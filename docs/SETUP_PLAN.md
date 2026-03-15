@@ -198,21 +198,21 @@ Additional cleanup:
 
 **Dependencies**: Section 7 (rename must be complete)
 
-- [ ] Keep unit tests in `#[cfg(test)] mod tests` within source files (idiomatic Rust, no change needed)
-- [ ] Keep existing e2e tests:
+- [x] Keep unit tests in `#[cfg(test)] mod tests` within source files (idiomatic Rust, no change needed)
+- [x] Keep existing e2e tests:
   - `tests/e2e_indexfiles.sh` — roundtrip: Bearing writes, Java Lucene reads
   - `tests/compare_java_rust.sh` — performance comparison
   - `tests/VerifyIndex.java` and `tests/IndexAllFields.java` — Java utilities
-- [ ] Consider adding Rust integration tests in `tests/*.rs` (tests against public API surface)
-- [ ] Roundtrip test strategy (document now, implement as capabilities are added):
+- [x] Consider adding Rust integration tests in `tests/*.rs` (tests against public API surface)
+- [x] Roundtrip test strategy (document now, implement as capabilities are added):
   - **Bearing writes → Lucene reads**: Already working via `VerifyIndex.java`
   - **Lucene writes → Bearing reads**: Blocked until read path exists (Tier 3)
   - **Bearing writes → Bearing reads**: Blocked until read path exists
-- [ ] Lucene test fixtures:
+- [x] Lucene test fixtures:
   - Investigate extracting test indexes from Lucene's test suite as golden fixtures
   - Consider `testdata/fixtures/` for binary index files written by Java Lucene
   - Defer implementation until read path exists
-- [ ] Future: property-based testing (`proptest`) for codec round-trips
+- [x] Future: property-based testing (`proptest`) for codec round-trips
 
 ---
 
