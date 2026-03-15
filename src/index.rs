@@ -2,15 +2,18 @@
 
 // Ported from org.apache.lucene.index
 
-pub mod documents_writer_per_thread;
-pub mod dwpt_pool;
-pub mod flush_control;
-pub mod flush_policy;
-pub mod index_file_names;
-pub mod index_writer;
-pub mod index_writer_config;
-pub mod indexing_chain;
-pub mod segment_infos;
+pub(crate) mod documents_writer_per_thread;
+pub(crate) mod dwpt_pool;
+pub(crate) mod flush_control;
+pub(crate) mod flush_policy;
+pub(crate) mod index_file_names;
+pub(crate) mod index_writer;
+pub(crate) mod index_writer_config;
+
+pub use index_writer::{CommitResult, IndexWriter};
+pub use index_writer_config::IndexWriterConfig;
+pub(crate) mod indexing_chain;
+pub(crate) mod segment_infos;
 
 use std::collections::{HashMap, HashSet};
 

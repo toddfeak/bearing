@@ -14,10 +14,8 @@ use log::{error, warn};
 
 use bearing::document;
 use bearing::document::Document;
-use bearing::index::index_writer::IndexWriter;
-use bearing::index::index_writer_config::IndexWriterConfig;
-use bearing::store::Directory;
-use bearing::store::fs::FSDirectory;
+use bearing::index::{IndexWriter, IndexWriterConfig};
+use bearing::store::{Directory, FSDirectory};
 
 struct CliArgs {
     index_path: String,

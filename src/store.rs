@@ -6,6 +6,10 @@ pub mod checksum;
 pub mod fs;
 pub mod memory;
 
+pub use checksum::CRC32;
+pub use fs::FSDirectory;
+pub use memory::{MemoryDirectory, MemoryIndexOutput};
+
 use std::collections::HashMap;
 use std::io;
 
@@ -235,7 +239,7 @@ pub trait IndexOutput: DataOutput {
 }
 
 /// Calculates the aligned offset for the given position and alignment.
-pub fn align_offset(offset: u64, alignment: usize) -> u64 {
+pub(crate) fn align_offset(offset: u64, alignment: usize) -> u64 {
     let a = alignment as u64;
     (offset + a - 1) & !(a - 1)
 }

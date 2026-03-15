@@ -3,8 +3,7 @@
 //! Tests the StandardAnalyzer, tokenization, and the zero-allocation
 //! analyze_to callback API.
 
-use bearing::analysis::standard::StandardAnalyzer;
-use bearing::analysis::{Analyzer, Token, TokenRef};
+use bearing::analysis::{Analyzer, StandardAnalyzer, Token, TokenRef};
 
 // ---------------------------------------------------------------------------
 // StandardAnalyzer tokenization

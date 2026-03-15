@@ -2,11 +2,11 @@
 
 // Ported from org.apache.lucene.util
 
-pub mod bit_util;
-pub mod compress;
-pub mod numeric_utils;
-pub mod packed;
-pub mod string_helper;
+pub(crate) mod bit_util;
+pub(crate) mod compress;
+pub(crate) mod numeric_utils;
+pub(crate) mod packed;
+pub(crate) mod string_helper;
 
 /// A reference to a range of bytes, analogous to Java's BytesRef.
 /// In Rust, we can often use &[u8] directly, but this struct provides

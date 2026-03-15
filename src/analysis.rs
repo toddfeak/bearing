@@ -4,6 +4,8 @@
 
 pub mod standard;
 
+pub use standard::{LowerCaseFilter, StandardAnalyzer, StandardTokenizer};
+
 /// A token produced by a tokenizer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {

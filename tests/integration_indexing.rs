@@ -12,11 +12,8 @@ use bearing::document::{
     stored_bytes_field, stored_double_field, stored_float_field, stored_int_field,
     stored_long_field, stored_string_field, string_field, text_field,
 };
-use bearing::index::index_writer::IndexWriter;
-use bearing::index::index_writer_config::IndexWriterConfig;
-use bearing::store::Directory;
-use bearing::store::fs::FSDirectory;
-use bearing::store::memory::MemoryDirectory;
+use bearing::index::{IndexWriter, IndexWriterConfig};
+use bearing::store::{Directory, FSDirectory, MemoryDirectory};
 
 /// Helper: creates a document with all 8 field types.
 fn make_all_fields_doc() -> Document {

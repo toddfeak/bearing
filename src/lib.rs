@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod analysis;
-pub mod codecs;
+pub(crate) mod codecs;
 pub mod document;
 pub mod index;
 pub mod store;

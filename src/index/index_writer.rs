@@ -265,10 +265,10 @@ impl Default for IndexWriter {
 }
 
 /// All state needed to write a segment to disk.
-pub struct SegmentWriteState<'a> {
-    pub segment_commit_info: SegmentCommitInfo,
-    pub field_infos: crate::index::FieldInfos,
-    pub chain: &'a IndexingChain,
+pub(crate) struct SegmentWriteState<'a> {
+    pub(crate) segment_commit_info: SegmentCommitInfo,
+    pub(crate) field_infos: crate::index::FieldInfos,
+    pub(crate) chain: &'a IndexingChain,
 }
 
 /// Output from flushing a single segment. Holds the raw sub-files before
