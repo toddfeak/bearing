@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository
 
-`github.com/toddfeak/rust-lucene-indexer`
+`github.com/toddfeak/bearing`
 
 ## Project
 

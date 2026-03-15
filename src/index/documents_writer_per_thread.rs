@@ -92,10 +92,7 @@ impl DocumentsWriterPerThread {
         diagnostics.insert("source".to_string(), "flush".to_string());
         diagnostics.insert("os.name".to_string(), std::env::consts::OS.to_string());
         diagnostics.insert("os.arch".to_string(), std::env::consts::ARCH.to_string());
-        diagnostics.insert(
-            "java.runtime.version".to_string(),
-            "rust-lucene-indexer".to_string(),
-        );
+        diagnostics.insert("java.runtime.version".to_string(), "bearing".to_string());
 
         let mut attributes = HashMap::new();
         attributes.insert(

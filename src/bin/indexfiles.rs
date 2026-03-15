@@ -12,12 +12,12 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use log::{error, warn};
 
-use rust_lucene_indexer::document;
-use rust_lucene_indexer::document::Document;
-use rust_lucene_indexer::index::index_writer::IndexWriter;
-use rust_lucene_indexer::index::index_writer_config::IndexWriterConfig;
-use rust_lucene_indexer::store::Directory;
-use rust_lucene_indexer::store::fs::FSDirectory;
+use bearing::document;
+use bearing::document::Document;
+use bearing::index::index_writer::IndexWriter;
+use bearing::index::index_writer_config::IndexWriterConfig;
+use bearing::store::Directory;
+use bearing::store::fs::FSDirectory;
 
 struct CliArgs {
     index_path: String,

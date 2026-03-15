@@ -1,8 +1,16 @@
 [package]
-name = "rust-lucene-indexer"
+name = "bearing"
 version = "0.1.0"
 edition = "2024"
+description = "A Rust port of Apache Lucene"
 license = "Apache-2.0"
+repository = "https://github.com/toddfeak/bearing"
+homepage = "https://github.com/toddfeak/bearing"
+readme = "README.md"
+keywords = ["lucene", "search", "indexing", "full-text-search"]
+categories = ["text-processing"]
+rust-version = "1.94"
+exclude = ["reference/", "testdata/", "tests/", ".claude/", "docs/"]
 
 [lib]
 path = "src/lib.rs"
