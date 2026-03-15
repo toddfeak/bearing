@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Index file naming conventions and segment name generation.
 
 /// The segments file name prefix.
 pub const SEGMENTS: &str = "segments";

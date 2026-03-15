@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Packed integer writers for compact storage of fixed-width values.
 
 use std::io;
 

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Indexing chain that processes document fields into postings, stored fields, and doc values.
 
 use std::collections::HashMap;
 

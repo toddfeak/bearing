@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Norms writer for per-field normalization values used in scoring.
 
 use std::collections::HashMap;
 use std::io;

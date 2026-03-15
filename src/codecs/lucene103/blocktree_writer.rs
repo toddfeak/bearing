@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Block tree terms dictionary writer that organizes terms into a trie of blocks.
 
 use std::collections::{HashMap, HashSet};
 use std::io;

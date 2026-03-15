@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Stored fields writer with LZ4 block compression.
 
 use std::io;
 

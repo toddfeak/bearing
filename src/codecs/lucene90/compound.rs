@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Compound file format (.cfs/.cfe) writer that merges segment files into a single file.
 
 use std::io;
 

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Flush policies that decide when a document writer should be flushed to disk.
 
 use crate::index::index_writer_config::IndexWriterConfig;
 

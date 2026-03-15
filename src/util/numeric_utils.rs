@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Numeric encoding utilities for sortable byte representations of integers and floats.
 
 /// Converts a long value to sortable bytes (8 bytes, big-endian).
 /// Flips the sign bit so that negative values sort before positive values.

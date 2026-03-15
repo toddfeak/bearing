@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Field infos format writer for per-field metadata (index options, doc values type, etc.).
 
 use std::io;
 

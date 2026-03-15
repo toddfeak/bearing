@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Postings format constants and term state for the Lucene 10.3 codec.
 
 use std::collections::HashMap;
 use std::io;

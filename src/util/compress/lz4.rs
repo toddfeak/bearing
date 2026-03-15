@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! LZ4 block compression for stored fields.
 
 // This implements the LZ4 block compression format used by Lucene's stored fields.
 

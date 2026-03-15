@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Bit manipulation utilities: zigzag encoding/decoding for variable-length integers.
 
 /// ZigZag-encodes a 32-bit integer.
 /// Maps signed integers to unsigned: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...

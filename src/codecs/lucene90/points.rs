@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! BKD tree writer for multi-dimensional point indexing.
 
 use std::collections::HashMap;
 use std::io;

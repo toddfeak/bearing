@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Frame-of-reference (FOR) and patched FOR (PFOR) integer encoding utilities.
 
 use std::io;
 

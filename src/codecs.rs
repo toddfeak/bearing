@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Codec implementations for reading and writing Lucene index formats.
 
 pub mod codec_util;
 pub mod lucene103;

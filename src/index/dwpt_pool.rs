@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Pool of per-thread document writers for concurrent indexing.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;

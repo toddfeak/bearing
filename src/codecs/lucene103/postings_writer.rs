@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Postings list writer that encodes doc IDs, frequencies, positions, and offsets.
 
 use std::io;
 

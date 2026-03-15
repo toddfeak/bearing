@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Segment info format writer for segment-level metadata (name, doc count, diagnostics).
 
 use std::io;
 

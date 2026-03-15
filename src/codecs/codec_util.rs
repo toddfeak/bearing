@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Utilities for writing codec headers and footers with CRC32 integrity checks.
 
 use std::io;
 

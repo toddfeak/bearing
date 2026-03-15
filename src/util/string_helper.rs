@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! String and ID utilities: random ID generation and byte sorting helpers.
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};

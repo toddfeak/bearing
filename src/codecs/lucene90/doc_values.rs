@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Doc values writer for numeric, binary, sorted, and sorted-set doc values.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;

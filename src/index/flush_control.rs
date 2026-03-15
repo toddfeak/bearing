@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Flush control that tracks active and pending-flush document writers.
 
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};

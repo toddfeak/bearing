@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Segment infos writer for the segments_N commit point file.
 
 use std::collections::HashMap;
 use std::io;
