@@ -3,8 +3,6 @@
 
 // This implements the LZ4 block compression format used by Lucene's stored fields.
 
-use std::io;
-
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
 const HASH_LOG: usize = 14;
@@ -183,8 +181,12 @@ pub fn compress_with_dictionary(buffer: &[u8], dict_len: usize) -> Vec<u8> {
     compress_inner(buffer, dict_len, &mut hash_table)
 }
 
+#[cfg(test)]
+use std::io;
+
 /// LZ4 decompress. `dest_len` is the expected uncompressed size.
-pub fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
+#[cfg(test)]
+fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
     let mut output = Vec::with_capacity(dest_len);
     let mut ip = 0;
 

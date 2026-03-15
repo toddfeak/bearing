@@ -65,8 +65,6 @@ pub struct DecodedPosting {
     pub doc_id: i32,
     pub freq: i32,
     pub positions: Vec<i32>,
-    pub start_offsets: Vec<i32>,
-    pub end_offsets: Vec<i32>,
 }
 
 /// Per-term posting list across all documents.
@@ -110,14 +108,6 @@ impl PostingList {
             has_positions,
             has_offsets,
         }
-    }
-
-    pub fn doc_freq(&self) -> i32 {
-        self.doc_freq
-    }
-
-    pub fn total_term_freq(&self) -> i64 {
-        self.total_term_freq
     }
 
     /// Finalizes the previous pending document (if any) and starts a new one.
@@ -241,17 +231,6 @@ impl PostingList {
             } else {
                 Vec::new()
             };
-            let mut start_offsets = if self.has_offsets {
-                Vec::with_capacity(freq as usize)
-            } else {
-                Vec::new()
-            };
-            let mut end_offsets = if self.has_offsets {
-                Vec::with_capacity(freq as usize)
-            } else {
-                Vec::new()
-            };
-
             if self.has_positions {
                 let mut last_pos = 0;
                 for _ in 0..freq {
@@ -261,8 +240,9 @@ impl PostingList {
                     last_pos = pos;
 
                     if self.has_offsets {
-                        start_offsets.push(read_vint(&self.byte_stream, &mut offset));
-                        end_offsets.push(read_vint(&self.byte_stream, &mut offset));
+                        // Consume offset data from the byte stream (not exposed in DecodedPosting)
+                        read_vint(&self.byte_stream, &mut offset);
+                        read_vint(&self.byte_stream, &mut offset);
                     }
                 }
             }
@@ -271,8 +251,6 @@ impl PostingList {
                 doc_id,
                 freq,
                 positions,
-                start_offsets,
-                end_offsets,
             });
         }
 
@@ -320,7 +298,6 @@ pub enum DocValuesAccumulator {
 /// A stored field for a single document.
 #[derive(Clone, Debug)]
 pub struct StoredDoc {
-    pub doc_id: i32,
     pub fields: Vec<(u32, StoredValue)>, // (field_number, value)
 }
 
@@ -533,7 +510,6 @@ impl IndexingChain {
         self.lowercase_buf = lowercase_buf;
 
         self.stored_docs.push(StoredDoc {
-            doc_id,
             fields: stored_fields,
         });
 
@@ -775,6 +751,12 @@ fn int_to_byte4(i: i32) -> u8 {
 mod tests {
     use super::*;
     use crate::analysis::standard::StandardAnalyzer;
+
+    impl PostingList {
+        fn doc_freq(&self) -> i32 {
+            self.doc_freq
+        }
+    }
     use crate::document;
 
     fn make_analyzer() -> StandardAnalyzer {

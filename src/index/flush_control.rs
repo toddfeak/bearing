@@ -43,25 +43,6 @@ impl FlushControl {
         }
     }
 
-    /// Adds a DWPT to the flush queue.
-    pub fn enqueue_for_flush(&self, dwpt: DocumentsWriterPerThread) {
-        self.inner.lock().unwrap().flush_queue.push_back(dwpt);
-    }
-
-    /// Takes the next DWPT from the flush queue, if any.
-    ///
-    /// Increments the flushing count so stall control knows how many
-    /// are in flight.
-    pub fn next_pending_flush(&self) -> Option<DocumentsWriterPerThread> {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(dwpt) = inner.flush_queue.pop_front() {
-            inner.flushing_count += 1;
-            Some(dwpt)
-        } else {
-            None
-        }
-    }
-
     /// Signals that a flush has completed, unblocking stalled threads.
     pub fn flush_completed(&self) {
         let mut inner = self.inner.lock().unwrap();
@@ -78,16 +59,6 @@ impl FlushControl {
         }
     }
 
-    /// Returns the number of DWPTs waiting in the flush queue.
-    pub fn pending_count(&self) -> usize {
-        self.inner.lock().unwrap().flush_queue.len()
-    }
-
-    /// Returns the number of DWPTs currently being flushed.
-    pub fn flushing_count(&self) -> usize {
-        self.inner.lock().unwrap().flushing_count
-    }
-
     /// Drains all pending DWPTs from the flush queue.
     pub fn drain_pending(&self) -> Vec<DocumentsWriterPerThread> {
         self.inner.lock().unwrap().flush_queue.drain(..).collect()
@@ -98,6 +69,34 @@ impl FlushControl {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    impl FlushControl {
+        /// Adds a DWPT to the flush queue.
+        fn enqueue_for_flush(&self, dwpt: DocumentsWriterPerThread) {
+            self.inner.lock().unwrap().flush_queue.push_back(dwpt);
+        }
+
+        /// Takes the next DWPT from the flush queue, if any.
+        fn next_pending_flush(&self) -> Option<DocumentsWriterPerThread> {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(dwpt) = inner.flush_queue.pop_front() {
+                inner.flushing_count += 1;
+                Some(dwpt)
+            } else {
+                None
+            }
+        }
+
+        /// Returns the number of DWPTs waiting in the flush queue.
+        fn pending_count(&self) -> usize {
+            self.inner.lock().unwrap().flush_queue.len()
+        }
+
+        /// Returns the number of DWPTs currently being flushed.
+        fn flushing_count(&self) -> usize {
+            self.inner.lock().unwrap().flushing_count
+        }
+    }
 
     fn make_dwpt(name: &str) -> DocumentsWriterPerThread {
         DocumentsWriterPerThread::new(name.to_string(), HashMap::new(), 0)

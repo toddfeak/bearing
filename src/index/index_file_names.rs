@@ -1,12 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Index file naming conventions and segment name generation.
 
-/// The segments file name prefix.
-pub const SEGMENTS: &str = "segments";
-
-/// The pending segments file name prefix.
-pub const PENDING_SEGMENTS: &str = "pending_segments";
-
 /// Constructs a segment file name: `<segment>(_<suffix>)(.<ext>)`
 pub fn segment_file_name(segment_name: &str, segment_suffix: &str, ext: &str) -> String {
     let mut name = segment_name.to_string();
@@ -19,25 +13,6 @@ pub fn segment_file_name(segment_name: &str, segment_suffix: &str, ext: &str) ->
         name.push_str(ext);
     }
     name
-}
-
-/// Constructs a file name from a base, extension, and generation.
-/// Generation -1 returns None, 0 returns `base.ext`, >0 returns `base_<gen36>.ext`.
-pub fn file_name_from_generation(base: &str, ext: &str, generation: i64) -> Option<String> {
-    if generation == -1 {
-        None
-    } else if generation == 0 {
-        Some(segment_file_name(base, "", ext))
-    } else {
-        // Generation encoded in radix 36
-        let gen_str = radix36(generation as u64);
-        let mut name = format!("{}_{}", base, gen_str);
-        if !ext.is_empty() {
-            name.push('.');
-            name.push_str(ext);
-        }
-        Some(name)
-    }
 }
 
 /// Converts a u64 to a radix-36 string (0-9, a-z).
@@ -55,19 +30,6 @@ pub fn radix36(mut n: u64) -> String {
     }
     digits.reverse();
     digits.into_iter().collect()
-}
-
-/// Extracts the file extension from a filename (after the first '.').
-pub fn get_extension(filename: &str) -> Option<&str> {
-    filename.find('.').map(|idx| &filename[idx + 1..])
-}
-
-/// Strips the extension from a filename.
-pub fn strip_extension(filename: &str) -> &str {
-    match filename.find('.') {
-        Some(idx) => &filename[..idx],
-        None => filename,
-    }
 }
 
 /// Strips the segment name prefix from a filename, returning the suffix portion.
@@ -93,28 +55,49 @@ pub fn strip_segment_name(filename: &str) -> &str {
     filename
 }
 
-/// Parses the segment name from a filename (everything up to the first '.' or second '_').
-pub fn parse_segment_name(filename: &str) -> &str {
-    // Find the first '.' or the second '_'
-    let bytes = filename.as_bytes();
-    let mut underscore_count = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'.' {
-            return &filename[..i];
-        }
-        if b == b'_' {
-            underscore_count += 1;
-            if underscore_count == 2 {
-                return &filename[..i];
-            }
-        }
-    }
-    filename
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Constructs a file name from a base, extension, and generation.
+    fn file_name_from_generation(base: &str, ext: &str, generation: i64) -> Option<String> {
+        if generation == -1 {
+            None
+        } else if generation == 0 {
+            Some(segment_file_name(base, "", ext))
+        } else {
+            let gen_str = radix36(generation as u64);
+            let mut name = format!("{}_{}", base, gen_str);
+            if !ext.is_empty() {
+                name.push('.');
+                name.push_str(ext);
+            }
+            Some(name)
+        }
+    }
+
+    /// Extracts the file extension from a filename (after the first '.').
+    fn get_extension(filename: &str) -> Option<&str> {
+        filename.find('.').map(|idx| &filename[idx + 1..])
+    }
+
+    /// Parses the segment name from a filename.
+    fn parse_segment_name(filename: &str) -> &str {
+        let bytes = filename.as_bytes();
+        let mut underscore_count = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'.' {
+                return &filename[..i];
+            }
+            if b == b'_' {
+                underscore_count += 1;
+                if underscore_count == 2 {
+                    return &filename[..i];
+                }
+            }
+        }
+        filename
+    }
 
     // Ported from org.apache.lucene.index.TestIndexFileNames
 

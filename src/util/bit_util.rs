@@ -7,24 +7,24 @@ pub fn zig_zag_encode_i32(i: i32) -> i32 {
     (i >> 31) ^ (i << 1)
 }
 
-/// ZigZag-decodes a 32-bit integer.
-pub fn zig_zag_decode_i32(i: i32) -> i32 {
-    ((i as u32) >> 1) as i32 ^ -(i & 1)
-}
-
 /// ZigZag-encodes a 64-bit integer.
 pub fn zig_zag_encode_i64(i: i64) -> i64 {
     (i >> 63) ^ (i << 1)
 }
 
-/// ZigZag-decodes a 64-bit integer.
-pub fn zig_zag_decode_i64(i: i64) -> i64 {
-    ((i as u64) >> 1) as i64 ^ -(i & 1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ZigZag-decodes a 32-bit integer.
+    fn zig_zag_decode_i32(i: i32) -> i32 {
+        ((i as u32) >> 1) as i32 ^ -(i & 1)
+    }
+
+    /// ZigZag-decodes a 64-bit integer.
+    fn zig_zag_decode_i64(i: i64) -> i64 {
+        ((i as u64) >> 1) as i64 ^ -(i & 1)
+    }
 
     // Ported from org.apache.lucene.util.TestBitUtil
 

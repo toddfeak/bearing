@@ -608,15 +608,12 @@ mod tests {
     fn test_write_stored_fields_basic() {
         let stored_docs = vec![
             StoredDoc {
-                doc_id: 0,
                 fields: vec![(0, StoredValue::String("path/doc1.txt".to_string()))],
             },
             StoredDoc {
-                doc_id: 1,
                 fields: vec![(0, StoredValue::String("path/doc2.txt".to_string()))],
             },
             StoredDoc {
-                doc_id: 2,
                 fields: vec![(0, StoredValue::String("path/doc3.txt".to_string()))],
             },
         ];
@@ -662,15 +659,12 @@ mod tests {
     fn test_fdm_layout_matches_fields_index_reader() {
         let stored_docs = vec![
             StoredDoc {
-                doc_id: 0,
                 fields: vec![(0, StoredValue::String("doc1".to_string()))],
             },
             StoredDoc {
-                doc_id: 1,
                 fields: vec![(0, StoredValue::String("doc2".to_string()))],
             },
             StoredDoc {
-                doc_id: 2,
                 fields: vec![(0, StoredValue::String("doc3".to_string()))],
             },
         ];
@@ -777,7 +771,6 @@ mod tests {
     #[test]
     fn test_write_stored_fields_with_suffix() {
         let stored_docs = vec![StoredDoc {
-            doc_id: 0,
             fields: vec![(0, StoredValue::String("hello".to_string()))],
         }];
 
@@ -960,7 +953,6 @@ mod tests {
     #[test]
     fn test_write_stored_fields_with_all_value_types() {
         let stored_docs = vec![StoredDoc {
-            doc_id: 0,
             fields: vec![
                 (0, StoredValue::String("hello".to_string())),
                 (1, StoredValue::Int(42)),

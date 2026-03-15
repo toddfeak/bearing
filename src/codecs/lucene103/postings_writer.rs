@@ -264,13 +264,6 @@ impl PostingsWriter {
         })
     }
 
-    /// Called by BlockTreeTermsWriter to initialize the terms output.
-    /// Writes the postings header to the .tim file.
-    pub fn init_terms_output(&self, terms_out: &mut dyn DataOutput) -> io::Result<()> {
-        terms_out.write_vint(postings_format::BLOCK_SIZE as i32)?;
-        Ok(())
-    }
-
     /// Write postings for one term. Returns metadata for the term dictionary.
     ///
     /// - Singleton (docFreq==1): docID pulsed into IntBlockTermState, nothing to .doc
@@ -327,7 +320,7 @@ impl PostingsWriter {
                 total_term_freq,
                 doc_start_fp,
                 pos_start_fp,
-                pay_start_fp: 0,
+
                 last_pos_block_offset,
                 singleton_doc_id,
             })
@@ -389,7 +382,7 @@ impl PostingsWriter {
                 total_term_freq,
                 doc_start_fp,
                 pos_start_fp,
-                pay_start_fp: 0,
+
                 last_pos_block_offset,
                 singleton_doc_id: -1,
             })
@@ -496,7 +489,6 @@ impl PostingsWriter {
             total_term_freq,
             doc_start_fp,
             pos_start_fp,
-            pay_start_fp: 0,
             last_pos_block_offset,
             singleton_doc_id: -1,
         })
@@ -578,16 +570,6 @@ impl PostingsWriter {
         files.push(self.meta_out.into_inner());
 
         Ok(files)
-    }
-
-    /// Get current .doc file pointer.
-    pub fn doc_file_pointer(&self) -> u64 {
-        self.doc_out.file_pointer()
-    }
-
-    /// Get current .pos file pointer.
-    pub fn pos_file_pointer(&self) -> u64 {
-        self.pos_out.as_ref().map(|p| p.file_pointer()).unwrap_or(0)
     }
 }
 
@@ -1011,7 +993,6 @@ mod tests {
             total_term_freq: 1,
             doc_start_fp: 0,
             pos_start_fp: 0,
-            pay_start_fp: 0,
             last_pos_block_offset: -1,
             singleton_doc_id: 5,
         };

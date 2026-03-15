@@ -8,12 +8,6 @@ pub fn long_to_sortable_bytes(value: i64) -> [u8; 8] {
     flipped.to_be_bytes()
 }
 
-/// Converts sortable bytes back to a long value.
-pub fn sortable_bytes_to_long(bytes: &[u8; 8]) -> i64 {
-    let v = i64::from_be_bytes(*bytes);
-    v ^ i64::MIN
-}
-
 /// Converts an int value to sortable bytes (4 bytes, big-endian).
 /// Flips the sign bit so that negative values sort before positive values.
 pub fn int_to_sortable_bytes(value: i32) -> [u8; 4] {
@@ -21,30 +15,14 @@ pub fn int_to_sortable_bytes(value: i32) -> [u8; 4] {
     flipped.to_be_bytes()
 }
 
-/// Converts sortable bytes back to an int value.
-pub fn sortable_bytes_to_int(bytes: &[u8; 4]) -> i32 {
-    let v = i32::from_be_bytes(*bytes);
-    v ^ i32::MIN
-}
-
 /// Converts a float to a sortable int using IEEE 754 bit manipulation.
 pub fn float_to_sortable_int(value: f32) -> i32 {
     sortable_float_bits(f32::to_bits(value) as i32)
 }
 
-/// Converts a sortable int back to a float.
-pub fn sortable_int_to_float(encoded: i32) -> f32 {
-    f32::from_bits(sortable_float_bits(encoded) as u32)
-}
-
 /// Converts a double to a sortable long using IEEE 754 bit manipulation.
 pub fn double_to_sortable_long(value: f64) -> i64 {
     sortable_double_bits(f64::to_bits(value) as i64)
-}
-
-/// Converts a sortable long back to a double.
-pub fn sortable_long_to_double(encoded: i64) -> f64 {
-    f64::from_bits(sortable_double_bits(encoded) as u64)
 }
 
 /// Converts a float to sortable bytes (4 bytes, big-endian).
@@ -70,6 +48,28 @@ fn sortable_double_bits(bits: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Converts sortable bytes back to a long value.
+    fn sortable_bytes_to_long(bytes: &[u8; 8]) -> i64 {
+        let v = i64::from_be_bytes(*bytes);
+        v ^ i64::MIN
+    }
+
+    /// Converts sortable bytes back to an int value.
+    fn sortable_bytes_to_int(bytes: &[u8; 4]) -> i32 {
+        let v = i32::from_be_bytes(*bytes);
+        v ^ i32::MIN
+    }
+
+    /// Converts a sortable int back to a float.
+    fn sortable_int_to_float(encoded: i32) -> f32 {
+        f32::from_bits(sortable_float_bits(encoded) as u32)
+    }
+
+    /// Converts a sortable long back to a double.
+    fn sortable_long_to_double(encoded: i64) -> f64 {
+        f64::from_bits(sortable_double_bits(encoded) as u64)
+    }
 
     // Ported from org.apache.lucene.util.TestNumericUtils
 

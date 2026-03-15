@@ -926,10 +926,6 @@ impl TrieBuilder {
         self.max_key = other.max_key;
     }
 
-    pub fn get_empty_output(&self) -> Option<&TrieOutput> {
-        self.root.output.as_ref()
-    }
-
     /// Save the trie to .tmd (meta) and .tip (index) outputs.
     pub fn save(&self, meta: &mut dyn DataOutput, index: &mut dyn IndexOutput) -> io::Result<()> {
         meta.write_vlong(index.file_pointer() as i64)?; // indexStartFP

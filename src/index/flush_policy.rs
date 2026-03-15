@@ -44,27 +44,26 @@ impl FlushPolicy for FlushByRamOrCountsPolicy {
     }
 }
 
-/// Flushes when the number of buffered documents reaches `max_buffered_docs`.
-///
-/// If `max_buffered_docs` is -1 (disabled), never triggers a flush.
-/// Kept for backward compatibility in tests that only use doc-count flushing.
-pub struct DocCountFlushPolicy;
-
-impl FlushPolicy for DocCountFlushPolicy {
-    fn should_flush(
-        &self,
-        num_docs: i32,
-        _ram_bytes_used: usize,
-        config: &IndexWriterConfig,
-    ) -> bool {
-        let max = config.max_buffered_docs();
-        max > 0 && num_docs >= max
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Flushes when the number of buffered documents reaches `max_buffered_docs`.
+    ///
+    /// If `max_buffered_docs` is -1 (disabled), never triggers a flush.
+    struct DocCountFlushPolicy;
+
+    impl FlushPolicy for DocCountFlushPolicy {
+        fn should_flush(
+            &self,
+            num_docs: i32,
+            _ram_bytes_used: usize,
+            config: &IndexWriterConfig,
+        ) -> bool {
+            let max = config.max_buffered_docs();
+            max > 0 && num_docs >= max
+        }
+    }
 
     // --- DocCountFlushPolicy tests ---
 

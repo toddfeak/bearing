@@ -11,12 +11,6 @@ pub const BLOCK_SIZE: usize = 128;
 // --- ForUtil ---
 // Frame-of-Reference bit packing for 128 integers.
 
-/// Returns the number of bytes needed to encode 128 values with the given bits per value.
-pub fn num_bytes(bpv: u32) -> u32 {
-    // bpv * 128 / 8 = bpv * 16
-    bpv << 4
-}
-
 // MASKS arrays for remainder bit handling during encode.
 const MASKS8: [i32; 8] = build_masks8();
 const MASKS16: [i32; 16] = build_masks16();
@@ -279,37 +273,6 @@ pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut dyn DataOutput) -> i
 // --- ForDeltaUtil ---
 // Delta encoding for doc IDs.
 
-/// Returns the bits required to encode the deltas of the given values.
-pub fn delta_bits_required(longs: &[i64; BLOCK_SIZE]) -> u32 {
-    // Compute deltas and find max
-    let mut max_delta: u64 = 0;
-    let mut prev = 0i64;
-    for &v in longs.iter() {
-        let delta = v - prev;
-        max_delta = max_delta.max(delta as u64);
-        prev = v;
-    }
-    bits_required(max_delta)
-}
-
-/// Encode doc ID deltas with the given bits per value.
-/// First computes deltas, picks primitive size, encodes with ForUtil.
-pub fn encode_deltas(
-    bpv: u32,
-    longs: &[i64; BLOCK_SIZE],
-    out: &mut dyn DataOutput,
-) -> io::Result<()> {
-    // Compute deltas in-place (into a copy)
-    let mut deltas = [0i64; BLOCK_SIZE];
-    let mut prev = 0i64;
-    for (i, &v) in longs.iter().enumerate() {
-        deltas[i] = v - prev;
-        prev = v;
-    }
-
-    encode(&deltas, bpv, out)
-}
-
 // --- ForDeltaUtil functions for block postings encoding ---
 // These use different collapse thresholds from ForUtil.
 
@@ -349,6 +312,38 @@ pub fn for_delta_encode(
 mod tests {
     use super::*;
     use crate::store::memory::MemoryIndexOutput;
+
+    /// Returns the number of bytes needed to encode 128 values with the given bits per value.
+    fn num_bytes(bpv: u32) -> u32 {
+        bpv << 4
+    }
+
+    /// Returns the bits required to encode the deltas of the given values.
+    fn delta_bits_required(longs: &[i64; BLOCK_SIZE]) -> u32 {
+        let mut max_delta: u64 = 0;
+        let mut prev = 0i64;
+        for &v in longs.iter() {
+            let delta = v - prev;
+            max_delta = max_delta.max(delta as u64);
+            prev = v;
+        }
+        bits_required(max_delta)
+    }
+
+    /// Encode doc ID deltas with the given bits per value.
+    fn encode_deltas(
+        bpv: u32,
+        longs: &[i64; BLOCK_SIZE],
+        out: &mut dyn DataOutput,
+    ) -> io::Result<()> {
+        let mut deltas = [0i64; BLOCK_SIZE];
+        let mut prev = 0i64;
+        for (i, &v) in longs.iter().enumerate() {
+            deltas[i] = v - prev;
+            prev = v;
+        }
+        encode(&deltas, bpv, out)
+    }
 
     #[test]
     fn test_for_util_num_bytes() {
