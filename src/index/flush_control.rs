@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.index.DocumentsWriterFlushControl
-
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 

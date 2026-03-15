@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.util.compress.LZ4
 // This implements the LZ4 block compression format used by Lucene's stored fields.
 
 use std::io;
@@ -158,7 +157,6 @@ fn encode_literals_only(input: &[u8]) -> Vec<u8> {
 /// LZ4 compress with a preset dictionary.
 /// `buffer[0..dict_len]` is the dictionary, `buffer[dict_len..]` is the data to compress.
 /// Returns compressed bytes for the data portion only.
-/// Ported from org.apache.lucene.util.compress.LZ4.compressWithDictionary
 pub fn compress_with_dictionary(buffer: &[u8], dict_len: usize) -> Vec<u8> {
     let data_len = buffer.len() - dict_len;
 

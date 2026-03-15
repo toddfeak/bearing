@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.lucene103.Lucene103PostingsFormat
-// and org.apache.lucene.codecs.lucene103.blocktree.Lucene103BlockTreeTermsReader
-
 use std::collections::HashMap;
 use std::io;
 
@@ -53,7 +50,6 @@ pub const DEFAULT_MIN_BLOCK_SIZE: usize = 25;
 pub const DEFAULT_MAX_BLOCK_SIZE: usize = 48;
 
 /// Per-term metadata stored in .tim blocks.
-/// Ported from Lucene103PostingsFormat.IntBlockTermState
 #[derive(Clone, Copy, Debug)]
 pub struct IntBlockTermState {
     // From BlockTermState base class

@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.index.FlushPolicy,
-// org.apache.lucene.index.FlushByRamOrCountsPolicy
-
 use crate::index::index_writer_config::IndexWriterConfig;
 
 /// Determines when an in-memory segment should be flushed to disk.

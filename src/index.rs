@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.index
+//! Indexing API and segment metadata.
+//!
+//! [`IndexWriter`] is the primary entry point for building an index.
+//! [`IndexWriterConfig`] controls flush behavior. The remaining types
+//! ([`FieldInfo`], [`FieldInfos`], [`SegmentInfo`], [`SegmentCommitInfo`])
+//! represent segment-level metadata.
 
 pub(crate) mod documents_writer_per_thread;
 pub(crate) mod dwpt_pool;
@@ -21,7 +26,6 @@ use crate::document::{DocValuesType, IndexOptions};
 use crate::util::string_helper;
 
 /// Configuration for point (BKD tree) dimensions.
-/// Ported from the point-related fields in org.apache.lucene.index.FieldInfo
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PointDimensionConfig {
     pub dimension_count: u32,
@@ -36,7 +40,6 @@ impl PointDimensionConfig {
 }
 
 /// Information about a single field in the index.
-/// Ported from org.apache.lucene.index.FieldInfo
 #[derive(Clone, Debug)]
 pub struct FieldInfo {
     name: String,
@@ -173,7 +176,6 @@ impl FieldInfo {
 }
 
 /// A collection of FieldInfo objects indexed by name and number.
-/// Ported from org.apache.lucene.index.FieldInfos
 #[derive(Clone, Debug)]
 pub struct FieldInfos {
     fields: Vec<FieldInfo>,
@@ -321,7 +323,6 @@ impl FieldInfos {
 }
 
 /// Information about a segment in the index.
-/// Ported from org.apache.lucene.index.SegmentInfo
 #[derive(Clone, Debug)]
 pub struct SegmentInfo {
     pub name: String,
@@ -357,7 +358,6 @@ impl SegmentInfo {
 }
 
 /// Information about a segment at a particular commit point.
-/// Ported from org.apache.lucene.index.SegmentCommitInfo
 #[derive(Clone, Debug)]
 pub struct SegmentCommitInfo {
     pub info: SegmentInfo,

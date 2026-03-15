@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.CodecUtil
-
 use std::io;
 
 use log::debug;

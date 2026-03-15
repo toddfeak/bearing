@@ -41,6 +41,7 @@ cargo clippy                   # lint
 - **CRC32**: Must match `java.util.zip.CRC32` (polynomial `0xEDB88320`).
 - **Codec module naming**: Codec implementations live under version-named modules matching the Java package (e.g., `codecs::lucene90`, `codecs::lucene103`). Version-agnostic utilities stay directly under `codecs`.
 - **Logging**: Use `log::debug!` at semantic boundaries (codec headers/footers, flush decisions). Do not log in hot loops.
+- **Rustdoc**: Keep `///` and `//!` documentation up to date when changing public API. All public items must be documented.
 
 ## Testing
 

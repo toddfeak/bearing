@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.lucene90.Lucene90DocValuesConsumer
-// and org.apache.lucene.codecs.lucene90.Lucene90DocValuesFormat
-
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 
@@ -110,7 +107,6 @@ pub fn write(
 }
 
 /// Adds a SORTED_NUMERIC field.
-/// Ported from Lucene90DocValuesConsumer.addSortedNumericField + doAddSortedNumericField
 fn add_sorted_numeric_field(
     meta: &mut dyn DataOutput,
     data: &mut dyn IndexOutput,
@@ -142,7 +138,6 @@ fn add_sorted_numeric_field(
 }
 
 /// Adds a SORTED_SET field (single-valued optimization).
-/// Ported from Lucene90DocValuesConsumer.addSortedSetField → doAddSortedField
 fn add_sorted_set_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
@@ -202,7 +197,6 @@ fn add_sorted_set_field(
 
 /// Core numeric encoding for doc values.
 /// Returns (numDocsWithField, numValues).
-/// Ported from Lucene90DocValuesConsumer.writeValues
 fn write_values(
     meta: &mut dyn DataOutput,
     data: &mut dyn IndexOutput,
@@ -395,7 +389,6 @@ fn gcd_compute(a: i64, b: i64) -> i64 {
 }
 
 /// Writes the terms dictionary for SORTED/SORTED_SET doc values.
-/// Ported from Lucene90DocValuesConsumer.addTermsDict
 fn add_terms_dict(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
@@ -515,7 +508,6 @@ fn compress_and_write_terms_block(
 }
 
 /// Writes the reverse terms index for SORTED/SORTED_SET.
-/// Ported from Lucene90DocValuesConsumer.writeTermsIndex
 fn write_terms_index(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,

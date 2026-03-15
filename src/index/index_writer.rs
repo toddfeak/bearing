@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.index.IndexWriter
+//! Thread-safe index writer with multi-segment, multi-threaded document ingestion.
+
 // Multi-segment, multi-threaded, no merging, no deletes
 
 use std::collections::HashMap;

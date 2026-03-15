@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.lucene90.compressing.Lucene90CompressingStoredFieldsWriter
-// and org.apache.lucene.codecs.compressing.FieldsIndexWriter
-
 use std::io;
 
 use log::debug;
@@ -326,7 +323,6 @@ fn save_ints(values: &[i32], count: usize, out: &mut dyn DataOutput) -> io::Resu
     Ok(())
 }
 
-/// Ported from org.apache.lucene.codecs.lucene90.compressing.StoredFieldsInts.writeInts
 fn write_stored_fields_ints(
     values: &[i32],
     count: usize,
@@ -425,7 +421,6 @@ fn write_ints_32(values: &[i32], count: usize, out: &mut dyn DataOutput) -> io::
 // ============================================================
 
 /// Writes a long in a variable-length format optimized for timestamps.
-/// Ported from Lucene90CompressingStoredFieldsWriter.writeTLong
 fn write_tlong(out: &mut dyn DataOutput, l: i64) -> io::Result<()> {
     let mut val = l;
     let header_base: u8;
@@ -468,7 +463,6 @@ const NEGATIVE_ZERO_FLOAT: i32 = f32::to_bits(-0.0_f32) as i32; // 0x80000000
 const NEGATIVE_ZERO_DOUBLE: i64 = f64::to_bits(-0.0_f64) as i64; // 0x8000000000000000
 
 /// Writes a float in a variable-length format. Writes between 1 and 5 bytes.
-/// Ported from Lucene90CompressingStoredFieldsWriter.writeZFloat
 fn write_zfloat(out: &mut dyn DataOutput, f: f32) -> io::Result<()> {
     let int_val = f as i32;
     let float_bits = f32::to_bits(f) as i32;
@@ -490,7 +484,6 @@ fn write_zfloat(out: &mut dyn DataOutput, f: f32) -> io::Result<()> {
 }
 
 /// Writes a double in a variable-length format. Writes between 1 and 9 bytes.
-/// Ported from Lucene90CompressingStoredFieldsWriter.writeZDouble
 fn write_zdouble(out: &mut dyn DataOutput, d: f64) -> io::Result<()> {
     let int_val = d as i32;
     let double_bits = f64::to_bits(d) as i64;

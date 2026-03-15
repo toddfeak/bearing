@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.lucene90.Lucene90PointsWriter,
-// org.apache.lucene.util.bkd.BKDWriter,
-// org.apache.lucene.util.bkd.DocIdsWriter
-
 use std::collections::HashMap;
 use std::io;
 
@@ -43,7 +39,6 @@ const BPV_32: u8 = 32;
 /// Writes points files (.kdd, .kdi, .kdm) for a segment.
 /// Returns a list of [`SegmentFile`]s.
 ///
-/// Ported from Lucene90PointsWriter.finish()
 pub fn write(
     segment_name: &str,
     segment_suffix: &str,
@@ -146,7 +141,6 @@ pub fn write(
 /// Supports both single-leaf (<=512 points) and multi-leaf BKD trees.
 /// For 1D data, points are pre-sorted and sliced sequentially into leaves.
 ///
-/// Ported from BKDWriter.finish() / BKDWriter.build()
 fn write_bkd_field(
     data: &mut dyn IndexOutput,
     index: &mut dyn IndexOutput,
@@ -236,7 +230,6 @@ fn write_bkd_field(
 }
 
 /// Writes doc IDs for a leaf block.
-/// Ported from BKDWriter.writeLeafBlockDocs() + DocIdsWriter.writeDocIds()
 fn write_leaf_block_docs(data: &mut dyn DataOutput, doc_ids: &[i32]) -> io::Result<()> {
     let count = doc_ids.len();
     data.write_vint(count as i32)?;
@@ -281,7 +274,6 @@ fn write_leaf_block_docs(data: &mut dyn DataOutput, doc_ids: &[i32]) -> io::Resu
 }
 
 /// Writes doc IDs as a bitset.
-/// Ported from DocIdsWriter.writeIdsAsBitSet()
 fn write_ids_as_bitset(
     data: &mut dyn DataOutput,
     doc_ids: &[i32],
@@ -312,7 +304,6 @@ fn write_ids_as_bitset(
 }
 
 /// Writes doc IDs using 16-bit delta encoding.
-/// Ported from DocIdsWriter.writeDocIds() DELTA_BPV_16 path
 fn write_delta_bpv16(data: &mut dyn DataOutput, doc_ids: &[i32], min: i32) -> io::Result<()> {
     data.write_byte(DELTA_BPV_16)?;
     data.write_vint(min)?;
@@ -338,7 +329,6 @@ fn write_delta_bpv16(data: &mut dyn DataOutput, doc_ids: &[i32], min: i32) -> io
 }
 
 /// Writes the common prefix bytes for each dimension.
-/// Ported from BKDWriter.writeCommonPrefixes()
 fn write_common_prefixes(
     data: &mut dyn DataOutput,
     first_value: &[u8],
@@ -364,7 +354,6 @@ fn write_common_prefixes(
 }
 
 /// Writes packed values for a leaf block using run-length compression.
-/// Ported from BKDWriter.writeLeafBlockPackedValues()
 fn write_leaf_block_packed_values(
     data: &mut dyn DataOutput,
     sorted_points: &[(i32, Vec<u8>)],
@@ -382,7 +371,6 @@ fn write_leaf_block_packed_values(
     }
 
     // Determine encoding: compare low vs high cardinality cost
-    // Ported from BKDWriter.writeLeafBlockPackedValues()
     let (high_cardinality_cost, low_cardinality_cost) = if count == leaf_cardinality {
         // All values are different — always use high cardinality
         (0usize, 1usize)
@@ -414,7 +402,6 @@ fn write_leaf_block_packed_values(
 }
 
 /// Writes low cardinality encoding: marker -2, then unique values with run lengths.
-/// Ported from BKDWriter.writeLowCardinalityLeafBlockPackedValues()
 fn write_low_cardinality_leaf_block(
     data: &mut dyn DataOutput,
     sorted_points: &[(i32, Vec<u8>)],
@@ -452,7 +439,6 @@ fn write_low_cardinality_leaf_block(
 }
 
 /// Writes high cardinality encoding with run-length compression on the sorted dimension byte.
-/// Ported from BKDWriter.writeHighCardinalityLeafBlockPackedValues()
 fn write_high_cardinality_leaf_block(
     data: &mut dyn DataOutput,
     sorted_points: &[(i32, Vec<u8>)],
@@ -490,7 +476,6 @@ fn write_high_cardinality_leaf_block(
 }
 
 /// Computes run length of identical bytes at the given offset.
-/// Ported from BKDWriter.runLen()
 fn run_len(
     sorted_points: &[(i32, Vec<u8>)],
     start: usize,
@@ -538,7 +523,6 @@ fn get_num_left_leaf_nodes(num_leaves: usize) -> usize {
 }
 
 /// Flushes the write buffer contents into the blocks list and returns the block size.
-/// Ported from BKDWriter.appendBlock().
 fn append_block(write_buffer: &mut Vec<u8>, blocks: &mut Vec<Vec<u8>>) -> usize {
     let block = std::mem::take(write_buffer);
     let len = block.len();
@@ -604,7 +588,6 @@ fn build_leaves(
 }
 
 /// Packs the leaf block file pointers and split values into a compact byte[] index.
-/// Ported from BKDWriter.packIndex() (line 1077).
 fn pack_index(
     leaf_block_fps: &[u64],
     split_packed_values: &[u8],

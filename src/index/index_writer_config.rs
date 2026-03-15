@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.index.IndexWriterConfig
+//! Configuration for [`IndexWriter`](super::IndexWriter) flush behavior.
 
 /// Configuration for an IndexWriter.
 ///

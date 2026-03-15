@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.index.IndexFileNames
-
 /// The segments file name prefix.
 pub const SEGMENTS: &str = "segments";
 

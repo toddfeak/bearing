@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.index.IndexingChain,
-// org.apache.lucene.index.FreqProxTermsWriterPerField,
-// org.apache.lucene.index.NormValuesWriter
-
 use std::collections::HashMap;
 
 use crate::analysis::Analyzer;
@@ -329,7 +325,6 @@ pub struct StoredDoc {
 
 /// The indexing chain: processes documents into in-memory data structures.
 ///
-/// Ported from org.apache.lucene.index.IndexingChain.
 /// Simplified for single-threaded, single-segment indexing.
 pub struct IndexingChain {
     /// Per-field accumulated data, keyed by field name.
@@ -421,7 +416,6 @@ impl IndexingChain {
 
     /// Estimates the RAM bytes used by this chain's buffered data.
     ///
-    /// Ported from org.apache.lucene.index.IndexingChain.ramBytesUsed().
     /// This is an approximation — exact byte counts are not required for
     /// flush decisions, only a reasonable estimate.
     pub fn ram_bytes_used(&self) -> usize {
@@ -721,7 +715,6 @@ impl IndexingChain {
 }
 
 /// Computes the BM25 norm value for a field.
-/// Ported from BM25Similarity.computeNorm.
 ///
 /// The norm encodes the field length as a single byte using a
 /// float-to-byte compression scheme compatible with SmallFloat.
@@ -730,7 +723,6 @@ fn compute_norm(field_length: i32) -> i64 {
 }
 
 /// Encodes a field length into a single norm byte.
-/// Ported from SmallFloat.intToByte4 / BM25Similarity.
 ///
 /// This matches Lucene's BM25Similarity.computeNorm which calls
 /// SmallFloat.intToByte4(invertState.getLength()).
@@ -741,7 +733,6 @@ fn encode_norm_value(length: i32) -> u8 {
 
 /// Encodes an integer using SmallFloat.intToByte4 format.
 /// 4 bits mantissa, 3 bits exponent, 1 sign bit (always positive for norms).
-/// Ported from org.apache.lucene.util.SmallFloat
 fn int_to_byte4(i: i32) -> u8 {
     if i < 0 {
         return 0;

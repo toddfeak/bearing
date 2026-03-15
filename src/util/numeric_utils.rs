@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.util.NumericUtils
-
 /// Converts a long value to sortable bytes (8 bytes, big-endian).
 /// Flips the sign bit so that negative values sort before positive values.
 pub fn long_to_sortable_bytes(value: i64) -> [u8; 8] {
@@ -29,25 +27,21 @@ pub fn sortable_bytes_to_int(bytes: &[u8; 4]) -> i32 {
 }
 
 /// Converts a float to a sortable int using IEEE 754 bit manipulation.
-/// Ported from org.apache.lucene.util.NumericUtils.floatToSortableInt
 pub fn float_to_sortable_int(value: f32) -> i32 {
     sortable_float_bits(f32::to_bits(value) as i32)
 }
 
 /// Converts a sortable int back to a float.
-/// Ported from org.apache.lucene.util.NumericUtils.sortableIntToFloat
 pub fn sortable_int_to_float(encoded: i32) -> f32 {
     f32::from_bits(sortable_float_bits(encoded) as u32)
 }
 
 /// Converts a double to a sortable long using IEEE 754 bit manipulation.
-/// Ported from org.apache.lucene.util.NumericUtils.doubleToSortableLong
 pub fn double_to_sortable_long(value: f64) -> i64 {
     sortable_double_bits(f64::to_bits(value) as i64)
 }
 
 /// Converts a sortable long back to a double.
-/// Ported from org.apache.lucene.util.NumericUtils.sortableLongToDouble
 pub fn sortable_long_to_double(encoded: i64) -> f64 {
     f64::from_bits(sortable_double_bits(encoded) as u64)
 }
@@ -63,13 +57,11 @@ pub fn double_to_sortable_bytes(value: f64) -> [u8; 8] {
 }
 
 /// Converts IEEE 754 float bits to sortable order (or back).
-/// Ported from org.apache.lucene.util.NumericUtils.sortableFloatBits
 fn sortable_float_bits(bits: i32) -> i32 {
     bits ^ ((bits >> 31) & 0x7FFFFFFF)
 }
 
 /// Converts IEEE 754 double bits to sortable order (or back).
-/// Ported from org.apache.lucene.util.NumericUtils.sortableDoubleBits
 fn sortable_double_bits(bits: i64) -> i64 {
     bits ^ ((bits >> 63) & 0x7FFFFFFFFFFFFFFF)
 }

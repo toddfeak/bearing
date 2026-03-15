@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.util
+//! Utility types for working with byte data.
 
 pub(crate) mod bit_util;
 pub(crate) mod compress;

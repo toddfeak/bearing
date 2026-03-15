@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.store.ByteBuffersDirectory
+//! In-memory [`Directory`](super::Directory) implementation, useful for tests.
 
 use std::collections::HashMap;
 use std::io;

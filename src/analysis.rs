@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.analysis
+//! Text analysis pipeline: tokenizers, token filters, and analyzers.
+//!
+//! The [`Analyzer`] trait is the main entry point. [`StandardAnalyzer`] provides
+//! Unicode-aware tokenization with lowercase normalization, matching Lucene's
+//! `StandardAnalyzer`.
 
 pub mod standard;
 

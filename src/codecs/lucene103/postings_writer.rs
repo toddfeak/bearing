@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.lucene103.Lucene103PostingsWriter
-// and org.apache.lucene.codecs.lucene103.PostingsUtil
-
 use std::io;
 
 use log::debug;
@@ -107,7 +104,6 @@ impl BlockFlushState {
     }
 
     /// Flush one full doc block (128 docs) with skip data.
-    /// Ported from Lucene103PostingsWriter.flushDocBlock() (lines 391-492).
     fn flush_doc_block(
         &mut self,
         doc_delta_buffer: &[i32; BLOCK_SIZE],
@@ -221,7 +217,6 @@ impl BlockFlushState {
 }
 
 /// Writes postings (.doc, .pos, .psm) files.
-/// Ported from Lucene103PostingsWriter.
 pub struct PostingsWriter {
     doc_out: MemoryIndexOutput,
     pos_out: Option<MemoryIndexOutput>,
@@ -283,8 +278,6 @@ impl PostingsWriter {
     ///   - With freqs: GroupVInt doc deltas with freq bits, then freqs for non-1
     ///   - Without freqs (DOCS only): GroupVInt doc deltas
     /// - Positions: PFOR-encoded blocks of 128 + VInt tail for remainder
-    ///
-    /// Ported from Lucene103PostingsWriter.startDoc() + addPosition() + finishTerm()
     pub fn write_term(
         &mut self,
         postings: &[(i32, i32, &[i32])], // (doc_id, freq, positions)
@@ -403,7 +396,6 @@ impl PostingsWriter {
     }
 
     /// Write a term with docFreq >= BLOCK_SIZE using block encoding with skip data.
-    /// Ported from Lucene103PostingsWriter.flushDocBlock() + finishTerm().
     #[allow(clippy::too_many_arguments)]
     fn write_term_blocks(
         &mut self,
@@ -512,7 +504,6 @@ impl PostingsWriter {
     /// Encode a term's metadata for the block tree terms dictionary.
     /// Called by BlockTreeTermsWriter for each term in a block.
     ///
-    /// Ported from Lucene103PostingsWriter.encodeTerm
     pub fn encode_term(
         &self,
         out: &mut Vec<u8>,
@@ -600,7 +591,6 @@ impl PostingsWriter {
 }
 
 /// Write freq buffer with variable-length encoding and doc buffer with group-varint encoding.
-/// Ported from PostingsUtil.writeVIntBlock
 fn write_vint_block(
     out: &mut dyn DataOutput,
     doc_deltas: &mut [i32],
@@ -612,7 +602,6 @@ fn write_vint_block(
 }
 
 /// Special vints encoded on 2 bytes if they require 15 bits or less.
-/// Ported from Lucene103PostingsWriter.writeVLong15 (line 381).
 fn write_vlong15(out: &mut dyn DataOutput, v: i64) -> io::Result<()> {
     debug_assert!(v >= 0);
     if (v & !0x7FFF_i64) == 0 {
@@ -624,7 +613,6 @@ fn write_vlong15(out: &mut dyn DataOutput, v: i64) -> io::Result<()> {
     Ok(())
 }
 
-/// Ported from Lucene103PostingsWriter.writeVInt15 (line 373).
 fn write_vint15(out: &mut dyn DataOutput, v: i32) -> io::Result<()> {
     debug_assert!(v >= 0);
     write_vlong15(out, v as i64)
@@ -633,7 +621,6 @@ fn write_vint15(out: &mut dyn DataOutput, v: i32) -> io::Result<()> {
 /// Encode minimal impact data for a single block.
 /// For MVP: one impact per block with (max_freq, norm=1).
 /// Returns number of bytes written.
-/// Ported from Lucene103PostingsWriter.writeImpacts (line 537).
 fn write_impacts(max_freq: i32, buf: &mut Vec<u8>) -> io::Result<usize> {
     let start = buf.len();
     let mut enc = VecOutput(buf);
@@ -645,7 +632,6 @@ fn write_impacts(max_freq: i32, buf: &mut Vec<u8>) -> io::Result<usize> {
 }
 
 /// Returns the number of longs needed to store the given number of bits.
-/// Ported from FixedBitSet.bits2words.
 fn bits2words(num_bits: usize) -> usize {
     num_bits.div_ceil(64)
 }

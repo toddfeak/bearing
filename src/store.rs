@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.store.DataOutput, IndexOutput, Directory
+//! Storage abstraction layer: directories, data output, and index output.
+//!
+//! The [`Directory`] trait abstracts file storage. [`FSDirectory`] writes to the
+//! filesystem; [`MemoryDirectory`] holds files in memory (useful for tests).
+//! [`DataOutput`] and [`IndexOutput`] define the byte-level writing interface
+//! used by codec writers.
 
 pub mod checksum;
 pub mod fs;
@@ -21,7 +26,6 @@ pub struct SegmentFile {
 }
 
 /// Trait for writing primitive types to an output stream.
-/// Ported from org.apache.lucene.store.DataOutput
 pub trait DataOutput {
     /// Writes a single byte.
     fn write_byte(&mut self, b: u8) -> io::Result<()>;
@@ -137,7 +141,6 @@ pub trait DataOutput {
     /// Groups of 4 are encoded with a flag byte (2 bits per int = byte width - 1)
     /// followed by the ints in LE with variable byte widths.
     /// Remaining values (< 4) are written as regular VInts.
-    /// Ported from org.apache.lucene.util.GroupVIntUtil.writeGroupVInts
     fn write_group_vints(&mut self, values: &[i32], limit: usize) -> io::Result<()> {
         let mut read_pos = 0;
         let mut scratch = [0u8; 17]; // 1 flag + 4 * 4 bytes max
@@ -215,7 +218,6 @@ impl DataOutput for VecOutput<'_> {
 }
 
 /// Trait for index file output with checksum and position tracking.
-/// Ported from org.apache.lucene.store.IndexOutput
 pub trait IndexOutput: DataOutput {
     /// Returns the name of this output (the file name).
     fn name(&self) -> &str;
@@ -245,7 +247,6 @@ pub(crate) fn align_offset(offset: u64, alignment: usize) -> u64 {
 }
 
 /// Trait for a directory that can create and manage index files.
-/// Ported from org.apache.lucene.store.Directory
 pub trait Directory {
     /// Creates a new output file with the given name.
     fn create_output(&mut self, name: &str) -> io::Result<Box<dyn IndexOutput>>;
@@ -274,14 +275,12 @@ pub trait Directory {
     }
 
     /// Ensures that any writes to the named files are moved to stable storage.
-    /// Ported from org.apache.lucene.store.Directory.sync
     fn sync(&self, names: &[&str]) -> io::Result<()> {
         let _ = names;
         Ok(())
     }
 
     /// Ensures that directory metadata (e.g., new file entries) is persisted.
-    /// Ported from org.apache.lucene.store.Directory.syncMetaData
     fn sync_meta_data(&self) -> io::Result<()> {
         Ok(())
     }

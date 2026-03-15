@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.util.packed
-
 use std::io;
 
 use crate::store::{DataOutput, IndexOutput};
 
 /// Supported bits-per-value for DirectWriter encoding.
-/// Ported from org.apache.lucene.util.packed.DirectWriter.SUPPORTED_BITS_PER_VALUE
 const SUPPORTED_BITS_PER_VALUE: &[u32] = &[1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64];
 
 /// Returns the number of bits required to represent values up to and including `max_value`,
 /// interpreted as unsigned, rounded up to the nearest supported BPV.
-/// Ported from org.apache.lucene.util.packed.DirectWriter.unsignedBitsRequired
 pub fn unsigned_bits_required(max_value: i64) -> u32 {
     // PackedInts.unsignedBitsRequired: max(1, 64 - Long.numberOfLeadingZeros(bits))
     let raw = if max_value == 0 {
@@ -28,7 +24,6 @@ pub fn unsigned_bits_required(max_value: i64) -> u32 {
 }
 
 /// Writes bit-packed integers.
-/// Ported from org.apache.lucene.util.packed.DirectWriter
 pub struct DirectWriter {
     bits_per_value: u32,
     values: Vec<i64>,
@@ -47,7 +42,6 @@ impl DirectWriter {
     }
 
     /// Writes all accumulated values as bit-packed data, then padding bytes.
-    /// Ported from org.apache.lucene.util.packed.DirectWriter.flush() + finish()
     pub fn finish(&self, output: &mut dyn DataOutput) -> io::Result<()> {
         if self.bits_per_value == 0 {
             return Ok(());
@@ -124,7 +118,6 @@ impl DirectWriter {
 }
 
 /// Writes monotonically-increasing sequences of longs with delta compression.
-/// Ported from org.apache.lucene.util.packed.DirectMonotonicWriter
 ///
 /// Data is split into blocks. For each block:
 /// - Meta: min value (VLong), avg increment (Int as float bits), offset (VLong), bits per value (Byte)
@@ -148,7 +141,6 @@ impl DirectMonotonicWriter {
 
     /// Writes metadata to meta_output and data to data_output.
     /// Returns the number of blocks written.
-    /// Ported from org.apache.lucene.util.packed.DirectMonotonicWriter.flush/finish
     pub fn finish(
         &self,
         meta_output: &mut dyn IndexOutput,

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.analysis.standard.StandardTokenizer,
-// org.apache.lucene.analysis.LowerCaseFilter,
-// org.apache.lucene.analysis.standard.StandardAnalyzer
+//! Standard analysis components: [`StandardTokenizer`], [`LowerCaseFilter`],
+//! and [`StandardAnalyzer`].
 
 use crate::analysis::{Analyzer, Token, TokenFilter, TokenRef, Tokenizer};
 
@@ -127,7 +126,6 @@ impl Tokenizer for StandardTokenizer {
 }
 
 /// Lowercases all token text.
-/// Ported from org.apache.lucene.analysis.LowerCaseFilter
 pub struct LowerCaseFilter;
 
 impl TokenFilter for LowerCaseFilter {
@@ -143,7 +141,6 @@ impl TokenFilter for LowerCaseFilter {
 }
 
 /// StandardAnalyzer: StandardTokenizer + LowerCaseFilter.
-/// Ported from org.apache.lucene.analysis.standard.StandardAnalyzer
 ///
 /// Java's default StandardAnalyzer() constructor uses NO stop words
 /// (CharArraySet.EMPTY_SET). The pipeline is just StandardTokenizer + LowerCaseFilter.

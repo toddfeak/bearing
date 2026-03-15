@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.lucene103.blocktree.Lucene103BlockTreeTermsWriter
-// and org.apache.lucene.codecs.lucene103.blocktree.TrieBuilder
-
 use std::collections::{HashMap, HashSet};
 use std::io;
 

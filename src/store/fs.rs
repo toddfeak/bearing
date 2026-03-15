@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.store.FSDirectory / FSDirectory
+//! Filesystem-backed [`Directory`](super::Directory) implementation.
 
 use std::fs;
 use std::fs::File;
@@ -11,7 +11,6 @@ use crate::store::checksum::CRC32;
 use crate::store::{DataOutput, Directory, IndexOutput};
 
 /// Filesystem-backed directory for reading and writing index files.
-/// Ported from org.apache.lucene.store.FSDirectory.
 pub struct FSDirectory {
     path: PathBuf,
 }

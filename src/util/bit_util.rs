@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.util.BitUtil
-
 /// ZigZag-encodes a 32-bit integer.
 /// Maps signed integers to unsigned: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...
 pub fn zig_zag_encode_i32(i: i32) -> i32 {

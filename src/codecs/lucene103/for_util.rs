@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.lucene103.ForUtil, PForUtil, ForDeltaUtil
-
 use std::io;
 
 use crate::store::DataOutput;
@@ -11,7 +9,6 @@ pub const BLOCK_SIZE: usize = 128;
 
 // --- ForUtil ---
 // Frame-of-Reference bit packing for 128 integers.
-// Ported from org.apache.lucene.codecs.lucene103.ForUtil
 
 /// Returns the number of bytes needed to encode 128 values with the given bits per value.
 pub fn num_bytes(bpv: u32) -> u32 {
@@ -20,7 +17,6 @@ pub fn num_bytes(bpv: u32) -> u32 {
 }
 
 // MASKS arrays for remainder bit handling during encode.
-// Ported from Java ForUtil static initializer.
 const MASKS8: [i32; 8] = build_masks8();
 const MASKS16: [i32; 16] = build_masks16();
 const MASKS32: [i32; 32] = build_masks32();
@@ -67,7 +63,6 @@ const fn build_masks32() -> [i32; 32] {
 }
 
 /// Collapse 128 ints by interleaving 4 groups of 32, packing 4 values per int.
-/// Ported from Java ForUtil.collapse8(int[]).
 fn collapse8(ints: &mut [i32; BLOCK_SIZE]) {
     for i in 0..32 {
         ints[i] = (ints[i] << 24) | (ints[32 + i] << 16) | (ints[64 + i] << 8) | ints[96 + i];
@@ -75,7 +70,6 @@ fn collapse8(ints: &mut [i32; BLOCK_SIZE]) {
 }
 
 /// Collapse 128 ints by interleaving 2 groups of 64, packing 2 values per int.
-/// Ported from Java ForUtil.collapse16(int[]).
 fn collapse16(ints: &mut [i32; BLOCK_SIZE]) {
     for i in 0..64 {
         ints[i] = (ints[i] << 16) | ints[64 + i];
@@ -84,7 +78,6 @@ fn collapse16(ints: &mut [i32; BLOCK_SIZE]) {
 
 /// Encode 128 longs with the given bits per value using FOR bit packing.
 /// Uses ForUtil thresholds: bpv<=8 → collapse8, <=16 → collapse16, else → no collapse.
-/// Ported from Java ForUtil.encode(int[], int, DataOutput).
 pub fn encode(longs: &[i64; BLOCK_SIZE], bpv: u32, out: &mut dyn DataOutput) -> io::Result<()> {
     if bpv == 0 {
         return Ok(());
@@ -106,7 +99,6 @@ pub fn encode(longs: &[i64; BLOCK_SIZE], bpv: u32, out: &mut dyn DataOutput) -> 
 }
 
 /// Core encode: 3-phase bit packing into tmp, then write as 32-bit ints.
-/// Ported from Java ForUtil.encode(int[], int, int, DataOutput, int[]).
 fn encode_ints(
     ints: &[i32; BLOCK_SIZE],
     bpv: u32,
@@ -186,12 +178,10 @@ fn encode_ints(
 
 // --- PForUtil ---
 // Patched Frame-of-Reference with up to 7 exceptions.
-// Ported from org.apache.lucene.codecs.lucene103.PForUtil
 
 pub const MAX_EXCEPTIONS: usize = 7;
 
 /// Encode 128 values using PForUtil (patched FOR).
-/// Ported from org.apache.lucene.codecs.lucene103.PForUtil.encode.
 ///
 /// Uses a min-heap to find the top MAX_EXCEPTIONS+1 values. The heap minimum
 /// determines the patched bpv. Exceptions (values exceeding the patched mask)
@@ -287,7 +277,6 @@ pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut dyn DataOutput) -> i
 
 // --- ForDeltaUtil ---
 // Delta encoding for doc IDs.
-// Ported from org.apache.lucene.codecs.lucene103.ForDeltaUtil
 
 /// Returns the bits required to encode the deltas of the given values.
 pub fn delta_bits_required(longs: &[i64; BLOCK_SIZE]) -> u32 {
@@ -322,11 +311,9 @@ pub fn encode_deltas(
 
 // --- ForDeltaUtil functions for block postings encoding ---
 // These use different collapse thresholds from ForUtil.
-// Ported from org.apache.lucene.codecs.lucene103.ForDeltaUtil
 
 /// Returns the bits required to encode the given raw delta values (OR-based).
 /// Unlike `delta_bits_required` which takes cumulative values, this takes raw deltas directly.
-/// Ported from Java ForDeltaUtil.bitsRequired() (line 91).
 pub fn for_delta_bits_required(deltas: &[i32; BLOCK_SIZE]) -> u32 {
     let mut or = 0i32;
     for &d in deltas.iter() {
@@ -337,7 +324,6 @@ pub fn for_delta_bits_required(deltas: &[i32; BLOCK_SIZE]) -> u32 {
 
 /// Encode raw deltas using ForDelta thresholds:
 /// bpv<=3→collapse8, <=10→collapse16, else→no collapse.
-/// Ported from Java ForDeltaUtil.encodeDeltas() (line 105).
 pub fn for_delta_encode(
     bpv: u32,
     deltas: &[i32; BLOCK_SIZE],

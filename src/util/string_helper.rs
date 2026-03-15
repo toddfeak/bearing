@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.util.StringHelper
-
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 

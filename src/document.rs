@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.document and org.apache.lucene.index
+//! Document model and field types.
+//!
+//! A [`Document`] is a collection of [`Field`]s, each with a name, [`FieldType`],
+//! and value. Factory functions like [`text_field`], [`keyword_field`], and
+//! [`long_field`] create fields with common configurations.
 
 /// Specifies what information is stored in the index for a field.
-/// Ported from org.apache.lucene.index.IndexOptions
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IndexOptions {
     /// Not indexed.
@@ -29,7 +32,6 @@ impl IndexOptions {
 }
 
 /// Specifies the type of doc values stored for a field.
-/// Ported from org.apache.lucene.index.DocValuesType
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DocValuesType {
     /// No doc values.
@@ -47,7 +49,6 @@ pub enum DocValuesType {
 }
 
 /// Describes the properties of a field type.
-/// Ported from org.apache.lucene.document.FieldType
 #[derive(Clone, Debug)]
 pub struct FieldType {
     stored: bool,
@@ -174,7 +175,6 @@ pub enum FieldValue {
 }
 
 /// A field in a document.
-/// Ported from org.apache.lucene.document.Field
 #[derive(Clone, Debug)]
 pub struct Field {
     name: String,
@@ -276,7 +276,6 @@ pub enum StoredValue {
 }
 
 /// A document to be indexed.
-/// Ported from org.apache.lucene.document.Document
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     pub fields: Vec<Field>,

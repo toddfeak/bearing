@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Ported from org.apache.lucene.codecs.lucene90.Lucene90NormsConsumer
-
 use std::collections::HashMap;
 use std::io;
 
