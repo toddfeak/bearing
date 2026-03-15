@@ -10,14 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A port of Apache Lucene's indexing functionality from Java to Rust. The Java implementation of **Apache Lucene 10.3.2** is the canonical source. All Rust code should be derived from the Lucene 10.3.2 Java source in `reference/lucene-10.3.2/lucene/`. See `reference/CLAUDE.md` for details. Run `./reference/download-lucene.sh` to set up the reference source.
 
-Do **not** reference the golucene Go port as a source of information for this project.
-
 ## Current State
 
 - Target codec: **Lucene103**
 - Multi-threaded `IndexWriter` with DWPT pool (no merging, no deletes)
 - Eight field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`
-- 344 tests passing, Java Lucene VerifyIndex validates output
 
 ### Known Limitations
 
@@ -169,3 +166,4 @@ The key Java packages to port from are under `reference/lucene-10.3.2/lucene/cor
 - The Java Lucene 10.3.2 test source is at `reference/lucene-10.3.2/lucene/core/src/test/java/org/apache/lucene/`. Use it to find canonical test cases for any feature being ported.
 - Test functions should reference the Java test class they were ported from in a comment (e.g. `// Ported from org.apache.lucene.codecs.TestCodecUtil`).
 - Use an in-memory `Directory` implementation for unit tests.
+- Integration tests in `tests/*.rs` exercise the public API as an external consumer would. They use only `pub` items from `bearing::*` and do not depend on test utilities or test data files.
