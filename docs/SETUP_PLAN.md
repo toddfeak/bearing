@@ -246,18 +246,18 @@ Additional cleanup:
 
 **Dependencies**: Section 9
 
-- [ ] Document compatibility policy:
+- [x] Document compatibility policy in `COMPATIBILITY.md`:
   - Current target: **Apache Lucene 10.3.2**
   - Codec target: **Lucene103** (constituents: Lucene90, Lucene94, Lucene99)
   - Guarantee: Bearing-written indexes MUST be readable by Java Lucene 10.3.2
   - Aspiration: Bearing should eventually read Java Lucene 10.3.2 indexes
-- [ ] Add version constant in code (`pub const LUCENE_TARGET_VERSION: &str = "10.3.2"` in `lib.rs`)
-- [ ] Define upgrade strategy:
+- [x] ~~Add version constant in code~~ — skipped, not useful enough to justify
+- [x] Define upgrade strategy in `COMPATIBILITY.md`:
   - Minor codec changes (Lucene103 → Lucene104): new codec version module
   - Major version changes: new codec modules, maintain backwards compat for reading
   - Track Lucene releases via GitHub issues
-- [ ] Surface codec version mapping from `reference/formats/MAINTAINING.md` in README or a `COMPATIBILITY.md`
-- [ ] Future: golden index tests in CI (indexes written by specific Lucene versions that Bearing must read)
+- [x] Surface codec version mapping in `COMPATIBILITY.md`
+- [x] Future: golden index tests in CI — documented in `COMPATIBILITY.md`, deferred until read path exists
 
 ---
 
