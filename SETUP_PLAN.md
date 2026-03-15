@@ -1,0 +1,323 @@
+# Bearing — GitHub & Project Setup Plan
+
+## Context
+
+Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/rust-lucene-indexer` project (104 commits, ~18K LOC, 367 tests, Lucene 10.3.2 write path). The scope is expanding from indexing-only to full Lucene support. This plan covers everything needed to establish Bearing as a properly structured open-source project on GitHub, initially private under the `toddfeak` account.
+
+---
+
+## 1. GitHub Repository Setup
+
+**Dependencies**: None (do this first)
+
+- [ ] Create new `toddfeak/bearing` repository on GitHub
+- [ ] Initialize with a fresh commit of the current project state (no history from `rust-lucene-indexer`)
+- [ ] Set description: "A Rust port of Apache Lucene"
+- [ ] Add topics: `rust`, `lucene`, `search`, `indexing`, `information-retrieval`, `search-engine`, `full-text-search`, `apache-lucene`
+- [ ] Keep repository **private** until Pre-Public Checklist (Section 12) is complete
+- [ ] Disable wiki and discussions (enable discussions later if community grows)
+- [ ] Enable issues
+- [ ] Confirm default branch is `main`
+
+**Note**: This is a clean break from `rust-lucene-indexer` — no fork relationship, no commit history carried over. The NOTICE file and README provide sufficient provenance.
+
+---
+
+## 2. License & Legal
+
+**Dependencies**: Section 1
+
+- [ ] Create `LICENSE` file with full Apache License 2.0 text
+- [ ] Create `NOTICE` file (required by Apache 2.0 Section 4d for derivative works):
+  ```
+  Bearing
+  Copyright 2025-2026 Todd Feak
+
+  This product includes software derived from Apache Lucene
+  (https://lucene.apache.org/), licensed under the Apache License 2.0.
+
+  Apache Lucene
+  Copyright 2001-2025 The Apache Software Foundation
+  ```
+- [ ] Use SPDX short identifier (`// SPDX-License-Identifier: Apache-2.0`) as file header convention — add incrementally, not in bulk
+- [ ] Verify no existing files contain conflicting license statements
+- [ ] Confirm the Java test utilities (`VerifyIndex.java`, `IndexAllFields.java`) are original work, not copied from Lucene source
+
+**Files to create**: `LICENSE`, `NOTICE`
+
+---
+
+## 3. Project Identity
+
+**Dependencies**: Section 2
+
+- [ ] Update `Cargo.toml`:
+  - `name = "bearing"`
+  - `description = "A Rust port of Apache Lucene"`
+  - `license = "Apache-2.0"`
+  - `repository = "https://github.com/toddfeak/bearing"`
+  - `homepage = "https://github.com/toddfeak/bearing"`
+  - `readme = "README.md"`
+  - `keywords = ["lucene", "search", "indexing", "full-text-search"]`
+  - `categories = ["text-processing"]`
+  - `rust-version = "1.85"` (edition 2024 requires 1.85+)
+  - `exclude = ["reference/", "testdata/", "tests/*.sh", "tests/*.java", "rust-index/", ".claude/", "docs/"]`
+- [ ] Create `README.md`:
+  - Project name and one-line description
+  - Current status (what works: write path, 8 field types, multi-threaded indexing)
+  - Lucene version target (10.3.2, Lucene103 codec)
+  - Performance highlights (2x-4.4x faster than Java Lucene)
+  - Build instructions (`cargo build`, `cargo test`)
+  - Roadmap summary (tiers, expanded for full Lucene support)
+  - Contributing link
+  - License note with Apache Lucene attribution
+- [ ] Create `rust-toolchain.toml`:
+  ```toml
+  [toolchain]
+  channel = "stable"
+  components = ["rustfmt", "clippy"]
+  ```
+- [ ] Verify `Cargo.lock` regenerates after rename
+
+**Files to create**: `README.md`, `rust-toolchain.toml`
+**Files to modify**: `Cargo.toml`
+
+---
+
+## 4. Community Files
+
+**Dependencies**: Section 1
+
+- [ ] Create `CONTRIBUTING.md`:
+  - Build and test instructions
+  - Link to `CLAUDE.md` for coding conventions
+  - Porting methodology (Java Lucene is the canonical source)
+  - How to set up reference source (`./reference/download-lucene.sh`)
+  - How to run the full test suite including e2e
+  - PR expectations (tests required, clippy clean, formatted)
+  - Dependency policy (minimal deps)
+- [ ] Create `SECURITY.md`:
+  - Supported versions
+  - Vulnerability reporting via email (not public issues)
+  - Expected response timeline
+- [ ] Create `.github/ISSUE_TEMPLATE/bug_report.md`:
+  - Rust version, OS, Bearing version
+  - Steps to reproduce, expected vs actual behavior
+  - Lucene compatibility context if relevant
+- [ ] Create `.github/ISSUE_TEMPLATE/feature_request.md`:
+  - Which Lucene feature/API this relates to
+  - Use case
+  - Java Lucene class reference if applicable
+- [ ] Create `.github/ISSUE_TEMPLATE/config.yml`
+- [ ] Create `.github/PULL_REQUEST_TEMPLATE.md`:
+  - What this PR does
+  - Java Lucene source reference (if porting)
+  - Test coverage
+  - Checklist: `cargo test`, `cargo clippy`, `cargo fmt`
+
+**Files to create**: `CONTRIBUTING.md`, `SECURITY.md`, `.github/ISSUE_TEMPLATE/bug_report.md`, `.github/ISSUE_TEMPLATE/feature_request.md`, `.github/ISSUE_TEMPLATE/config.yml`, `.github/PULL_REQUEST_TEMPLATE.md`
+
+---
+
+## 5. CI/CD
+
+**Dependencies**: Section 3 (Cargo.toml must have correct name and MSRV)
+
+- [ ] Create `.github/workflows/ci.yml`:
+  - Trigger on push to `main` and on pull requests
+  - Job: **test** — `cargo test` on ubuntu-latest
+  - Job: **clippy** — `cargo clippy -- -D warnings`
+  - Job: **fmt** — `cargo fmt -- --check`
+  - Job: **msrv** — test against Rust 1.85 (MSRV) in addition to stable
+  - Cache via `Swatinem/rust-cache`
+- [ ] Create `.github/workflows/e2e.yml` (separate, heavier workflow):
+  - Trigger: `workflow_dispatch` (manual) and weekly schedule
+  - Install Java 21+, download Lucene, run `./tests/e2e_indexfiles.sh`
+  - Separate because it requires Java + Lucene JAR
+- [ ] Create `.github/dependabot.yml`:
+  - Weekly updates for `cargo` and `github-actions` ecosystems
+- [ ] Consider adding `deny.toml` for `cargo-deny`:
+  - License auditing (important for Apache 2.0 — ensures dependency licenses are compatible)
+  - Security advisory DB checks
+- [ ] Consider `cargo llvm-cov` in CI (adds ~2min, useful for visibility, don't block on thresholds)
+
+**Files to create**: `.github/workflows/ci.yml`, `.github/workflows/e2e.yml`, `.github/dependabot.yml`
+**Optional**: `deny.toml`
+
+---
+
+## 6. Repository Settings
+
+**Dependencies**: Section 5 (CI checks must exist before requiring them)
+
+- [ ] Branch protection on `main`:
+  - Require status checks to pass: `test`, `clippy`, `fmt`
+  - Require branches to be up to date before merging
+  - Allow force pushes: no
+  - Allow deletions: no
+  - Note: As sole admin, you can bypass when needed. Protection is for discipline and future contributors.
+- [ ] Merge strategy:
+  - Enable squash merging (default for PRs)
+  - Enable rebase merging
+  - Disable merge commits (keep history linear)
+  - Auto-delete head branches after merge
+- [ ] Issue labels:
+  - **Component**: `codec`, `indexing`, `search`, `analysis`, `store`, `util`, `cli`
+  - **Type**: `bug`, `enhancement`, `documentation`, `porting`, `infrastructure`
+  - **Priority**: `priority:high`, `priority:low`
+  - **Status**: `good first issue`, `help wanted`, `blocked`
+  - **Lucene**: `lucene-compat`
+- [ ] Clean up default labels that don't apply
+
+---
+
+## 7. Code Cleanup for Rename
+
+**Dependencies**: Section 3 (Cargo.toml name change)
+
+All references to `rust-lucene-indexer` / `rust_lucene_indexer`:
+
+- [ ] `Cargo.toml` — `name = "bearing"` (done in Section 3)
+- [ ] `src/bin/indexfiles.rs` — 6 `use rust_lucene_indexer::` imports → `use bearing::`
+- [ ] `src/index/documents_writer_per_thread.rs:95` — `"rust-lucene-indexer"` string → `"bearing"` (segment diagnostics metadata)
+- [ ] `CLAUDE.md:7` — repo URL → `github.com/toddfeak/bearing`
+- [ ] `PLAN.md:1` — title update (or full rewrite in Section 9)
+- [ ] `Cargo.lock` — regenerated by `cargo build`
+
+Additional cleanup:
+- [ ] Delete empty `rust-index/` directory
+- [ ] Verify `cargo build` succeeds
+- [ ] Verify all 367 tests pass
+- [ ] Verify `cargo clippy` and `cargo fmt` clean
+
+**Note**: The diagnostics string change means new indexes will have `"bearing"` in `.si` metadata instead of `"rust-lucene-indexer"`. Informational only, not functional.
+
+---
+
+## 8. Test Infrastructure
+
+**Dependencies**: Section 7 (rename must be complete)
+
+- [ ] Keep unit tests in `#[cfg(test)] mod tests` within source files (idiomatic Rust, no change needed)
+- [ ] Keep existing e2e tests:
+  - `tests/e2e_indexfiles.sh` — roundtrip: Bearing writes, Java Lucene reads
+  - `tests/compare_java_rust.sh` — performance comparison
+  - `tests/VerifyIndex.java` and `tests/IndexAllFields.java` — Java utilities
+- [ ] Consider adding Rust integration tests in `tests/*.rs` (tests against public API surface)
+- [ ] Roundtrip test strategy (document now, implement as capabilities are added):
+  - **Bearing writes → Lucene reads**: Already working via `VerifyIndex.java`
+  - **Lucene writes → Bearing reads**: Blocked until read path exists (Tier 3)
+  - **Bearing writes → Bearing reads**: Blocked until read path exists
+- [ ] Lucene test fixtures:
+  - Investigate extracting test indexes from Lucene's test suite as golden fixtures
+  - Consider `testdata/fixtures/` for binary index files written by Java Lucene
+  - Defer implementation until read path exists
+- [ ] Future: property-based testing (`proptest`) for codec round-trips
+
+---
+
+## 9. Documentation
+
+**Dependencies**: Section 7
+
+- [ ] Adapt `CLAUDE.md`:
+  - Update project name and repo URL
+  - Expand scope: "A Rust port of Apache Lucene" (not just indexing)
+  - Update stats (367 tests, 8 field types, current LOC)
+  - Keep coding conventions, testing guidelines, reference docs sections
+- [ ] Rewrite `PLAN.md` for expanded Bearing scope:
+  - Rename to "Bearing — Roadmap"
+  - Keep performance summary
+  - Expand Tier 3 (search) into multiple tiers covering the full Lucene surface
+  - Add tiers for: advanced query types, analyzers, faceting, spatial, suggesters
+  - Add "Non-Goals" section
+  - Add version compatibility matrix
+- [ ] Review `reference/formats/MAINTAINING.md` — update any repo name references
+- [ ] Create `CHANGELOG.md`:
+  - Use [Keep a Changelog](https://keepachangelog.com/) format
+  - Start with `[Unreleased]` section
+  - Backfill `[0.1.0]` summarizing current state (MVP write path)
+
+**Files to modify**: `CLAUDE.md`, `PLAN.md`
+**Files to create**: `CHANGELOG.md`
+
+---
+
+## 10. Lucene Version Compatibility Strategy
+
+**Dependencies**: Section 9
+
+- [ ] Document compatibility policy:
+  - Current target: **Apache Lucene 10.3.2**
+  - Codec target: **Lucene103** (constituents: Lucene90, Lucene94, Lucene99)
+  - Guarantee: Bearing-written indexes MUST be readable by Java Lucene 10.3.2
+  - Aspiration: Bearing should eventually read Java Lucene 10.3.2 indexes
+- [ ] Add version constant in code (`pub const LUCENE_TARGET_VERSION: &str = "10.3.2"` in `lib.rs`)
+- [ ] Define upgrade strategy:
+  - Minor codec changes (Lucene103 → Lucene104): new codec version module
+  - Major version changes: new codec modules, maintain backwards compat for reading
+  - Track Lucene releases via GitHub issues
+- [ ] Surface codec version mapping from `reference/formats/MAINTAINING.md` in README or a `COMPATIBILITY.md`
+- [ ] Future: golden index tests in CI (indexes written by specific Lucene versions that Bearing must read)
+
+---
+
+## 11. Style & Tooling
+
+**Dependencies**: Section 5
+
+- [ ] Evaluate `rustfmt.toml` — only create if non-default settings are needed. Candidate: `edition = "2024"`
+- [ ] Skip `clippy.toml` for now — CI enforces `-D warnings`, CLAUDE.md says don't suppress warnings
+- [ ] `rust-toolchain.toml` created in Section 3
+
+---
+
+## 12. Pre-Public Checklist
+
+**Dependencies**: ALL previous sections
+
+- [ ] **Secrets audit**: Scan codebase for `.env`, `.pem`, `.key`, credentials (fresh repo has no history to audit)
+- [ ] **Content audit**: No hardcoded local paths (`/home/rfeak/...`), no inappropriate TODOs, no personal info beyond git author
+- [ ] **Legal audit**: LICENSE exists, NOTICE exists, Cargo.toml has `license = "Apache-2.0"`, no verbatim Lucene copies without attribution
+- [ ] **CI verification**: All checks pass on `main`, branch protection active
+- [ ] **Documentation verification**: README complete, CONTRIBUTING exists, no "rust-lucene-indexer" references remain
+- [ ] **Build verification**: `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` all clean
+- [ ] **History review**: Fresh repo with no prior history — verify initial commit is clean
+- [ ] **Flip to public**: Settings > Danger Zone > Change visibility
+
+---
+
+## 13. Post-Public / Future (not blocking)
+
+- [ ] Release strategy: define when to tag `v0.1.0`, adopt semver
+- [ ] Annotated git tags (`git tag -a v0.1.0 -m "Initial release"`)
+- [ ] GitHub Releases with changelog excerpts
+- [ ] Crates.io publishing (after API surface stabilizes)
+- [ ] README badges: CI status, crates.io, docs.rs, license, MSRV
+- [ ] Ensure `cargo doc` builds cleanly for docs.rs
+- [ ] Enable GitHub Discussions when community grows
+- [ ] `criterion` benchmark suite with CI tracking
+- [ ] `cargo fuzz` for codec edge cases
+- [ ] Cross-platform CI (macOS, Windows) for index portability testing
+
+---
+
+## Dependency Graph
+
+```
+1. GitHub Repo Setup
+├── 2. License & Legal
+│   └── 3. Project Identity
+│       └── 7. Code Cleanup for Rename
+│           ├── 8. Test Infrastructure
+│           └── 9. Documentation
+│               └── 10. Lucene Version Compat
+├── 4. Community Files (parallel with 2, 5)
+├── 5. CI/CD (parallel with 2, 4)
+│   ├── 6. Repository Settings
+│   └── 11. Style & Tooling
+└── 12. Pre-Public Checklist (depends on ALL above)
+     └── 13. Post-Public
+```
+
+Sections 2, 4, and 5 can proceed in parallel after Section 1. Sections 3 → 7 → 8/9 are sequential. Section 12 is the final gate.

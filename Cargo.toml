@@ -1,0 +1,15 @@
+[package]
+name = "rust-lucene-indexer"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+log = "0.4"
+env_logger = "0.11"
+
+[[bin]]
+name = "indexfiles"
+path = "src/bin/indexfiles.rs"

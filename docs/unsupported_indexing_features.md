@@ -1,0 +1,151 @@
+# Unsupported Indexing Features
+
+This document catalogs indexing features present in Java Lucene 10.3.2 that are not yet implemented in this Rust port. It covers **indexing-only** features — querying, searching, and the `IndexReader` API are out of scope here.
+
+The canonical reference is **Apache Lucene 10.3.2** (`reference/lucene-10.3.2/`).
+
+---
+
+## 1. Document Operations
+
+**Java feature:** `IndexWriter` supports `updateDocument`, `deleteDocuments` (by term, query, or doc ID), `softUpdateDocument`, bulk `addDocuments`, `deleteAll`, and doc values updates (`updateNumericDocValue`, `updateBinaryDocValue`).
+
+**Rust status:** Not implemented. Only `add_document` (single document) is supported. There is no mechanism for updates, deletes, or bulk operations.
+
+**Priority:** High — deletes and updates are essential for any production indexer that manages a changing corpus.
+
+## 2. Merging
+
+**Java feature:** `MergePolicy` (e.g., `TieredMergePolicy`, `LogByteSizeMergePolicy`) selects segments for merging. `MergeScheduler` (e.g., `ConcurrentMergeScheduler`) executes merges in background threads. `forceMerge` and `forceMergeDeletes` allow explicit merge control.
+
+**Rust status:** Not implemented. Each flush creates a new segment; segments are never combined.
+
+**Priority:** High — without merging, segment count grows unboundedly, degrading search performance and increasing file handle usage.
+
+## 3. Field Types
+
+**Java feature:** Lucene provides many specialized field types beyond what the Rust port supports:
+
+| Field Type | Purpose |
+|---|---|
+| `NumericDocValuesField` | Per-document long values for sorting/faceting |
+| `BinaryDocValuesField` | Per-document arbitrary byte arrays |
+| `SortedDocValuesField` | Per-document ordinal-mapped byte arrays |
+| `SortedSetDocValuesField` | Multi-valued sorted byte arrays |
+| `SortedNumericDocValuesField` | Multi-valued sorted longs |
+| `KnnFloatVectorField` | Float vectors for HNSW-based nearest-neighbor search |
+| `KnnByteVectorField` | Byte vectors for HNSW-based nearest-neighbor search |
+| `FeatureField` | Static feature scores (BM25 boosting) |
+| `LatLonPoint` | Latitude/longitude points for geo queries |
+| Range fields | `IntRange`, `LongRange`, `FloatRange`, `DoubleRange` |
+| Shape fields | Geo and XY shape indexing |
+
+**Rust status:** Not implemented. The Rust port supports 8 field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`.
+
+**Priority:** Medium — the current set covers common use cases. Additional types can be added incrementally as needed.
+
+## 4. Multi-Valued Fields
+
+**Java feature:** `SORTED_SET` and `SORTED_NUMERIC` doc values support multiple values per document (e.g., a document with multiple tags or multiple timestamps).
+
+**Rust status:** Partial — the doc values types exist but indexing multiple values per document currently returns `Err`.
+
+**Priority:** Medium — required for faceting and multi-valued sorting use cases.
+
+## 5. Sparse Doc Values / Norms
+
+**Java feature:** Fields do not need to be present in every document. Lucene tracks which documents have a given field via dense/sparse encoding and a `docsWithField` bitset.
+
+**Rust status:** Partial — sparse fields currently return `Err`. All demo fields are present in every document, masking this gap.
+
+**Priority:** Medium — most real-world schemas have optional fields.
+
+## 6. Payloads
+
+**Java feature:** Postings can carry per-position payload bytes (stored in `.pay` files), used for custom scoring and annotation.
+
+**Rust status:** Not implemented. No `.pay` file is written.
+
+**Priority:** Low — payloads are a niche feature used in specialized scoring applications.
+
+## 7. Term Vectors
+
+**Java feature:** Per-document term vectors (`.tvd`/`.tvx` files) store the terms, frequencies, positions, and offsets for a document's fields, enabling features like "more like this" and hit highlighting.
+
+**Rust status:** Not implemented. `FieldType::store_term_vectors` is ignored.
+
+**Priority:** Medium — needed for hit highlighting and document similarity.
+
+## 8. KNN Vector Search
+
+**Java feature:** HNSW graph indexing for approximate nearest-neighbor search over float or byte vectors. Writes `.vec`, `.vex`, `.vemf` files via the `Lucene99HnswVectorsFormat`.
+
+**Rust status:** Not implemented.
+
+**Priority:** Low-Medium — increasingly important for AI/ML applications but orthogonal to core text indexing.
+
+## 9. Index-Time Sorting
+
+**Java feature:** `IndexWriterConfig.setIndexSort(Sort)` pre-sorts segments at flush time so that queries can exploit sorted order for early termination.
+
+**Rust status:** Not implemented.
+
+**Priority:** Low — an optimization, not a correctness requirement.
+
+## 10. Live Docs
+
+**Java feature:** When documents are deleted, Lucene writes a `.liv` file containing a bitset of live (non-deleted) documents and tracks `del_count` in segment metadata.
+
+**Rust status:** Not implemented. Depends on delete support (§1).
+
+**Priority:** High — required for deletes and updates to work.
+
+## 11. Near-Real-Time (NRT)
+
+**Java feature:** `IndexWriter.getReader()` returns a `DirectoryReader` that sees all changes (including uncommitted ones) for near-real-time search.
+
+**Rust status:** Not implemented. The Rust port has no `IndexReader`.
+
+**Priority:** Low — depends on having a search stack first.
+
+## 12. Two-Phase Commit
+
+**Java feature:** `prepareCommit()` writes the new segments file but defers making it active, enabling coordination with external transactional systems. `rollback()` discards uncommitted changes.
+
+**Rust status:** Not implemented. `commit()` is a single-phase operation. `rollback()` is not supported.
+
+**Priority:** Low — only needed for transactional coordination with external systems.
+
+## 13. Analysis
+
+**Java feature:** Rich analysis pipeline including stop word filters, synonym filters, `CharFilter` chains, per-field `AnalyzerWrapper`, and dozens of language-specific analyzers.
+
+**Rust status:** Partial — `StandardAnalyzer` performs Unicode tokenization and lowercasing, but has no stop words and no synonym support. `CharFilter` is not implemented. All fields use the same analyzer.
+
+**Priority:** Medium — stop words are the most impactful gap. Per-field analyzers and synonym support matter for advanced use cases.
+
+## 14. Configuration
+
+**Java feature:** `IndexWriterConfig` exposes many options:
+
+| Option | Purpose |
+|---|---|
+| `OpenMode` | `CREATE`, `APPEND`, `CREATE_OR_APPEND` |
+| Custom `Codec` | Override the codec used for writing |
+| `IndexDeletionPolicy` | Control which commits are retained |
+| Soft deletes field | Track soft deletes for NRT use cases |
+| `Similarity` | Custom scoring model (e.g., BM25 parameters) |
+| Reader pooling | Reuse `SegmentReader` instances across NRT opens |
+| Segment warming | Pre-warm new segments before making them searchable |
+
+**Rust status:** Partial — `OpenMode::CREATE` is supported. `max_buffered_docs`, `ram_buffer_size_mb`, and thread count are configurable. Other options are not implemented.
+
+**Priority:** Medium — `APPEND` and `CREATE_OR_APPEND` modes are important for incremental indexing.
+
+## 15. Codec Features
+
+**Java feature:** Lucene's `PerFieldPostingsFormat` and `PerFieldDocValuesFormat` allow different fields to use different codec implementations. The `Codec` class aggregates format implementations for all file types (postings, doc values, stored fields, norms, term vectors, live docs, etc.).
+
+**Rust status:** Partial — the Rust port uses fixed Lucene103 codec implementations for all fields. Per-field format overrides are not supported. Term vector and live docs formats are not implemented.
+
+**Priority:** Low — per-field format overrides are rarely needed in practice.
