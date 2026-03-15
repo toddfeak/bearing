@@ -1,4 +1,4 @@
-# Rust Lucene Indexer — Roadmap
+# Bearing — Roadmap
 
 ## Performance Summary
 
