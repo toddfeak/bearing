@@ -220,23 +220,22 @@ Additional cleanup:
 
 **Dependencies**: Section 7
 
-- [ ] Adapt `CLAUDE.md`:
+- [x] Adapt `CLAUDE.md`:
   - Update project name and repo URL
   - Expand scope: "A Rust port of Apache Lucene" (not just indexing)
-  - Update stats (367 tests, 8 field types, current LOC)
-  - Keep coding conventions, testing guidelines, reference docs sections
-- [ ] Rewrite `PLAN.md` for expanded Bearing scope:
+  - Streamlined: removed Known Limitations, moved operational details to `tests/CLAUDE.md` and `reference/CLAUDE.md`
+  - Added Directory Layout table pointing to subdirectory CLAUDE.md files
+- [x] Rewrite `PLAN.md` for expanded Bearing scope:
   - Rename to "Bearing — Roadmap"
   - Keep performance summary
   - Expand Tier 3 (search) into multiple tiers covering the full Lucene surface
   - Add tiers for: advanced query types, analyzers, faceting, spatial, suggesters
   - Add "Non-Goals" section
   - Add version compatibility matrix
-- [ ] Review `reference/formats/MAINTAINING.md` — update any repo name references
-- [ ] Create `CHANGELOG.md`:
+- [x] Review `reference/formats/MAINTAINING.md` — no repo name references found, clean
+- [x] Create `CHANGELOG.md`:
   - Use [Keep a Changelog](https://keepachangelog.com/) format
-  - Start with `[Unreleased]` section
-  - Backfill `[0.1.0]` summarizing current state (MVP write path)
+  - Start with `[Unreleased]` section (no versioned entries — project is pre-release)
 
 **Files to modify**: `CLAUDE.md`, `PLAN.md`
 **Files to create**: `CHANGELOG.md`
