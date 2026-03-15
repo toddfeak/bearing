@@ -9,7 +9,7 @@ homepage = "https://github.com/toddfeak/bearing"
 readme = "README.md"
 keywords = ["lucene", "search", "indexing", "full-text-search"]
 categories = ["text-processing"]
-rust-version = "1.94"
+rust-version = "1.88"
 exclude = ["reference/", "testdata/", "tests/", ".claude/", "docs/"]
 
 [lib]
