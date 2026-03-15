@@ -124,7 +124,11 @@ fn parse_args() -> CliArgs {
 }
 
 fn main() {
-    env_logger::init();
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Warn)
+        .env()
+        .init()
+        .unwrap();
 
     let args = parse_args();
 

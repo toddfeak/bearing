@@ -37,7 +37,7 @@ When porting a feature, locate the corresponding Java source under `reference/lu
 
 ## Dependency Policy
 
-Bearing uses only two external crates: `log` (logging facade) and `env_logger` (concrete logger for the binary). Everything else uses the Rust standard library.
+Bearing uses only two external crates: `log` (logging facade) and `simple_logger` (concrete logger for the binary). Everything else uses the Rust standard library.
 
 ## If PRs Open in the Future
 

@@ -135,7 +135,7 @@ The key Java packages to port from are under `reference/lucene-10.3.2/lucene/cor
 
 ## Conventions
 
-- No external dependencies except `log` (logging facade) and `env_logger` (concrete logger for the binary). Use the Rust standard library for everything else.
+- No external dependencies except `log` (logging facade) and `simple_logger` (concrete logger for the binary). Use the Rust standard library for everything else.
 - Unimplemented methods should use `todo!("description")` or return `Err(...)` with a descriptive message.
 - Prefer Rust idioms (traits, enums, `Result`/`Option`) over direct 1:1 Java translation. For example, use traits where Java uses interfaces/abstract classes, and enums where Java uses constant sets.
 - Use `#[cfg(test)]` modules within source files for unit tests.
@@ -161,7 +161,7 @@ The key Java packages to port from are under `reference/lucene-10.3.2/lucene/cor
 - Set `RUST_LOG=debug` to enable (e.g., `RUST_LOG=debug cargo run -- -docs testdata/docs`).
 - Log at a semantic level (what's being written and why), not every byte.
 - Do **not** log in hot loops (per-token, per-document). Only at boundaries (codec headers/footers, flush decisions).
-- The binary initializes `env_logger` in `main()`; the library only uses the `log` facade.
+- The binary initializes `simple_logger` in `main()`; the library only uses the `log` facade.
 
 ## Testing
 
