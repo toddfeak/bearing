@@ -265,9 +265,9 @@ Additional cleanup:
 
 **Dependencies**: Section 5
 
-- [ ] Evaluate `rustfmt.toml` — only create if non-default settings are needed. Candidate: `edition = "2024"`
-- [ ] Skip `clippy.toml` for now — CI enforces `-D warnings`, CLAUDE.md says don't suppress warnings
-- [ ] `rust-toolchain.toml` created in Section 3
+- [x] Evaluate `rustfmt.toml` — not needed; `rustfmt` reads edition from `Cargo.toml` automatically
+- [x] Skip `clippy.toml` — CI enforces `-D warnings`, CLAUDE.md says don't suppress warnings
+- [x] `rust-toolchain.toml` created in Section 3
 
 ---
 
