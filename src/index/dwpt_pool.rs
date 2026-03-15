@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.index.DocumentsWriterPerThreadPool
 
 use std::collections::{HashMap, VecDeque};

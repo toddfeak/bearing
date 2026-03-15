@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Modeled after org.apache.lucene.demo.IndexFiles
 
 use std::env;

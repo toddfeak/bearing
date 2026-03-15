@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 # Usage: compare_java_rust.sh [-docs DOCS_DIR] [-release] [--threads N]

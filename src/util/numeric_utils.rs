@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.util.NumericUtils
 
 /// Converts a long value to sortable bytes (8 bytes, big-endian).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.analysis.standard.StandardTokenizer,
 // org.apache.lucene.analysis.LowerCaseFilter,
 // org.apache.lucene.analysis.standard.StandardAnalyzer

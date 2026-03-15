@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.codecs.lucene90.compressing.Lucene90CompressingStoredFieldsWriter
 // and org.apache.lucene.codecs.compressing.FieldsIndexWriter
 

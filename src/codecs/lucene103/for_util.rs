@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.codecs.lucene103.ForUtil, PForUtil, ForDeltaUtil
 
 use std::io;

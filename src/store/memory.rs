@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.store.ByteBuffersDirectory
 
 use std::collections::HashMap;

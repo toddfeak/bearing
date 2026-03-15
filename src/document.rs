@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.document and org.apache.lucene.index
 
 /// Specifies what information is stored in the index for a field.

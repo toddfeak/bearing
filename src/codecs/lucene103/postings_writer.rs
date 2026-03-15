@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.codecs.lucene103.Lucene103PostingsWriter
 // and org.apache.lucene.codecs.lucene103.PostingsUtil
 

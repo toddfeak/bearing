@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.util.BitUtil
 
 /// ZigZag-encodes a 32-bit integer.

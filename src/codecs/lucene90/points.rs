@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.codecs.lucene90.Lucene90PointsWriter,
 // org.apache.lucene.util.bkd.BKDWriter,
 // org.apache.lucene.util.bkd.DocIdsWriter

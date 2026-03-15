@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from java.util.zip.CRC32
 // ISO 3309 / ITU-T V.42, polynomial 0xEDB88320 (reflected representation)
 

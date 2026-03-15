@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.index.DocumentsWriterPerThread
 //
 // Each DWPT wraps an IndexingChain and a segment name. It is exclusively

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.util.compress.LZ4
 // This implements the LZ4 block compression format used by Lucene's stored fields.
 

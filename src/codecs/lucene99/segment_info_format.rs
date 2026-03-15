@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Ported from org.apache.lucene.codecs.lucene99.Lucene99SegmentInfoFormat
 
 use std::io;
