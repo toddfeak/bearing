@@ -39,3 +39,16 @@ Start with `MAINTAINING.md` for the codec version mapping table — it shows whi
 |---|---|
 | `reference/lucene-10.3.2/lucene/core/src/java/org/apache/lucene/` | Main source code |
 | `reference/lucene-10.3.2/lucene/core/src/test/java/org/apache/lucene/` | Test source code |
+
+## Java Package Guide
+
+Key packages under `.../src/java/org/apache/lucene/`:
+
+| Package | Purpose |
+|---|---|
+| `index` | Core indexing: `IndexWriter`, `IndexReader`, `DocumentsWriter`, `SegmentInfo`, `Terms`, `PostingsEnum` |
+| `document` | `Document`, `Field`, `FieldType`, `IndexOptions`, `DocValuesType` |
+| `store` | `Directory`, `IndexInput`, `IndexOutput`, `Lock`, `IOContext` |
+| `codecs` | `Codec` and all sub-format interfaces for encoding/decoding index data |
+| `analysis` | `Analyzer`, `TokenStream`, `Tokenizer`, `TokenFilter` |
+| `util` | Shared utilities: `BytesRef`, `Bits`, `FixedBitSet`, `InfoStream`, packed integers, FST, automaton |
