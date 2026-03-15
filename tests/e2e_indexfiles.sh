@@ -13,9 +13,10 @@ INDEXFILES="$PROJECT_DIR/target/debug/indexfiles"
 
 # Create temporary directories for index output
 INDEX_DIR="$(mktemp -d)"
-VERIFY_CLASSES="$(mktemp -d)"
 JAVA_INDEX_DIR="$(mktemp -d)"
-trap 'rm -rf "$INDEX_DIR" "$VERIFY_CLASSES" "$JAVA_INDEX_DIR"' EXIT
+trap 'rm -rf "$INDEX_DIR" "$JAVA_INDEX_DIR"' EXIT
+
+GRADLE="$SCRIPT_DIR/java/gradlew --project-dir=$SCRIPT_DIR/java --quiet"
 
 echo "=== Test: indexfiles with -docs and -index ==="
 "$INDEXFILES" -docs "$DOCS_DIR" -index "$INDEX_DIR"
@@ -49,29 +50,14 @@ echo "PASSED"
 
 echo ""
 echo "=== Test: Java Lucene verification (all-fields Rust index) ==="
-LUCENE_CORE="$PROJECT_DIR/reference/lucene-10.3.2/lucene/core/build/libs/lucene-core-10.3.2-SNAPSHOT.jar"
-VERIFY_JAVA="$SCRIPT_DIR/VerifyIndex.java"
-
-if [ ! -f "$LUCENE_CORE" ]; then
-    echo "SKIPPED: lucene-core JAR not found at $LUCENE_CORE"
-else
-    javac -cp "$LUCENE_CORE" "$VERIFY_JAVA" -d "$VERIFY_CLASSES" 2>&1
-    java -cp "$LUCENE_CORE:$VERIFY_CLASSES" VerifyIndex "$INDEX_DIR" 3 2>&1
-    echo "PASSED"
-fi
+$GRADLE verifyIndex -PindexDir="$INDEX_DIR" -PdocCount=3 2>&1
+echo "PASSED"
 
 echo ""
 echo "=== Test: Java IndexAllFields + verification ==="
-INDEX_ALL_JAVA="$SCRIPT_DIR/IndexAllFields.java"
-
-if [ ! -f "$LUCENE_CORE" ]; then
-    echo "SKIPPED: lucene-core JAR not found at $LUCENE_CORE"
-else
-    javac -cp "$LUCENE_CORE" "$INDEX_ALL_JAVA" -d "$VERIFY_CLASSES" 2>&1
-    java -cp "$LUCENE_CORE:$VERIFY_CLASSES" IndexAllFields "$DOCS_DIR" "$JAVA_INDEX_DIR" 2>&1
-    java -cp "$LUCENE_CORE:$VERIFY_CLASSES" VerifyIndex "$JAVA_INDEX_DIR" 3 2>&1
-    echo "PASSED"
-fi
+$GRADLE indexAllFields -PdocsDir="$DOCS_DIR" -PindexDir="$JAVA_INDEX_DIR" 2>&1
+$GRADLE verifyIndex -PindexDir="$JAVA_INDEX_DIR" -PdocCount=3 2>&1
+echo "PASSED"
 
 echo ""
 echo "All tests passed."

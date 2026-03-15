@@ -4,13 +4,13 @@ This directory contains the canonical Apache Lucene 10.3.2 Java source used as t
 
 ## Setup
 
-Run the download script to fetch and build the Lucene source:
+Run the download script to fetch the Lucene source:
 
 ```bash
 ./reference/download-lucene.sh
 ```
 
-This downloads the source tarball from the Apache archive, extracts it to `reference/lucene-10.3.2/`, and builds the `lucene-core` JAR needed by test scripts.
+This downloads the source tarball from the Apache archive and extracts it to `reference/lucene-10.3.2/`.
 
 ## Rules
 
@@ -39,4 +39,3 @@ Start with `MAINTAINING.md` for the codec version mapping table — it shows whi
 |---|---|
 | `reference/lucene-10.3.2/lucene/core/src/java/org/apache/lucene/` | Main source code |
 | `reference/lucene-10.3.2/lucene/core/src/test/java/org/apache/lucene/` | Test source code |
-| `reference/lucene-10.3.2/lucene/core/build/libs/lucene-core-10.3.2-SNAPSHOT.jar` | Built JAR for test scripts |

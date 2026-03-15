@@ -37,11 +37,11 @@ Benchmark indexing 2,000 synthetic documents (149 MB) on Linux:
 
 ## Reference Source
 
-Download the Apache Lucene 10.3.2 source (used as the canonical reference and for e2e tests):
+Download the Apache Lucene 10.3.2 source (used as the canonical reference when porting). This is primarily for Claude Code:
 
     ./reference/download-lucene.sh
 
-Requires Java 21+ and internet access. Downloads, extracts, and builds the lucene-core JAR.
+Requires internet access. Not required for building or testing.
 
 ## Test Data
 
@@ -55,7 +55,7 @@ Roundtrip test: Bearing writes an index, Java Lucene reads and validates it.
 
     ./tests/e2e_indexfiles.sh
 
-Requires the reference source (above).
+Requires Java 21+. Gradle handles the Lucene dependency automatically.
 
 ## Performance Comparison
 

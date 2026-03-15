@@ -71,9 +71,9 @@ The end-to-end test builds the binary, indexes `testdata/docs`, verifies index f
 ./tests/e2e_indexfiles.sh
 ```
 
-### VerifyIndex.java
+### Java Test Utilities
 
-`tests/VerifyIndex.java` is a standalone Java utility that opens a Rust-generated index with Java Lucene's `DirectoryReader`, checks document count, stored fields, term counts, and runs a search query. Requires the Lucene 10.3.2 JAR built by `./reference/download-lucene.sh`.
+`tests/java/` is a Gradle project containing Java utilities (`VerifyIndex`, `IndexAllFields`) that validate Rust-generated indexes using Java Lucene. The Lucene dependency is fetched from Maven Central automatically. These are invoked by the shell scripts above — no need to run Gradle directly.
 
 ## Performance Comparison
 

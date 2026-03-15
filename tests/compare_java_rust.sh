@@ -12,12 +12,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-LUCENE_BASE="$PROJECT_DIR/reference/lucene-10.3.2/lucene"
-LUCENE_CORE="$LUCENE_BASE/core/build/libs/lucene-core-10.3.2-SNAPSHOT.jar"
+GRADLE="$SCRIPT_DIR/java/gradlew --project-dir=$SCRIPT_DIR/java"
 
 DOCS_DIR="$PROJECT_DIR/testdata/docs"
-VERIFY_JAVA="$SCRIPT_DIR/VerifyIndex.java"
-INDEX_ALL_JAVA="$SCRIPT_DIR/IndexAllFields.java"
 BUILD_MODE="debug"
 CARGO_FLAGS=""
 MT_THREADS=12
@@ -46,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+DOCS_DIR="$(cd "$DOCS_DIR" && pwd)"
 DOC_COUNT=$(find "$DOCS_DIR" -type f | wc -l)
 DOC_SIZE=$(du -sh "$DOCS_DIR" | cut -f1)
 
@@ -53,8 +51,7 @@ JAVA_1T_INDEX="$(mktemp -d)"
 JAVA_MT_INDEX="$(mktemp -d)"
 RUST_1T_INDEX="$(mktemp -d)"
 RUST_MT_INDEX="$(mktemp -d)"
-VERIFY_CLASSES="$(mktemp -d)"
-trap 'rm -rf "$JAVA_1T_INDEX" "$JAVA_MT_INDEX" "$RUST_1T_INDEX" "$RUST_MT_INDEX" "$VERIFY_CLASSES"' EXIT
+trap 'rm -rf "$JAVA_1T_INDEX" "$JAVA_MT_INDEX" "$RUST_1T_INDEX" "$RUST_MT_INDEX"' EXIT
 
 echo "========================================"
 echo "  Java vs Rust Lucene Index Comparison"
@@ -100,9 +97,9 @@ print_index_files() {
     printf "  %-20s %10s bytes\n" "TOTAL" "$_INDEX_TOTAL"
 }
 
-# --- Compile Java classes ---
-echo "Compiling IndexAllFields.java and VerifyIndex.java..."
-javac -cp "$LUCENE_CORE" "$INDEX_ALL_JAVA" "$VERIFY_JAVA" -d "$VERIFY_CLASSES" 2>&1
+# --- Build Java classes ---
+echo "Building Java test utilities..."
+$GRADLE compileJava --quiet 2>&1
 
 # --- Build Rust binary ---
 echo "Building Rust indexfiles ($BUILD_MODE)..."
@@ -110,13 +107,11 @@ cargo build --bin indexfiles $CARGO_FLAGS --manifest-path "$PROJECT_DIR/Cargo.to
 INDEXFILES="$PROJECT_DIR/target/$BUILD_MODE/indexfiles"
 echo ""
 
-JAVA_CP="$LUCENE_CORE:$VERIFY_CLASSES"
-
 # --- 1. Java IndexAllFields (1 thread) ---
 echo "========================================"
 echo "  1. JAVA IndexAllFields (1 thread)"
 echo "========================================"
-run_with_metrics "Java-1T" java -cp "$JAVA_CP" IndexAllFields "$DOCS_DIR" "$JAVA_1T_INDEX"
+run_with_metrics "Java-1T" $GRADLE indexAllFields --quiet -PdocsDir="$DOCS_DIR" -PindexDir="$JAVA_1T_INDEX"
 JAVA_1T_MS=$_TIME_MS
 JAVA_1T_RSS_KB=$_PEAK_RSS_KB
 JAVA_1T_RSS_MB=$(echo "scale=1; $JAVA_1T_RSS_KB / 1024" | bc)
@@ -132,7 +127,7 @@ echo ""
 echo "========================================"
 echo "  2. JAVA IndexAllFields ($MT_THREADS threads)"
 echo "========================================"
-run_with_metrics "Java-MT" java -cp "$JAVA_CP" IndexAllFields "$DOCS_DIR" "$JAVA_MT_INDEX" --threads "$MT_THREADS"
+run_with_metrics "Java-MT" $GRADLE indexAllFields --quiet -PdocsDir="$DOCS_DIR" -PindexDir="$JAVA_MT_INDEX" -Pthreads="$MT_THREADS"
 JAVA_MT_MS=$_TIME_MS
 JAVA_MT_RSS_KB=$_PEAK_RSS_KB
 JAVA_MT_RSS_MB=$(echo "scale=1; $JAVA_MT_RSS_KB / 1024" | bc)
@@ -184,7 +179,7 @@ for label_dir in "Java (1T):$JAVA_1T_INDEX" "Java (${MT_THREADS}T):$JAVA_MT_INDE
     echo "========================================"
     echo "  VerifyIndex on $label index"
     echo "========================================"
-    java -cp "$JAVA_CP" VerifyIndex "$dir" "$DOC_COUNT" 2>&1
+    $GRADLE verifyIndex --quiet -PindexDir="$dir" -PdocCount="$DOC_COUNT" 2>&1
     echo ""
 done
 

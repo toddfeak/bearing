@@ -1,0 +1,36 @@
+plugins {
+    java
+    application
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation("org.apache.lucene:lucene-core:10.3.2")
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.register<JavaExec>("verifyIndex") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "VerifyIndex"
+    val indexDir = project.findProperty("indexDir") as? String
+    val docCount = project.findProperty("docCount") as? String
+    args = listOfNotNull(indexDir, docCount)
+}
+
+tasks.register<JavaExec>("indexAllFields") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "IndexAllFields"
+    val docsDir = project.findProperty("docsDir") as? String
+    val indexDir = project.findProperty("indexDir") as? String
+    val threads = project.findProperty("threads") as? String
+    args = listOfNotNull(docsDir, indexDir) +
+        if (threads != null) listOf("--threads", threads) else emptyList()
+}

@@ -7,6 +7,10 @@
 # Reference Lucene source (downloaded by reference/download-lucene.sh)
 /reference/lucene-*/
 
+# Gradle (Java test utilities)
+tests/java/.gradle/
+tests/java/build/
+
 # JetBrains IDE (keep project files, exclude user-specific state)
 .idea/workspace.xml
 .idea/tasks.xml

@@ -13,7 +13,7 @@ cargo clippy           # lint (warnings should be zero)
 cargo fmt              # format code
 ```
 
-Full end-to-end test (requires Java 21+):
+Full end-to-end test (requires Java 21+; Gradle handles the Lucene dependency):
 
 ```bash
 ./tests/e2e_indexfiles.sh
