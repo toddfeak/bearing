@@ -10,14 +10,14 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
 
 **Dependencies**: None (do this first)
 
-- [ ] Create new `toddfeak/bearing` repository on GitHub
-- [ ] Initialize with a fresh commit of the current project state (no history from `rust-lucene-indexer`)
-- [ ] Set description: "A Rust port of Apache Lucene"
-- [ ] Add topics: `rust`, `lucene`, `search`, `indexing`, `information-retrieval`, `search-engine`, `full-text-search`, `apache-lucene`
-- [ ] Keep repository **private** until Pre-Public Checklist (Section 12) is complete
-- [ ] Disable wiki and discussions (enable discussions later if community grows)
-- [ ] Enable issues
-- [ ] Confirm default branch is `main`
+- [x] Create new `toddfeak/bearing` repository on GitHub
+- [x] Initialize with a fresh commit of the current project state (no history from `rust-lucene-indexer`)
+- [x] Set description: "A Rust port of Apache Lucene"
+- [x] Add topics: `rust`, `lucene`, `search`, `indexing`, `information-retrieval`, `search-engine`, `full-text-search`, `apache-lucene`
+- [x] Keep repository **private** until Pre-Public Checklist (Section 12) is complete
+- [x] Disable wiki and discussions (enable discussions later if community grows)
+- [x] Enable issues
+- [x] Confirm default branch is `main`
 
 **Note**: This is a clean break from `rust-lucene-indexer` — no fork relationship, no commit history carried over. The NOTICE file and README provide sufficient provenance.
 
@@ -27,8 +27,8 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
 
 **Dependencies**: Section 1
 
-- [ ] Create `LICENSE` file with full Apache License 2.0 text
-- [ ] Create `NOTICE` file (required by Apache 2.0 Section 4d for derivative works):
+- [x] Create `LICENSE` file with full Apache License 2.0 text
+- [x] Create `NOTICE` file (required by Apache 2.0 Section 4d for derivative works):
   ```
   Bearing
   Copyright 2025-2026 Todd Feak
@@ -39,9 +39,9 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
   Apache Lucene
   Copyright 2001-2025 The Apache Software Foundation
   ```
-- [ ] Use SPDX short identifier (`// SPDX-License-Identifier: Apache-2.0`) as file header convention — add incrementally, not in bulk
-- [ ] Verify no existing files contain conflicting license statements
-- [ ] Confirm the Java test utilities (`VerifyIndex.java`, `IndexAllFields.java`) are original work, not copied from Lucene source
+- [x] Use SPDX short identifier (`// SPDX-License-Identifier: Apache-2.0`) as file header convention — add incrementally, not in bulk
+- [x] Verify no existing files contain conflicting license statements
+- [x] Confirm the Java test utilities (`VerifyIndex.java`, `IndexAllFields.java`) are original work, not copied from Lucene source
 
 **Files to create**: `LICENSE`, `NOTICE`
 
@@ -51,7 +51,7 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
 
 **Dependencies**: Section 2
 
-- [ ] Update `Cargo.toml`:
+- [x] Update `Cargo.toml`:
   - `name = "bearing"`
   - `description = "A Rust port of Apache Lucene"`
   - `license = "Apache-2.0"`
@@ -62,7 +62,7 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
   - `categories = ["text-processing"]`
   - `rust-version = "1.85"` (edition 2024 requires 1.85+)
   - `exclude = ["reference/", "testdata/", "tests/*.sh", "tests/*.java", "rust-index/", ".claude/", "docs/"]`
-- [ ] Create `README.md`:
+- [x] Create `README.md`:
   - Project name and one-line description
   - Current status (what works: write path, 8 field types, multi-threaded indexing)
   - Lucene version target (10.3.2, Lucene103 codec)
@@ -71,13 +71,13 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
   - Roadmap summary (tiers, expanded for full Lucene support)
   - Contributing link
   - License note with Apache Lucene attribution
-- [ ] Create `rust-toolchain.toml`:
+- [x] Create `rust-toolchain.toml`:
   ```toml
   [toolchain]
   channel = "stable"
   components = ["rustfmt", "clippy"]
   ```
-- [ ] Verify `Cargo.lock` regenerates after rename
+- [x] Verify `Cargo.lock` regenerates after rename
 
 **Files to create**: `README.md`, `rust-toolchain.toml`
 **Files to modify**: `Cargo.toml`
@@ -88,7 +88,7 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
 
 **Dependencies**: Section 1
 
-- [ ] Create `CONTRIBUTING.md`:
+- [x] Create `CONTRIBUTING.md`:
   - Build and test instructions
   - Link to `CLAUDE.md` for coding conventions
   - Porting methodology (Java Lucene is the canonical source)
@@ -96,20 +96,20 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
   - How to run the full test suite including e2e
   - PR expectations (tests required, clippy clean, formatted)
   - Dependency policy (minimal deps)
-- [ ] Create `SECURITY.md`:
+- [x] Create `SECURITY.md`:
   - Supported versions
   - Vulnerability reporting via email (not public issues)
   - Expected response timeline
-- [ ] Create `.github/ISSUE_TEMPLATE/bug_report.md`:
+- [x] Create `.github/ISSUE_TEMPLATE/bug_report.md`:
   - Rust version, OS, Bearing version
   - Steps to reproduce, expected vs actual behavior
   - Lucene compatibility context if relevant
-- [ ] Create `.github/ISSUE_TEMPLATE/feature_request.md`:
+- [x] Create `.github/ISSUE_TEMPLATE/feature_request.md`:
   - Which Lucene feature/API this relates to
   - Use case
   - Java Lucene class reference if applicable
-- [ ] Create `.github/ISSUE_TEMPLATE/config.yml`
-- [ ] Create `.github/PULL_REQUEST_TEMPLATE.md`:
+- [x] Create `.github/ISSUE_TEMPLATE/config.yml`
+- [x] Create `.github/PULL_REQUEST_TEMPLATE.md`:
   - What this PR does
   - Java Lucene source reference (if porting)
   - Test coverage
@@ -123,23 +123,23 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
 
 **Dependencies**: Section 3 (Cargo.toml must have correct name and MSRV)
 
-- [ ] Create `.github/workflows/ci.yml`:
+- [x] Create `.github/workflows/ci.yml`:
   - Trigger on push to `main` and on pull requests
   - Job: **test** — `cargo test` on ubuntu-latest
   - Job: **clippy** — `cargo clippy -- -D warnings`
   - Job: **fmt** — `cargo fmt -- --check`
   - Job: **msrv** — test against Rust 1.85 (MSRV) in addition to stable
   - Cache via `Swatinem/rust-cache`
-- [ ] Create `.github/workflows/e2e.yml` (separate, heavier workflow):
+- [x] Create `.github/workflows/e2e.yml` (separate, heavier workflow):
   - Trigger: `workflow_dispatch` (manual) and weekly schedule
   - Install Java 21+, download Lucene, run `./tests/e2e_indexfiles.sh`
   - Separate because it requires Java + Lucene JAR
-- [ ] Create `.github/dependabot.yml`:
+- [x] Create `.github/dependabot.yml`:
   - Weekly updates for `cargo` and `github-actions` ecosystems
-- [ ] Consider adding `deny.toml` for `cargo-deny`:
+- [x] Consider adding `deny.toml` for `cargo-deny`:
   - License auditing (important for Apache 2.0 — ensures dependency licenses are compatible)
   - Security advisory DB checks
-- [ ] Consider `cargo llvm-cov` in CI (adds ~2min, useful for visibility, don't block on thresholds)
+- [x] Consider `cargo llvm-cov` in CI (adds ~2min, useful for visibility, don't block on thresholds)
 
 **Files to create**: `.github/workflows/ci.yml`, `.github/workflows/e2e.yml`, `.github/dependabot.yml`
 **Optional**: `deny.toml`
@@ -150,24 +150,24 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
 
 **Dependencies**: Section 5 (CI checks must exist before requiring them)
 
-- [ ] Branch protection on `main`:
+- [ ] Branch protection on `main` — **deferred to Section 12** (requires GitHub Pro for private repos):
   - Require status checks to pass: `test`, `clippy`, `fmt`
   - Require branches to be up to date before merging
   - Allow force pushes: no
   - Allow deletions: no
   - Note: As sole admin, you can bypass when needed. Protection is for discipline and future contributors.
-- [ ] Merge strategy:
+- [x] Merge strategy:
   - Enable squash merging (default for PRs)
   - Enable rebase merging
   - Disable merge commits (keep history linear)
   - Auto-delete head branches after merge
-- [ ] Issue labels:
+- [x] Issue labels:
   - **Component**: `codec`, `indexing`, `search`, `analysis`, `store`, `util`, `cli`
-  - **Type**: `bug`, `enhancement`, `documentation`, `porting`, `infrastructure`
+  - **Type**: `bug`, `enhancement`, `documentation`, `infrastructure`
   - **Priority**: `priority:high`, `priority:low`
   - **Status**: `good first issue`, `help wanted`, `blocked`
   - **Lucene**: `lucene-compat`
-- [ ] Clean up default labels that don't apply
+- [x] Clean up default labels that don't apply (kept all defaults, they're all useful)
 
 ---
 
@@ -279,6 +279,7 @@ Additional cleanup:
 - [ ] **Secrets audit**: Scan codebase for `.env`, `.pem`, `.key`, credentials (fresh repo has no history to audit)
 - [ ] **Content audit**: No hardcoded local paths (`/home/rfeak/...`), no inappropriate TODOs, no personal info beyond git author
 - [ ] **Legal audit**: LICENSE exists, NOTICE exists, Cargo.toml has `license = "Apache-2.0"`, no verbatim Lucene copies without attribution
+- [ ] **Branch protection**: Enable branch protection on `main` (deferred from Section 6 — requires GitHub Pro or public repo)
 - [ ] **CI verification**: All checks pass on `main`, branch protection active
 - [ ] **Documentation verification**: README complete, CONTRIBUTING exists, no "rust-lucene-indexer" references remain
 - [ ] **Build verification**: `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` all clean
