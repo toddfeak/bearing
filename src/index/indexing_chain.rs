@@ -398,10 +398,11 @@ impl IndexingChain {
 
     /// Returns the RAM bytes used by this chain's buffered data.
     ///
-    /// Uses `mem_dbg` to accurately measure all heap allocations including
-    /// HashMap overhead, String keys, and nested collections.
+    /// Uses `mem_dbg` with `CAPACITY` flag to measure actual allocated memory,
+    /// including unused HashMap buckets and Vec capacity. This ensures the
+    /// flush policy sees the true memory footprint, not just the used portion.
     pub fn ram_bytes_used(&self) -> usize {
-        self.mem_size(mem_dbg::SizeFlags::default())
+        self.mem_size(mem_dbg::SizeFlags::CAPACITY)
     }
 
     /// Processes a single document, extracting all field data.
