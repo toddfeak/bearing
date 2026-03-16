@@ -4,7 +4,12 @@
 //!
 //! A [`Document`] is a collection of [`Field`]s, each with a name, [`FieldType`],
 //! and value. Factory functions like [`text_field`], [`keyword_field`], and
-//! [`long_field`] create fields with common configurations.
+//! [`long_field`] create fields with common configurations. The [`text_field_reader`]
+//! factory accepts a [`Read`] source for streaming tokenization without buffering
+//! the entire text in memory.
+
+use std::fmt;
+use std::io::Read;
 
 /// Specifies what information is stored in the index for a field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -158,7 +163,6 @@ impl Default for FieldType {
 }
 
 /// The stored value for a field.
-#[derive(Clone, Debug)]
 pub enum FieldValue {
     /// A text string (for keyword, text, and stored string fields).
     Text(String),
@@ -172,10 +176,30 @@ pub enum FieldValue {
     Double(f64),
     /// Raw bytes (for binary fields).
     Bytes(Vec<u8>),
+    /// A streaming text source (for large text fields).
+    ///
+    /// Reader fields are tokenized and indexed but cannot be stored or used
+    /// for doc values or point lookups. Use [`text_field_reader`] to create
+    /// a field with this variant.
+    Reader(Box<dyn Read + Send>),
+}
+
+impl fmt::Debug for FieldValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FieldValue::Text(s) => f.debug_tuple("Text").field(s).finish(),
+            FieldValue::Int(v) => f.debug_tuple("Int").field(v).finish(),
+            FieldValue::Long(v) => f.debug_tuple("Long").field(v).finish(),
+            FieldValue::Float(v) => f.debug_tuple("Float").field(v).finish(),
+            FieldValue::Double(v) => f.debug_tuple("Double").field(v).finish(),
+            FieldValue::Bytes(b) => f.debug_tuple("Bytes").field(b).finish(),
+            FieldValue::Reader(_) => f.debug_tuple("Reader").field(&"...").finish(),
+        }
+    }
 }
 
 /// A field in a document.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Field {
     name: String,
     field_type: FieldType,
@@ -201,6 +225,11 @@ impl Field {
 
     pub fn value(&self) -> &FieldValue {
         &self.value
+    }
+
+    /// Returns a mutable reference to the field value.
+    pub(crate) fn value_mut(&mut self) -> &mut FieldValue {
+        &mut self.value
     }
 
     /// Returns the string value, if this field holds text.
@@ -260,6 +289,7 @@ impl Field {
             FieldValue::Float(v) => Some(StoredValue::Float(*v)),
             FieldValue::Double(v) => Some(StoredValue::Double(*v)),
             FieldValue::Bytes(b) => Some(StoredValue::Bytes(b.clone())),
+            FieldValue::Reader(_) => None,
         }
     }
 }
@@ -276,7 +306,7 @@ pub enum StoredValue {
 }
 
 /// A document to be indexed.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct Document {
     pub fields: Vec<Field>,
 }
@@ -331,6 +361,18 @@ pub fn text_field(name: &str, value: &str) -> Field {
     ft.index_options = IndexOptions::DocsAndFreqsAndPositions;
     ft.tokenized = true;
     Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
+}
+
+/// Creates a tokenized text field backed by a [`Read`] source.
+///
+/// The reader is consumed during indexing, tokenizing in chunks without
+/// buffering the entire content in memory. Reader fields are indexed but
+/// cannot be stored.
+pub fn text_field_reader(name: &str, reader: impl Read + Send + 'static) -> Field {
+    let mut ft = FieldType::new();
+    ft.index_options = IndexOptions::DocsAndFreqsAndPositions;
+    ft.tokenized = true;
+    Field::new(name.to_string(), ft, FieldValue::Reader(Box::new(reader)))
 }
 
 /// Creates a StringField (inverted-only, no doc values).
@@ -697,5 +739,28 @@ mod tests {
         assert!(!f.field_type().stored());
         assert!(f.stored_value().is_none());
         assert!(f.point_bytes().is_some());
+    }
+
+    #[test]
+    fn test_text_field_reader() {
+        let f = text_field_reader("contents", std::io::Cursor::new(b"hello world".to_vec()));
+        assert_eq!(f.name(), "contents");
+        assert_eq!(
+            f.field_type().index_options(),
+            IndexOptions::DocsAndFreqsAndPositions
+        );
+        assert!(f.field_type().tokenized());
+        assert!(!f.field_type().stored());
+        assert!(matches!(f.value(), FieldValue::Reader(_)));
+        assert!(f.string_value().is_none());
+        assert!(f.stored_value().is_none());
+        assert!(f.point_bytes().is_none());
+    }
+
+    #[test]
+    fn test_field_value_debug() {
+        let reader_val = FieldValue::Reader(Box::new(std::io::Cursor::new(vec![])));
+        let debug_str = format!("{:?}", reader_val);
+        assert!(debug_str.contains("Reader"));
     }
 }

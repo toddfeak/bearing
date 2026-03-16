@@ -18,7 +18,7 @@
 //! let mut doc = Document::new();
 //! doc.add(text_field("body", "the quick brown fox"));
 //! doc.add(keyword_field("category", "animals"));
-//! writer.add_document(&doc).unwrap();
+//! writer.add_document(doc).unwrap();
 //!
 //! let result = writer.commit().unwrap();
 //! let mut dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();

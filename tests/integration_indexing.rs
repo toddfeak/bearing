@@ -41,7 +41,7 @@ fn single_threaded_index_and_commit() -> io::Result<()> {
         let mut doc = Document::new();
         doc.add(text_field("body", &format!("document number {i}")));
         doc.add(keyword_field("id", &format!("doc-{i}")));
-        writer.add_document(&doc)?;
+        writer.add_document(doc)?;
     }
 
     let result = writer.commit()?;
@@ -91,7 +91,7 @@ fn multi_threaded_indexing() -> io::Result<()> {
                     let mut doc = Document::new();
                     doc.add(text_field("body", &format!("thread {t} doc {i}")));
                     doc.add(keyword_field("id", &format!("t{t}-d{i}")));
-                    w.add_document(&doc).expect("add_document failed");
+                    w.add_document(doc).expect("add_document failed");
                 }
             })
         })
@@ -128,7 +128,7 @@ fn config_max_buffered_docs() -> io::Result<()> {
     for i in 0..20 {
         let mut doc = Document::new();
         doc.add(text_field("body", &format!("document {i}")));
-        writer.add_document(&doc)?;
+        writer.add_document(doc)?;
     }
 
     let result = writer.commit()?;
@@ -178,7 +178,7 @@ fn empty_commit() -> io::Result<()> {
 fn all_field_types_commit_successfully() -> io::Result<()> {
     let writer = IndexWriter::new();
     let doc = make_all_fields_doc();
-    writer.add_document(&doc)?;
+    writer.add_document(doc)?;
 
     let result = writer.commit()?;
     assert_eq!(writer.num_docs(), 1);
@@ -202,7 +202,7 @@ fn stored_only_fields_commit_successfully() -> io::Result<()> {
     doc.add(stored_bytes_field("b", vec![0xDE, 0xAD, 0xBE, 0xEF]));
     // Need at least one indexed field for the document to be valid
     doc.add(keyword_field("id", "stored-only"));
-    writer.add_document(&doc)?;
+    writer.add_document(doc)?;
 
     let result = writer.commit()?;
     assert_eq!(writer.num_docs(), 1);
@@ -273,7 +273,7 @@ fn memory_directory_round_trip() -> io::Result<()> {
         let mut doc = Document::new();
         doc.add(text_field("body", &format!("memory test {i}")));
         doc.add(keyword_field("id", &format!("mem-{i}")));
-        writer.add_document(&doc)?;
+        writer.add_document(doc)?;
     }
 
     let result = writer.commit()?;
@@ -307,7 +307,7 @@ fn segment_file_names_follow_lucene_conventions() -> io::Result<()> {
 
     let mut doc = Document::new();
     doc.add(text_field("body", "naming test"));
-    writer.add_document(&doc)?;
+    writer.add_document(doc)?;
 
     let result = writer.commit()?;
     let files = result.into_segment_files()?;
@@ -342,7 +342,7 @@ fn fs_directory_round_trip() -> io::Result<()> {
         doc.add(text_field("body", "filesystem test document"));
         doc.add(keyword_field("id", "fs-1"));
         doc.add(long_field("ts", 1_000_000));
-        writer.add_document(&doc)?;
+        writer.add_document(doc)?;
         writer.commit()?
     };
 
@@ -381,7 +381,7 @@ fn multiple_segments_via_flush() -> io::Result<()> {
         let mut doc = Document::new();
         doc.add(text_field("body", &format!("segment test doc {i}")));
         doc.add(keyword_field("id", &format!("seg-{i}")));
-        writer.add_document(&doc)?;
+        writer.add_document(doc)?;
     }
 
     let result = writer.commit()?;
@@ -411,7 +411,7 @@ fn all_field_types_in_single_document() -> io::Result<()> {
     // Verify the document has the expected number of fields
     assert_eq!(doc.fields.len(), 8);
 
-    writer.add_document(&doc)?;
+    writer.add_document(doc)?;
     let result = writer.commit()?;
 
     let mut dir = MemoryDirectory::new();
@@ -444,7 +444,7 @@ fn large_batch_indexing() -> io::Result<()> {
             if i % 2 == 0 { "even" } else { "odd" },
         ));
         doc.add(long_field("id", i));
-        writer.add_document(&doc)?;
+        writer.add_document(doc)?;
     }
 
     let result = writer.commit()?;

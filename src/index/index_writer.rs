@@ -39,8 +39,8 @@ use crate::store::SegmentFile;
 /// Usage (single-threaded):
 /// ```ignore
 /// let writer = IndexWriter::new();
-/// writer.add_document(&doc)?;
-/// writer.add_document(&doc2)?;
+/// writer.add_document(doc)?;
+/// writer.add_document(doc2)?;
 /// let result = writer.commit()?;
 /// let files = result.into_segment_files()?;
 /// ```
@@ -53,7 +53,7 @@ use crate::store::SegmentFile;
 ///         let w = writer.clone();
 ///         s.spawn(move || {
 ///             for doc in chunk {
-///                 w.add_document(&doc).unwrap();
+///                 w.add_document(doc).unwrap();
 ///             }
 ///         });
 ///     }
@@ -108,13 +108,13 @@ impl IndexWriter {
         }
     }
 
-    /// Adds a document to the index.
+    /// Adds a document to the index, consuming it.
     ///
     /// Obtains a DWPT from the pool, processes the document, checks the
     /// flush policy, and either returns the DWPT to the pool or flushes it.
     ///
     /// Thread-safe: multiple threads can call this concurrently.
-    pub fn add_document(&self, doc: &Document) -> io::Result<()> {
+    pub fn add_document(&self, doc: Document) -> io::Result<()> {
         // Wait if too many concurrent flushes
         self.shared.flush_control.wait_if_stalled();
 
@@ -122,7 +122,7 @@ impl IndexWriter {
         let mut dwpt = self.shared.dwpt_pool.obtain();
 
         // Process document (no locks held during this CPU-intensive work)
-        dwpt.add_document(doc, self.shared.analyzer.as_ref());
+        dwpt.add_document(doc, self.shared.analyzer.as_ref())?;
         self.shared.total_docs.fetch_add(1, Ordering::Relaxed);
 
         // Check flush policy
@@ -468,13 +468,13 @@ mod tests {
         doc.add(document::keyword_field("path", "/foo.txt"));
         doc.add(document::long_field("modified", 1000));
         doc.add(document::text_field("contents", "hello world"));
-        writer.add_document(&doc).unwrap();
+        writer.add_document(doc).unwrap();
 
         let mut doc2 = Document::new();
         doc2.add(document::keyword_field("path", "/bar.txt"));
         doc2.add(document::long_field("modified", 2000));
         doc2.add(document::text_field("contents", "goodbye world"));
-        writer.add_document(&doc2).unwrap();
+        writer.add_document(doc2).unwrap();
 
         assert_eq!(writer.num_docs(), 2);
     }
@@ -487,7 +487,7 @@ mod tests {
         doc.add(document::keyword_field("path", "/foo.txt"));
         doc.add(document::long_field("modified", 1000));
         doc.add(document::text_field("contents", "hello world"));
-        writer.add_document(&doc).unwrap();
+        writer.add_document(doc).unwrap();
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
 
@@ -517,7 +517,7 @@ mod tests {
             doc.add(document::keyword_field("path", path));
             doc.add(document::long_field("modified", modified));
             doc.add(document::text_field("contents", contents));
-            writer.add_document(&doc).unwrap();
+            writer.add_document(doc).unwrap();
         }
         writer
     }
@@ -575,7 +575,7 @@ mod tests {
         doc.add(document::keyword_field("path", "/only.txt"));
         doc.add(document::long_field("modified", 42));
         doc.add(document::text_field("contents", "just one document"));
-        writer.add_document(&doc).unwrap();
+        writer.add_document(doc).unwrap();
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
         assert_eq!(files.len(), 4);
@@ -648,7 +648,7 @@ mod tests {
             doc.add(document::keyword_field("path", &format!("/{i}.txt")));
             doc.add(document::long_field("modified", i as i64 * 100));
             doc.add(document::text_field("contents", &format!("doc number {i}")));
-            writer.add_document(&doc).unwrap();
+            writer.add_document(doc).unwrap();
         }
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
@@ -687,7 +687,7 @@ mod tests {
             doc.add(document::keyword_field("path", &format!("/{i}.txt")));
             doc.add(document::long_field("modified", i as i64));
             doc.add(document::text_field("contents", "hello"));
-            writer.add_document(&doc).unwrap();
+            writer.add_document(doc).unwrap();
         }
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
@@ -709,7 +709,7 @@ mod tests {
             doc.add(document::keyword_field("path", &format!("/{i}.txt")));
             doc.add(document::long_field("modified", i as i64));
             doc.add(document::text_field("contents", "test"));
-            writer.add_document(&doc).unwrap();
+            writer.add_document(doc).unwrap();
         }
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
@@ -733,7 +733,7 @@ mod tests {
             doc.add(document::keyword_field("path", &format!("/{i}.txt")));
             doc.add(document::long_field("modified", i as i64));
             doc.add(document::text_field("contents", "test content"));
-            writer.add_document(&doc).unwrap();
+            writer.add_document(doc).unwrap();
         }
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
@@ -800,7 +800,7 @@ mod tests {
                             "contents",
                             &format!("thread {thread_id} doc {i}"),
                         ));
-                        w.add_document(&doc).unwrap();
+                        w.add_document(doc).unwrap();
                     }
                 });
             }
@@ -834,7 +834,7 @@ mod tests {
                         doc.add(document::keyword_field("path", &format!("/t{t}_{i}.txt")));
                         doc.add(document::long_field("modified", i as i64));
                         doc.add(document::text_field("contents", "test"));
-                        w.add_document(&doc).unwrap();
+                        w.add_document(doc).unwrap();
                     }
                 });
             }
@@ -879,7 +879,7 @@ mod tests {
                         doc.add(document::keyword_field("path", &format!("/t{t}_{i}.txt")));
                         doc.add(document::long_field("modified", i as i64));
                         doc.add(document::text_field("contents", "stall test"));
-                        w.add_document(&doc).unwrap();
+                        w.add_document(doc).unwrap();
                     }
                 });
             }
@@ -911,7 +911,7 @@ mod tests {
         let writer = IndexWriter::with_config(config);
 
         for i in 0..20 {
-            writer.add_document(&make_large_doc(i)).unwrap();
+            writer.add_document(make_large_doc(i)).unwrap();
         }
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
@@ -932,7 +932,7 @@ mod tests {
             doc.add(document::keyword_field("path", &format!("/{i}.txt")));
             doc.add(document::long_field("modified", i as i64));
             doc.add(document::text_field("contents", "small doc"));
-            writer.add_document(&doc).unwrap();
+            writer.add_document(doc).unwrap();
         }
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
@@ -950,7 +950,7 @@ mod tests {
         let writer = IndexWriter::with_config(config);
 
         for i in 0..50 {
-            writer.add_document(&make_large_doc(i)).unwrap();
+            writer.add_document(make_large_doc(i)).unwrap();
         }
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
@@ -1003,7 +1003,7 @@ mod tests {
             doc.add(document::keyword_field("path", &format!("/{i}.txt")));
             doc.add(document::long_field("modified", i as i64 * 100));
             doc.add(document::text_field("contents", &format!("doc number {i}")));
-            writer.add_document(&doc).unwrap();
+            writer.add_document(doc).unwrap();
         }
 
         let commit = writer.commit().unwrap();

@@ -2,6 +2,8 @@
 //! Indexing chain that processes document fields into postings, stored fields, and doc values.
 
 use std::collections::HashMap;
+use std::io;
+use std::io::Read;
 
 use crate::analysis::Analyzer;
 use crate::document::{DocValuesType, Document, Field, FieldValue, IndexOptions, StoredValue};
@@ -457,14 +459,14 @@ impl IndexingChain {
     }
 
     /// Processes a single document, extracting all field data.
-    pub fn process_document(&mut self, doc: &Document, analyzer: &dyn Analyzer) {
+    pub fn process_document(&mut self, doc: Document, analyzer: &dyn Analyzer) -> io::Result<()> {
         let doc_id = self.num_docs;
         let mut stored_fields: Vec<(u32, StoredValue)> = Vec::new();
         // Extract reusable buffer so we can pass &mut to process_indexed_field
         let mut lowercase_buf = std::mem::take(&mut self.lowercase_buf);
 
-        for field in &doc.fields {
-            let meta = self.get_or_create_field_meta(field);
+        for mut field in doc.fields {
+            let meta = self.get_or_create_field_meta(&field);
 
             // Avoid allocating an owned key on the hot path: get_mut borrows the key,
             // falling back to entry() only on first occurrence of a new field name.
@@ -478,10 +480,22 @@ impl IndexingChain {
 
             // Process indexed field (postings)
             if meta.index_options != IndexOptions::None {
+                // Temporary bridge: read Reader into String so existing tokenization works
+                if matches!(field.value(), FieldValue::Reader(_)) {
+                    let FieldValue::Reader(mut reader) =
+                        std::mem::replace(field.value_mut(), FieldValue::Text(String::new()))
+                    else {
+                        unreachable!()
+                    };
+                    let mut text = String::new();
+                    reader.read_to_string(&mut text)?;
+                    *field.value_mut() = FieldValue::Text(text);
+                }
+
                 Self::process_indexed_field(
                     per_field,
                     &meta,
-                    field,
+                    &field,
                     doc_id,
                     analyzer,
                     &mut lowercase_buf,
@@ -495,7 +509,7 @@ impl IndexingChain {
 
             // Process doc values
             if meta.doc_values_type != DocValuesType::None {
-                Self::process_doc_values(per_field, &meta, field, doc_id);
+                Self::process_doc_values(per_field, &meta, &field, doc_id);
             }
 
             // Process point values
@@ -514,6 +528,7 @@ impl IndexingChain {
         });
 
         self.num_docs += 1;
+        Ok(())
     }
 
     /// Gets or creates a FieldInfo for the given field, returning a lightweight FieldMeta.
@@ -773,7 +788,7 @@ mod tests {
         doc.add(document::long_field("modified", 1000));
         doc.add(document::text_field("contents", "hello world"));
 
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         assert_eq!(chain.num_docs(), 1);
         assert_eq!(chain.stored_docs().len(), 1);
@@ -824,8 +839,8 @@ mod tests {
         doc2.add(document::keyword_field("path", "/b.txt"));
         doc2.add(document::text_field("contents", "hello rust"));
 
-        chain.process_document(&doc1, &analyzer);
-        chain.process_document(&doc2, &analyzer);
+        chain.process_document(doc1, &analyzer).unwrap();
+        chain.process_document(doc2, &analyzer).unwrap();
         chain.finalize_pending_postings();
 
         assert_eq!(chain.num_docs(), 2);
@@ -857,7 +872,7 @@ mod tests {
         let mut doc = Document::new();
         doc.add(document::text_field("contents", "hello world hello"));
 
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
         chain.finalize_pending_postings();
 
         let contents = chain.per_field().get("contents").unwrap();
@@ -879,7 +894,7 @@ mod tests {
         doc.add(document::long_field("modified", 100));
         doc.add(document::text_field("contents", "hello"));
 
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         let fis = chain.build_field_infos();
         assert_eq!(fis.len(), 3);
@@ -896,7 +911,7 @@ mod tests {
 
         let mut doc = Document::new();
         doc.add(document::long_field("modified", 42));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         let modified = chain.per_field().get("modified").unwrap();
         if let DocValuesAccumulator::SortedNumeric(ref vals) = modified.doc_values {
@@ -914,7 +929,7 @@ mod tests {
 
         let mut doc = Document::new();
         doc.add(document::keyword_field("path", "/foo.txt"));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         let path_data = chain.per_field().get("path").unwrap();
         if let DocValuesAccumulator::SortedSet(ref vals) = path_data.doc_values {
@@ -935,7 +950,7 @@ mod tests {
         doc.add(document::keyword_field("path", "/foo.txt"));
         doc.add(document::long_field("modified", 1000));
         doc.add(document::text_field("contents", "hello world"));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         let fis = chain.build_field_infos();
 
@@ -995,7 +1010,7 @@ mod tests {
         doc.add(document::keyword_field("path", "/foo.txt"));
         doc.add(document::long_field("modified", 1000));
         doc.add(document::text_field("contents", "hello world"));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         let ram_after_one = chain.ram_bytes_used();
         assert!(ram_after_one > 0, "RAM should be positive after one doc");
@@ -1009,7 +1024,7 @@ mod tests {
                 "contents",
                 &format!("document number {i} with some text content"),
             ));
-            chain.process_document(&doc, &analyzer);
+            chain.process_document(doc, &analyzer).unwrap();
         }
 
         let ram_after_many = chain.ram_bytes_used();
@@ -1089,7 +1104,7 @@ mod tests {
 
         let mut doc = Document::new();
         doc.add(document::int_field("size", 42, true));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         let size_data = chain.per_field().get("size").unwrap();
         // Points: 4-byte sortable encoding
@@ -1113,7 +1128,7 @@ mod tests {
 
         let mut doc = Document::new();
         doc.add(document::float_field("score", 1.5, true));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         let score_data = chain.per_field().get("score").unwrap();
         assert_eq!(score_data.points.len(), 1);
@@ -1134,7 +1149,7 @@ mod tests {
 
         let mut doc = Document::new();
         doc.add(document::double_field("rating", 9.87, false));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         let rating_data = chain.per_field().get("rating").unwrap();
         assert_eq!(rating_data.points.len(), 1);
@@ -1157,7 +1172,7 @@ mod tests {
 
         let mut doc = Document::new();
         doc.add(document::string_field("title", "hello world", true));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
         chain.finalize_pending_postings();
 
         let title_data = chain.per_field().get("title").unwrap();
@@ -1180,7 +1195,7 @@ mod tests {
         doc.add(document::stored_int_field("extra_int", 99));
         doc.add(document::stored_float_field("extra_float", 1.5));
         doc.add(document::stored_double_field("extra_double", 2.5));
-        chain.process_document(&doc, &analyzer);
+        chain.process_document(doc, &analyzer).unwrap();
 
         // All should be stored, nothing indexed
         assert_eq!(chain.stored_docs()[0].fields.len(), 4);
@@ -1190,5 +1205,56 @@ mod tests {
             assert!(data.points.is_empty());
             assert!(matches!(data.doc_values, DocValuesAccumulator::None));
         }
+    }
+
+    #[test]
+    fn test_reader_field_produces_same_postings_as_text_field() {
+        let text = "the quick brown fox jumps over the lazy dog";
+
+        // Index with text_field
+        let mut chain_text = IndexingChain::new();
+        let analyzer = make_analyzer();
+        let mut doc = Document::new();
+        doc.add(document::text_field("contents", text));
+        chain_text.process_document(doc, &analyzer).unwrap();
+        chain_text.finalize_pending_postings();
+
+        // Index with text_field_reader
+        let mut chain_reader = IndexingChain::new();
+        let mut doc = Document::new();
+        doc.add(document::text_field_reader(
+            "contents",
+            std::io::Cursor::new(text.as_bytes().to_vec()),
+        ));
+        chain_reader.process_document(doc, &analyzer).unwrap();
+        chain_reader.finalize_pending_postings();
+
+        let pf_text = chain_text.per_field().get("contents").unwrap();
+        let pf_reader = chain_reader.per_field().get("contents").unwrap();
+
+        assert_eq!(pf_text.postings.len(), pf_reader.postings.len());
+
+        for (term, pl_text) in &pf_text.postings {
+            let pl_reader = pf_reader.postings.get(term).unwrap_or_else(|| {
+                panic!("reader chain missing term: {term}");
+            });
+            let decoded_text = pl_text.decode();
+            let decoded_reader = pl_reader.decode();
+            assert_eq!(
+                decoded_text.len(),
+                decoded_reader.len(),
+                "doc count mismatch for term: {term}"
+            );
+            for (dt, dr) in decoded_text.iter().zip(&decoded_reader) {
+                assert_eq!(dt.doc_id, dr.doc_id, "doc_id mismatch for term: {term}");
+                assert_eq!(dt.freq, dr.freq, "freq mismatch for term: {term}");
+                assert_eq!(
+                    dt.positions, dr.positions,
+                    "positions mismatch for term: {term}"
+                );
+            }
+        }
+
+        assert_eq!(pf_text.norms, pf_reader.norms);
     }
 }

@@ -174,7 +174,7 @@ fn main() {
         // Single-threaded indexing
         for path in &doc_paths {
             let doc = make_document(path);
-            if let Err(e) = writer.add_document(&doc) {
+            if let Err(e) = writer.add_document(doc) {
                 error!("Error indexing '{}': {e}", path.display());
                 process::exit(1);
             }
@@ -189,7 +189,7 @@ fn main() {
                 s.spawn(move || {
                     for path in chunk {
                         let doc = make_document(path);
-                        if let Err(e) = w.add_document(&doc) {
+                        if let Err(e) = w.add_document(doc) {
                             error!("Error indexing '{}': {e}", path.display());
                         }
                     }

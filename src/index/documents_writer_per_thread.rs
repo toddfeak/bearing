@@ -39,8 +39,8 @@ impl DocumentsWriterPerThread {
     }
 
     /// Adds a document to this DWPT's indexing chain.
-    pub fn add_document(&mut self, doc: &Document, analyzer: &dyn Analyzer) {
-        self.chain.process_document(doc, analyzer);
+    pub fn add_document(&mut self, doc: Document, analyzer: &dyn Analyzer) -> io::Result<()> {
+        self.chain.process_document(doc, analyzer)
     }
 
     /// Returns the number of documents buffered in this DWPT.
@@ -137,7 +137,7 @@ mod tests {
         doc.add(document::keyword_field("path", "/test.txt"));
         doc.add(document::long_field("modified", 1000));
         doc.add(document::text_field("contents", "hello world"));
-        dwpt.add_document(&doc, &analyzer);
+        dwpt.add_document(doc, &analyzer).unwrap();
 
         assert_eq!(dwpt.num_docs(), 1);
         assert_eq!(dwpt.segment_name(), "_0");
