@@ -17,15 +17,19 @@ The end-to-end test builds the binary, indexes `testdata/docs`, verifies index f
 Compare indexing speed, memory usage, and correctness between Java Lucene and Rust:
 
 ```bash
-./tests/compare_java_rust.sh -release --threads 12
-./tests/compare_java_rust.sh -docs /tmp/perf-docs -release
+./tests/compare_java_rust.sh                                  # default: MT, release, verify
+./tests/compare_java_rust.sh --1t                             # also run single-threaded
+./tests/compare_java_rust.sh --debug                          # debug build
+./tests/compare_java_rust.sh -docs /tmp/perf-docs --no-verify # large corpus, skip verify
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `-docs DIR` | `testdata/docs` | Documents directory |
-| `-release` | debug | Build Rust in release mode |
-| `--threads N` | `12` | Thread count for multi-threaded Rust run |
+| `--debug` | release | Build Rust in debug mode |
+| `--threads N` | `12` | Thread count for multi-threaded runs |
+| `--1t` | off | Also run single-threaded (1T) for both Java and Rust |
+| `--no-verify` | verify on | Skip VerifyIndex validation |
 
 ## CLI Reference
 
