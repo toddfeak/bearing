@@ -3,6 +3,8 @@
 //! Standard analysis components: [`StandardTokenizer`], [`LowerCaseFilter`],
 //! and [`StandardAnalyzer`].
 
+use std::io::{self, Read};
+
 use crate::analysis::{Analyzer, Token, TokenFilter, TokenRef, Tokenizer};
 
 /// Maximum token length. Tokens longer than this are split.
@@ -179,6 +181,127 @@ impl Analyzer for StandardAnalyzer {
         // Tokenize the pre-lowercased buffer, emitting borrowed slices
         StandardTokenizer::tokenize_callback(buf, callback);
     }
+
+    fn analyze_reader(
+        &self,
+        reader: &mut dyn Read,
+        buf: &mut String,
+        callback: &mut dyn FnMut(TokenRef<'_>),
+    ) -> io::Result<()> {
+        const CHUNK_SIZE: usize = 8192;
+        let mut read_buf = [0u8; CHUNK_SIZE];
+        // Bytes that formed an incomplete UTF-8 sequence at the end of the last read
+        let mut utf8_carry = [0u8; 4];
+        let mut utf8_carry_len: usize = 0;
+        // Cumulative byte offset of buf[0] in the original stream
+        let mut base_offset: usize = 0;
+
+        buf.clear();
+
+        loop {
+            // Read a chunk
+            let bytes_read = reader.read(&mut read_buf)?;
+            let eof = bytes_read == 0;
+
+            if !eof {
+                // Prepend any carried-over incomplete UTF-8 bytes
+                let raw = if utf8_carry_len > 0 {
+                    let mut combined = Vec::with_capacity(utf8_carry_len + bytes_read);
+                    combined.extend_from_slice(&utf8_carry[..utf8_carry_len]);
+                    combined.extend_from_slice(&read_buf[..bytes_read]);
+                    utf8_carry_len = 0;
+                    combined
+                } else {
+                    read_buf[..bytes_read].to_vec()
+                };
+
+                // Find the last valid UTF-8 boundary
+                let valid_len = find_utf8_boundary(&raw);
+                if valid_len < raw.len() {
+                    let leftover = raw.len() - valid_len;
+                    utf8_carry[..leftover].copy_from_slice(&raw[valid_len..]);
+                    utf8_carry_len = leftover;
+                }
+
+                // Lowercase and append valid bytes to buf
+                for &b in &raw[..valid_len] {
+                    buf.push(if b.is_ascii_uppercase() {
+                        (b + 32) as char
+                    } else {
+                        b as char
+                    });
+                }
+            }
+
+            if buf.is_empty() {
+                if eof {
+                    break;
+                }
+                continue;
+            }
+
+            if eof {
+                // Emit all remaining tokens
+                StandardTokenizer::tokenize_callback(buf, &mut |mut tr| {
+                    tr.start_offset += base_offset;
+                    tr.end_offset += base_offset;
+                    callback(tr);
+                });
+                break;
+            }
+
+            // Tokenize buf, but hold back the last token if it ends at buf's
+            // boundary (it might continue into the next chunk).
+            let mut last_token: Option<(usize, usize)> = None;
+            StandardTokenizer::tokenize_inner(buf, |start, end| {
+                // Emit the *previous* last_token since we now know it's complete
+                if let Some((ls, le)) = last_token {
+                    callback(TokenRef {
+                        text: &buf[ls..le],
+                        start_offset: base_offset + ls,
+                        end_offset: base_offset + le,
+                        position_increment: 1,
+                    });
+                }
+                last_token = Some((start, end));
+            });
+
+            if let Some((ls, le)) = last_token {
+                if le == buf.len() {
+                    // Last token touches the buffer boundary — carry it over
+                    let carried = buf[ls..le].to_string();
+                    base_offset += ls;
+                    buf.clear();
+                    buf.push_str(&carried);
+                } else {
+                    // Last token doesn't touch the end — safe to emit
+                    callback(TokenRef {
+                        text: &buf[ls..le],
+                        start_offset: base_offset + ls,
+                        end_offset: base_offset + le,
+                        position_increment: 1,
+                    });
+                    base_offset += buf.len();
+                    buf.clear();
+                }
+            } else {
+                // No tokens found in this chunk
+                base_offset += buf.len();
+                buf.clear();
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Finds the largest prefix of `bytes` that is valid UTF-8.
+/// Returns `bytes.len()` if all bytes are valid.
+fn find_utf8_boundary(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) => e.valid_up_to(),
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +451,191 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_analyze_reader_matches_analyze_to() {
+        let analyzer = StandardAnalyzer::new();
+        let test_cases = [
+            "The Quick BROWN Fox",
+            "don't STOP believing",
+            "Hello, World! Foo.",
+            "",
+            "UPPERCASE lowercase MiXeD",
+            "test123 ABC456 xyz",
+            "a single word",
+            "  leading   trailing  ",
+        ];
+
+        for input in &test_cases {
+            let mut buf1 = String::new();
+            let mut tokens_to = Vec::new();
+            analyzer.analyze_to(input, &mut buf1, &mut |tr| {
+                tokens_to.push((
+                    tr.text.to_string(),
+                    tr.start_offset,
+                    tr.end_offset,
+                    tr.position_increment,
+                ));
+            });
+
+            let mut buf2 = String::new();
+            let mut tokens_reader = Vec::new();
+            let mut cursor = std::io::Cursor::new(input.as_bytes());
+            analyzer
+                .analyze_reader(&mut cursor, &mut buf2, &mut |tr| {
+                    tokens_reader.push((
+                        tr.text.to_string(),
+                        tr.start_offset,
+                        tr.end_offset,
+                        tr.position_increment,
+                    ));
+                })
+                .unwrap();
+
+            assert_eq!(tokens_to, tokens_reader, "mismatch for input: {:?}", input,);
+        }
+    }
+
+    #[test]
+    fn test_analyze_reader_word_spanning_chunk_boundary() {
+        let analyzer = StandardAnalyzer::new();
+        // Create text where a word spans the 8 KB chunk boundary
+        let padding = "x ".repeat(4094); // 8188 bytes, next word starts near boundary
+        let text = format!("{padding}foxy lady");
+
+        let mut buf_to = String::new();
+        let mut tokens_to = Vec::new();
+        analyzer.analyze_to(&text, &mut buf_to, &mut |tr| {
+            tokens_to.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+        });
+
+        let mut buf_reader = String::new();
+        let mut tokens_reader = Vec::new();
+        let mut cursor = std::io::Cursor::new(text.as_bytes());
+        analyzer
+            .analyze_reader(&mut cursor, &mut buf_reader, &mut |tr| {
+                tokens_reader.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+            })
+            .unwrap();
+
+        assert_eq!(tokens_to, tokens_reader);
+    }
+
+    /// Reader that yields exactly one byte at a time, stressing carry-over logic.
+    struct OneByteReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+    impl<'a> std::io::Read for OneByteReader<'a> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            buf[0] = self.data[self.pos];
+            self.pos += 1;
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn test_analyze_reader_one_byte_at_a_time() {
+        let analyzer = StandardAnalyzer::new();
+        let text = "Hello World";
+
+        let mut buf1 = String::new();
+        let mut tokens_to = Vec::new();
+        analyzer.analyze_to(text, &mut buf1, &mut |tr| {
+            tokens_to.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+        });
+
+        let mut buf2 = String::new();
+        let mut tokens_reader = Vec::new();
+        let mut reader = OneByteReader {
+            data: text.as_bytes(),
+            pos: 0,
+        };
+        analyzer
+            .analyze_reader(&mut reader, &mut buf2, &mut |tr| {
+                tokens_reader.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+            })
+            .unwrap();
+
+        assert_eq!(tokens_to, tokens_reader);
+    }
+
+    #[test]
+    fn test_analyze_reader_contraction_at_chunk_boundary() {
+        let analyzer = StandardAnalyzer::new();
+        // Place "don't" so "don" ends the first 8192-byte chunk and "'t" is in the next.
+        // We need exactly 8189 bytes of padding (8192 - 3 for "don"), then "don't stop".
+        let mut padding = String::with_capacity(8189);
+        while padding.len() < 8189 - 1 {
+            padding.push_str("z ");
+        }
+        // Fill remaining bytes with spaces
+        while padding.len() < 8189 {
+            padding.push(' ');
+        }
+        let text = format!("{padding}don't stop");
+
+        let mut buf1 = String::new();
+        let mut tokens_to = Vec::new();
+        analyzer.analyze_to(&text, &mut buf1, &mut |tr| {
+            tokens_to.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+        });
+
+        let mut buf2 = String::new();
+        let mut tokens_reader = Vec::new();
+        let mut cursor = std::io::Cursor::new(text.as_bytes());
+        analyzer
+            .analyze_reader(&mut cursor, &mut buf2, &mut |tr| {
+                tokens_reader.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+            })
+            .unwrap();
+
+        assert_eq!(tokens_to, tokens_reader);
+    }
+
+    #[test]
+    fn test_analyze_reader_empty() {
+        let analyzer = StandardAnalyzer::new();
+        let mut buf = String::new();
+        let mut tokens = Vec::new();
+        let mut cursor = std::io::Cursor::new(b"");
+        analyzer
+            .analyze_reader(&mut cursor, &mut buf, &mut |tr| {
+                tokens.push(tr.text.to_string());
+            })
+            .unwrap();
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_reader_multibyte_utf8_at_chunk_boundary() {
+        let analyzer = StandardAnalyzer::new();
+        // Place a multi-byte character right at the 8192 boundary
+        let padding = "a ".repeat(4095); // 8190 bytes
+        // "ä" is 2 bytes (0xC3 0xA4), so it starts at byte 8190 and first byte
+        // is in chunk 1, second in chunk 2
+        let text = format!("{padding}ä hello");
+
+        let mut buf1 = String::new();
+        let mut tokens_to = Vec::new();
+        analyzer.analyze_to(&text, &mut buf1, &mut |tr| {
+            tokens_to.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+        });
+
+        let mut buf2 = String::new();
+        let mut tokens_reader = Vec::new();
+        let mut cursor = std::io::Cursor::new(text.as_bytes());
+        analyzer
+            .analyze_reader(&mut cursor, &mut buf2, &mut |tr| {
+                tokens_reader.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+            })
+            .unwrap();
+
+        assert_eq!(tokens_to, tokens_reader);
     }
 
     #[test]

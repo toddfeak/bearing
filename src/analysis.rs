@@ -6,6 +6,8 @@
 //! Unicode-aware tokenization with lowercase normalization, matching Lucene's
 //! `StandardAnalyzer`.
 
+use std::io::{self, Read};
+
 pub mod standard;
 
 pub use standard::{LowerCaseFilter, StandardAnalyzer, StandardTokenizer};
@@ -61,5 +63,27 @@ pub trait Analyzer: Send + Sync {
                 position_increment: token.position_increment,
             });
         }
+    }
+
+    /// Streaming analysis from a [`Read`] source. Tokenizes in chunks without
+    /// buffering the entire input.
+    ///
+    /// The default implementation reads all bytes into `buf` and delegates to
+    /// [`analyze_to`](Analyzer::analyze_to). Analyzers that support true
+    /// streaming should override this.
+    fn analyze_reader(
+        &self,
+        reader: &mut dyn Read,
+        buf: &mut String,
+        callback: &mut dyn FnMut(TokenRef<'_>),
+    ) -> io::Result<()> {
+        buf.clear();
+        reader.read_to_string(buf)?;
+        // Safety: we need a second borrow of buf's content for analyze_to,
+        // but analyze_to takes &mut String. Copy the text out so buf can be reused.
+        let text = std::mem::take(buf);
+        self.analyze_to(&text, buf, callback);
+        *buf = text;
+        Ok(())
     }
 }
