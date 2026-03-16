@@ -52,4 +52,13 @@ We should consider restructing to reduce memory overhead in some of the Bearing 
 
 Lucene uses an arena approach, as does Tantivy. This actually attacks two problems at once. Accurately measuring usage AND optimizing memory storage at index time. However, this is a fairly large structural change that will permeate the entire indexing side of the codebase. There are libraries we can use that will help, like bumpalo and hashbrown. 
 
+## Order of repairs vs indexing features
+We need to finish implementing the missing indexing features. We should take that into consideration when dtermining when to implement the suggested fixes. I propose the following.
+
+1. Document Streaming. It's trivial and separate
+2. Memory Measurement
+3. Flushing Policy
+4. Continue working on indexing features listed in PLAN.md for Tier 1 and Tier 2
+5. Circle back to Memory and Struct optimization last.
+
 
