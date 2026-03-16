@@ -13,7 +13,7 @@ use log::{error, warn};
 use bearing::document;
 use bearing::document::Document;
 use bearing::index::{IndexWriter, IndexWriterConfig};
-use bearing::store::{Directory, FSDirectory};
+use bearing::store::FSDirectory;
 
 struct CliArgs {
     index_path: String,
@@ -21,6 +21,7 @@ struct CliArgs {
     max_buffered_docs: i32,
     ram_buffer_size_mb: f64,
     num_threads: usize,
+    use_compound_file: bool,
 }
 
 fn parse_args() -> CliArgs {
@@ -31,6 +32,7 @@ fn parse_args() -> CliArgs {
     let mut max_buffered_docs: i32 = -1;
     let mut ram_buffer_size_mb: f64 = -1.0; // -1.0 = use default (16 MB)
     let mut num_threads: usize = 1;
+    let mut use_compound_file: bool = true;
 
     let mut i = 1;
     while i < args.len() {
@@ -93,6 +95,9 @@ fn parse_args() -> CliArgs {
                     }
                 };
             }
+            "--no-compound" => {
+                use_compound_file = false;
+            }
             other => {
                 error!("Unknown parameter: {other}");
                 print_usage();
@@ -116,6 +121,7 @@ fn parse_args() -> CliArgs {
         max_buffered_docs,
         ram_buffer_size_mb,
         num_threads,
+        use_compound_file,
     }
 }
 
@@ -160,7 +166,7 @@ fn main() {
     let mut doc_paths = Vec::new();
     walk_docs(&doc_dir, &mut doc_paths);
 
-    // Create IndexWriter — default config uses 16 MB RAM buffer (matching Java Lucene)
+    // Create IndexWriter with FSDirectory — files are written at flush time
     let mut config = IndexWriterConfig::new();
     if args.max_buffered_docs > 0 {
         config = config.set_max_buffered_docs(args.max_buffered_docs);
@@ -168,7 +174,16 @@ fn main() {
     if args.ram_buffer_size_mb >= 0.0 {
         config = config.set_ram_buffer_size_mb(args.ram_buffer_size_mb);
     }
-    let writer = IndexWriter::with_config(config);
+    config = config.set_use_compound_file(args.use_compound_file);
+
+    let fs_dir = match FSDirectory::open(Path::new(&args.index_path)) {
+        Ok(d) => d,
+        Err(e) => {
+            error!("Error opening index directory '{}': {e}", args.index_path);
+            process::exit(1);
+        }
+    };
+    let writer = IndexWriter::with_config_and_directory(config, Box::new(fs_dir));
 
     if args.num_threads <= 1 {
         // Single-threaded indexing
@@ -215,26 +230,14 @@ fn main() {
     println!();
     println!("Indexed {} documents in {elapsed:.2?}", writer.num_docs());
 
-    let mut fs_dir = match FSDirectory::open(Path::new(&args.index_path)) {
-        Ok(d) => d,
-        Err(e) => {
-            error!("Error opening index directory '{}': {e}", args.index_path);
-            process::exit(1);
-        }
-    };
-
-    let written_files = match commit.write_to_directory(&mut fs_dir) {
-        Ok(files) => files,
-        Err(e) => {
-            error!("Error writing index to '{}': {e}", args.index_path);
-            process::exit(1);
-        }
-    };
+    // Files are already on disk — just report the file names
+    let written_files = commit.file_names();
 
     println!("Produced {} index files:", written_files.len());
-    for name in &written_files {
-        match fs_dir.file_length(name) {
-            Ok(len) => println!("  {name}: {len} bytes"),
+    let index_path = Path::new(&args.index_path);
+    for name in written_files {
+        match fs::metadata(index_path.join(name)) {
+            Ok(meta) => println!("  {name}: {} bytes", meta.len()),
             Err(_) => println!("  {name}"),
         }
     }
@@ -390,13 +393,14 @@ fn is_index_file(name: &str) -> bool {
 
 fn print_usage() {
     eprintln!(
-        "Usage: indexfiles [-index INDEX_PATH] -docs DOCS_PATH [--max-buffered-docs N] [--ram-buffer-size MB] [--threads N]\n\n\
+        "Usage: indexfiles [-index INDEX_PATH] -docs DOCS_PATH [OPTIONS]\n\n\
          Indexes the documents in DOCS_PATH, creating a Lucene index\n\
          in INDEX_PATH that can be searched with SearchFiles.\n\
          Any existing index files in INDEX_PATH are removed first.\n\n\
          Options:\n\
          \t--max-buffered-docs N  Flush after N docs per segment (-1 = disabled)\n\
          \t--ram-buffer-size MB   RAM buffer size in MB (default: 16.0)\n\
-         \t--threads N            Number of indexing threads (default: 1)"
+         \t--threads N            Number of indexing threads (default: 1)\n\
+         \t--no-compound          Write individual segment files instead of .cfs/.cfe"
     );
 }

@@ -16,6 +16,9 @@ pub struct IndexWriterConfig {
     /// exceeds this threshold, it is flushed to disk. 0.0 or negative disables
     /// RAM-based flushing. Default: 16.0 (matches Java Lucene).
     ram_buffer_size_mb: f64,
+    /// Whether to pack per-segment files into compound files (.cfs/.cfe).
+    /// Default: `true` (matches Java Lucene).
+    use_compound_file: bool,
 }
 
 impl IndexWriterConfig {
@@ -28,6 +31,7 @@ impl IndexWriterConfig {
         Self {
             max_buffered_docs: -1,
             ram_buffer_size_mb: Self::DEFAULT_RAM_BUFFER_SIZE_MB,
+            use_compound_file: true,
         }
     }
 
@@ -53,6 +57,17 @@ impl IndexWriterConfig {
     /// Returns the RAM buffer size in megabytes.
     pub fn ram_buffer_size_mb(&self) -> f64 {
         self.ram_buffer_size_mb
+    }
+
+    /// Sets whether to use compound file format (.cfs/.cfe).
+    pub fn set_use_compound_file(mut self, use_compound: bool) -> Self {
+        self.use_compound_file = use_compound;
+        self
+    }
+
+    /// Returns whether compound file format is enabled.
+    pub fn use_compound_file(&self) -> bool {
+        self.use_compound_file
     }
 
     /// Returns the RAM buffer size as bytes, or 0 if disabled.
@@ -111,5 +126,17 @@ mod tests {
             .set_ram_buffer_size_mb(8.0);
         assert_eq!(config.max_buffered_docs(), 50);
         assert!((config.ram_buffer_size_mb() - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_use_compound_file_default() {
+        let config = IndexWriterConfig::new();
+        assert!(config.use_compound_file());
+    }
+
+    #[test]
+    fn test_set_use_compound_file() {
+        let config = IndexWriterConfig::new().set_use_compound_file(false);
+        assert!(!config.use_compound_file());
     }
 }

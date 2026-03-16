@@ -6,12 +6,14 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::Mutex;
 
 use crate::analysis::Analyzer;
 use crate::document::Document;
 use crate::index::index_writer::{FlushedSegment, SegmentWriteState, flush_segment_to_files};
 use crate::index::indexing_chain::IndexingChain;
 use crate::index::{SegmentCommitInfo, SegmentInfo};
+use crate::store::Directory;
 use crate::util::string_helper;
 
 /// A per-thread document writer that accumulates documents into an IndexingChain.
@@ -64,7 +66,13 @@ impl DocumentsWriterPerThread {
     }
 
     /// Consumes this DWPT, flushing its chain into a FlushedSegment.
-    pub(crate) fn flush(mut self) -> io::Result<FlushedSegment> {
+    ///
+    /// Segment files are written to the given directory immediately.
+    pub(crate) fn flush(
+        mut self,
+        directory: &Mutex<Box<dyn Directory + Send>>,
+        use_compound_file: bool,
+    ) -> io::Result<FlushedSegment> {
         if self.chain.num_docs() == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -76,13 +84,14 @@ impl DocumentsWriterPerThread {
         // for every PostingList into the byte stream) before flush.
         self.chain.finalize_pending_postings();
 
-        let state = Self::build_write_state(&self.chain, &self.segment_name);
-        flush_segment_to_files(&state)
+        let state = Self::build_write_state(&self.chain, &self.segment_name, use_compound_file);
+        flush_segment_to_files(&state, directory, use_compound_file)
     }
 
     fn build_write_state<'a>(
         chain: &'a IndexingChain,
         segment_name: &str,
+        use_compound_file: bool,
     ) -> SegmentWriteState<'a> {
         let segment_id = string_helper::random_id();
         let field_infos = chain.build_field_infos();
@@ -102,7 +111,7 @@ impl DocumentsWriterPerThread {
         let segment_info = SegmentInfo::new(
             segment_name.to_string(),
             chain.num_docs(),
-            true,
+            use_compound_file,
             segment_id,
             diagnostics,
             attributes,
@@ -127,6 +136,11 @@ mod tests {
     use super::*;
     use crate::analysis::standard::StandardAnalyzer;
     use crate::document;
+    use crate::store::memory::MemoryDirectory;
+
+    fn test_directory() -> Mutex<Box<dyn Directory + Send>> {
+        Mutex::new(Box::new(MemoryDirectory::new()))
+    }
 
     #[test]
     fn test_dwpt_add_and_flush() {
@@ -142,14 +156,17 @@ mod tests {
         assert_eq!(dwpt.num_docs(), 1);
         assert_eq!(dwpt.segment_name(), "_0");
 
-        let flushed = dwpt.flush().unwrap();
+        let dir = test_directory();
+        let flushed = dwpt.flush(&dir, true).unwrap();
         assert_eq!(flushed.segment_commit_info.info.name, "_0");
         assert_eq!(flushed.segment_commit_info.info.max_doc, 1);
+        assert!(!flushed.file_names.is_empty());
     }
 
     #[test]
     fn test_dwpt_flush_empty_fails() {
+        let dir = test_directory();
         let dwpt = DocumentsWriterPerThread::new("_0".to_string(), HashMap::new(), 0);
-        assert!(dwpt.flush().is_err());
+        assert!(dwpt.flush(&dir, true).is_err());
     }
 }

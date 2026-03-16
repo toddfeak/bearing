@@ -15,6 +15,15 @@ use bearing::document::{
 use bearing::index::{IndexWriter, IndexWriterConfig};
 use bearing::store::{Directory, FSDirectory, MemoryDirectory};
 
+/// Helper: creates a document with path, modified, and contents fields.
+fn make_simple_doc(path: &str, modified: i64, contents: &str) -> Document {
+    let mut doc = Document::new();
+    doc.add(text_field("body", contents));
+    doc.add(keyword_field("id", path));
+    doc.add(long_field("ts", modified));
+    doc
+}
+
 /// Helper: creates a document with all 8 field types.
 fn make_all_fields_doc() -> Document {
     let mut doc = Document::new();
@@ -336,21 +345,21 @@ fn fs_directory_round_trip() -> io::Result<()> {
         std::fs::remove_dir_all(&tmp_dir)?;
     }
 
-    let result = {
-        let writer = IndexWriter::new();
-        let mut doc = Document::new();
-        doc.add(text_field("body", "filesystem test document"));
-        doc.add(keyword_field("id", "fs-1"));
-        doc.add(long_field("ts", 1_000_000));
-        writer.add_document(doc)?;
-        writer.commit()?
-    };
+    let fs_dir = FSDirectory::open(&tmp_dir)?;
+    let writer = IndexWriter::with_directory(Box::new(fs_dir));
+    writer.add_document(make_simple_doc(
+        "fs-1",
+        1_000_000,
+        "filesystem test document",
+    ))?;
+    let result = writer.commit()?;
 
-    let mut dir = FSDirectory::open(&tmp_dir)?;
-    let file_names = result.write_to_directory(&mut dir)?;
+    // Files are already on disk — verify via file_names()
+    let file_names = result.file_names();
+    assert!(!file_names.is_empty());
+    assert!(file_names.iter().any(|n| n.starts_with("segments_")));
 
-    // Verify files exist on disk
-    for name in &file_names {
+    for name in file_names {
         let path = tmp_dir.join(name);
         assert!(
             path.exists(),
@@ -453,5 +462,78 @@ fn large_batch_indexing() -> io::Result<()> {
     let files = result.into_segment_files()?;
     assert!(!files.is_empty());
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Non-compound file mode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn non_compound_mode() -> io::Result<()> {
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..5 {
+        writer.add_document(make_simple_doc(
+            &format!("nc-{i}"),
+            i as i64,
+            &format!("non-compound test {i}"),
+        ))?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 5);
+
+    let file_names = result.file_names().to_vec();
+
+    // No compound files
+    assert!(!file_names.iter().any(|n| n.ends_with(".cfs")));
+    assert!(!file_names.iter().any(|n| n.ends_with(".cfe")));
+
+    // Individual sub-files present
+    assert!(file_names.iter().any(|n| n.ends_with(".fnm")));
+    assert!(file_names.iter().any(|n| n.ends_with(".si")));
+
+    // Can still read files via into_segment_files
+    let files = result.into_segment_files()?;
+    assert!(!files.is_empty());
+    assert!(
+        files.len() > 4,
+        "non-compound should have more than 4 files"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// FSDirectory with non-compound mode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fs_directory_non_compound() -> io::Result<()> {
+    let tmp_dir = std::env::temp_dir().join("bearing_integration_test_fs_nc");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir)?;
+    }
+
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let fs_dir = FSDirectory::open(&tmp_dir)?;
+    let writer = IndexWriter::with_config_and_directory(config, Box::new(fs_dir));
+
+    writer.add_document(make_simple_doc("fs-nc-1", 100, "non-compound fs test"))?;
+    let result = writer.commit()?;
+
+    let file_names = result.file_names();
+    assert!(!file_names.iter().any(|n| n.ends_with(".cfs")));
+    assert!(file_names.iter().any(|n| n.ends_with(".fnm")));
+
+    // Verify files on disk
+    for name in file_names {
+        let path = tmp_dir.join(name);
+        assert!(path.exists(), "file should exist: {}", path.display());
+    }
+
+    std::fs::remove_dir_all(&tmp_dir)?;
     Ok(())
 }

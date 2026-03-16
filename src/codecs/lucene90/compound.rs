@@ -10,7 +10,6 @@ use crate::index::index_file_names;
 use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SegmentFile};
 
-const DATA_EXTENSION: &str = "cfs";
 const ENTRIES_EXTENSION: &str = "cfe";
 const DATA_CODEC: &str = "Lucene90CompoundData";
 const ENTRY_CODEC: &str = "Lucene90CompoundEntries";
@@ -101,25 +100,24 @@ pub fn write_to(
     Ok(entries.into_inner())
 }
 
-/// Writes a compound file (.cfs) and entry table (.cfe) from the given segment files,
-/// returning both as in-memory [`SegmentFile`]s.
-///
-/// This is a convenience wrapper around [`write_to`] that buffers the .cfs in memory.
-/// For large indexes, prefer [`write_to`] with a file-backed `IndexOutput` to avoid
-/// buffering the entire compound file.
-pub fn write(
-    segment_name: &str,
-    segment_id: &[u8; 16],
-    files: &[SegmentFile],
-) -> io::Result<Vec<SegmentFile>> {
-    let data_file = index_file_names::segment_file_name(segment_name, "", DATA_EXTENSION);
-    let mut data = MemoryIndexOutput::new(data_file);
-    let cfe = write_to(segment_name, segment_id, files, &mut data)?;
-    Ok(vec![data.into_inner(), cfe])
-}
-
 #[cfg(test)]
 mod tests {
+    const DATA_EXTENSION: &str = "cfs";
+
+    /// Writes a compound file (.cfs) and entry table (.cfe) from the given segment files,
+    /// returning both as in-memory [`SegmentFile`]s.
+    ///
+    /// Convenience wrapper for tests only.
+    fn write(
+        segment_name: &str,
+        segment_id: &[u8; 16],
+        files: &[SegmentFile],
+    ) -> io::Result<Vec<SegmentFile>> {
+        let data_file = index_file_names::segment_file_name(segment_name, "", DATA_EXTENSION);
+        let mut data = MemoryIndexOutput::new(data_file);
+        let cfe = write_to(segment_name, segment_id, files, &mut data)?;
+        Ok(vec![data.into_inner(), cfe])
+    }
     use super::*;
     use crate::codecs::codec_util::{CODEC_MAGIC, FOOTER_LENGTH, FOOTER_MAGIC};
     use crate::store::memory::MemoryIndexOutput;
