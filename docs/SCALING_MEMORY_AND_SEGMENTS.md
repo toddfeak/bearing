@@ -1,5 +1,7 @@
 # Scaling: Memory and Segment Count
 
+See also: [Block Pools, Streaming Flush, and Segment Merging](BLOCK_POOLS_AND_SEGMENT_MERGING.md)
+
 ## Problem
 
 With 12 threads indexing 2000 Gutenberg texts (796 MB input), Bearing uses far more memory than Java Lucene and produces orders of magnitude more segments:
