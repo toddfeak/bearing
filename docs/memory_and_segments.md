@@ -29,17 +29,27 @@ There are two primary hotspots that have been identified by using Heaptrack. Sum
 
 "PostingList byte streams (Vec<u8>) growing during tokenization account for ~181M of peak heap. The codec flush path accounts for ~213M, dominated by PositionEncoder::finish() (~81M building position data Vecs) and DataOutput buffer growth inside PostingsWriter::write_term() via pfor_encode (~131M). Both are amplified by concurrent flushes across 12 threads."
 
+At a higher level, there's a lot of overhead on each struct that is repeated for literally thousands of struct instances. Maps that hold these, vecs, etc. all add up to use up memory quickly.
+
 ## Suggested Approach
 This will still require some research, but here is the higher level approach I'd like to take.
 
 ### Document Analyzer
 Just switch this to a streaming approach. It's simple and not tied to other issues. It's an easy win.
 
-### Flushing Policy
-I'd like to start with a simplistic approach here. Assume that each thread can accurately measure its memory usage. Divide the entire memory allowed for the threads (16MB is default I think) by the number of threads. Each thread gets that amount and is responsible for flushing when it hits max. For small data sets this will pretty much guarantee N segments for N threads. For large data sets it should approach optimal flushing up until the end where there will be up to N extra segments that are smaller. This should be simple code.
-
-### Memory Usage
+### Memory Usage Measurement
 We must figure out how to accurately measure how much memory each thread is using for the index data its essentially caching until flush. This is where we have to do some research. Rust is a powerful language with better memory access and control than Java. We shouldn't have to resort to Lucene's complexity to achieve this. However, we may have to leveraging external crates and relaxing our dependency policy. Look into bumpalo and arena memory approaches. Also look into whether Rust can accurately and quickly report actual memory usage as it allocates. A trait where each struct can report their usage as they are added to the thread memory may be elegant.
 
-### Struct Optimization
-We should look at how Lucene optimizes this. We should also consider restructing to reduce memory overhead in some of the Bearing Structs. This should start with memory profiling to truly understand the usage, but focus on the index time structures.
+There are libraries that help with this like mem_dbg, deepsize, get-size, etc.
+
+### Flushing Policy
+I'd like to start with a reasonably simple approach here. Assume that each thread can accurately measure its memory usage. There is a master thread that manages what documents are handed to which workers. That same master thread can also tell a document when to flush. Each worker thread reports it's current memory usage every time it completes a doc. Once a threshold has been hit, the master thread will select the "fattest" worker thread and ask it to flush before handing it its next document. The logic and coordination should be pretty simple. We should assume something like 80-90% usage of maximum memory as the threshold to give a little room for a thread to complete what it's working on before flushing.
+
+It's important that a thread is properly cleaned up during flush before recieving its next document. Its IndexingChain needs to be reinitialized or replaced with a new one.
+
+### Memory and Struct Optimization
+We should consider restructing to reduce memory overhead in some of the Bearing structs on the indexing path. This should start with memory profiling to truly understand the usage, but focus on the index time structures.
+
+Lucene uses an arena approach, as does Tantivy. This actually attacks two problems at once. Accurately measuring usage AND optimizing memory storage at index time. However, this is a fairly large structural change that will permeate the entire indexing side of the codebase. There are libraries we can use that will help, like bumpalo and hashbrown. 
+
+
