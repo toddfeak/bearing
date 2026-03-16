@@ -3,9 +3,8 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::io::Read;
 
-use crate::analysis::Analyzer;
+use crate::analysis::{Analyzer, TokenRef};
 use crate::document::{DocValuesType, Document, Field, FieldValue, IndexOptions, StoredValue};
 use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
 use crate::util::BytesRef;
@@ -480,26 +479,14 @@ impl IndexingChain {
 
             // Process indexed field (postings)
             if meta.index_options != IndexOptions::None {
-                // Temporary bridge: read Reader into String so existing tokenization works
-                if matches!(field.value(), FieldValue::Reader(_)) {
-                    let FieldValue::Reader(mut reader) =
-                        std::mem::replace(field.value_mut(), FieldValue::Text(String::new()))
-                    else {
-                        unreachable!()
-                    };
-                    let mut text = String::new();
-                    reader.read_to_string(&mut text)?;
-                    *field.value_mut() = FieldValue::Text(text);
-                }
-
                 Self::process_indexed_field(
                     per_field,
                     &meta,
-                    &field,
+                    &mut field,
                     doc_id,
                     analyzer,
                     &mut lowercase_buf,
-                );
+                )?;
             }
 
             // Process stored field
@@ -596,52 +583,66 @@ impl IndexingChain {
     fn process_indexed_field(
         per_field: &mut PerFieldData,
         meta: &FieldMeta,
-        field: &Field,
+        field: &mut Field,
         doc_id: i32,
         analyzer: &dyn Analyzer,
         buf: &mut String,
-    ) {
+    ) -> io::Result<()> {
         let has_positions = meta.index_options >= IndexOptions::DocsAndFreqsAndPositions;
         let has_offsets = meta.index_options >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
         let has_freqs = meta.index_options >= IndexOptions::DocsAndFreqs;
 
-        let text = match field.value() {
-            FieldValue::Text(text) => text,
-            _ => return,
-        };
-
         let mut position: i32 = -1;
         let mut field_length: i32 = 0;
 
+        let mut record_token = |per_field: &mut PerFieldData, token_ref: TokenRef<'_>| {
+            position += token_ref.position_increment as i32;
+            field_length += 1;
+
+            let posting_list = if let Some(pl) = per_field.postings.get_mut(token_ref.text) {
+                pl
+            } else {
+                per_field
+                    .postings
+                    .entry(token_ref.text.to_string())
+                    .or_insert_with(|| PostingList::new(has_freqs, has_positions, has_offsets))
+            };
+
+            posting_list.record_occurrence(
+                doc_id,
+                position,
+                token_ref.start_offset as i32,
+                token_ref.end_offset as i32,
+            );
+        };
+
         if field.field_type().tokenized() {
-            // Tokenized field: use zero-allocation analyze_to() callback path
-            analyzer.analyze_to(text, buf, &mut |token_ref| {
-                position += token_ref.position_increment as i32;
-                field_length += 1;
-
-                // get_mut/entry pattern: avoids owned-key allocation on hot path (see process_document)
-                let posting_list = if let Some(pl) = per_field.postings.get_mut(token_ref.text) {
-                    pl
-                } else {
-                    per_field
-                        .postings
-                        .entry(token_ref.text.to_string())
-                        .or_insert_with(|| PostingList::new(has_freqs, has_positions, has_offsets))
-                };
-
-                posting_list.record_occurrence(
-                    doc_id,
-                    position,
-                    token_ref.start_offset as i32,
-                    token_ref.end_offset as i32,
-                );
-            });
+            match field.value() {
+                FieldValue::Text(text) => {
+                    analyzer.analyze_to(text, buf, &mut |tr| record_token(per_field, tr));
+                }
+                FieldValue::Reader(_) => {
+                    let FieldValue::Reader(mut reader) =
+                        std::mem::replace(field.value_mut(), FieldValue::Text(String::new()))
+                    else {
+                        unreachable!()
+                    };
+                    analyzer.analyze_reader(&mut *reader, buf, &mut |tr| {
+                        record_token(per_field, tr);
+                    })?;
+                }
+                _ => return Ok(()),
+            }
         } else {
+            let text = match field.value() {
+                FieldValue::Text(text) => text,
+                _ => return Ok(()),
+            };
+
             // Keyword field: single token with the exact value, no allocation needed
             position += 1;
             field_length = 1;
 
-            // get_mut/entry pattern: avoids owned-key allocation on hot path (see process_document)
             let posting_list = if let Some(pl) = per_field.postings.get_mut(text.as_str()) {
                 pl
             } else {
@@ -661,6 +662,8 @@ impl IndexingChain {
             per_field.norms.push(norm);
             per_field.norms_docs.push(doc_id);
         }
+
+        Ok(())
     }
 
     /// Processes doc values for a field.
@@ -1220,6 +1223,57 @@ mod tests {
         chain_text.finalize_pending_postings();
 
         // Index with text_field_reader
+        let mut chain_reader = IndexingChain::new();
+        let mut doc = Document::new();
+        doc.add(document::text_field_reader(
+            "contents",
+            std::io::Cursor::new(text.as_bytes().to_vec()),
+        ));
+        chain_reader.process_document(doc, &analyzer).unwrap();
+        chain_reader.finalize_pending_postings();
+
+        let pf_text = chain_text.per_field().get("contents").unwrap();
+        let pf_reader = chain_reader.per_field().get("contents").unwrap();
+
+        assert_eq!(pf_text.postings.len(), pf_reader.postings.len());
+
+        for (term, pl_text) in &pf_text.postings {
+            let pl_reader = pf_reader.postings.get(term).unwrap_or_else(|| {
+                panic!("reader chain missing term: {term}");
+            });
+            let decoded_text = pl_text.decode();
+            let decoded_reader = pl_reader.decode();
+            assert_eq!(
+                decoded_text.len(),
+                decoded_reader.len(),
+                "doc count mismatch for term: {term}"
+            );
+            for (dt, dr) in decoded_text.iter().zip(&decoded_reader) {
+                assert_eq!(dt.doc_id, dr.doc_id, "doc_id mismatch for term: {term}");
+                assert_eq!(dt.freq, dr.freq, "freq mismatch for term: {term}");
+                assert_eq!(
+                    dt.positions, dr.positions,
+                    "positions mismatch for term: {term}"
+                );
+            }
+        }
+
+        assert_eq!(pf_text.norms, pf_reader.norms);
+    }
+
+    #[test]
+    fn test_large_reader_field_multi_chunk() {
+        // 40 KB of text — exercises multiple 8 KB chunks in analyze_reader
+        let text = "the quick brown fox jumps over the lazy dog ".repeat(1000);
+        assert!(text.len() > 32_000);
+
+        let mut chain_text = IndexingChain::new();
+        let analyzer = make_analyzer();
+        let mut doc = Document::new();
+        doc.add(document::text_field("contents", &text));
+        chain_text.process_document(doc, &analyzer).unwrap();
+        chain_text.finalize_pending_postings();
+
         let mut chain_reader = IndexingChain::new();
         let mut doc = Document::new();
         doc.add(document::text_field_reader(
