@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::thread;
@@ -272,9 +272,14 @@ fn make_document(path: &Path) -> Document {
         .unwrap_or(0);
     doc.add(document::long_field("modified", modified));
 
-    // "contents" field — the file text
-    let contents = fs::read_to_string(path).unwrap_or_default();
-    doc.add(document::text_field("contents", &contents));
+    // "contents" field — streamed from file
+    match File::open(path) {
+        Ok(file) => doc.add(document::text_field_reader(
+            "contents",
+            BufReader::new(file),
+        )),
+        Err(_) => doc.add(document::text_field("contents", "")),
+    }
 
     // "title" field — filename without extension
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
