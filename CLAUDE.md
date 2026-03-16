@@ -33,7 +33,7 @@ cargo clippy                   # lint
 ## Conventions
 
 - Write idiomatic Rust. Use traits, enums, `Result`/`Option` — not 1:1 Java translation.
-- No external dependencies except `log` (logging facade) and `simple_logger` (binary logger).
+- No external dependencies except `log` (logging facade), `simple_logger` (binary logger), and `mem_dbg` (memory measurement).
 - Use `io::Result<T>` for all fallible operations. Create errors with `io::Error::other("message")`.
 - No unsafe code.
 - Unimplemented methods should use `todo!("description")` or return `Err(...)`.
