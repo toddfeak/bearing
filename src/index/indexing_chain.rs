@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::io;
 
+use mem_dbg::MemSize;
+
 use crate::analysis::{Analyzer, TokenRef};
 use crate::document::{DocValuesType, Document, Field, FieldValue, IndexOptions, StoredValue};
 use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
@@ -73,7 +75,7 @@ pub struct DecodedPosting {
 /// Stores finalized document postings as a compact vInt-encoded byte stream,
 /// using ~3-5 bytes per posting instead of ~80 bytes with the old Vec<Posting>
 /// approach. Only the current in-progress document uses temporary Vecs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, MemSize)]
 pub struct PostingList {
     /// Compact storage: all finalized docs encoded as vInt byte stream.
     byte_stream: Vec<u8>,
@@ -260,7 +262,7 @@ impl PostingList {
 }
 
 /// Per-field accumulated data from all documents.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, MemSize)]
 pub struct PerFieldData {
     /// Term -> PostingList.
     pub postings: HashMap<String, PostingList>,
@@ -287,7 +289,7 @@ impl PerFieldData {
 }
 
 /// Accumulated doc values, type-specific.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, MemSize)]
 pub enum DocValuesAccumulator {
     None,
     /// SORTED_NUMERIC: per-doc list of long values.
@@ -297,7 +299,7 @@ pub enum DocValuesAccumulator {
 }
 
 /// A stored field for a single document.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, MemSize)]
 pub struct StoredDoc {
     pub fields: Vec<(u32, StoredValue)>, // (field_number, value)
 }
@@ -305,6 +307,7 @@ pub struct StoredDoc {
 /// The indexing chain: processes documents into in-memory data structures.
 ///
 /// Simplified for single-threaded, single-segment indexing.
+#[derive(MemSize)]
 pub struct IndexingChain {
     /// Per-field accumulated data, keyed by field name.
     per_field: HashMap<String, PerFieldData>,
@@ -393,68 +396,12 @@ impl IndexingChain {
         }
     }
 
-    /// Estimates the RAM bytes used by this chain's buffered data.
+    /// Returns the RAM bytes used by this chain's buffered data.
     ///
-    /// This is an approximation — exact byte counts are not required for
-    /// flush decisions, only a reasonable estimate.
+    /// Uses `mem_dbg` to accurately measure all heap allocations including
+    /// HashMap overhead, String keys, and nested collections.
     pub fn ram_bytes_used(&self) -> usize {
-        let mut bytes: usize = 0;
-
-        // Per-field postings, norms, doc values, points
-        for pf in self.per_field.values() {
-            for pl in pf.postings.values() {
-                bytes += std::mem::size_of::<PostingList>();
-                bytes += pl.byte_stream.capacity();
-                bytes += pl.current_positions.capacity() * std::mem::size_of::<i32>();
-                bytes += pl.current_start_offsets.capacity() * std::mem::size_of::<i32>();
-                bytes += pl.current_end_offsets.capacity() * std::mem::size_of::<i32>();
-            }
-            // Norms
-            bytes += pf.norms.capacity() * std::mem::size_of::<i64>();
-            bytes += pf.norms_docs.capacity() * std::mem::size_of::<i32>();
-            // Doc values
-            match &pf.doc_values {
-                DocValuesAccumulator::None => {}
-                DocValuesAccumulator::SortedNumeric(vals) => {
-                    for (_doc, v) in vals {
-                        bytes += v.capacity() * std::mem::size_of::<i64>();
-                    }
-                    bytes += vals.capacity() * std::mem::size_of::<(i32, Vec<i64>)>();
-                }
-                DocValuesAccumulator::SortedSet(vals) => {
-                    for (_doc, v) in vals {
-                        for br in v {
-                            bytes += br.bytes.len();
-                        }
-                        bytes += v.capacity() * std::mem::size_of::<BytesRef>();
-                    }
-                    bytes += vals.capacity() * std::mem::size_of::<(i32, Vec<BytesRef>)>();
-                }
-            }
-            // Points
-            for (_doc, val) in &pf.points {
-                bytes += val.capacity();
-            }
-            bytes += pf.points.capacity() * std::mem::size_of::<(i32, Vec<u8>)>();
-        }
-
-        // Stored docs
-        for sd in &self.stored_docs {
-            for (_num, val) in &sd.fields {
-                bytes += match val {
-                    StoredValue::String(s) => s.len(),
-                    StoredValue::Int(_) => 4,
-                    StoredValue::Long(_) => 8,
-                    StoredValue::Float(_) => 4,
-                    StoredValue::Double(_) => 8,
-                    StoredValue::Bytes(b) => b.len(),
-                };
-            }
-            bytes += sd.fields.capacity() * std::mem::size_of::<(u32, StoredValue)>();
-        }
-        bytes += self.stored_docs.capacity() * std::mem::size_of::<StoredDoc>();
-
-        bytes
+        self.mem_size(mem_dbg::SizeFlags::default())
     }
 
     /// Processes a single document, extracting all field data.
@@ -1007,7 +954,7 @@ mod tests {
         let mut chain = IndexingChain::new();
         let analyzer = make_analyzer();
 
-        assert_eq!(chain.ram_bytes_used(), 0);
+        let ram_empty = chain.ram_bytes_used();
 
         let mut doc = Document::new();
         doc.add(document::keyword_field("path", "/foo.txt"));
@@ -1016,7 +963,10 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let ram_after_one = chain.ram_bytes_used();
-        assert!(ram_after_one > 0, "RAM should be positive after one doc");
+        assert!(
+            ram_after_one > ram_empty,
+            "RAM should grow after one doc: empty={ram_empty}, after_one={ram_after_one}"
+        );
 
         // Add more docs and verify RAM grows
         for i in 0..10 {

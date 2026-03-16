@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 log = "0.4"
+mem_dbg = "0.4"
 simple_logger = { version = "5.2", default-features = false }
 
 [[bin]]

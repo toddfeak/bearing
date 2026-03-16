@@ -2,6 +2,8 @@
 
 //! Utility types for working with byte data.
 
+use mem_dbg::MemSize;
+
 pub(crate) mod bit_util;
 pub(crate) mod compress;
 pub(crate) mod numeric_utils;
@@ -11,7 +13,7 @@ pub(crate) mod string_helper;
 /// A reference to a range of bytes, analogous to Java's BytesRef.
 /// In Rust, we can often use &[u8] directly, but this struct provides
 /// owned storage for cases where we need to hold onto the bytes.
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, MemSize)]
 pub struct BytesRef {
     pub bytes: Vec<u8>,
 }

@@ -22,11 +22,14 @@ pub(crate) mod segment_infos;
 
 use std::collections::{HashMap, HashSet};
 
+use mem_dbg::MemSize;
+
 use crate::document::{DocValuesType, IndexOptions};
 use crate::util::string_helper;
 
 /// Configuration for point (BKD tree) dimensions.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, MemSize)]
+#[mem_size_flat]
 pub struct PointDimensionConfig {
     pub dimension_count: u32,
     pub index_dimension_count: u32,
@@ -40,7 +43,7 @@ impl PointDimensionConfig {
 }
 
 /// Information about a single field in the index.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, MemSize)]
 pub struct FieldInfo {
     name: String,
     number: u32,

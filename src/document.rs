@@ -11,8 +11,11 @@
 use std::fmt;
 use std::io::Read;
 
+use mem_dbg::MemSize;
+
 /// Specifies what information is stored in the index for a field.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, MemSize)]
+#[mem_size_flat]
 pub enum IndexOptions {
     /// Not indexed.
     None = 0,
@@ -37,7 +40,8 @@ impl IndexOptions {
 }
 
 /// Specifies the type of doc values stored for a field.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, MemSize)]
+#[mem_size_flat]
 pub enum DocValuesType {
     /// No doc values.
     None = 0,
@@ -295,7 +299,7 @@ impl Field {
 }
 
 /// A stored value that can be read back from the index.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, MemSize)]
 pub enum StoredValue {
     String(String),
     Int(i32),
