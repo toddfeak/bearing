@@ -103,9 +103,10 @@ pub fn write(
 
     for fi in indexed_fields {
         if let Some(pfd) = per_field.get(fi.name())
-            && !pfd.postings.is_empty()
+            && pfd.has_postings()
         {
-            btw.write_field(fi, &pfd.postings)?;
+            let sorted = pfd.sorted_postings();
+            btw.write_field(fi, &sorted)?;
         }
     }
 

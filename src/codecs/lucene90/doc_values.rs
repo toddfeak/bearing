@@ -579,23 +579,15 @@ mod tests {
     }
 
     fn make_per_field_data_sorted_numeric(values: Vec<(i32, Vec<i64>)>) -> PerFieldData {
-        PerFieldData {
-            postings: HashMap::new(),
-            doc_values: DocValuesAccumulator::SortedNumeric(values),
-            norms: Vec::new(),
-            norms_docs: Vec::new(),
-            points: Vec::new(),
-        }
+        let mut pfd = PerFieldData::new();
+        pfd.doc_values = DocValuesAccumulator::SortedNumeric(values);
+        pfd
     }
 
     fn make_per_field_data_sorted_set(values: Vec<(i32, Vec<BytesRef>)>) -> PerFieldData {
-        PerFieldData {
-            postings: HashMap::new(),
-            doc_values: DocValuesAccumulator::SortedSet(values),
-            norms: Vec::new(),
-            norms_docs: Vec::new(),
-            points: Vec::new(),
-        }
+        let mut pfd = PerFieldData::new();
+        pfd.doc_values = DocValuesAccumulator::SortedSet(values);
+        pfd
     }
 
     #[test]

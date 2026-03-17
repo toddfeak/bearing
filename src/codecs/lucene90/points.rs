@@ -783,7 +783,7 @@ mod tests {
     use super::*;
     use crate::codecs::codec_util::{FOOTER_LENGTH, header_length, index_header_length};
     use crate::document::{DocValuesType, IndexOptions};
-    use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
+    use crate::index::indexing_chain::PerFieldData;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::{Directory, MemoryDirectory, MemoryIndexOutput, SharedDirectory};
     use std::collections::HashMap;
@@ -817,13 +817,9 @@ mod tests {
     }
 
     fn make_per_field_with_points(points: Vec<(i32, Vec<u8>)>) -> PerFieldData {
-        PerFieldData {
-            postings: HashMap::new(),
-            doc_values: DocValuesAccumulator::None,
-            norms: Vec::new(),
-            norms_docs: Vec::new(),
-            points,
-        }
+        let mut pfd = PerFieldData::new();
+        pfd.points = points;
+        pfd
     }
 
     #[test]

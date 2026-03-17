@@ -105,6 +105,7 @@ pub struct PostingList {
 }
 
 impl PostingList {
+    /// Creates a new empty posting list with the given index options.
     pub fn new(has_freqs: bool, has_positions: bool, has_offsets: bool) -> Self {
         Self {
             byte_stream: Vec::new(),
@@ -284,10 +285,17 @@ impl PostingList {
 }
 
 /// Per-field accumulated data from all documents.
+///
+/// Postings are stored as a separate term-id lookup (`term_ids`) and a
+/// contiguous `Vec<PostingList>` indexed by term id. During HashMap rehash
+/// only the lightweight `(String, u32)` entries are copied (~29 bytes each)
+/// instead of the full `(String, PostingList)` entries (~145+ bytes each).
 #[derive(Clone, Debug, MemSize)]
 pub struct PerFieldData {
-    /// Term -> PostingList.
-    pub postings: HashMap<String, PostingList>,
+    /// Term string -> index into `posting_lists`.
+    term_ids: HashMap<String, u32>,
+    /// PostingLists indexed by term id.
+    posting_lists: Vec<PostingList>,
     /// Doc values accumulated per document.
     pub doc_values: DocValuesAccumulator,
     /// Norm values per document (only for fields with norms).
@@ -299,14 +307,64 @@ pub struct PerFieldData {
 }
 
 impl PerFieldData {
-    fn new() -> Self {
+    /// Creates a new empty `PerFieldData`.
+    pub fn new() -> Self {
         Self {
-            postings: HashMap::new(),
+            term_ids: HashMap::new(),
+            posting_lists: Vec::new(),
             doc_values: DocValuesAccumulator::None,
             norms: Vec::new(),
             norms_docs: Vec::new(),
             points: Vec::new(),
         }
+    }
+
+    /// Looks up or inserts a term, returning `&mut PostingList`.
+    fn get_or_insert_posting_list(
+        &mut self,
+        term: &str,
+        has_freqs: bool,
+        has_positions: bool,
+        has_offsets: bool,
+    ) -> &mut PostingList {
+        let posting_lists = &mut self.posting_lists;
+        let id = *self.term_ids.entry(term.to_string()).or_insert_with(|| {
+            let id = posting_lists.len() as u32;
+            posting_lists.push(PostingList::new(has_freqs, has_positions, has_offsets));
+            id
+        });
+        &mut self.posting_lists[id as usize]
+    }
+
+    /// Returns terms and posting lists in byte-sorted order for codec writing.
+    pub fn sorted_postings(&self) -> Vec<(&str, &PostingList)> {
+        let mut pairs: Vec<(&str, &PostingList)> = self
+            .term_ids
+            .iter()
+            .map(|(term, &id)| (term.as_str(), &self.posting_lists[id as usize]))
+            .collect();
+        pairs.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+        pairs
+    }
+
+    /// Returns true if this field has any postings.
+    pub fn has_postings(&self) -> bool {
+        !self.term_ids.is_empty()
+    }
+}
+
+#[cfg(test)]
+impl PerFieldData {
+    /// Number of unique terms.
+    pub fn num_terms(&self) -> usize {
+        self.term_ids.len()
+    }
+
+    /// Looks up a posting list by term.
+    pub fn posting_list(&self, term: &str) -> Option<&PostingList> {
+        self.term_ids
+            .get(term)
+            .map(|&id| &self.posting_lists[id as usize])
     }
 }
 
@@ -412,7 +470,7 @@ impl IndexingChain {
     /// is encoded into the byte stream.
     pub fn finalize_pending_postings(&mut self) {
         for pf in self.per_field.values_mut() {
-            for pl in pf.postings.values_mut() {
+            for pl in &mut pf.posting_lists {
                 pl.finalize_current_doc();
             }
         }
@@ -569,14 +627,12 @@ impl IndexingChain {
             position += token_ref.position_increment as i32;
             field_length += 1;
 
-            let posting_list = if let Some(pl) = per_field.postings.get_mut(token_ref.text) {
-                pl
-            } else {
-                per_field
-                    .postings
-                    .entry(token_ref.text.to_string())
-                    .or_insert_with(|| PostingList::new(has_freqs, has_positions, has_offsets))
-            };
+            let posting_list = per_field.get_or_insert_posting_list(
+                token_ref.text,
+                has_freqs,
+                has_positions,
+                has_offsets,
+            );
 
             posting_list.record_occurrence(
                 doc_id,
@@ -613,14 +669,8 @@ impl IndexingChain {
             position += 1;
             field_length = 1;
 
-            let posting_list = if let Some(pl) = per_field.postings.get_mut(text.as_str()) {
-                pl
-            } else {
-                per_field
-                    .postings
-                    .entry(text.clone())
-                    .or_insert_with(|| PostingList::new(has_freqs, has_positions, has_offsets))
-            };
+            let posting_list =
+                per_field.get_or_insert_posting_list(text, has_freqs, has_positions, has_offsets);
 
             posting_list.record_occurrence(doc_id, position, 0, text.len() as i32);
         }
@@ -771,17 +821,17 @@ mod tests {
 
         // Check "path" field postings (keyword, single token)
         let path_data = chain.per_field().get("path").unwrap();
-        assert_eq!(path_data.postings.len(), 1); // one unique term
-        let posting_list = path_data.postings.get("/foo/bar.txt").unwrap();
+        assert_eq!(path_data.num_terms(), 1); // one unique term
+        let posting_list = path_data.posting_list("/foo/bar.txt").unwrap();
         assert_eq!(posting_list.doc_freq(), 1);
         let decoded = posting_list.decode();
         assert_eq!(decoded[0].doc_id, 0);
 
         // Check "contents" field postings (tokenized)
         let contents_data = chain.per_field().get("contents").unwrap();
-        assert_eq!(contents_data.postings.len(), 2); // "hello", "world"
-        assert!(contents_data.postings.contains_key("hello"));
-        assert!(contents_data.postings.contains_key("world"));
+        assert_eq!(contents_data.num_terms(), 2); // "hello", "world"
+        assert!(contents_data.posting_list("hello").is_some());
+        assert!(contents_data.posting_list("world").is_some());
 
         // Check norms exist for "contents" (has norms)
         assert_eq!(contents_data.norms.len(), 1);
@@ -820,19 +870,19 @@ mod tests {
 
         // "hello" appears in both docs
         let contents_data = chain.per_field().get("contents").unwrap();
-        let hello_list = contents_data.postings.get("hello").unwrap();
+        let hello_list = contents_data.posting_list("hello").unwrap();
         assert_eq!(hello_list.doc_freq(), 2);
         let hello_decoded = hello_list.decode();
         assert_eq!(hello_decoded[0].doc_id, 0);
         assert_eq!(hello_decoded[1].doc_id, 1);
 
         // "world" only in doc 0
-        let world_list = contents_data.postings.get("world").unwrap();
+        let world_list = contents_data.posting_list("world").unwrap();
         assert_eq!(world_list.doc_freq(), 1);
         assert_eq!(world_list.decode()[0].doc_id, 0);
 
         // "rust" only in doc 1
-        let rust_list = contents_data.postings.get("rust").unwrap();
+        let rust_list = contents_data.posting_list("rust").unwrap();
         assert_eq!(rust_list.doc_freq(), 1);
         assert_eq!(rust_list.decode()[0].doc_id, 1);
     }
@@ -849,7 +899,7 @@ mod tests {
         chain.finalize_pending_postings();
 
         let contents = chain.per_field().get("contents").unwrap();
-        let hello_list = contents.postings.get("hello").unwrap();
+        let hello_list = contents.posting_list("hello").unwrap();
         let decoded = hello_list.decode();
         assert_eq!(decoded[0].freq, 2);
         assert_eq!(decoded[0].positions.len(), 2);
@@ -1153,8 +1203,8 @@ mod tests {
 
         let title_data = chain.per_field().get("title").unwrap();
         // StringField is not tokenized, so the whole value is one term
-        assert_eq!(title_data.postings.len(), 1);
-        assert!(title_data.postings.contains_key("hello world"));
+        assert_eq!(title_data.num_terms(), 1);
+        assert!(title_data.posting_list("hello world").is_some());
         // No doc values
         assert!(matches!(title_data.doc_values, DocValuesAccumulator::None));
         // Stored
@@ -1177,7 +1227,7 @@ mod tests {
         assert_eq!(chain.stored_docs()[0].fields.len(), 4);
         for field_name in &["notes", "extra_int", "extra_float", "extra_double"] {
             let data = chain.per_field().get(*field_name).unwrap();
-            assert!(data.postings.is_empty());
+            assert!(!data.has_postings());
             assert!(data.points.is_empty());
             assert!(matches!(data.doc_values, DocValuesAccumulator::None));
         }
@@ -1208,10 +1258,10 @@ mod tests {
         let pf_text = chain_text.per_field().get("contents").unwrap();
         let pf_reader = chain_reader.per_field().get("contents").unwrap();
 
-        assert_eq!(pf_text.postings.len(), pf_reader.postings.len());
+        assert_eq!(pf_text.num_terms(), pf_reader.num_terms());
 
-        for (term, pl_text) in &pf_text.postings {
-            let pl_reader = pf_reader.postings.get(term).unwrap_or_else(|| {
+        for (term, pl_text) in pf_text.sorted_postings() {
+            let pl_reader = pf_reader.posting_list(term).unwrap_or_else(|| {
                 panic!("reader chain missing term: {term}");
             });
             let decoded_text = pl_text.decode();
@@ -1259,10 +1309,10 @@ mod tests {
         let pf_text = chain_text.per_field().get("contents").unwrap();
         let pf_reader = chain_reader.per_field().get("contents").unwrap();
 
-        assert_eq!(pf_text.postings.len(), pf_reader.postings.len());
+        assert_eq!(pf_text.num_terms(), pf_reader.num_terms());
 
-        for (term, pl_text) in &pf_text.postings {
-            let pl_reader = pf_reader.postings.get(term).unwrap_or_else(|| {
+        for (term, pl_text) in pf_text.sorted_postings() {
+            let pl_reader = pf_reader.posting_list(term).unwrap_or_else(|| {
                 panic!("reader chain missing term: {term}");
             });
             let decoded_text = pl_text.decode();

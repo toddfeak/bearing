@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Block tree terms dictionary writer that organizes terms into a trie of blocks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 
 use log::debug;
@@ -125,19 +125,15 @@ impl BlockTreeTermsWriter {
     }
 
     /// Write all terms for one indexed field.
-    /// Terms are sorted by byte order internally.
+    /// Terms must be pre-sorted by byte order.
     pub fn write_field(
         &mut self,
         field_info: &FieldInfo,
-        terms: &HashMap<String, PostingList>,
+        sorted_terms: &[(&str, &PostingList)],
     ) -> io::Result<()> {
-        if terms.is_empty() {
+        if sorted_terms.is_empty() {
             return Ok(());
         }
-
-        // Sort terms by byte order for blocktree encoding
-        let mut sorted_terms: Vec<_> = terms.iter().collect();
-        sorted_terms.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
 
         debug!(
             "blocktree_writer: write_field name={} num_terms={}",
@@ -159,7 +155,7 @@ impl BlockTreeTermsWriter {
         // Compute doc_count and process terms in a single pass (no double decode)
         let mut docs_seen = HashSet::new();
 
-        for &(term_str, posting_list) in &sorted_terms {
+        for (term_str, posting_list) in sorted_terms {
             let decoded = posting_list.decode();
 
             // Accumulate unique doc IDs for doc_count
@@ -1247,6 +1243,13 @@ mod tests {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
+    /// Sorts a HashMap of terms into the slice format expected by write_field.
+    fn sort_terms(terms: &HashMap<String, PostingList>) -> Vec<(&str, &PostingList)> {
+        let mut sorted: Vec<_> = terms.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        sorted.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+        sorted
+    }
+
     fn make_field_info(name: &str, number: u32, index_options: IndexOptions) -> FieldInfo {
         FieldInfo::new(
             name.to_string(),
@@ -1482,7 +1485,7 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &terms).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
         let names = btw.finish().unwrap();
 
         // Should produce .tim, .tip, .tmd, .doc, .psm files (no .pos since no positions)
@@ -1543,7 +1546,7 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &terms).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
         let names = btw.finish().unwrap();
 
         // Should produce .tim, .tip, .tmd, .doc, .pos, .psm files
@@ -1595,7 +1598,7 @@ mod tests {
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
         // This panicked before the fix with "attempt to subtract with overflow"
-        btw.write_field(&fi, &terms).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
         let names = btw.finish().unwrap();
 
         assert!(
@@ -1624,7 +1627,7 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &terms).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
         let names = btw.finish().unwrap();
 
         // Find .tmd and parse the field metadata to check doc_count
@@ -1750,7 +1753,7 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &terms).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
         let names = btw.finish().unwrap();
 
         assert!(

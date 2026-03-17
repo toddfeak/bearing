@@ -179,7 +179,7 @@ mod tests {
     use super::*;
     use crate::codecs::codec_util::{FOOTER_LENGTH, index_header_length};
     use crate::document::{DocValuesType, IndexOptions};
-    use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
+    use crate::index::indexing_chain::PerFieldData;
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{Directory, MemoryDirectory, SharedDirectory};
     use crate::test_util;
@@ -196,13 +196,10 @@ mod tests {
     }
 
     fn make_per_field_data(norms: Vec<i64>, norms_docs: Vec<i32>) -> PerFieldData {
-        PerFieldData {
-            postings: HashMap::new(),
-            doc_values: DocValuesAccumulator::None,
-            norms,
-            norms_docs,
-            points: Vec::new(),
-        }
+        let mut pfd = PerFieldData::new();
+        pfd.norms = norms;
+        pfd.norms_docs = norms_docs;
+        pfd
     }
 
     fn test_directory() -> SharedDirectory {
