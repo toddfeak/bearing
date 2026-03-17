@@ -500,17 +500,13 @@ fn write_compound_segment(
     sub_file_names: &[String],
     directory: &SharedDirectory,
 ) -> io::Result<Vec<String>> {
-    let compound_file_names = vec![
-        index_file_names::segment_file_name(&si.name, "", "cfs"),
-        index_file_names::segment_file_name(&si.name, "", "cfe"),
-    ];
-
-    let si_name = lucene99::segment_info_format::write(directory, si, &compound_file_names)?;
-    debug!("flush: wrote {}", si_name);
-
-    // Read sub-files from directory, build compound files, then delete originals
+    let si_name = index_file_names::segment_file_name(&si.name, "", "si");
     let cfs_name = index_file_names::segment_file_name(&si.name, "", "cfs");
     let cfe_name = index_file_names::segment_file_name(&si.name, "", "cfe");
+    let si_files = vec![si_name.clone(), cfs_name.clone(), cfe_name.clone()];
+
+    lucene99::segment_info_format::write(directory, si, &si_files)?;
+    debug!("flush: wrote {}", si_name);
     {
         let mut dir = directory.lock().unwrap();
 
@@ -548,12 +544,16 @@ fn write_non_compound_segment(
     sub_file_names: &[String],
     directory: &SharedDirectory,
 ) -> io::Result<Vec<String>> {
-    let si_name = lucene99::segment_info_format::write(directory, si, sub_file_names)?;
+    let si_name = index_file_names::segment_file_name(&si.name, "", "si");
+    let mut si_files = Vec::with_capacity(1 + sub_file_names.len());
+    si_files.push(si_name.clone());
+    si_files.extend_from_slice(sub_file_names);
+
+    lucene99::segment_info_format::write(directory, si, &si_files)?;
     debug!("flush: wrote {}", si_name);
 
-    let mut names = Vec::with_capacity(1 + sub_file_names.len());
-    names.push(si_name);
-    names.extend_from_slice(sub_file_names);
+    // Return all file names (si + sub-files)
+    let names = si_files;
 
     Ok(names)
 }
