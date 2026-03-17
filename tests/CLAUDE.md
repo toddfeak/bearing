@@ -59,6 +59,18 @@ python3 testdata/gen_docs.py -n 2000    # generates to /tmp/perf-docs/
 
 ## Profiling
 
+### CPU Flamegraph
+
 ```bash
 cargo flamegraph --bin indexfiles -- -docs /tmp/perf-docs -index /tmp/flame-idx
+```
+
+### Heap Profiling (heaptrack)
+
+Always run heaptrack on the compiled binary directly — not via `cargo run`:
+
+```bash
+cargo build --release
+heaptrack --record-only -o /tmp/heaptrack_%p target/release/indexfiles -docs <DOCS_PATH> -index /tmp/heap-idx --threads 12
+heaptrack_print /tmp/heaptrack_<PID>.zst
 ```
