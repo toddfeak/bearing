@@ -6,6 +6,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::competitive_impact::{CompetitiveImpactAccumulator, Impact, NormsLookup};
 use crate::document::IndexOptions;
 use crate::index::FieldInfo;
 use crate::index::index_file_names::segment_file_name;
@@ -85,6 +86,12 @@ struct BlockFlushState {
     write_positions: bool,
     max_num_impacts_at_level0: i32,
     max_impact_num_bytes_at_level0: i32,
+    max_num_impacts_at_level1: i32,
+    max_impact_num_bytes_at_level1: i32,
+    /// Accumulates competitive (freq, norm) pairs for the current level 0 block.
+    level0_accumulator: CompetitiveImpactAccumulator,
+    /// Accumulates competitive impacts across level 0 blocks for level 1 skip data.
+    level1_accumulator: CompetitiveImpactAccumulator,
 }
 
 impl BlockFlushState {
@@ -100,6 +107,10 @@ impl BlockFlushState {
             write_positions,
             max_num_impacts_at_level0: 0,
             max_impact_num_bytes_at_level0: 0,
+            max_num_impacts_at_level1: 0,
+            max_impact_num_bytes_at_level1: 0,
+            level0_accumulator: CompetitiveImpactAccumulator::new(),
+            level1_accumulator: CompetitiveImpactAccumulator::new(),
         }
     }
 
@@ -117,13 +128,13 @@ impl BlockFlushState {
 
         // 1. Write impact data (only when we have freqs)
         if self.write_freqs {
-            let max_freq = freq_buffer.iter().copied().max().unwrap_or(1);
+            let impacts = self.level0_accumulator.get_competitive_freq_norm_pairs();
 
             let impact_start = self.scratch_buf.len();
-            let impact_bytes_len = write_impacts(max_freq, &mut self.scratch_buf)?;
+            let impact_bytes_len = write_impacts(&impacts, &mut self.scratch_buf)?;
 
-            if 1 > self.max_num_impacts_at_level0 {
-                self.max_num_impacts_at_level0 = 1;
+            if impacts.len() as i32 > self.max_num_impacts_at_level0 {
+                self.max_num_impacts_at_level0 = impacts.len() as i32;
             }
             if impact_bytes_len as i32 > self.max_impact_num_bytes_at_level0 {
                 self.max_impact_num_bytes_at_level0 = impact_bytes_len as i32;
@@ -211,6 +222,10 @@ impl BlockFlushState {
         // Update tracking state for next block
         self.level0_last_doc_id = last_doc_id;
         self.level0_last_pos_fp = pos_fp;
+        if self.write_freqs {
+            self.level1_accumulator.add_all(&self.level0_accumulator);
+        }
+        self.level0_accumulator.clear();
 
         Ok(())
     }
@@ -283,6 +298,7 @@ impl PostingsWriter {
         &mut self,
         postings: &[(i32, i32, &[i32])], // (doc_id, freq, positions)
         index_options: IndexOptions,
+        norms: &NormsLookup,
     ) -> io::Result<IntBlockTermState> {
         let doc_freq = postings.len() as i32;
         let write_freqs = index_options.has_freqs();
@@ -342,6 +358,7 @@ impl PostingsWriter {
                 pos_start_fp,
                 write_freqs,
                 write_positions,
+                norms,
             )
         } else {
             // VInt block (docFreq < BLOCK_SIZE)
@@ -407,6 +424,7 @@ impl PostingsWriter {
         pos_start_fp: i64,
         write_freqs: bool,
         write_positions: bool,
+        norms: &NormsLookup,
     ) -> io::Result<IntBlockTermState> {
         let mut doc_delta_buffer = [0i32; BLOCK_SIZE];
         let mut freq_buffer = [0i32; BLOCK_SIZE];
@@ -424,6 +442,7 @@ impl PostingsWriter {
             doc_delta_buffer[doc_buffer_upto] = doc_delta;
             if write_freqs {
                 freq_buffer[doc_buffer_upto] = freq;
+                bfs.level0_accumulator.add(freq, norms.get(doc_id));
             }
             last_doc_id = doc_id;
 
@@ -483,6 +502,19 @@ impl PostingsWriter {
             last_pos_block_offset = pe.finish(&mut **pos_out, total_term_freq, pos_start_fp)?;
         }
 
+        // Compute level 1 impact metadata from accumulated impacts
+        if write_freqs {
+            let level1_impacts = bfs.level1_accumulator.get_competitive_freq_norm_pairs();
+            if level1_impacts.len() as i32 > bfs.max_num_impacts_at_level1 {
+                bfs.max_num_impacts_at_level1 = level1_impacts.len() as i32;
+            }
+            let mut scratch = Vec::new();
+            let level1_bytes = write_impacts(&level1_impacts, &mut scratch)?;
+            if level1_bytes as i32 > bfs.max_impact_num_bytes_at_level1 {
+                bfs.max_impact_num_bytes_at_level1 = level1_bytes as i32;
+            }
+        }
+
         // Copy impact metadata back from BlockFlushState
         self.max_num_impacts_at_level0 = self
             .max_num_impacts_at_level0
@@ -490,6 +522,12 @@ impl PostingsWriter {
         self.max_impact_num_bytes_at_level0 = self
             .max_impact_num_bytes_at_level0
             .max(bfs.max_impact_num_bytes_at_level0);
+        self.max_num_impacts_at_level1 = self
+            .max_num_impacts_at_level1
+            .max(bfs.max_num_impacts_at_level1);
+        self.max_impact_num_bytes_at_level1 = self
+            .max_impact_num_bytes_at_level1
+            .max(bfs.max_impact_num_bytes_at_level1);
 
         Ok(IntBlockTermState {
             doc_freq,
@@ -607,15 +645,30 @@ fn write_vint15(out: &mut dyn DataOutput, v: i32) -> io::Result<()> {
     write_vlong15(out, v as i64)
 }
 
-/// Encode minimal impact data for a single block.
-/// For MVP: one impact per block with (max_freq, norm=1).
+/// Delta-encodes competitive impacts into the buffer.
+///
+/// Each impact is encoded relative to the previous one:
+/// - `freqDelta = freq - prevFreq - 1`
+/// - `normDelta = norm - prevNorm - 1`
+/// - If normDelta == 0: write `freqDelta << 1` as VInt
+/// - Otherwise: write `(freqDelta << 1) | 1` as VInt, then normDelta as ZLong
+///
 /// Returns number of bytes written.
-fn write_impacts(max_freq: i32, buf: &mut Vec<u8>) -> io::Result<usize> {
+fn write_impacts(impacts: &[Impact], buf: &mut Vec<u8>) -> io::Result<usize> {
     let start = buf.len();
     let mut enc = VecOutput(buf);
-    // Single impact: freqDelta = max_freq - 0 - 1 = max_freq - 1
-    // normDelta = 1 - 0 - 1 = 0, so we use the (freqDelta << 1) encoding (normDelta==0 path)
-    enc.write_vint((max_freq - 1) << 1)?;
+    let mut prev = Impact { freq: 0, norm: 0 };
+    for &impact in impacts {
+        let freq_delta = impact.freq - prev.freq - 1;
+        let norm_delta = impact.norm - prev.norm - 1;
+        if norm_delta == 0 {
+            enc.write_vint(freq_delta << 1)?;
+        } else {
+            enc.write_vint((freq_delta << 1) | 1)?;
+            enc.write_zlong(norm_delta)?;
+        }
+        prev = impact;
+    }
     let bytes_written = enc.0.len() - start;
     Ok(bytes_written)
 }
@@ -677,7 +730,11 @@ mod tests {
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings = vec![(5, 1, [].as_slice())];
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqs)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqs,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 1);
@@ -698,7 +755,11 @@ mod tests {
         ];
         let header_size = pw.doc_out.file_pointer();
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqs)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqs,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 3);
@@ -715,7 +776,9 @@ mod tests {
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings = vec![(7, 1, [].as_slice()), (11, 1, [].as_slice())];
         let header_size = pw.doc_out.file_pointer();
-        let state = pw.write_term(&postings, IndexOptions::Docs).unwrap();
+        let state = pw
+            .write_term(&postings, IndexOptions::Docs, &NormsLookup::no_norms())
+            .unwrap();
 
         assert_eq!(state.doc_freq, 2);
         assert_eq!(state.singleton_doc_id, -1);
@@ -732,7 +795,11 @@ mod tests {
         let positions1 = vec![3];
         let postings = vec![(0, 3, positions0.as_slice()), (2, 1, positions1.as_slice())];
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 2);
@@ -768,7 +835,11 @@ mod tests {
         let postings = vec![(0, postings_format::BLOCK_SIZE as i32, positions.as_slice())];
 
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 1);
@@ -801,7 +872,11 @@ mod tests {
         ];
 
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 2);
@@ -840,7 +915,11 @@ mod tests {
         let postings = vec![(0, 300, positions.as_slice())];
 
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 1);
@@ -876,7 +955,11 @@ mod tests {
         let postings = vec![(0, 256, positions.as_slice())];
 
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.total_term_freq, 256);
@@ -913,7 +996,11 @@ mod tests {
         ];
 
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.total_term_freq, 150);
@@ -936,7 +1023,11 @@ mod tests {
         let postings = vec![(0, 128, positions.as_slice())];
 
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.total_term_freq, 128);
@@ -978,7 +1069,11 @@ mod tests {
         let postings = vec![(0, 256, positions.as_slice())];
 
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.total_term_freq, 256);
@@ -1093,24 +1188,50 @@ mod tests {
     // --- Tests for write_impacts ---
 
     #[test]
-    fn test_write_impacts_single() {
+    fn test_write_impacts_single_norm_one() {
         // Single impact with freq=1, norm=1
+        // freqDelta = 1 - 0 - 1 = 0, normDelta = 1 - 0 - 1 = 0
+        // Encoding: VInt(0 << 1) = VInt(0)
+        let impacts = [Impact { freq: 1, norm: 1 }];
         let mut buf = Vec::new();
-        let len = write_impacts(1, &mut buf).unwrap();
-        assert_eq!(len, 1); // VInt((1-1)<<1) = VInt(0) = 1 byte
+        let len = write_impacts(&impacts, &mut buf).unwrap();
+        assert_eq!(len, 1);
         assert_eq!(buf[0], 0);
 
-        // Single impact with freq=5
+        // Single impact with freq=5, norm=1
+        // freqDelta = 5 - 0 - 1 = 4, normDelta = 1 - 0 - 1 = 0
+        // Encoding: VInt(4 << 1) = VInt(8)
+        let impacts = [Impact { freq: 5, norm: 1 }];
         let mut buf = Vec::new();
-        let len = write_impacts(5, &mut buf).unwrap();
-        assert_eq!(len, 1); // VInt((5-1)<<1) = VInt(8) = 1 byte
+        let len = write_impacts(&impacts, &mut buf).unwrap();
+        assert_eq!(len, 1);
         assert_eq!(buf[0], 8);
 
         // Larger freq
+        // freqDelta = 100 - 0 - 1 = 99, normDelta = 0
+        // VInt(99 << 1) = VInt(198) = 2 bytes
+        let impacts = [Impact { freq: 100, norm: 1 }];
         let mut buf = Vec::new();
-        let len = write_impacts(100, &mut buf).unwrap();
-        // VInt((100-1)<<1) = VInt(198) - needs 2 bytes (198 > 127)
+        let len = write_impacts(&impacts, &mut buf).unwrap();
         assert_eq!(len, 2);
+    }
+
+    #[test]
+    fn test_write_impacts_with_norm() {
+        // Single impact with freq=3, norm=5
+        // freqDelta = 3 - 0 - 1 = 2, normDelta = 5 - 0 - 1 = 4
+        // Encoding: VInt((2 << 1) | 1) = VInt(5), ZLong(4) = VLong(zigzag(4)) = VLong(8)
+        let impacts = [Impact { freq: 3, norm: 5 }];
+        let mut buf = Vec::new();
+        let len = write_impacts(&impacts, &mut buf).unwrap();
+        assert!(len >= 2); // At least VInt + ZLong
+        assert_eq!(buf[0], 5); // (2 << 1) | 1
+
+        // Two impacts: delta-encoded
+        let impacts = [Impact { freq: 3, norm: 5 }, Impact { freq: 10, norm: 13 }];
+        let mut buf = Vec::new();
+        let len = write_impacts(&impacts, &mut buf).unwrap();
+        assert!(len > 2); // Two impacts encoded
     }
 
     // --- Tests for block encoding (docFreq >= 128) ---
@@ -1124,7 +1245,11 @@ mod tests {
             (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
         let header_size = pw.doc_out.file_pointer();
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqs)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqs,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 128);
@@ -1148,7 +1273,11 @@ mod tests {
             (0..130).map(|i| (i, 1i32, [].as_slice())).collect();
         let header_size = pw.doc_out.file_pointer();
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqs)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqs,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 130);
@@ -1169,7 +1298,11 @@ mod tests {
             (0..256).map(|i| (i, 1i32, [].as_slice())).collect();
         let header_size = pw.doc_out.file_pointer();
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqs)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqs,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 256);
@@ -1192,7 +1325,11 @@ mod tests {
             (0..128).map(|i| (i, 2i32, positions.as_slice())).collect();
 
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqsAndPositions)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 128);
@@ -1216,7 +1353,11 @@ mod tests {
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqs)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqs,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 128);
@@ -1233,7 +1374,11 @@ mod tests {
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i * 100, 1i32, [].as_slice())).collect();
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqs)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqs,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 128);
@@ -1247,7 +1392,9 @@ mod tests {
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
-        let state = pw.write_term(&postings, IndexOptions::Docs).unwrap();
+        let state = pw
+            .write_term(&postings, IndexOptions::Docs, &NormsLookup::no_norms())
+            .unwrap();
 
         assert_eq!(state.doc_freq, 128);
         assert_eq!(state.total_term_freq, -1);
@@ -1262,7 +1409,11 @@ mod tests {
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, (i % 10) + 1, [].as_slice())).collect();
         let state = pw
-            .write_term(&postings, IndexOptions::DocsAndFreqs)
+            .write_term(
+                &postings,
+                IndexOptions::DocsAndFreqs,
+                &NormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 128);

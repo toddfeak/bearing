@@ -2,6 +2,7 @@
 //! Codec implementations for reading and writing Lucene index formats.
 
 pub mod codec_util;
+pub mod competitive_impact;
 pub mod lucene103;
 pub mod lucene90;
 pub mod lucene94;

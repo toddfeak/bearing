@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::codecs::competitive_impact::NormsLookup;
 use crate::document::IndexOptions;
 use crate::index::indexing_chain::PerFieldData;
 use crate::index::{FieldInfos, SegmentInfo};
@@ -106,7 +107,12 @@ pub fn write(
             && pfd.has_postings()
         {
             let sorted = pfd.sorted_postings();
-            btw.write_field(fi, &sorted)?;
+            let norms = if fi.omit_norms() {
+                NormsLookup::no_norms()
+            } else {
+                NormsLookup::new(&pfd.norms, &pfd.norms_docs)
+            };
+            btw.write_field(fi, &sorted, &norms)?;
         }
     }
 

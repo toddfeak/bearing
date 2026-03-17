@@ -7,6 +7,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::competitive_impact::NormsLookup;
 use crate::document::IndexOptions;
 use crate::index::index_file_names::segment_file_name;
 use crate::index::indexing_chain::PostingList;
@@ -130,6 +131,7 @@ impl BlockTreeTermsWriter {
         &mut self,
         field_info: &FieldInfo,
         sorted_terms: &[(&str, &PostingList)],
+        norms: &NormsLookup,
     ) -> io::Result<()> {
         if sorted_terms.is_empty() {
             return Ok(());
@@ -168,9 +170,11 @@ impl BlockTreeTermsWriter {
                 .map(|p| (p.doc_id, p.freq, p.positions.as_slice()))
                 .collect();
 
-            let state = self
-                .postings_writer
-                .write_term(&postings_data, field_info.index_options())?;
+            let state = self.postings_writer.write_term(
+                &postings_data,
+                field_info.index_options(),
+                norms,
+            )?;
 
             let term = BytesRef::from_utf8(term_str);
             tw.add_term(
@@ -1485,7 +1489,8 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+            .unwrap();
         let names = btw.finish().unwrap();
 
         // Should produce .tim, .tip, .tmd, .doc, .psm files (no .pos since no positions)
@@ -1546,7 +1551,8 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+            .unwrap();
         let names = btw.finish().unwrap();
 
         // Should produce .tim, .tip, .tmd, .doc, .pos, .psm files
@@ -1598,7 +1604,8 @@ mod tests {
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
         // This panicked before the fix with "attempt to subtract with overflow"
-        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+            .unwrap();
         let names = btw.finish().unwrap();
 
         assert!(
@@ -1627,7 +1634,8 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+            .unwrap();
         let names = btw.finish().unwrap();
 
         // Find .tmd and parse the field metadata to check doc_count
@@ -1753,7 +1761,8 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms)).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+            .unwrap();
         let names = btw.finish().unwrap();
 
         assert!(
