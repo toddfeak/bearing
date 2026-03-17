@@ -15,6 +15,7 @@ The Java implementation of **Apache Lucene 10.3.2** is the canonical source. All
 | `testdata/` | Test corpus and data generation scripts |
 | `reference/` | Lucene 10.3.2 Java source and format documentation (see `reference/CLAUDE.md`) |
 | `docs/` | Roadmap and planning documents |
+| `docs/backlog/` | Known issues and gaps to address in future work |
 
 ## Current State
 
