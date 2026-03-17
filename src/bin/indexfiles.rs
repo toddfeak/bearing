@@ -32,7 +32,7 @@ fn parse_args() -> CliArgs {
     let mut max_buffered_docs: i32 = -1;
     let mut ram_buffer_size_mb: f64 = -1.0; // -1.0 = use default (16 MB)
     let mut num_threads: usize = 1;
-    let mut use_compound_file: bool = true;
+    let mut use_compound_file: bool = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -95,8 +95,8 @@ fn parse_args() -> CliArgs {
                     }
                 };
             }
-            "--no-compound" => {
-                use_compound_file = false;
+            "--compound" => {
+                use_compound_file = true;
             }
             other => {
                 error!("Unknown parameter: {other}");
@@ -401,6 +401,6 @@ fn print_usage() {
          \t--max-buffered-docs N  Flush after N docs per segment (-1 = disabled)\n\
          \t--ram-buffer-size MB   RAM buffer size in MB (default: 16.0)\n\
          \t--threads N            Number of indexing threads (default: 1)\n\
-         \t--no-compound          Write individual segment files instead of .cfs/.cfe"
+         \t--compound             Package segment files into .cfs/.cfe (default: non-compound)"
     );
 }

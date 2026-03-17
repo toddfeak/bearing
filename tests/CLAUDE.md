@@ -30,6 +30,7 @@ Compare indexing speed, memory usage, and correctness between Java Lucene and Ru
 | `--threads N` | `12` | Thread count for multi-threaded runs |
 | `--1t` | off | Also run single-threaded (1T) for both Java and Rust |
 | `--no-verify` | verify on | Skip VerifyIndex validation |
+| `--compound` | off | Use compound file format (.cfs/.cfe) |
 
 ## CLI Reference
 
@@ -46,6 +47,7 @@ cargo run --bin indexfiles -- -docs <DOCS_PATH> [OPTIONS]
 | `--max-buffered-docs N` | disabled | Flush after N documents per segment |
 | `--ram-buffer-size MB` | `16.0` | RAM buffer size in MB |
 | `--threads N` | `1` | Number of indexing threads |
+| `--compound` | off | Package segment files into .cfs/.cfe |
 
 ## Test Data
 

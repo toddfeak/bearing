@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
-# Usage: compare_java_rust.sh [-docs DIR] [--debug] [--threads N] [--1t] [--no-verify]
+# Usage: compare_java_rust.sh [-docs DIR] [--debug] [--threads N] [--1t] [--no-verify] [--compound]
 #
 # Options:
 #   -docs DIR      Documents directory (default: testdata/docs)
@@ -10,6 +10,7 @@ set -euo pipefail
 #   --threads N    Thread count for multi-threaded runs (default: 12)
 #   --1t           Also run single-threaded (1T) for both Java and Rust
 #   --no-verify    Skip VerifyIndex validation
+#   --compound     Use compound file format (.cfs/.cfe)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -22,6 +23,7 @@ CARGO_FLAGS="--release"
 MT_THREADS=12
 RUN_1T=""
 VERIFY="yes"
+COMPOUND=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -46,9 +48,13 @@ while [[ $# -gt 0 ]]; do
             VERIFY=""
             shift
             ;;
+        --compound)
+            COMPOUND="yes"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: compare_java_rust.sh [-docs DIR] [--debug] [--threads N] [--1t] [--no-verify]"
+            echo "Usage: compare_java_rust.sh [-docs DIR] [--debug] [--threads N] [--1t] [--no-verify] [--compound]"
             exit 1
             ;;
     esac
@@ -80,6 +86,7 @@ if [[ -n "$RUN_1T" ]]; then
 else
     echo "Threads:        $MT_THREADS"
 fi
+echo "Compound:       $(if [[ -n "$COMPOUND" ]]; then echo yes; else echo no; fi)"
 echo "Verify:         $(if [[ -n "$VERIFY" ]]; then echo yes; else echo no; fi)"
 echo ""
 
@@ -170,6 +177,13 @@ run_index() {
 }
 
 # --- Build ---
+RUST_COMPOUND_FLAG=""
+JAVA_COMPOUND_FLAG=""
+if [[ -n "$COMPOUND" ]]; then
+    RUST_COMPOUND_FLAG="--compound"
+    JAVA_COMPOUND_FLAG="-Pcompound=true"
+fi
+
 echo "Building Java test utilities..."
 $GRADLE compileJava --quiet 2>&1
 
@@ -181,13 +195,13 @@ echo ""
 # --- 1T runs (optional) ---
 if [[ -n "$RUN_1T" ]]; then
     run_index "JAVA IndexAllFields (1 thread)" \
-        "$GRADLE indexAllFields --quiet -PdocsDir=$DOCS_DIR -PindexDir=$JAVA_1T_INDEX" \
+        "$GRADLE indexAllFields --quiet -PdocsDir=$DOCS_DIR -PindexDir=$JAVA_1T_INDEX $JAVA_COMPOUND_FLAG" \
         "$JAVA_1T_INDEX"
     JAVA_1T_MS=$_TIME_MS; JAVA_1T_RSS_KB=$_PEAK_RSS_KB
     JAVA_1T_TOTAL=$_INDEX_TOTAL; JAVA_1T_FC=$_INDEX_FILE_COUNT
 
     run_index "RUST indexfiles ($BUILD_MODE, 1 thread)" \
-        "$INDEXFILES -docs $DOCS_DIR -index $RUST_1T_INDEX --threads 1" \
+        "$INDEXFILES -docs $DOCS_DIR -index $RUST_1T_INDEX --threads 1 $RUST_COMPOUND_FLAG" \
         "$RUST_1T_INDEX"
     RUST_1T_MS=$_TIME_MS; RUST_1T_RSS_KB=$_PEAK_RSS_KB
     RUST_1T_TOTAL=$_INDEX_TOTAL; RUST_1T_FC=$_INDEX_FILE_COUNT
@@ -195,13 +209,13 @@ fi
 
 # --- MT runs (always) ---
 run_index "JAVA IndexAllFields ($MT_THREADS threads)" \
-    "$GRADLE indexAllFields --quiet -PdocsDir=$DOCS_DIR -PindexDir=$JAVA_MT_INDEX -Pthreads=$MT_THREADS" \
+    "$GRADLE indexAllFields --quiet -PdocsDir=$DOCS_DIR -PindexDir=$JAVA_MT_INDEX -Pthreads=$MT_THREADS $JAVA_COMPOUND_FLAG" \
     "$JAVA_MT_INDEX"
 JAVA_MT_MS=$_TIME_MS; JAVA_MT_RSS_KB=$_PEAK_RSS_KB
 JAVA_MT_TOTAL=$_INDEX_TOTAL; JAVA_MT_FC=$_INDEX_FILE_COUNT
 
 run_index "RUST indexfiles ($BUILD_MODE, $MT_THREADS threads)" \
-    "$INDEXFILES -docs $DOCS_DIR -index $RUST_MT_INDEX --threads $MT_THREADS" \
+    "$INDEXFILES -docs $DOCS_DIR -index $RUST_MT_INDEX --threads $MT_THREADS $RUST_COMPOUND_FLAG" \
     "$RUST_MT_INDEX"
 RUST_MT_MS=$_TIME_MS; RUST_MT_RSS_KB=$_PEAK_RSS_KB
 RUST_MT_TOTAL=$_INDEX_TOTAL; RUST_MT_FC=$_INDEX_FILE_COUNT

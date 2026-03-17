@@ -44,10 +44,13 @@ public class IndexAllFields {
         Path docsDir = Paths.get(args[0]);
         Path indexDir = Paths.get(args[1]);
         int numThreads = 1;
+        boolean useCompoundFile = false;
 
         for (int i = 2; i < args.length; i++) {
             if ("--threads".equals(args[i]) && i + 1 < args.length) {
                 numThreads = Integer.parseInt(args[++i]);
+            } else if ("--compound".equals(args[i])) {
+                useCompoundFile = true;
             }
         }
 
@@ -78,6 +81,7 @@ public class IndexAllFields {
         });
 
         IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
+        config.setUseCompoundFile(useCompoundFile);
         try (IndexWriter writer = new IndexWriter(FSDirectory.open(indexDir), config)) {
             if (numThreads <= 1) {
                 for (Path file : filePaths) {

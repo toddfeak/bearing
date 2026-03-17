@@ -31,6 +31,8 @@ tasks.register<JavaExec>("indexAllFields") {
     val docsDir = project.findProperty("docsDir") as? String
     val indexDir = project.findProperty("indexDir") as? String
     val threads = project.findProperty("threads") as? String
+    val compound = project.findProperty("compound") as? String
     args = listOfNotNull(docsDir, indexDir) +
-        if (threads != null) listOf("--threads", threads) else emptyList()
+        (if (threads != null) listOf("--threads", threads) else emptyList()) +
+        (if (compound != null) listOf("--compound") else emptyList())
 }
