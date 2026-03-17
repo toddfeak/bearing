@@ -10,7 +10,21 @@ The end-to-end test builds the binary, indexes `testdata/docs`, verifies index f
 
 ## Java Test Utilities
 
-`tests/java/` is a Gradle project containing Java utilities (`VerifyIndex`, `IndexAllFields`) that validate Rust-generated indexes using Java Lucene. The Lucene dependency is fetched from Maven Central automatically. These are invoked by the shell scripts — no need to run Gradle directly.
+`tests/java/` is a Gradle project containing Java utilities that validate Rust-generated indexes using Java Lucene. The Lucene dependency is fetched from Maven Central automatically. These are invoked by the shell scripts — no need to run Gradle directly.
+
+| Utility | Purpose |
+|---|---|
+| `VerifyIndex` | Validates index structure, stored fields, term counts, and queries |
+| `VerifyImpacts` | Checks competitive impact data in `.doc` skip blocks for proper norms |
+| `IndexAllFields` | Indexes documents with all field types (baseline for cross-validation) |
+
+## Impact Verification
+
+Verifies that Rust-generated indexes contain proper competitive impact data (norms in `.doc` skip blocks). Requires a 500-doc corpus to produce terms with docFreq >= 128.
+
+```bash
+./tests/e2e_verify_impacts.sh
+```
 
 ## Performance Comparison
 

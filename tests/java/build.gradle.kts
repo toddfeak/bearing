@@ -25,6 +25,13 @@ tasks.register<JavaExec>("verifyIndex") {
     args = listOfNotNull(indexDir, docCount)
 }
 
+tasks.register<JavaExec>("verifyImpacts") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "VerifyImpacts"
+    val indexDir = project.findProperty("indexDir") as? String
+    args = listOfNotNull(indexDir)
+}
+
 tasks.register<JavaExec>("indexAllFields") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass = "IndexAllFields"
