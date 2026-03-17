@@ -18,6 +18,9 @@ While analyzing documents, Bearing will read the entire document into memory as 
 ### Flushing Approach
 Flushing controls how many segments are created. They may later be merged to reduce segments on disk, but our problems start with flushing. Right now we don't do a good job of flushing efficiently. Java will flush the thread that is using the most memory any time the threshold for memory usage is hit. This maximizes segment size and minimizes segment count. There are edge cases with many threads and a small input data set where small segments may be created, but for larger data sets this is approaching ideal and the segment merging cleans up the minor leftovers.
 
+### Extra Index Memory Copy
+In Bearing, when worker threads flush, they flush a copy of their work to memory. They don't actually commit it to disk until later. This means we keep a copy of pretty much all the output index in memory while indexing. Lucene writes all the way out to disk to avoid this.
+
 ### Segment Merging
 As mentioned above, Lucene will merge smaller segments at the tail end of indexing, which also reduces segment count. This requires the ability to read/parse existing file formats which Bearing doesn't support at this time. Adding this support is not until later in the timeline, so we can assume this will not be addressed for a while.
 
@@ -42,10 +45,18 @@ We must figure out how to accurately measure how much memory each thread is usin
 
 There are libraries that help with this like mem_dbg, deepsize, get-size, etc.
 
+### Flush to Disk, not Memory
+We should implement a similar approach as Lucene in that flushing from the workers should go all the way to disk, not make a memory copy.
+
+We need to be sure this keeps functioning both with and without Compound files. We also need to be sure this doesn't block threads for too long when they flush.
+
+
 ### Flushing Policy
 I'd like to start with a reasonably simple approach here. Assume that each thread can accurately measure its memory usage. There is a master thread that manages what documents are handed to which workers. That same master thread can also tell a document when to flush. Each worker thread reports it's current memory usage every time it completes a doc. Once a threshold has been hit, the master thread will select the "fattest" worker thread and ask it to flush before handing it its next document. The logic and coordination should be pretty simple. We should assume something like 80-90% usage of maximum memory as the threshold to give a little room for a thread to complete what it's working on before flushing.
 
 It's important that a thread is properly cleaned up during flush before recieving its next document. Its IndexingChain needs to be reinitialized or replaced with a new one.
+
+To note, this doesn't currently work well with the Gutenberg documents. Each Gutenberg document takes up about 1-2MB of memory for the threads, so they end up flusing every 1-2 documents with this strategy. This may be a strong indication that the memory and struct optimization needs to be completed before we see the benefit.
 
 ### Memory and Struct Optimization
 We should consider restructing to reduce memory overhead in some of the Bearing structs on the indexing path. This should start with memory profiling to truly understand the usage, but focus on the index time structures.
@@ -60,5 +71,8 @@ We need to finish implementing the missing indexing features. We should take tha
 3. Flushing Policy
 4. Continue working on indexing features listed in PLAN.md for Tier 1 and Tier 2
 5. Circle back to Memory and Struct optimization last.
+
+## Huge Caveat
+All of this is against the Gutenberg samples. Each document is an entire book. While this can be used to highlight some inefficiencies, it may not be the best example to focus our efforts on. Regardless, while implementing some of these fixes the benefits do show on smaller documents.
 
 
