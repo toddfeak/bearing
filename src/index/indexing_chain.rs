@@ -70,6 +70,16 @@ pub struct DecodedPosting {
     pub positions: Vec<i32>,
 }
 
+/// Start and end offset buffers for offset-indexed fields.
+///
+/// Boxed and optional in `PostingList` to avoid 48 bytes of Vec overhead
+/// per term in the common case where offsets are not indexed.
+#[derive(Clone, Debug, MemSize)]
+struct OffsetBuffers {
+    start_offsets: Vec<i32>,
+    end_offsets: Vec<i32>,
+}
+
 /// Per-term posting list across all documents.
 ///
 /// Stores finalized document postings as a compact vInt-encoded byte stream,
@@ -87,8 +97,7 @@ pub struct PostingList {
     current_doc_id: i32,
     current_freq: i32,
     current_positions: Vec<i32>,
-    current_start_offsets: Vec<i32>,
-    current_end_offsets: Vec<i32>,
+    current_offsets: Option<Box<OffsetBuffers>>,
     /// Field's index options (needed for encoding decisions).
     has_freqs: bool,
     has_positions: bool,
@@ -105,8 +114,14 @@ impl PostingList {
             current_doc_id: -1,
             current_freq: 0,
             current_positions: Vec::new(),
-            current_start_offsets: Vec::new(),
-            current_end_offsets: Vec::new(),
+            current_offsets: if has_offsets {
+                Some(Box::new(OffsetBuffers {
+                    start_offsets: Vec::new(),
+                    end_offsets: Vec::new(),
+                }))
+            } else {
+                None
+            },
             has_freqs,
             has_positions,
             has_offsets,
@@ -135,8 +150,12 @@ impl PostingList {
 
     /// Records an offset pair for the current document.
     pub fn add_offset(&mut self, start: i32, end: i32) {
-        self.current_start_offsets.push(start);
-        self.current_end_offsets.push(end);
+        let offsets = self
+            .current_offsets
+            .as_mut()
+            .expect("add_offset called on non-offset field");
+        offsets.start_offsets.push(start);
+        offsets.end_offsets.push(end);
     }
 
     /// Records a token occurrence for the given document: starts a new doc
@@ -190,15 +209,16 @@ impl PostingList {
 
         // positions + optional offsets
         if self.has_positions {
+            let offsets = self.current_offsets.as_ref();
             let mut last_pos = 0;
             for (i, &pos) in self.current_positions.iter().enumerate() {
                 let pos_delta = pos - last_pos;
                 write_vint(&mut self.byte_stream, pos_delta);
                 last_pos = pos;
 
-                if self.has_offsets {
-                    write_vint(&mut self.byte_stream, self.current_start_offsets[i]);
-                    write_vint(&mut self.byte_stream, self.current_end_offsets[i]);
+                if let Some(ob) = offsets {
+                    write_vint(&mut self.byte_stream, ob.start_offsets[i]);
+                    write_vint(&mut self.byte_stream, ob.end_offsets[i]);
                 }
             }
         }
@@ -207,8 +227,10 @@ impl PostingList {
         self.current_doc_id = -1;
         self.current_freq = 0;
         self.current_positions.clear();
-        self.current_start_offsets.clear();
-        self.current_end_offsets.clear();
+        if let Some(ob) = self.current_offsets.as_mut() {
+            ob.start_offsets.clear();
+            ob.end_offsets.clear();
+        }
     }
 
     /// Decodes the entire byte stream into a Vec of DecodedPosting.
