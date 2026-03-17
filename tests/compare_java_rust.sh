@@ -235,6 +235,11 @@ if [[ -n "$VERIFY" ]]; then
         echo "========================================"
         $GRADLE verifyIndex --quiet -PindexDir="$dir" -PdocCount="$DOC_COUNT" 2>&1
         echo ""
+        echo "========================================"
+        echo "  VerifyImpacts on $label index"
+        echo "========================================"
+        $GRADLE verifyImpacts --quiet -PindexDir="$dir" 2>&1
+        echo ""
     done
 fi
 

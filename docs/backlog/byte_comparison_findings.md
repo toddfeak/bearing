@@ -12,12 +12,14 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 
 ## Results: 19 files total
 
-### Payload-identical after masking (3 files)
+### Payload-identical after masking (5 files)
 
 | File | Size | Contents |
 |------|-----:|---------|
 | `_0.fdx` | 64 | Stored fields index |
 | `_0.nvd` | 59 | Norms data |
+| `_0.nvm` | 103 | Norms metadata (was 1-byte diff before SmallFloat.intToByte4 fix) |
+| `_0_Lucene103_0.doc` | 166,158 | Postings doc IDs + frequencies (was 1,880 bytes smaller before competitive impacts fix) |
 | `_0_Lucene103_0.pos` | 5,239,366 | Postings positions |
 
 ### Same size, differ — verified root cause (2 files)
@@ -35,23 +37,16 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 | `_0.si` | 533 | 429 | -104 | Segment info metadata. Java writes 8 diagnostic entries (JVM version, OS details, timestamp, etc.), Rust writes 4. Files set now matches (both list 18 files including `_0.si` — this was a bug, now fixed). Verified by parsing both files field-by-field. |
 | `_0_Lucene103_0.tim` | 29,613 | 35,225 | +5,612 | Term dictionary. Rust does not implement suffix compression (LZ4 / LOWERCASE_ASCII). Block splitting, suffix length optimization, and all other encoding match Java. Verified by code review. See [tim_suffix_compression.md](tim_suffix_compression.md). |
 
-### Different size — verified root cause, not yet byte-compared (1 file)
+### Same size, differ — not yet investigated (6 files)
 
-| File | Java | Rust | Delta | Root Cause |
-|------|-----:|-----:|------:|-----------|
-| `_0_Lucene103_0.doc` | 166,158 | 164,278 | -1,880 | Postings doc IDs + frequencies. Rust writes minimal impact data (single max_freq per block), Java writes richer competitive impacts via `CompetitiveImpactAccumulator`. Determined by code review, not byte-level verification. See [doc_competitive_impacts.md](doc_competitive_impacts.md). |
-
-### Same size, differ — not yet investigated (7 files)
-
-These likely cascade from the verified differences above (`.fnm` attribute ordering, `.tim` size, `.doc` size), but this has not been confirmed by byte-level analysis.
+These likely cascade from the verified differences above (`.fnm` attribute ordering, `.tim` size), but this has not been confirmed by byte-level analysis.
 
 | File | Size | Contents | Likely Cause |
 |------|-----:|---------|-------------|
 | `_0.kdd` | 8,768 | BKD points data | Document insertion order affects BKD tree layout |
 | `_0.kdi` | 74 | BKD points index | Cascades from `.kdd` |
 | `_0.kdm` | 306 | BKD points metadata | Cascades from `.kdd` |
-| `_0.nvm` | 103 | Norms metadata | 1 byte diff — unknown |
-| `_0_Lucene103_0.psm` | 112 | Postings metadata | Likely cascades from `.doc`/`.tim` offset changes |
+| `_0_Lucene103_0.psm` | 112 | Postings metadata | Level 1 impact metadata differs (Rust computes it eagerly, Java only when writing level 1 skip data) |
 | `_0_Lucene103_0.tip` | 397 | Term index | Likely cascades from `.tim` block offsets |
 | `_0_Lucene90_0.dvm` | 1,407 | Doc values metadata | Unknown |
 

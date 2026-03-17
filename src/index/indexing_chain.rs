@@ -734,7 +734,11 @@ impl IndexingChain {
 /// The norm encodes the field length as a single byte using a
 /// float-to-byte compression scheme compatible with SmallFloat.
 fn compute_norm(field_length: i32) -> i64 {
-    encode_norm_value(field_length) as i64
+    // Sign-extend to match Java's byte → long widening.
+    // Java's SmallFloat.intToByte4 returns a byte (signed, -128..127),
+    // which is widened to long with sign extension. Rust's int_to_byte4
+    // returns u8 (0..255), so we must cast through i8 to match.
+    encode_norm_value(field_length) as i8 as i64
 }
 
 /// Encodes a field length into a single norm byte.
@@ -746,42 +750,50 @@ fn encode_norm_value(length: i32) -> u8 {
     int_to_byte4(length)
 }
 
-/// Encodes an integer using SmallFloat.intToByte4 format.
-/// 4 bits mantissa, 3 bits exponent, 1 sign bit (always positive for norms).
+/// Float-like encoding for positive longs that preserves ordering and 4 significant bits.
+/// Matches Java's `SmallFloat.longToInt4`.
+fn long_to_int4(i: i64) -> i32 {
+    assert!(i >= 0);
+    let num_bits = 64 - (i as u64).leading_zeros();
+    if num_bits < 4 {
+        // subnormal value
+        i as i32
+    } else {
+        // normal value
+        let shift = num_bits - 4;
+        // only keep the 5 most significant bits
+        let mut encoded = (i as u64 >> shift) as i32;
+        // clear the most significant bit, which is implicit
+        encoded &= 0x07;
+        // encode the shift, adding 1 because 0 is reserved for subnormal values
+        encoded |= (shift as i32 + 1) << 3;
+        encoded
+    }
+}
+
+/// `longToInt4(Integer.MAX_VALUE)`
+const MAX_INT4: u32 = {
+    // longToInt4(i32::MAX) = longToInt4(2147483647)
+    // numBits = 31, shift = 27, encoded = (2147483647 >> 27) & 0x07 = 7, | (28 << 3) = 224+7 = 231
+    231
+};
+
+/// Number of values encoded directly (without `longToInt4`), matching Java's `NUM_FREE_VALUES`.
+const NUM_FREE_VALUES: u32 = 255 - MAX_INT4; // 24
+
+/// Encodes an integer to a byte using SmallFloat.intToByte4 format.
+///
+/// Matches Java's `SmallFloat.intToByte4` from Lucene 10.3.2, which uses
+/// `longToInt4` with `NUM_FREE_VALUES` offset for accurate encoding of
+/// small values.
 fn int_to_byte4(i: i32) -> u8 {
     if i < 0 {
         return 0;
     }
-    // Number of leading zeros determines exponent
-    if i == 0 {
-        return 0;
-    }
-    let i = i as u32;
-    let num_bits = 32 - i.leading_zeros(); // number of significant bits
-    if num_bits <= 4 {
-        // Fits in mantissa
-        (i as u8) << (4 - num_bits) as u8
+    if (i as u32) < NUM_FREE_VALUES {
+        i as u8
     } else {
-        let shift = num_bits - 4;
-        // Round up
-        let mantissa = (i + (1 << (shift - 1))) >> shift;
-        // Check for overflow from rounding
-        if mantissa > 0xF {
-            // mantissa overflowed, adjust
-            let shift = shift + 1;
-            let mantissa = (i + (1 << (shift - 1))) >> shift;
-            let exponent = shift;
-            if exponent > 7 {
-                return 255; // max value
-            }
-            ((exponent as u8) << 4) | (mantissa as u8 & 0xF)
-        } else {
-            let exponent = shift;
-            if exponent > 7 {
-                return 255;
-            }
-            ((exponent as u8) << 4) | (mantissa as u8 & 0xF)
-        }
+        (NUM_FREE_VALUES + long_to_int4(i as i64 - NUM_FREE_VALUES as i64) as u32) as u8
     }
 }
 
