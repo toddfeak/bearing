@@ -14,6 +14,7 @@ use crate::index::indexing_chain::PostingList;
 use crate::index::{FieldInfo, FieldInfos};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
+use crate::util::compress::{lowercase_ascii, lz4};
 
 use super::postings_format::{
     self, BLOCKTREE_VERSION_CURRENT, DEFAULT_MAX_BLOCK_SIZE, DEFAULT_MIN_BLOCK_SIZE,
@@ -284,6 +285,7 @@ struct TermsWriter {
     doc_count: i32,
     first_term_bytes: Vec<u8>,
     last_term_bytes: Vec<u8>,
+    lz4_ht: lz4::HighCompressionHashTable,
 }
 
 impl TermsWriter {
@@ -306,6 +308,7 @@ impl TermsWriter {
             sum_total_term_freq: 0,
             sum_doc_freq: 0,
             doc_count: 0,
+            lz4_ht: lz4::HighCompressionHashTable::new(),
             first_term_bytes: Vec::new(),
             last_term_bytes: Vec::new(),
         }
@@ -482,6 +485,7 @@ impl TermsWriter {
                 terms_out,
                 postings_writer,
                 &field_ctx,
+                &mut self.lz4_ht,
             )?;
             new_blocks.push(block);
         }
@@ -627,6 +631,7 @@ impl TermsWriter {
 }
 
 /// Write a single block to .tim output.
+#[allow(clippy::too_many_arguments)]
 fn write_block_to_output(
     pending: &[PendingEntry],
     last_term: &[u8],
@@ -635,6 +640,7 @@ fn write_block_to_output(
     terms_out: &mut dyn IndexOutput,
     postings_writer: &PostingsWriter,
     field_ctx: &FieldWriteContext,
+    lz4_ht: &mut lz4::HighCompressionHashTable,
 ) -> io::Result<PendingBlock> {
     let start_fp = terms_out.file_pointer();
     let has_floor_lead_label = spec.is_floor && spec.floor_lead_label != -1;
@@ -732,15 +738,43 @@ fn write_block_to_output(
         stats_writer.finish()?;
     }
 
-    // Write suffix data (uncompressed, no LZ4 for MVP)
+    // Write suffix data, optionally compressed with LZ4 or lowercase ASCII.
     let suffix_len = suffix_bytes.len();
+    let mut compression_code: i64 = 0; // 0=none, 1=lowercase_ascii, 2=lz4
+    let mut compressed_bytes: Option<Vec<u8>> = None;
+
+    // Only try compression when there are enough suffix bytes per entry
+    // and the prefix is long enough (>2) to avoid hurting fuzzy query perf.
+    if suffix_len > 2 * num_entries && prefix_length > 2 {
+        // Try LZ4 first if average suffix > 6 bytes
+        if suffix_len > 6 * num_entries {
+            let lz4_compressed = lz4::compress_high(&suffix_bytes, lz4_ht);
+            // Use LZ4 only if it saves > 25%
+            if lz4_compressed.len() < suffix_len - (suffix_len >> 2) {
+                compression_code = 2;
+                compressed_bytes = Some(lz4_compressed);
+            }
+        }
+        // Fall back to lowercase ASCII if LZ4 didn't help
+        if compression_code == 0
+            && let Some(ascii_compressed) = lowercase_ascii::compress(&suffix_bytes, suffix_len)
+        {
+            compression_code = 1;
+            compressed_bytes = Some(ascii_compressed);
+        }
+    }
+
     let mut token = (suffix_len as i64) << 3;
     if is_leaf_block {
         token |= 0x04;
     }
-    // compression = NO_COMPRESSION (code 0)
+    token |= compression_code;
     terms_out.write_vlong(token)?;
-    terms_out.write_bytes(&suffix_bytes)?;
+    if let Some(ref data) = compressed_bytes {
+        terms_out.write_bytes(data)?;
+    } else {
+        terms_out.write_bytes(&suffix_bytes)?;
+    }
 
     // Write suffix lengths
     let num_suffix_bytes = suffix_lengths_bytes.len();

@@ -29,7 +29,10 @@ The Java implementation of **Apache Lucene 10.3.2** is the canonical source. All
 cargo build                    # debug build
 cargo test                     # run all tests
 cargo clippy                   # lint
+./tests/e2e_all.sh             # all e2e tests (indexing, impacts, compression)
 ```
+
+**Before any commit**, run `cargo test`, `cargo fmt`, `cargo clippy`, and `./tests/e2e_all.sh`. All must pass.
 
 ## Conventions
 

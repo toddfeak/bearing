@@ -74,13 +74,13 @@ echo "PASSED"
 
 echo ""
 echo "=== Test: Java Lucene verification (all-fields Rust index) ==="
-$GRADLE verifyIndex -PindexDir="$INDEX_DIR" -PdocCount=3 2>&1
+$GRADLE verifyIndex -PindexDir="$INDEX_DIR" -PdocCount=4 2>&1
 echo "PASSED"
 
 echo ""
 echo "=== Test: Java IndexAllFields + verification ==="
 $GRADLE indexAllFields -PdocsDir="$DOCS_DIR" -PindexDir="$JAVA_INDEX_DIR" 2>&1
-$GRADLE verifyIndex -PindexDir="$JAVA_INDEX_DIR" -PdocCount=3 2>&1
+$GRADLE verifyIndex -PindexDir="$JAVA_INDEX_DIR" -PdocCount=4 2>&1
 echo "PASSED"
 
 echo ""

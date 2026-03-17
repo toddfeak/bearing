@@ -16,6 +16,7 @@ The end-to-end test builds the binary, indexes `testdata/docs`, verifies index f
 |---|---|
 | `VerifyIndex` | Validates index structure, stored fields, term counts, and queries |
 | `VerifyImpacts` | Checks competitive impact data in `.doc` skip blocks for proper norms |
+| `VerifyTimCompression` | Inspects `.tim` block compression codes via reflection (NO_COMPRESSION, LOWERCASE_ASCII, LZ4) |
 | `IndexAllFields` | Indexes documents with all field types (baseline for cross-validation) |
 
 ## Impact Verification
@@ -24,6 +25,14 @@ Verifies that Rust-generated indexes contain proper competitive impact data (nor
 
 ```bash
 ./tests/e2e_verify_impacts.sh
+```
+
+## Tim Compression Verification
+
+Verifies that Rust-generated indexes use suffix compression (LOWERCASE_ASCII and LZ4) in `.tim` blocks, matching Java Lucene's behavior.
+
+```bash
+./tests/e2e_verify_tim_compression.sh
 ```
 
 ## Performance Comparison
@@ -65,7 +74,9 @@ cargo run --bin indexfiles -- -docs <DOCS_PATH> [OPTIONS]
 
 ## Test Data
 
-`testdata/docs/` contains 3 small text files used as the default corpus for quick tests.
+`testdata/docs/` contains 4 small text files used as the default corpus for quick tests. The `science.txt` file uses dense scientific vocabulary to exercise LZ4 compression in blocktree suffix blocks.
+
+`testdata/impact-docs/` contains 150 small generated documents (~63KB total) with a constrained vocabulary, ensuring common terms appear in 128+ docs. This is the minimum needed for competitive impact block verification. Regenerate with `python3 testdata/gen_impact_docs.py`.
 
 Generate a larger synthetic corpus for benchmarking:
 

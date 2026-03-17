@@ -3,25 +3,19 @@
 #
 # Verifies competitive impact data in Rust-generated indexes.
 #
-# 1. Generates a 500-doc corpus (enough for 128-doc blocks on common terms)
-# 2. Indexes with Rust indexfiles
-# 3. Runs Java VerifyImpacts — checks for proper norm/impact data
-# 4. Indexes same corpus with Java IndexAllFields
-# 5. Runs Java VerifyImpacts on Java index (baseline — should always pass)
+# 1. Indexes testdata/impact-docs (150 docs, enough for 128-doc blocks)
+# 2. Runs Java VerifyImpacts — checks for proper norm/impact data
+# 3. Indexes same docs with Java IndexAllFields
+# 4. Runs Java VerifyImpacts on Java index (baseline — should always pass)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Generate a 500-doc corpus
-DOCS_DIR="$(mktemp -d)"
+DOCS_DIR="$PROJECT_DIR/testdata/impact-docs"
 RUST_INDEX_DIR="$(mktemp -d)"
 JAVA_INDEX_DIR="$(mktemp -d)"
-trap 'rm -rf "$DOCS_DIR" "$RUST_INDEX_DIR" "$JAVA_INDEX_DIR"' EXIT
-
-echo "=== Generating 500-doc corpus ==="
-python3 "$PROJECT_DIR/testdata/gen_docs.py" -n 500 2>&1
-DOCS_DIR="/tmp/perf-docs"
+trap 'rm -rf "$RUST_INDEX_DIR" "$JAVA_INDEX_DIR"' EXIT
 
 # Build the Rust binary
 cargo build --bin indexfiles --manifest-path "$PROJECT_DIR/Cargo.toml"
@@ -30,7 +24,7 @@ INDEXFILES="$PROJECT_DIR/target/debug/indexfiles"
 GRADLE="$SCRIPT_DIR/java/gradlew --project-dir=$SCRIPT_DIR/java --quiet"
 
 echo ""
-echo "=== Indexing 500 docs with Rust ==="
+echo "=== Indexing 150 docs with Rust ==="
 "$INDEXFILES" -docs "$DOCS_DIR" -index "$RUST_INDEX_DIR"
 
 echo ""
@@ -44,7 +38,7 @@ else
 fi
 
 echo ""
-echo "=== Indexing 500 docs with Java ==="
+echo "=== Indexing 150 docs with Java ==="
 $GRADLE indexAllFields -PdocsDir="$DOCS_DIR" -PindexDir="$JAVA_INDEX_DIR" 2>&1
 
 echo ""

@@ -32,6 +32,14 @@ tasks.register<JavaExec>("verifyImpacts") {
     args = listOfNotNull(indexDir)
 }
 
+tasks.register<JavaExec>("verifyTimCompression") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "VerifyTimCompression"
+    jvmArgs("--add-opens", "org.apache.lucene.core/org.apache.lucene.codecs.lucene103.blocktree=ALL-UNNAMED")
+    val indexDir = project.findProperty("indexDir") as? String
+    args = listOfNotNull(indexDir)
+}
+
 tasks.register<JavaExec>("indexAllFields") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass = "IndexAllFields"

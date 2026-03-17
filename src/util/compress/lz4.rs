@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-//! LZ4 block compression for stored fields.
-
-// This implements the LZ4 block compression format used by Lucene's stored fields.
+//! LZ4 block compression for stored fields and blocktree suffix data.
 
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
 const HASH_LOG: usize = 14;
 const HASH_TABLE_SIZE: usize = 1 << HASH_LOG;
 const MAX_DISTANCE: usize = 1 << 16; // 65536
+const HASH_LOG_HC: usize = 15;
+const HASH_TABLE_SIZE_HC: usize = 1 << HASH_LOG_HC;
+const MAX_ATTEMPTS: usize = 256;
+const MASK: usize = MAX_DISTANCE - 1;
 
 /// LZ4 compress a block of data.
 /// Returns the compressed bytes.
@@ -179,6 +181,226 @@ pub fn compress_with_dictionary(buffer: &[u8], dict_len: usize) -> Vec<u8> {
     }
 
     compress_inner(buffer, dict_len, &mut hash_table)
+}
+
+/// Hash function for the high-compression hash table (HASH_LOG_HC = 15 bits).
+fn hash_hc(v: u32) -> usize {
+    (v.wrapping_mul(2654435761u32) >> (32 - HASH_LOG_HC)) as usize
+}
+
+/// Read a native-endian 32-bit int from a byte slice at the given position.
+fn read_int(data: &[u8], pos: usize) -> u32 {
+    u32::from_ne_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+}
+
+/// Count common bytes between `data[o1..]` and `data[o2..]` up to `limit`.
+fn common_bytes(data: &[u8], o1: usize, o2: usize, limit: usize) -> usize {
+    let mut len = 0;
+    while o1 + len < limit && o2 + len < limit && data[o1 + len] == data[o2 + len] {
+        len += 1;
+    }
+    len
+}
+
+/// High-compression hash table for LZ4 that stores up to 256 occurrences of
+/// 4-byte sequences within a 64KB window. Produces better compression than the
+/// standard fast hash table at the cost of slower compression speed.
+///
+/// Reusable across multiple calls — call [`reset`](HighCompressionHashTable::reset)
+/// before each compression.
+pub struct HighCompressionHashTable {
+    hash_table: Vec<i32>,
+    chain_table: Vec<u16>,
+    base: usize,
+    next: usize,
+    end: usize,
+}
+
+impl HighCompressionHashTable {
+    /// Create a new high-compression hash table.
+    pub fn new() -> Self {
+        Self {
+            hash_table: vec![-1; HASH_TABLE_SIZE_HC],
+            chain_table: vec![0xFFFF; MAX_DISTANCE],
+            base: 0,
+            next: 0,
+            end: 0,
+        }
+    }
+
+    /// Reset the hash table for compressing `data[off..off+len]`.
+    fn reset(&mut self, off: usize, len: usize) {
+        if self.end - self.base < self.chain_table.len() {
+            // Previous compression was on < 64KB — only reset relevant chain entries
+            let start_offset = self.base & MASK;
+            let end_offset = if self.end == 0 {
+                0
+            } else {
+                ((self.end - 1) & MASK) + 1
+            };
+            if start_offset < end_offset {
+                self.chain_table[start_offset..end_offset].fill(0xFFFF);
+            } else {
+                self.chain_table[..end_offset].fill(0xFFFF);
+                self.chain_table[start_offset..].fill(0xFFFF);
+            }
+        } else {
+            self.hash_table.fill(-1);
+            self.chain_table.fill(0xFFFF);
+        }
+        self.base = off;
+        self.next = off;
+        self.end = off + len;
+    }
+
+    /// Add a position to the hash table.
+    fn add_hash(&mut self, data: &[u8], off: usize) {
+        let v = read_int(data, off);
+        let h = hash_hc(v);
+        let mut delta = off as i64 - self.hash_table[h] as i64;
+        if delta <= 0 || delta >= MAX_DISTANCE as i64 {
+            delta = (MAX_DISTANCE - 1) as i64;
+        }
+        self.chain_table[off & MASK] = delta as u16;
+        self.hash_table[h] = off as i32;
+    }
+
+    /// Find a match for the 4-byte sequence at `off`. Advances internal cursor.
+    /// Returns the matched position or `None`.
+    fn get(&mut self, data: &[u8], off: usize) -> Option<usize> {
+        // Advance cursor, hashing skipped positions
+        while self.next < off {
+            self.add_hash(data, self.next);
+            self.next += 1;
+        }
+
+        let v = read_int(data, off);
+        let h = hash_hc(v);
+
+        let mut attempts = 0;
+        let mut ref_pos = self.hash_table[h];
+
+        if ref_pos >= off as i32 {
+            // Remainder from a previous call
+            return None;
+        }
+
+        let min = if off >= MAX_DISTANCE - 1 {
+            (off - MAX_DISTANCE + 1).max(self.base)
+        } else {
+            self.base
+        };
+
+        while ref_pos >= min as i32 && attempts < MAX_ATTEMPTS {
+            if read_int(data, ref_pos as usize) == v {
+                return Some(ref_pos as usize);
+            }
+            let delta = self.chain_table[ref_pos as usize & MASK] as usize;
+            ref_pos -= delta as i32;
+            // If delta was 0xFFFF (end of chain), ref_pos will go negative and loop ends
+            attempts += 1;
+        }
+        None
+    }
+
+    /// Find a previous match in the chain from `off`.
+    fn previous(&self, data: &[u8], off: usize, attempts: &mut usize) -> Option<usize> {
+        let v = read_int(data, off);
+        let mut ref_pos = off as i64 - (self.chain_table[off & MASK] as u64 & 0xFFFF) as i64;
+
+        while ref_pos >= self.base as i64 && *attempts < MAX_ATTEMPTS {
+            if read_int(data, ref_pos as usize) == v {
+                return Some(ref_pos as usize);
+            }
+            let delta = self.chain_table[ref_pos as usize & MASK] as u64 & 0xFFFF;
+            ref_pos -= delta as i64;
+            *attempts += 1;
+        }
+        None
+    }
+}
+
+/// LZ4 compress using the high-compression hash table.
+///
+/// Produces the same LZ4 block format as [`compress`] but finds better matches,
+/// resulting in smaller output. The hash table is reusable across calls.
+pub fn compress_high(input: &[u8], ht: &mut HighCompressionHashTable) -> Vec<u8> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    if input.len() < MIN_MATCH + LAST_LITERALS {
+        return encode_literals_only(input);
+    }
+
+    let len = input.len();
+    let mut output = Vec::with_capacity(len);
+
+    ht.reset(0, len);
+
+    let limit = len - LAST_LITERALS;
+    let match_limit = limit - MIN_MATCH;
+    let mut off = 0;
+    let mut anchor = 0;
+
+    'main: while off <= limit {
+        // Find a match
+        loop {
+            if off >= match_limit {
+                break 'main;
+            }
+            if let Some(ref_pos) = ht.get(input, off) {
+                // Found a match — compute length
+                let match_len =
+                    MIN_MATCH + common_bytes(input, ref_pos + MIN_MATCH, off + MIN_MATCH, limit);
+
+                // Try to find a better match via the chain
+                let mut attempts = 0;
+                let mut best_ref = ref_pos;
+                let mut best_len = match_len;
+
+                let mut r_opt = ht.previous(input, ref_pos, &mut attempts);
+                let min = if off >= MAX_DISTANCE - 1 {
+                    (off - MAX_DISTANCE + 1).max(0)
+                } else {
+                    0
+                };
+                while let Some(r) = r_opt {
+                    if r < min {
+                        break;
+                    }
+                    let r_match_len =
+                        MIN_MATCH + common_bytes(input, r + MIN_MATCH, off + MIN_MATCH, limit);
+                    if r_match_len > best_len {
+                        best_ref = r;
+                        best_len = r_match_len;
+                    }
+                    r_opt = ht.previous(input, r, &mut attempts);
+                }
+
+                // Encode the sequence
+                let literal_len = off - anchor;
+                let match_distance = off - best_ref;
+                encode_sequence(
+                    &mut output,
+                    input,
+                    anchor,
+                    literal_len,
+                    match_distance,
+                    best_len,
+                );
+                off += best_len;
+                anchor = off;
+                break;
+            }
+            off += 1;
+        }
+    }
+
+    // Last literals
+    let remaining = len - anchor;
+    encode_last_literals(&mut output, input, anchor, remaining);
+
+    output
 }
 
 #[cfg(test)]
@@ -512,5 +734,90 @@ mod tests {
 
         // Return only the data portion (after the prefix)
         output[prefix.len()..].to_vec()
+    }
+
+    #[test]
+    fn test_compress_high_simple() {
+        let input = b"hello world hello world hello world!";
+        let mut ht = HighCompressionHashTable::new();
+        let compressed = compress_high(input, &mut ht);
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(&decompressed, input);
+    }
+
+    #[test]
+    fn test_compress_high_short() {
+        let input = b"hi";
+        let mut ht = HighCompressionHashTable::new();
+        let compressed = compress_high(input, &mut ht);
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(&decompressed, input);
+    }
+
+    #[test]
+    fn test_compress_high_empty() {
+        let mut ht = HighCompressionHashTable::new();
+        let compressed = compress_high(b"", &mut ht);
+        assert!(compressed.is_empty());
+    }
+
+    #[test]
+    fn test_compress_high_repetitive() {
+        let input: Vec<u8> = "abcdefgh".repeat(100).into_bytes();
+        let mut ht = HighCompressionHashTable::new();
+        let compressed = compress_high(&input, &mut ht);
+        assert!(compressed.len() < input.len());
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_compress_high_better_than_fast() {
+        // High compression should generally match or beat fast compression
+        let input: Vec<u8> = "the quick brown fox jumps over the lazy dog "
+            .repeat(50)
+            .into_bytes();
+        let fast_compressed = compress(&input);
+        let mut ht = HighCompressionHashTable::new();
+        let high_compressed = compress_high(&input, &mut ht);
+
+        // Both must decompress correctly
+        let fast_decompressed = decompress(&fast_compressed, input.len()).unwrap();
+        let high_decompressed = decompress(&high_compressed, input.len()).unwrap();
+        assert_eq!(fast_decompressed, input);
+        assert_eq!(high_decompressed, input);
+
+        // High compression should be at least as good
+        assert!(
+            high_compressed.len() <= fast_compressed.len(),
+            "high {} > fast {}",
+            high_compressed.len(),
+            fast_compressed.len()
+        );
+    }
+
+    #[test]
+    fn test_compress_high_reuse_hash_table() {
+        let mut ht = HighCompressionHashTable::new();
+
+        // Compress multiple inputs reusing the same hash table
+        for _ in 0..5 {
+            let input: Vec<u8> = "pattern repeated pattern repeated pattern "
+                .repeat(20)
+                .into_bytes();
+            let compressed = compress_high(&input, &mut ht);
+            let decompressed = decompress(&compressed, input.len()).unwrap();
+            assert_eq!(decompressed, input);
+        }
+    }
+
+    #[test]
+    fn test_compress_high_all_same_byte() {
+        let input = vec![0xAA; 1000];
+        let mut ht = HighCompressionHashTable::new();
+        let compressed = compress_high(&input, &mut ht);
+        assert!(compressed.len() < input.len());
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(decompressed, input);
     }
 }
