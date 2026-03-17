@@ -6,14 +6,13 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::Mutex;
 
 use crate::analysis::Analyzer;
 use crate::document::Document;
 use crate::index::index_writer::{FlushedSegment, SegmentWriteState, flush_segment_to_files};
 use crate::index::indexing_chain::IndexingChain;
 use crate::index::{SegmentCommitInfo, SegmentInfo};
-use crate::store::Directory;
+use crate::store::SharedDirectory;
 use crate::util::string_helper;
 
 /// A per-thread document writer that accumulates documents into an IndexingChain.
@@ -70,7 +69,7 @@ impl DocumentsWriterPerThread {
     /// Segment files are written to the given directory immediately.
     pub(crate) fn flush(
         mut self,
-        directory: &Mutex<Box<dyn Directory + Send>>,
+        directory: &SharedDirectory,
         use_compound_file: bool,
     ) -> io::Result<FlushedSegment> {
         if self.chain.num_docs() == 0 {
@@ -136,10 +135,11 @@ mod tests {
     use super::*;
     use crate::analysis::standard::StandardAnalyzer;
     use crate::document;
+    use crate::store::SharedDirectory;
     use crate::store::memory::MemoryDirectory;
 
-    fn test_directory() -> Mutex<Box<dyn Directory + Send>> {
-        Mutex::new(Box::new(MemoryDirectory::new()))
+    fn test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
     #[test]

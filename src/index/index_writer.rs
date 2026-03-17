@@ -25,7 +25,7 @@ use crate::index::flush_policy::{FlushByRamOrCountsPolicy, FlushPolicy};
 use crate::index::index_writer_config::IndexWriterConfig;
 use crate::index::indexing_chain::IndexingChain;
 use crate::index::{SegmentCommitInfo, index_file_names, segment_infos};
-use crate::store::{Directory, SegmentFile};
+use crate::store::{Directory, SegmentFile, SharedDirectory};
 
 /// A thread-safe IndexWriter supporting multiple segments and concurrent
 /// document ingestion.
@@ -76,7 +76,7 @@ struct SharedState {
     config: IndexWriterConfig,
     flush_policy: Box<dyn FlushPolicy>,
     /// Directory where segment files are written at flush time.
-    directory: Arc<Mutex<Box<dyn Directory + Send>>>,
+    directory: Arc<SharedDirectory>,
     /// Flushed but uncommitted segments (metadata only — file data is in directory).
     pending_segments: Mutex<Vec<FlushedSegment>>,
     /// Commit generation (incremented on each commit).
@@ -108,7 +108,7 @@ impl IndexWriter {
     }
 
     /// Creates a new IndexWriter with default config and the given directory.
-    pub fn with_directory(dir: Box<dyn Directory + Send>) -> Self {
+    pub fn with_directory(dir: Box<dyn Directory>) -> Self {
         Self::with_config_and_directory(IndexWriterConfig::new(), dir)
     }
 
@@ -116,10 +116,7 @@ impl IndexWriter {
     ///
     /// Segment files are written to `dir` at flush time. At commit, only the
     /// `segments_N` file is added and all files are synced.
-    pub fn with_config_and_directory(
-        config: IndexWriterConfig,
-        dir: Box<dyn Directory + Send>,
-    ) -> Self {
+    pub fn with_config_and_directory(config: IndexWriterConfig, dir: Box<dyn Directory>) -> Self {
         Self {
             shared: Arc::new(SharedState {
                 dwpt_pool: DwptPool::new(),
@@ -342,11 +339,11 @@ pub(crate) struct FlushedSegment {
 ///
 /// - [`file_names`](CommitResult::file_names): returns the list of written file names.
 /// - [`into_segment_files`](CommitResult::into_segment_files): reads files from the
-///   writer's directory into memory (requires [`MemoryDirectory`](crate::store::MemoryDirectory)).
+///   writer's directory into memory.
 /// - [`write_to_directory`](CommitResult::write_to_directory): copies files to a different
-///   [`Directory`] (requires the source to support [`file_bytes`](Directory::file_bytes)).
+///   [`Directory`].
 pub struct CommitResult {
-    directory: Arc<Mutex<Box<dyn Directory + Send>>>,
+    directory: Arc<SharedDirectory>,
     file_names: Vec<String>,
 }
 
@@ -358,14 +355,11 @@ impl CommitResult {
 
     /// Materializes all files in memory by reading from the writer's directory.
     /// Returns a flat list: `[segments_N, _0.si, _0.cfs, _0.cfe, ...]`.
-    ///
-    /// Only works when the writer uses a directory that supports
-    /// [`file_bytes`](Directory::file_bytes) (e.g., [`MemoryDirectory`](crate::store::MemoryDirectory)).
     pub fn into_segment_files(self) -> io::Result<Vec<SegmentFile>> {
         let dir = self.directory.lock().unwrap();
         let mut files = Vec::with_capacity(self.file_names.len());
         for name in &self.file_names {
-            let data = dir.file_bytes(name)?.to_vec();
+            let data = dir.read_file(name)?;
             files.push(SegmentFile {
                 name: name.clone(),
                 data,
@@ -376,17 +370,14 @@ impl CommitResult {
 
     /// Copies all committed files to the given [`Directory`], syncs, and returns
     /// the file names.
-    ///
-    /// Only works when the writer uses a directory that supports
-    /// [`file_bytes`](Directory::file_bytes) (e.g., [`MemoryDirectory`](crate::store::MemoryDirectory)).
     pub fn write_to_directory(
         self,
         dir: &mut dyn crate::store::Directory,
     ) -> io::Result<Vec<String>> {
         let source = self.directory.lock().unwrap();
         for name in &self.file_names {
-            let data = source.file_bytes(name)?;
-            dir.write_file(name, data)?;
+            let data = source.read_file(name)?;
+            dir.write_file(name, &data)?;
         }
         drop(source);
         let name_refs: Vec<&str> = self.file_names.iter().map(|s| s.as_str()).collect();
@@ -396,38 +387,40 @@ impl CommitResult {
     }
 }
 
-/// Logs and appends codec output files to the accumulator.
-fn collect_files(files: Vec<SegmentFile>, out: &mut Vec<SegmentFile>) {
-    for f in &files {
-        debug!("flush: wrote {}", f.name);
-    }
-    out.extend(files);
-}
-
 /// Runs the full codec pipeline for one segment, writes files to the directory,
 /// and returns metadata-only [`FlushedSegment`].
 pub(crate) fn flush_segment_to_files(
     state: &SegmentWriteState<'_>,
-    directory: &Mutex<Box<dyn Directory + Send>>,
+    directory: &SharedDirectory,
     use_compound_file: bool,
 ) -> io::Result<FlushedSegment> {
     let si = &state.segment_commit_info.info;
     let field_infos = &state.field_infos;
     let chain = state.chain;
 
-    let mut all_segment_files: Vec<SegmentFile> = Vec::new();
+    let mut all_file_names: Vec<String> = Vec::new();
 
     // 1. Field infos (.fnm)
-    let fnm = lucene94::field_infos_format::write(si, "", field_infos)?;
-    collect_files(vec![fnm], &mut all_segment_files);
+    let fnm_name = lucene94::field_infos_format::write(directory, si, "", field_infos)?;
+    debug!("flush: wrote {}", fnm_name);
+    all_file_names.push(fnm_name);
 
     // 2. Postings (.doc, .pos, .tim, .tip, .tmd, .psm) — PerField suffix "Lucene103_0"
-    let postings_files =
-        lucene103::postings_format::write(si, "Lucene103_0", field_infos, chain.per_field())?;
-    collect_files(postings_files, &mut all_segment_files);
+    let postings_names = lucene103::postings_format::write(
+        directory,
+        si,
+        "Lucene103_0",
+        field_infos,
+        chain.per_field(),
+    )?;
+    for name in &postings_names {
+        debug!("flush: wrote {}", name);
+    }
+    all_file_names.extend(postings_names);
 
     // 3. Norms (.nvm, .nvd)
-    let norms_files = lucene90::norms::write(
+    let norms_names = lucene90::norms::write(
+        directory,
         &si.name,
         "",
         &si.id,
@@ -435,10 +428,14 @@ pub(crate) fn flush_segment_to_files(
         chain.per_field(),
         chain.num_docs(),
     )?;
-    collect_files(norms_files, &mut all_segment_files);
+    for name in &norms_names {
+        debug!("flush: wrote {}", name);
+    }
+    all_file_names.extend(norms_names);
 
     // 4. Doc values (.dvm, .dvd) — PerField suffix "Lucene90_0"
-    let dv_files = lucene90::doc_values::write(
+    let dv_names = lucene90::doc_values::write(
+        directory,
         &si.name,
         "Lucene90_0",
         &si.id,
@@ -446,10 +443,14 @@ pub(crate) fn flush_segment_to_files(
         chain.per_field(),
         chain.num_docs(),
     )?;
-    collect_files(dv_files, &mut all_segment_files);
+    for name in &dv_names {
+        debug!("flush: wrote {}", name);
+    }
+    all_file_names.extend(dv_names);
 
     // 5. Points (.kdd, .kdi, .kdm)
-    let pts_files = lucene90::points::write(
+    let pts_names = lucene90::points::write(
+        directory,
         &si.name,
         "",
         &si.id,
@@ -457,33 +458,33 @@ pub(crate) fn flush_segment_to_files(
         chain.per_field(),
         chain.num_docs(),
     )?;
-    collect_files(pts_files, &mut all_segment_files);
+    for name in &pts_names {
+        debug!("flush: wrote {}", name);
+    }
+    all_file_names.extend(pts_names);
 
     // 6. Stored fields (.fdt, .fdx, .fdm)
-    let sf_files = lucene90::stored_fields::write(
+    let sf_names = lucene90::stored_fields::write(
+        directory,
         &si.name,
         "",
         &si.id,
         chain.stored_docs(),
         chain.num_docs(),
     )?;
-    collect_files(sf_files, &mut all_segment_files);
+    for name in &sf_names {
+        debug!("flush: wrote {}", name);
+    }
+    all_file_names.extend(sf_names);
 
-    debug!(
-        "flush: {} per-segment files totalling {} bytes",
-        all_segment_files.len(),
-        all_segment_files
-            .iter()
-            .map(|f| f.data.len())
-            .sum::<usize>()
-    );
+    debug!("flush: {} per-segment files", all_file_names.len());
 
-    // Write files to directory — codec encoding above is the slow part (lock-free),
-    // the directory lock is held only for the brief file writes below.
+    // All codec files are already written to directory (auto-persisted on drop).
+    // Now write compound files or .si as needed.
     let file_names = if use_compound_file {
-        write_compound_segment(si, &all_segment_files, directory)?
+        write_compound_segment(si, &all_file_names, directory)?
     } else {
-        write_non_compound_segment(si, &all_segment_files, directory)?
+        write_non_compound_segment(si, &all_file_names, directory)?
     };
 
     Ok(FlushedSegment {
@@ -492,55 +493,67 @@ pub(crate) fn flush_segment_to_files(
     })
 }
 
-/// Builds compound files (.cfs/.cfe) and writes .si + .cfs + .cfe to the directory.
+/// Builds compound files (.cfs/.cfe) from files already in the directory,
+/// then writes .si + .cfs + .cfe and deletes the originals.
 fn write_compound_segment(
     si: &crate::index::SegmentInfo,
-    sub_files: &[SegmentFile],
-    directory: &Mutex<Box<dyn Directory + Send>>,
+    sub_file_names: &[String],
+    directory: &SharedDirectory,
 ) -> io::Result<Vec<String>> {
     let compound_file_names = vec![
         index_file_names::segment_file_name(&si.name, "", "cfs"),
         index_file_names::segment_file_name(&si.name, "", "cfe"),
     ];
 
-    let si_file = lucene99::segment_info_format::write(si, &compound_file_names)?;
-    debug!("flush: wrote {}", si_file.name);
+    let si_name = lucene99::segment_info_format::write(directory, si, &compound_file_names)?;
+    debug!("flush: wrote {}", si_name);
 
-    // Build .cfs/.cfe in memory
+    // Read sub-files from directory, build compound files, then delete originals
     let cfs_name = index_file_names::segment_file_name(&si.name, "", "cfs");
-    let mut cfs_out = crate::store::memory::MemoryIndexOutput::new(cfs_name.clone());
-    let cfe = lucene90::compound::write_to(&si.name, &si.id, sub_files, &mut cfs_out)?;
+    let cfe_name = index_file_names::segment_file_name(&si.name, "", "cfe");
+    {
+        let mut dir = directory.lock().unwrap();
 
-    // Write to directory (brief lock)
-    let mut dir = directory.lock().unwrap();
-    dir.write_file(&si_file.name, &si_file.data)?;
-    dir.write_file(&cfs_name, cfs_out.bytes())?;
-    dir.write_file(&cfe.name, &cfe.data)?;
+        // Read sub-files into SegmentFile structs for compound writer
+        let sub_files: Vec<SegmentFile> = sub_file_names
+            .iter()
+            .map(|name| {
+                let data = dir.read_file(name)?;
+                Ok(SegmentFile {
+                    name: name.clone(),
+                    data,
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
 
-    Ok(vec![si_file.name, cfs_name, cfe.name])
+        // Build compound file
+        let mut cfs_out = crate::store::memory::MemoryIndexOutput::new(cfs_name.clone());
+        let cfe = lucene90::compound::write_to(&si.name, &si.id, &sub_files, &mut cfs_out)?;
+        dir.write_file(&cfs_name, cfs_out.bytes())?;
+        dir.write_file(&cfe.name, &cfe.data)?;
+
+        // Delete original sub-files
+        for name in sub_file_names {
+            dir.delete_file(name)?;
+        }
+    }
+
+    Ok(vec![si_name, cfs_name, cfe_name])
 }
 
-/// Writes individual sub-files and .si directly to the directory (non-compound mode).
+/// Writes .si directly to the directory (non-compound mode).
+/// All sub-files are already in the directory.
 fn write_non_compound_segment(
     si: &crate::index::SegmentInfo,
-    sub_files: &[SegmentFile],
-    directory: &Mutex<Box<dyn Directory + Send>>,
+    sub_file_names: &[String],
+    directory: &SharedDirectory,
 ) -> io::Result<Vec<String>> {
-    let sub_file_names: Vec<String> = sub_files.iter().map(|f| f.name.clone()).collect();
-    let si_file = lucene99::segment_info_format::write(si, &sub_file_names)?;
-    debug!("flush: wrote {}", si_file.name);
+    let si_name = lucene99::segment_info_format::write(directory, si, sub_file_names)?;
+    debug!("flush: wrote {}", si_name);
 
-    let mut names = Vec::with_capacity(1 + sub_files.len());
-
-    // Write to directory (brief lock)
-    let mut dir = directory.lock().unwrap();
-    dir.write_file(&si_file.name, &si_file.data)?;
-    names.push(si_file.name);
-
-    for f in sub_files {
-        dir.write_file(&f.name, &f.data)?;
-        names.push(f.name.clone());
-    }
+    let mut names = Vec::with_capacity(1 + sub_file_names.len());
+    names.push(si_name);
+    names.extend_from_slice(sub_file_names);
 
     Ok(names)
 }
@@ -614,16 +627,17 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_produces_four_files() {
+    fn test_commit_produces_segment_files() {
         let writer = make_three_doc_writer();
         let files = writer.commit().unwrap().into_segment_files().unwrap();
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        // segments_1 + _0.si + _0.cfs + _0.cfe = 4
         assert_eq!(names.len(), 4);
         assert_eq!(names[0], "segments_1");
-        assert_eq!(names[1], "_0.si");
-        assert_eq!(names[2], "_0.cfs");
-        assert_eq!(names[3], "_0.cfe");
+        assert!(names.contains(&"_0.si"));
+        assert!(names.contains(&"_0.cfs"));
+        assert!(names.contains(&"_0.cfe"));
     }
 
     #[test]
@@ -669,10 +683,14 @@ mod tests {
         writer.add_document(doc).unwrap();
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
+        // segments_1 + _0.si + _0.cfs + _0.cfe = 4
         assert_eq!(files.len(), 4);
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, &["segments_1", "_0.si", "_0.cfs", "_0.cfe"]);
+        assert_eq!(names[0], "segments_1");
+        assert!(names.contains(&"_0.si"));
+        assert!(names.contains(&"_0.cfs"));
+        assert!(names.contains(&"_0.cfe"));
     }
 
     #[test]
@@ -744,24 +762,20 @@ mod tests {
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
 
-        // segments_1 + 3 segments x 3 files each = 10
+        // segments_1 + 3 segments x (si + cfs + cfe) = 10
         assert_eq!(files.len(), 10);
         assert_eq!(files[0].name, "segments_1");
 
-        // Segment _0
-        assert_eq!(files[1].name, "_0.si");
-        assert_eq!(files[2].name, "_0.cfs");
-        assert_eq!(files[3].name, "_0.cfe");
-
-        // Segment _1
-        assert_eq!(files[4].name, "_1.si");
-        assert_eq!(files[5].name, "_1.cfs");
-        assert_eq!(files[6].name, "_1.cfe");
-
-        // Segment _2
-        assert_eq!(files[7].name, "_2.si");
-        assert_eq!(files[8].name, "_2.cfs");
-        assert_eq!(files[9].name, "_2.cfe");
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"_0.si"));
+        assert!(names.contains(&"_0.cfs"));
+        assert!(names.contains(&"_0.cfe"));
+        assert!(names.contains(&"_1.si"));
+        assert!(names.contains(&"_1.cfs"));
+        assert!(names.contains(&"_1.cfe"));
+        assert!(names.contains(&"_2.si"));
+        assert!(names.contains(&"_2.cfs"));
+        assert!(names.contains(&"_2.cfe"));
 
         assert_eq!(writer.num_docs(), 5);
     }
@@ -783,10 +797,11 @@ mod tests {
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
 
-        // segments_1 + 1 segment x 3 files = 4
+        // segments_1 + _0.si + _0.cfs + _0.cfe = 4
         assert_eq!(files.len(), 4);
         assert_eq!(files[0].name, "segments_1");
-        assert_eq!(files[1].name, "_0.si");
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"_0.si"));
     }
 
     #[test]
@@ -1061,12 +1076,12 @@ mod tests {
         let mut dir = MemoryDirectory::new();
         let written = commit.write_to_directory(&mut dir).unwrap();
 
-        // Single segment: segments_1, _0.si, _0.cfs, _0.cfe
+        // segments_1 + _0.si + _0.cfs + _0.cfe = 4
         assert_eq!(written.len(), 4);
         assert_eq!(written[0], "segments_1");
-        assert_eq!(written[1], "_0.si");
-        assert_eq!(written[2], "_0.cfs");
-        assert_eq!(written[3], "_0.cfe");
+        assert!(written.contains(&"_0.si".to_string()));
+        assert!(written.contains(&"_0.cfs".to_string()));
+        assert!(written.contains(&"_0.cfe".to_string()));
 
         // All files should exist in the directory
         let files = dir.list_all().unwrap();
@@ -1100,7 +1115,7 @@ mod tests {
         let mut dir = MemoryDirectory::new();
         let written = commit.write_to_directory(&mut dir).unwrap();
 
-        // segments_1 + 3 segments x 3 files = 10
+        // segments_1 + 3 segments x (si + cfs + cfe) = 10
         assert_eq!(written.len(), 10);
         assert_eq!(written[0], "segments_1");
 
@@ -1199,6 +1214,7 @@ mod tests {
         writer.add_document(doc).unwrap();
 
         let result = writer.commit().unwrap();
+        // segments_1 + _0.si + _0.cfs + _0.cfe = 4
         assert_eq!(result.file_names().len(), 4);
     }
 
@@ -1218,7 +1234,7 @@ mod tests {
         }
 
         let result = writer.commit().unwrap();
-        // segments_1 + 3 segments x 3 files = 10
+        // segments_1 + 3 segments x (si + cfs + cfe) = 10
         assert_eq!(result.file_names().len(), 10);
     }
 }

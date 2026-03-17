@@ -7,7 +7,7 @@ use std::io;
 use crate::document::IndexOptions;
 use crate::index::indexing_chain::PerFieldData;
 use crate::index::{FieldInfos, SegmentInfo};
-use crate::store::SegmentFile;
+use crate::store::SharedDirectory;
 
 use super::blocktree_writer::BlockTreeTermsWriter;
 
@@ -77,15 +77,17 @@ impl Default for IntBlockTermState {
     }
 }
 
-/// Write all postings files for the given fields.
-/// Returns a Vec of [`SegmentFile`]s for all output files.
+/// Write all postings files for the given fields to the directory.
+/// Returns the file names written.
 pub fn write(
+    directory: &SharedDirectory,
     segment_info: &SegmentInfo,
     segment_suffix: &str,
     field_infos: &FieldInfos,
     per_field: &HashMap<String, PerFieldData>,
-) -> io::Result<Vec<SegmentFile>> {
+) -> io::Result<Vec<String>> {
     let mut btw = BlockTreeTermsWriter::new(
+        directory,
         &segment_info.name,
         segment_suffix,
         &segment_info.id,

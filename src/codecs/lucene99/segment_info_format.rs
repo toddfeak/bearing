@@ -8,8 +8,7 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
-use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, SegmentFile};
+use crate::store::SharedDirectory;
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
 const VERSION_CURRENT: i32 = 0;
@@ -24,11 +23,15 @@ const LUCENE_BUGFIX: i32 = 2;
 const SI_YES: u8 = 1;
 const SI_NO: u8 = 0xFF; // -1 as byte
 
-/// Writes the .si (segment info) file.
-/// Returns a [`SegmentFile`] for the .si file.
-pub fn write(segment_info: &SegmentInfo, files: &[String]) -> io::Result<SegmentFile> {
+/// Writes the .si (segment info) file to `directory`.
+/// Returns the file name written.
+pub fn write(
+    directory: &SharedDirectory,
+    segment_info: &SegmentInfo,
+    files: &[String],
+) -> io::Result<String> {
     let file_name = index_file_names::segment_file_name(&segment_info.name, "", EXTENSION);
-    let mut output = MemoryIndexOutput::new(file_name.clone());
+    let mut output = directory.lock().unwrap().create_output(&file_name)?;
 
     debug!(
         "segment_info: segment={:?}, maxDoc={}, compound={}, files={}",
@@ -39,7 +42,7 @@ pub fn write(segment_info: &SegmentInfo, files: &[String]) -> io::Result<Segment
     );
 
     codec_util::write_index_header(
-        &mut output,
+        &mut *output,
         CODEC_NAME,
         VERSION_CURRENT,
         &segment_info.id,
@@ -86,15 +89,21 @@ pub fn write(segment_info: &SegmentInfo, files: &[String]) -> io::Result<Segment
     // numSortFields = 0 (no index sorting)
     output.write_vint(0)?;
 
-    codec_util::write_footer(&mut output)?;
+    codec_util::write_footer(&mut *output)?;
 
-    Ok(output.into_inner())
+    Ok(file_name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    use crate::store::{MemoryDirectory, SharedDirectory};
+
+    fn test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
 
     fn make_test_segment() -> SegmentInfo {
         let mut diagnostics = HashMap::new();
@@ -115,17 +124,19 @@ mod tests {
         let si = make_test_segment();
         let files = vec!["_0.cfs".to_string(), "_0.cfe".to_string()];
 
-        let file = write(&si, &files).unwrap();
-        assert_eq!(file.name, "_0.si");
-        assert!(!file.data.is_empty());
+        let dir = test_directory();
+        let name = write(&dir, &si, &files).unwrap();
+        assert_eq!(name, "_0.si");
+        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        assert!(!data.is_empty());
 
         // Verify header magic
-        assert_eq!(&file.data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
+        assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
 
         // Verify footer magic
-        let footer_start = file.data.len() - 16;
+        let footer_start = data.len() - 16;
         assert_eq!(
-            &file.data[footer_start..footer_start + 4],
+            &data[footer_start..footer_start + 4],
             &[0xc0, 0x28, 0x93, 0xe8]
         );
     }
@@ -133,49 +144,53 @@ mod tests {
     #[test]
     fn test_lucene_version_encoding() {
         let si = make_test_segment();
-        let file = write(&si, &[]).unwrap();
+        let dir = test_directory();
+        let name = write(&dir, &si, &[]).unwrap();
+        let data = dir.lock().unwrap().read_file(&name).unwrap();
 
         // After the index header, the first data is the Lucene version
         // Header: 4(magic) + 1+19(codec name) + 4(version) + 16(id) + 1(suffix len) = 45 bytes
         let version_offset = 45;
 
         // major=10
-        assert_eq!(file.data[version_offset], 10);
-        assert_eq!(file.data[version_offset + 1], 0);
-        assert_eq!(file.data[version_offset + 2], 0);
-        assert_eq!(file.data[version_offset + 3], 0);
+        assert_eq!(data[version_offset], 10);
+        assert_eq!(data[version_offset + 1], 0);
+        assert_eq!(data[version_offset + 2], 0);
+        assert_eq!(data[version_offset + 3], 0);
 
         // minor=3
-        assert_eq!(file.data[version_offset + 4], 3);
-        assert_eq!(file.data[version_offset + 5], 0);
-        assert_eq!(file.data[version_offset + 6], 0);
-        assert_eq!(file.data[version_offset + 7], 0);
+        assert_eq!(data[version_offset + 4], 3);
+        assert_eq!(data[version_offset + 5], 0);
+        assert_eq!(data[version_offset + 6], 0);
+        assert_eq!(data[version_offset + 7], 0);
 
         // bugfix=2
-        assert_eq!(file.data[version_offset + 8], 2);
-        assert_eq!(file.data[version_offset + 9], 0);
-        assert_eq!(file.data[version_offset + 10], 0);
-        assert_eq!(file.data[version_offset + 11], 0);
+        assert_eq!(data[version_offset + 8], 2);
+        assert_eq!(data[version_offset + 9], 0);
+        assert_eq!(data[version_offset + 10], 0);
+        assert_eq!(data[version_offset + 11], 0);
     }
 
     #[test]
     fn test_max_doc_and_flags() {
         let si = make_test_segment();
-        let file = write(&si, &[]).unwrap();
+        let dir = test_directory();
+        let name = write(&dir, &si, &[]).unwrap();
+        let data = dir.lock().unwrap().read_file(&name).unwrap();
 
         // After header (45) + version (12) + hasMinVersion(1) + minVersion(12) = 70
         let maxdoc_offset = 70;
 
         // maxDoc=3
-        assert_eq!(file.data[maxdoc_offset], 3);
-        assert_eq!(file.data[maxdoc_offset + 1], 0);
-        assert_eq!(file.data[maxdoc_offset + 2], 0);
-        assert_eq!(file.data[maxdoc_offset + 3], 0);
+        assert_eq!(data[maxdoc_offset], 3);
+        assert_eq!(data[maxdoc_offset + 1], 0);
+        assert_eq!(data[maxdoc_offset + 2], 0);
+        assert_eq!(data[maxdoc_offset + 3], 0);
 
         // isCompoundFile = YES = 1
-        assert_eq!(file.data[maxdoc_offset + 4], 1);
+        assert_eq!(data[maxdoc_offset + 4], 1);
 
         // hasBlocks = NO = 0xFF
-        assert_eq!(file.data[maxdoc_offset + 5], 0xFF);
+        assert_eq!(data[maxdoc_offset + 5], 0xFF);
     }
 }

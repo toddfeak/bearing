@@ -9,8 +9,7 @@ use crate::codecs::codec_util;
 use crate::document::IndexOptions;
 use crate::index::FieldInfo;
 use crate::index::index_file_names::segment_file_name;
-use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, IndexOutput, VecOutput};
+use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::bit_util;
 
 use super::for_util::{self, BLOCK_SIZE};
@@ -219,9 +218,9 @@ impl BlockFlushState {
 
 /// Writes postings (.doc, .pos, .psm) files.
 pub struct PostingsWriter {
-    doc_out: MemoryIndexOutput,
-    pos_out: Option<MemoryIndexOutput>,
-    meta_out: MemoryIndexOutput,
+    doc_out: Box<dyn IndexOutput>,
+    pos_out: Option<Box<dyn IndexOutput>>,
+    meta_out: Box<dyn IndexOutput>,
     // Track impact metadata (minimal for MVP)
     max_num_impacts_at_level0: i32,
     max_impact_num_bytes_at_level0: i32,
@@ -230,28 +229,36 @@ pub struct PostingsWriter {
 }
 
 impl PostingsWriter {
+    /// Creates a new PostingsWriter that streams to outputs from the directory.
     pub fn new(
+        directory: &SharedDirectory,
         segment: &str,
         suffix: &str,
         id: &[u8; 16],
         has_positions: bool,
     ) -> io::Result<Self> {
         let doc_name = segment_file_name(segment, suffix, DOC_EXTENSION);
-        let mut doc_out = MemoryIndexOutput::new(doc_name);
-        codec_util::write_index_header(&mut doc_out, DOC_CODEC, VERSION_CURRENT, id, suffix)?;
-
         let meta_name = segment_file_name(segment, suffix, META_EXTENSION);
-        let mut meta_out = MemoryIndexOutput::new(meta_name);
-        codec_util::write_index_header(&mut meta_out, META_CODEC, VERSION_CURRENT, id, suffix)?;
 
-        let pos_out = if has_positions {
-            let pos_name = segment_file_name(segment, suffix, POS_EXTENSION);
-            let mut pos_out = MemoryIndexOutput::new(pos_name);
-            codec_util::write_index_header(&mut pos_out, POS_CODEC, VERSION_CURRENT, id, suffix)?;
-            Some(pos_out)
-        } else {
-            None
+        let (mut doc_out, mut meta_out, mut pos_out) = {
+            let mut dir = directory.lock().unwrap();
+            let doc_out = dir.create_output(&doc_name)?;
+            let meta_out = dir.create_output(&meta_name)?;
+            let pos_out = if has_positions {
+                let pos_name = segment_file_name(segment, suffix, POS_EXTENSION);
+                Some(dir.create_output(&pos_name)?)
+            } else {
+                None
+            };
+            (doc_out, meta_out, pos_out)
         };
+
+        codec_util::write_index_header(&mut *doc_out, DOC_CODEC, VERSION_CURRENT, id, suffix)?;
+        codec_util::write_index_header(&mut *meta_out, META_CODEC, VERSION_CURRENT, id, suffix)?;
+
+        if let Some(ref mut pos_out) = pos_out {
+            codec_util::write_index_header(&mut **pos_out, POS_CODEC, VERSION_CURRENT, id, suffix)?;
+        }
 
         Ok(Self {
             doc_out,
@@ -309,10 +316,10 @@ impl PostingsWriter {
                 let mut pe = PositionEncoder::new();
                 let mut last_pos = 0i32;
                 for &pos in positions {
-                    pe.add_position(pos - last_pos, pos_out)?;
+                    pe.add_position(pos - last_pos, &mut **pos_out)?;
                     last_pos = pos;
                 }
-                last_pos_block_offset = pe.finish(pos_out, total_term_freq, pos_start_fp)?;
+                last_pos_block_offset = pe.finish(&mut **pos_out, total_term_freq, pos_start_fp)?;
             }
 
             Ok(IntBlockTermState {
@@ -350,7 +357,7 @@ impl PostingsWriter {
             }
 
             write_vint_block(
-                &mut self.doc_out,
+                &mut *self.doc_out,
                 &mut doc_deltas,
                 &freqs,
                 doc_freq as usize,
@@ -370,11 +377,11 @@ impl PostingsWriter {
                 for &(_, _, positions) in postings {
                     let mut last_pos = 0i32;
                     for &pos in positions {
-                        pe.add_position(pos - last_pos, pos_out)?;
+                        pe.add_position(pos - last_pos, &mut **pos_out)?;
                         last_pos = pos;
                     }
                 }
-                last_pos_block_offset = pe.finish(pos_out, total_term_freq, pos_start_fp)?;
+                last_pos_block_offset = pe.finish(&mut **pos_out, total_term_freq, pos_start_fp)?;
             }
 
             Ok(IntBlockTermState {
@@ -424,7 +431,7 @@ impl PostingsWriter {
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
                 let mut last_pos = 0i32;
                 for &pos in positions {
-                    pe.add_position(pos - last_pos, pos_out)?;
+                    pe.add_position(pos - last_pos, &mut **pos_out)?;
                     last_pos = pos;
                 }
             }
@@ -473,7 +480,7 @@ impl PostingsWriter {
         // Write remaining position VInt tail
         let mut last_pos_block_offset = -1i64;
         if write_positions && let Some(ref mut pos_out) = self.pos_out {
-            last_pos_block_offset = pe.finish(pos_out, total_term_freq, pos_start_fp)?;
+            last_pos_block_offset = pe.finish(&mut **pos_out, total_term_freq, pos_start_fp)?;
         }
 
         // Copy impact metadata back from BlockFlushState
@@ -534,16 +541,17 @@ impl PostingsWriter {
         Ok(())
     }
 
-    /// Finalize: write footers, return [`SegmentFile`] pairs.
-    pub fn finish(mut self) -> io::Result<Vec<crate::store::SegmentFile>> {
-        let mut files = Vec::new();
+    /// Finalize: write footers, drop outputs (auto-persists to directory).
+    /// Returns the file names written.
+    pub fn finish(mut self) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
 
         // Write .doc footer
-        codec_util::write_footer(&mut self.doc_out)?;
+        codec_util::write_footer(&mut *self.doc_out)?;
 
         // Write .pos footer if present
         if let Some(ref mut pos_out) = self.pos_out {
-            codec_util::write_footer(pos_out)?;
+            codec_util::write_footer(&mut **pos_out)?;
         }
 
         // Write .psm metadata: impact stats + file lengths + footer
@@ -557,19 +565,17 @@ impl PostingsWriter {
             .write_le_long(self.doc_out.file_pointer() as i64)?;
         if let Some(ref pos_out) = self.pos_out {
             self.meta_out.write_le_long(pos_out.file_pointer() as i64)?;
-            // No .pay file in our MVP
         }
-        codec_util::write_footer(&mut self.meta_out)?;
+        codec_util::write_footer(&mut *self.meta_out)?;
 
-        files.push(self.doc_out.into_inner());
-
-        if let Some(pos_out) = self.pos_out {
-            files.push(pos_out.into_inner());
+        names.push(self.doc_out.name().to_string());
+        if let Some(ref pos_out) = self.pos_out {
+            names.push(pos_out.name().to_string());
         }
+        names.push(self.meta_out.name().to_string());
 
-        files.push(self.meta_out.into_inner());
-
-        Ok(files)
+        // Dropping self auto-persists all outputs to directory
+        Ok(names)
     }
 }
 
@@ -659,10 +665,16 @@ fn write_vint_block_impl(
 mod tests {
     use super::*;
     use crate::index::PointDimensionConfig;
+    use crate::store::{Directory, MemoryDirectory, SharedDirectory};
+
+    fn test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
 
     #[test]
     fn test_singleton_term() {
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings = vec![(5, 1, [].as_slice())];
         let state = pw
             .write_term(&postings, IndexOptions::DocsAndFreqs)
@@ -677,7 +689,8 @@ mod tests {
 
     #[test]
     fn test_multi_doc_term_with_freqs() {
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings = vec![
             (0, 1, [].as_slice()),
             (5, 3, [].as_slice()),
@@ -698,7 +711,8 @@ mod tests {
 
     #[test]
     fn test_multi_doc_term_docs_only() {
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings = vec![(7, 1, [].as_slice()), (11, 1, [].as_slice())];
         let header_size = pw.doc_out.file_pointer();
         let state = pw.write_term(&postings, IndexOptions::Docs).unwrap();
@@ -711,8 +725,9 @@ mod tests {
 
     #[test]
     fn test_term_with_positions_vint_tail() {
-        // Ported from Lucene103PostingsWriter: totalTermFreq < BLOCK_SIZE uses VInt tail only
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        // totalTermFreq < BLOCK_SIZE uses VInt tail only
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
         let positions0 = vec![0, 5, 10];
         let positions1 = vec![3];
         let postings = vec![(0, 3, positions0.as_slice()), (2, 1, positions1.as_slice())];
@@ -726,10 +741,13 @@ mod tests {
         // No PFOR blocks: last_pos_block_offset must be -1
         assert_eq!(state.last_pos_block_offset, -1);
 
-        // Verify positions were written as VInts
-        let pos_out = pw.pos_out.as_ref().unwrap();
+        // Finish writing to flush output to directory
+        let names = pw.finish().unwrap();
+        let pos_name = names.iter().find(|n| n.ends_with(".pos")).unwrap();
+        let pos_data = dir.lock().unwrap().read_file(pos_name).unwrap();
         let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
-        let pos_bytes = &pos_out.bytes()[pos_header_size..];
+        let footer_size = codec_util::FOOTER_LENGTH;
+        let pos_bytes = &pos_data[pos_header_size..pos_data.len() - footer_size];
         // 4 positions with deltas: [0, 5, 10] -> deltas [0, 5, 5], [3] -> delta [3]
         // VInt encoding: 0, 5, 5, 3 = 4 bytes (all single-byte VInts)
         assert_eq!(pos_bytes.len(), 4);
@@ -742,7 +760,8 @@ mod tests {
     #[test]
     fn test_term_with_positions_pfor_one_block() {
         // Ported from Lucene103PostingsWriter: exactly BLOCK_SIZE positions = one PFOR block, no tail
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         // Create a single doc with exactly 128 positions (0, 1, 2, ..., 127)
         let positions: Vec<i32> = (0..postings_format::BLOCK_SIZE as i32).collect();
@@ -770,7 +789,8 @@ mod tests {
     #[test]
     fn test_term_with_positions_pfor_plus_tail() {
         // Ported from Lucene103PostingsWriter: totalTermFreq > BLOCK_SIZE = PFOR blocks + VInt tail
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         // 130 positions across 2 docs: first doc has 128 positions, second has 2
         let positions0: Vec<i32> = (0..128).collect();
@@ -812,7 +832,8 @@ mod tests {
     #[test]
     fn test_term_with_positions_pfor_multiple_blocks() {
         // Ported from Lucene103PostingsWriter: multiple PFOR blocks + tail
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         // 300 positions: 2 full PFOR blocks (256) + 44 VInt tail
         let positions: Vec<i32> = (0..300).collect();
@@ -848,7 +869,8 @@ mod tests {
     #[test]
     fn test_term_with_positions_exactly_two_blocks() {
         // Ported from Lucene103PostingsWriter: exactly 2*BLOCK_SIZE positions = 2 PFOR blocks, no tail
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         let positions: Vec<i32> = (0..256).collect();
         let postings = vec![(0, 256, positions.as_slice())];
@@ -877,7 +899,8 @@ mod tests {
     #[test]
     fn test_term_with_positions_multi_doc_block_boundary() {
         // Verify position deltas reset per document when spanning a PFOR block boundary
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         // Doc 0: 100 positions (0..100), Doc 1: 50 positions (0..50)
         // Total = 150 > BLOCK_SIZE, so we get 1 PFOR block + 22 VInt tail
@@ -905,7 +928,8 @@ mod tests {
     #[test]
     fn test_term_with_positions_large_deltas() {
         // Ported from TestPForUtil: positions with large gaps need more bits per value
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         // 128 positions with gaps of 1000 each — requires ~10 bits per value
         let positions: Vec<i32> = (0..128).map(|i| i * 1000).collect();
@@ -935,8 +959,8 @@ mod tests {
     #[test]
     fn test_term_with_positions_pfor_compresses_real_data() {
         // Verify PFOR is more compact than VInt for realistic position data
-        // Ported from TestPForUtil / BasePostingsFormatTestCase
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         // 256 positions with varied gaps (simulating real text positions)
         // Mix of common deltas (1-5) with occasional larger gaps
@@ -976,7 +1000,8 @@ mod tests {
 
     #[test]
     fn test_encode_term_singleton() {
-        let pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let fi = FieldInfo::new(
             "test".to_string(),
             0,
@@ -1009,22 +1034,23 @@ mod tests {
 
     #[test]
     fn test_finish_produces_files() {
-        let pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
-        let files = pw.finish().unwrap();
+        let dir = test_directory();
+        let pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let names = pw.finish().unwrap();
 
         // Should produce .doc, .pos, .psm files
-        assert_eq!(files.len(), 3);
-        assert!(files[0].name.ends_with(".doc"));
-        assert!(files[1].name.ends_with(".pos"));
-        assert!(files[2].name.ends_with(".psm"));
+        assert_eq!(names.len(), 3);
+        assert!(names[0].ends_with(".doc"));
+        assert!(names[1].ends_with(".pos"));
+        assert!(names[2].ends_with(".psm"));
 
         // Each file should have at least header + footer
-        for f in &files {
+        for name in &names {
+            let data = dir.lock().unwrap().read_file(name).unwrap();
             assert!(
-                f.data.len() >= codec_util::FOOTER_LENGTH,
-                "file {} too small: {} bytes",
-                f.name,
-                f.data.len()
+                data.len() >= codec_util::FOOTER_LENGTH,
+                "file {name} too small: {} bytes",
+                data.len()
             );
         }
     }
@@ -1092,7 +1118,8 @@ mod tests {
     #[test]
     fn test_block_encoding_128_docs() {
         // Exactly 128 docs: 1 full block, no VInt tail
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
         let header_size = pw.doc_out.file_pointer();
@@ -1115,7 +1142,8 @@ mod tests {
     #[test]
     fn test_block_encoding_130_docs() {
         // 130 docs: 1 full block + 2 VInt tail docs
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings: Vec<(i32, i32, &[i32])> =
             (0..130).map(|i| (i, 1i32, [].as_slice())).collect();
         let header_size = pw.doc_out.file_pointer();
@@ -1135,7 +1163,8 @@ mod tests {
     #[test]
     fn test_block_encoding_256_docs() {
         // 256 docs: 2 full blocks, no tail
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings: Vec<(i32, i32, &[i32])> =
             (0..256).map(|i| (i, 1i32, [].as_slice())).collect();
         let header_size = pw.doc_out.file_pointer();
@@ -1155,7 +1184,8 @@ mod tests {
     #[test]
     fn test_block_encoding_with_positions() {
         // 128+ docs with positions: verify pos skip data is present
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], true).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
         // Each doc has 2 positions [0, 1]
         let positions = vec![0i32, 1];
         let postings: Vec<(i32, i32, &[i32])> =
@@ -1180,7 +1210,8 @@ mod tests {
     fn test_block_encoding_consecutive_docs() {
         // Docs 0..127 with deltas all = 1 → doc_range == 128 == BLOCK_SIZE
         // This should use the byte(0) consecutive encoding
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         // doc IDs: 0, 1, 2, ..., 127 — deltas from -1 are 1, 1, 1, ... = range 128
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
@@ -1196,7 +1227,8 @@ mod tests {
     #[test]
     fn test_block_encoding_sparse_docs() {
         // Sparse doc IDs with large deltas → uses FOR encoding
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         // doc IDs: 0, 100, 200, ..., 12700 — delta = 100 each (except first which is 1 from -1)
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i * 100, 1i32, [].as_slice())).collect();
@@ -1211,7 +1243,8 @@ mod tests {
     #[test]
     fn test_block_encoding_docs_only() {
         // DOCS-only index option (no freqs) with 128 docs
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
         let state = pw.write_term(&postings, IndexOptions::Docs).unwrap();
@@ -1224,7 +1257,8 @@ mod tests {
     #[test]
     fn test_block_encoding_varied_freqs() {
         // 128 docs with varied frequencies
-        let mut pw = PostingsWriter::new("_0", "", &[0u8; 16], false).unwrap();
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, (i % 10) + 1, [].as_slice())).collect();
         let state = pw

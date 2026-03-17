@@ -67,11 +67,8 @@ impl Directory for FSDirectory {
         fs::rename(&src_path, &dst_path)
     }
 
-    fn file_bytes(&self, _name: &str) -> io::Result<&[u8]> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "file_bytes not supported by FSDirectory; use MemoryDirectory for compound file building",
-        ))
+    fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
+        fs::read(self.path.join(name))
     }
 
     fn write_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
@@ -263,15 +260,16 @@ mod tests {
     }
 
     #[test]
-    fn test_fs_directory_file_bytes() {
-        let dir_path = temp_dir("file_bytes");
-        let dir = FSDirectory::open(&dir_path).unwrap();
+    fn test_fs_directory_read_file() {
+        let dir_path = temp_dir("read_file");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
-        // FSDirectory does not support file_bytes — it should return Err
-        let result = dir.file_bytes("any_file.bin");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
+        dir.write_file("test.bin", b"hello world").unwrap();
+        let data = dir.read_file("test.bin").unwrap();
+        assert_eq!(data, b"hello world");
+
+        assert!(dir.read_file("nonexistent.bin").is_err());
     }
 
     #[test]

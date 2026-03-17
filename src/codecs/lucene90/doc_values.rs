@@ -11,7 +11,7 @@ use crate::index::FieldInfos;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
 use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, IndexOutput, SegmentFile, VecOutput};
+use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
 use crate::util::compress::lz4;
 use crate::util::packed::{DirectMonotonicWriter, DirectWriter, unsigned_bits_required};
@@ -40,25 +40,28 @@ const TERMS_DICT_REVERSE_INDEX_MASK: usize = TERMS_DICT_REVERSE_INDEX_SIZE - 1;
 const DIRECT_MONOTONIC_BLOCK_SHIFT: u32 = 16;
 
 /// Writes doc values files (.dvm, .dvd) for a segment.
-/// Returns a list of [`SegmentFile`]s.
+/// Returns the names of the files written.
 pub fn write(
+    directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
     field_infos: &FieldInfos,
     per_field: &HashMap<String, PerFieldData>,
     num_docs: i32,
-) -> io::Result<Vec<SegmentFile>> {
+) -> io::Result<Vec<String>> {
     let dvm_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
     let dvd_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
 
-    let mut meta = MemoryIndexOutput::new(dvm_name);
-    let mut data = MemoryIndexOutput::new(dvd_name);
+    let (mut meta, mut data) = {
+        let mut dir = directory.lock().unwrap();
+        (dir.create_output(&dvm_name)?, dir.create_output(&dvd_name)?)
+    };
 
-    codec_util::write_index_header(&mut meta, META_CODEC, VERSION, segment_id, segment_suffix)?;
-    codec_util::write_index_header(&mut data, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_util::write_index_header(&mut *meta, META_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_util::write_index_header(&mut *data, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
 
     // Iterate fields in field-number order
     for fi in field_infos.iter() {
@@ -80,7 +83,7 @@ pub fn write(
                 );
                 meta.write_le_int(fi.number() as i32)?;
                 meta.write_byte(SORTED_NUMERIC)?;
-                add_sorted_numeric_field(&mut meta, &mut data, vals, num_docs)?;
+                add_sorted_numeric_field(&mut *meta, &mut *data, vals, num_docs)?;
             }
             DocValuesAccumulator::SortedSet(vals) => {
                 debug!(
@@ -91,7 +94,7 @@ pub fn write(
                 );
                 meta.write_le_int(fi.number() as i32)?;
                 meta.write_byte(SORTED_SET)?;
-                add_sorted_set_field(&mut meta, &mut data, vals, num_docs)?;
+                add_sorted_set_field(&mut *meta, &mut *data, vals, num_docs)?;
             }
             DocValuesAccumulator::None => continue,
         }
@@ -101,10 +104,10 @@ pub fn write(
     meta.write_le_int(-1)?;
 
     // Write footers
-    codec_util::write_footer(&mut meta)?;
-    codec_util::write_footer(&mut data)?;
+    codec_util::write_footer(&mut *meta)?;
+    codec_util::write_footer(&mut *data)?;
 
-    Ok(vec![meta.into_inner(), data.into_inner()])
+    Ok(vec![dvm_name, dvd_name])
 }
 
 /// Adds a SORTED_NUMERIC field.
@@ -563,8 +566,13 @@ mod tests {
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
     use crate::index::{FieldInfo, FieldInfos};
+    use crate::store::{Directory, MemoryDirectory, SharedDirectory};
     use crate::test_util::{self, TestDataReader};
     use std::collections::HashMap;
+
+    fn make_test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
 
     fn make_field_info(name: &str, number: u32, dv_type: DocValuesType) -> FieldInfo {
         test_util::make_field_info(name, number, true, IndexOptions::None, dv_type)
@@ -630,13 +638,23 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "Lucene90_0", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name, "_0_Lucene90_0.dvm");
-        assert_eq!(result[1].name, "_0_Lucene90_0.dvd");
+        assert_eq!(result[0], "_0_Lucene90_0.dvm");
+        assert_eq!(result[1], "_0_Lucene90_0.dvd");
 
-        let dvm = &result[0].data;
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
 
         // Verify codec magic
         assert_eq!(&dvm[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -694,10 +712,20 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "Lucene90_0", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
 
-        let dvm = &result[0].data;
-        let dvd = &result[1].data;
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
 
         // Should succeed and produce valid output
         assert!(!dvm.is_empty());
@@ -740,10 +768,20 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "Lucene90_0", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
 
-        let dvm = &result[0].data;
-        let dvd = &result[1].data;
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
 
         assert!(!dvm.is_empty());
         assert!(!dvd.is_empty());
@@ -784,9 +822,19 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 1).unwrap();
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            1,
+        )
+        .unwrap();
 
-        let dvm = &result[0].data;
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
 
         // EOF marker is 4 bytes before footer
         let eof_pos = dvm.len() - FOOTER_LENGTH - 4;
@@ -833,13 +881,23 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "Lucene90_0", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name, "_0_Lucene90_0.dvm");
-        assert_eq!(result[1].name, "_0_Lucene90_0.dvd");
+        assert_eq!(result[0], "_0_Lucene90_0.dvm");
+        assert_eq!(result[1], "_0_Lucene90_0.dvd");
 
-        let dvm = &result[0].data;
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
 
         // Parse: after header, first field (path=0, SORTED_SET)
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -964,12 +1022,22 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "Lucene90_0", &segment_id, &field_infos, &per_field, 3).unwrap();
-        let dvm = &result[0].data;
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
 
         // Parse the .dvm like Java's Lucene90DocValuesProducer.readFields()
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
-        let mut reader = DvmReader::new(dvm, meta_header_len);
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
 
         // First field: path (#0, SORTED_SET)
         let field0 = reader.0.read_le_int();
@@ -1013,7 +1081,17 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
 
         // Should complete without error
         assert_eq!(result.len(), 2);
@@ -1036,7 +1114,17 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
     }
 }

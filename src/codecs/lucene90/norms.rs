@@ -10,8 +10,7 @@ use crate::codecs::codec_util;
 use crate::index::FieldInfos;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::PerFieldData;
-use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, IndexOutput, SegmentFile};
+use crate::store::{DataOutput, SharedDirectory};
 
 // File extensions
 const DATA_EXTENSION: &str = "nvd";
@@ -23,26 +22,29 @@ const META_CODEC: &str = "Lucene90NormsMetadata";
 const VERSION: i32 = 0;
 
 /// Writes norms files (.nvm, .nvd) for a segment.
-/// Returns a list of [`SegmentFile`]s.
+/// Returns the names of the files written.
 pub fn write(
+    directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
     field_infos: &FieldInfos,
     per_field: &HashMap<String, PerFieldData>,
     num_docs: i32,
-) -> io::Result<Vec<SegmentFile>> {
+) -> io::Result<Vec<String>> {
     let nvm_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
     let nvd_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
 
-    let mut nvm = MemoryIndexOutput::new(nvm_name);
-    let mut nvd = MemoryIndexOutput::new(nvd_name);
+    let (mut nvm, mut nvd) = {
+        let mut dir = directory.lock().unwrap();
+        (dir.create_output(&nvm_name)?, dir.create_output(&nvd_name)?)
+    };
 
     // Write index headers
-    codec_util::write_index_header(&mut nvm, META_CODEC, VERSION, segment_id, segment_suffix)?;
-    codec_util::write_index_header(&mut nvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_util::write_index_header(&mut *nvm, META_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_util::write_index_header(&mut *nvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
 
     // Iterate fields in field-number order
     for fi in field_infos.iter() {
@@ -52,7 +54,7 @@ pub fn write(
 
         let Some(pfd) = per_field.get(fi.name()) else {
             // Field declared with norms but no documents contributed norms
-            write_empty_norms_metadata(&mut nvm, fi.number())?;
+            write_empty_norms_metadata(&mut *nvm, fi.number())?;
             continue;
         };
         let (norms, norms_docs) = (&pfd.norms, &pfd.norms_docs);
@@ -65,7 +67,7 @@ pub fn write(
                 fi.name(),
                 fi.number()
             );
-            write_empty_norms_metadata(&mut nvm, fi.number())?;
+            write_empty_norms_metadata(&mut *nvm, fi.number())?;
             continue;
         }
 
@@ -102,7 +104,7 @@ pub fn write(
                 nvm.write_le_long(data_offset)?; // norms_offset
 
                 // Write norm values to .nvd
-                write_norm_values(&mut nvd, norms, bytes_per_norm)?;
+                write_norm_values(&mut *nvd, norms, bytes_per_norm)?;
             }
         } else {
             // SPARSE pattern — not implemented for MVP
@@ -119,10 +121,10 @@ pub fn write(
     nvm.write_le_int(-1)?;
 
     // Write footers
-    codec_util::write_footer(&mut nvm)?;
-    codec_util::write_footer(&mut nvd)?;
+    codec_util::write_footer(&mut *nvm)?;
+    codec_util::write_footer(&mut *nvd)?;
 
-    Ok(vec![nvm.into_inner(), nvd.into_inner()])
+    Ok(vec![nvm_name, nvd_name])
 }
 
 /// Writes metadata for a field with no norms (EMPTY pattern).
@@ -179,10 +181,9 @@ mod tests {
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
     use crate::index::{FieldInfo, FieldInfos};
+    use crate::store::{Directory, MemoryDirectory, SharedDirectory};
     use crate::test_util;
     use std::collections::HashMap;
-
-    // Ported from org.apache.lucene.codecs.lucene90.TestLucene90NormsFormat
 
     fn make_field_info(name: &str, number: u32, has_norms: bool) -> FieldInfo {
         test_util::make_field_info(
@@ -204,6 +205,10 @@ mod tests {
         }
     }
 
+    fn test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
+
     /// Size of one metadata entry in bytes:
     /// 4 (field_number) + 8 (offset) + 8 (length) + 2 (jump_table) + 1 (rank_power)
     /// + 4 (num_docs) + 1 (bytes_per_norm) + 8 (norms_offset) = 36
@@ -223,14 +228,15 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
 
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name, "_0.nvm");
-        assert_eq!(result[1].name, "_0.nvd");
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], "_0.nvm");
+        assert_eq!(names[1], "_0.nvd");
 
-        let nvm = &result[0].data;
-        let nvd = &result[1].data;
+        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
 
         // Both files should start with codec magic
         assert_eq!(&nvm[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -302,9 +308,10 @@ mod tests {
         per_field.insert("contents".to_string(), make_per_field_data(vec![], vec![]));
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
 
-        let nvm = &result[0].data;
+        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         let entry = &nvm[meta_header_len..];
 
@@ -330,9 +337,10 @@ mod tests {
         let per_field = HashMap::new(); // empty
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
 
-        let nvm = &result[0].data;
+        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         let entry = &nvm[meta_header_len..];
 
@@ -353,10 +361,11 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
 
-        let nvm = &result[0].data;
-        let nvd = &result[1].data;
+        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         let entry = &nvm[meta_header_len..];
 
@@ -391,9 +400,10 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 2).unwrap();
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 2).unwrap();
 
-        let nvm = &result[0].data;
+        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         let entry = &nvm[meta_header_len..];
 
@@ -416,10 +426,20 @@ mod tests {
         per_field.insert("f".to_string(), make_per_field_data(vec![10], vec![0]));
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "Lucene90_0", &segment_id, &field_infos, &per_field, 1).unwrap();
+        let dir = test_directory();
+        let names = write(
+            &dir,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            1,
+        )
+        .unwrap();
 
-        assert_eq!(result[0].name, "_0_Lucene90_0.nvm");
-        assert_eq!(result[1].name, "_0_Lucene90_0.nvd");
+        assert_eq!(names[0], "_0_Lucene90_0.nvm");
+        assert_eq!(names[1], "_0_Lucene90_0.nvd");
     }
 
     #[test]
@@ -464,10 +484,11 @@ mod tests {
         );
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
 
-        let nvm = &result[0].data;
-        let nvd = &result[1].data;
+        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
 
         // First entry: "alpha" (field 0), constant norms

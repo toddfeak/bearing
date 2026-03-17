@@ -4,13 +4,19 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::{Arc, Mutex};
 
 use crate::store::checksum::CRC32;
 use crate::store::{DataOutput, Directory, IndexOutput, SegmentFile};
 
-/// In-memory directory backed by a HashMap of byte vectors.
+/// In-memory directory backed by a shared HashMap of byte vectors.
+///
+/// Uses `Arc<Mutex<HashMap>>` for interior mutability so that outputs created
+/// by [`create_output`](Directory::create_output) can auto-persist their bytes
+/// back into the directory on drop, without requiring the caller to hold a
+/// mutable reference to the directory.
 pub struct MemoryDirectory {
-    files: HashMap<String, Vec<u8>>,
+    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 impl Default for MemoryDirectory {
@@ -20,26 +26,32 @@ impl Default for MemoryDirectory {
 }
 
 impl MemoryDirectory {
+    /// Creates a new empty in-memory directory.
     pub fn new() -> Self {
         Self {
-            files: HashMap::new(),
+            files: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 impl Directory for MemoryDirectory {
     fn create_output(&mut self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
-        Ok(Box::new(MemoryIndexOutput::new(name.to_string())))
+        Ok(Box::new(MemoryDirectoryOutput::new(
+            name.to_string(),
+            Arc::clone(&self.files),
+        )))
     }
 
     fn list_all(&self) -> io::Result<Vec<String>> {
-        let mut names: Vec<String> = self.files.keys().cloned().collect();
+        let files = self.files.lock().unwrap();
+        let mut names: Vec<String> = files.keys().cloned().collect();
         names.sort();
         Ok(names)
     }
 
     fn file_length(&self, name: &str) -> io::Result<u64> {
-        match self.files.get(name) {
+        let files = self.files.lock().unwrap();
+        match files.get(name) {
             Some(data) => Ok(data.len() as u64),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -49,7 +61,8 @@ impl Directory for MemoryDirectory {
     }
 
     fn delete_file(&mut self, name: &str) -> io::Result<()> {
-        match self.files.remove(name) {
+        let mut files = self.files.lock().unwrap();
+        match files.remove(name) {
             Some(_) => Ok(()),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -59,9 +72,10 @@ impl Directory for MemoryDirectory {
     }
 
     fn rename(&mut self, source: &str, dest: &str) -> io::Result<()> {
-        match self.files.remove(source) {
+        let mut files = self.files.lock().unwrap();
+        match files.remove(source) {
             Some(data) => {
-                self.files.insert(dest.to_string(), data);
+                files.insert(dest.to_string(), data);
                 Ok(())
             }
             None => Err(io::Error::new(
@@ -71,9 +85,10 @@ impl Directory for MemoryDirectory {
         }
     }
 
-    fn file_bytes(&self, name: &str) -> io::Result<&[u8]> {
-        match self.files.get(name) {
-            Some(data) => Ok(data.as_slice()),
+    fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
+        let files = self.files.lock().unwrap();
+        match files.get(name) {
+            Some(data) => Ok(data.clone()),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("file not found: {name}"),
@@ -82,20 +97,83 @@ impl Directory for MemoryDirectory {
     }
 
     fn write_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
-        self.files.insert(name.to_string(), data.to_vec());
+        let mut files = self.files.lock().unwrap();
+        files.insert(name.to_string(), data.to_vec());
         Ok(())
     }
 }
 
 impl MemoryDirectory {
-    /// Inserts a completed MemoryIndexOutput's bytes into this directory.
-    /// Call this after closing the output to persist its data.
+    /// Inserts a completed [`MemoryIndexOutput`]'s bytes into this directory.
     pub fn insert_output(&mut self, output: MemoryIndexOutput) {
-        self.files.insert(output.name, output.buf);
+        let mut files = self.files.lock().unwrap();
+        files.insert(output.name, output.buf);
     }
 }
 
-/// In-memory IndexOutput that writes to a Vec<u8> with running CRC32.
+/// Auto-persisting IndexOutput for [`MemoryDirectory`].
+///
+/// Writes are buffered in a local `Vec<u8>`. On drop, the buffer is inserted
+/// into the shared directory map, making the file visible to other callers.
+struct MemoryDirectoryOutput {
+    name: String,
+    buf: Vec<u8>,
+    crc: CRC32,
+    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+}
+
+impl MemoryDirectoryOutput {
+    fn new(name: String, files: Arc<Mutex<HashMap<String, Vec<u8>>>>) -> Self {
+        Self {
+            name,
+            buf: Vec::new(),
+            crc: CRC32::new(),
+            files,
+        }
+    }
+}
+
+impl Drop for MemoryDirectoryOutput {
+    fn drop(&mut self) {
+        let buf = std::mem::take(&mut self.buf);
+        let name = std::mem::take(&mut self.name);
+        self.files.lock().unwrap().insert(name, buf);
+    }
+}
+
+impl DataOutput for MemoryDirectoryOutput {
+    fn write_byte(&mut self, b: u8) -> io::Result<()> {
+        self.buf.push(b);
+        self.crc.update_byte(b);
+        Ok(())
+    }
+
+    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.buf.extend_from_slice(buf);
+        self.crc.update(buf);
+        Ok(())
+    }
+}
+
+impl IndexOutput for MemoryDirectoryOutput {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn file_pointer(&self) -> u64 {
+        self.buf.len() as u64
+    }
+
+    fn checksum(&self) -> u64 {
+        self.crc.value()
+    }
+}
+
+/// Standalone in-memory IndexOutput that writes to a `Vec<u8>` with running CRC32.
+///
+/// Unlike [`MemoryDirectoryOutput`], this does **not** auto-persist to a directory.
+/// Use it for unit tests (via [`bytes()`](MemoryIndexOutput::bytes)) and as scratch
+/// buffers (e.g., `address_buffer` in doc_values).
 pub struct MemoryIndexOutput {
     name: String,
     buf: Vec<u8>,
@@ -103,6 +181,7 @@ pub struct MemoryIndexOutput {
 }
 
 impl MemoryIndexOutput {
+    /// Creates a new standalone in-memory output.
     pub fn new(name: String) -> Self {
         Self {
             name,
@@ -167,14 +246,27 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_directory_create_output_auto_persists() {
+        let mut dir = MemoryDirectory::new();
+
+        {
+            let mut out = dir.create_output("auto.bin").unwrap();
+            out.write_bytes(b"auto-persisted").unwrap();
+            // Output dropped here — should auto-persist
+        }
+
+        assert_eq!(dir.read_file("auto.bin").unwrap(), b"auto-persisted");
+        assert_eq!(dir.file_length("auto.bin").unwrap(), 14);
+    }
+
+    #[test]
     fn test_memory_directory_create_and_list() {
         let mut dir = MemoryDirectory::new();
 
-        let out = MemoryIndexOutput::new("file1.txt".to_string());
-        dir.insert_output(out);
-
-        let out = MemoryIndexOutput::new("file2.txt".to_string());
-        dir.insert_output(out);
+        {
+            let _out = dir.create_output("file1.txt").unwrap();
+            let _out = dir.create_output("file2.txt").unwrap();
+        }
 
         let files = dir.list_all().unwrap();
         assert_eq!(files, vec!["file1.txt", "file2.txt"]);
@@ -213,13 +305,13 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_directory_file_bytes() {
+    fn test_memory_directory_read_file() {
         let mut dir = MemoryDirectory::new();
         let mut out = MemoryIndexOutput::new("test.bin".to_string());
         out.write_bytes(b"hello world").unwrap();
         dir.insert_output(out);
 
-        assert_eq!(dir.file_bytes("test.bin").unwrap(), b"hello world");
+        assert_eq!(dir.read_file("test.bin").unwrap(), b"hello world");
     }
 
     #[test]

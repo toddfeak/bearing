@@ -9,8 +9,7 @@ use crate::codecs::codec_util;
 use crate::document::StoredValue;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::StoredDoc;
-use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, IndexOutput, SegmentFile, VecOutput};
+use crate::store::{DataOutput, SharedDirectory, VecOutput};
 use crate::util::bit_util;
 use crate::util::compress::lz4;
 use crate::util::packed::DirectMonotonicWriter;
@@ -53,14 +52,15 @@ const HOUR_ENCODING: u8 = 0x80;
 const DAY_ENCODING: u8 = 0xC0;
 
 /// Writes stored fields files (.fdt, .fdx, .fdm) for a segment.
-/// Returns a list of [`SegmentFile`]s.
+/// Returns the names of the files written.
 pub fn write(
+    directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
     stored_docs: &[StoredDoc],
     num_docs: i32,
-) -> io::Result<Vec<SegmentFile>> {
+) -> io::Result<Vec<String>> {
     let fdt_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, FIELDS_EXTENSION);
     let fdx_name =
@@ -72,27 +72,32 @@ pub fn write(
         "stored_fields: writing {fdt_name}, {fdx_name}, {fdm_name} for segment={segment_name:?}, num_docs={num_docs}"
     );
 
-    let mut fdt = MemoryIndexOutput::new(fdt_name);
-    let mut fdx = MemoryIndexOutput::new(fdx_name);
-    let mut fdm = MemoryIndexOutput::new(fdm_name);
+    let (mut fdt, mut fdx, mut fdm) = {
+        let mut dir = directory.lock().unwrap();
+        (
+            dir.create_output(&fdt_name)?,
+            dir.create_output(&fdx_name)?,
+            dir.create_output(&fdm_name)?,
+        )
+    };
 
     // Write headers
     codec_util::write_index_header(
-        &mut fdt,
+        &mut *fdt,
         FORMAT_NAME,
         FDT_VERSION,
         segment_id,
         segment_suffix,
     )?;
     codec_util::write_index_header(
-        &mut fdx,
+        &mut *fdx,
         INDEX_CODEC_NAME_IDX,
         FDX_VERSION,
         segment_id,
         segment_suffix,
     )?;
     codec_util::write_index_header(
-        &mut fdm,
+        &mut *fdm,
         INDEX_CODEC_NAME_META,
         FDM_VERSION,
         segment_id,
@@ -172,7 +177,7 @@ pub fn write(
         fdt.write_vint(((num_buffered_docs as i32) << 2) | dirty_bit | sliced_bit)?;
 
         // Write numStoredFields
-        save_ints(&num_stored_fields, num_buffered_docs, &mut fdt)?;
+        save_ints(&num_stored_fields, num_buffered_docs, &mut *fdt)?;
 
         // Transform end_offsets to lengths
         let mut lengths = Vec::with_capacity(num_buffered_docs);
@@ -185,16 +190,16 @@ pub fn write(
         }
 
         // Write lengths
-        save_ints(&lengths, num_buffered_docs, &mut fdt)?;
+        save_ints(&lengths, num_buffered_docs, &mut *fdt)?;
 
         // Compress and write stored field data using LZ4 with preset dict
         if !sliced {
-            compress_lz4_preset_dict(data, &mut fdt)?;
+            compress_lz4_preset_dict(data, &mut *fdt)?;
         } else {
             let mut offset = 0;
             while offset < data.len() {
                 let l = std::cmp::min(CHUNK_SIZE as usize, data.len() - offset);
-                compress_lz4_preset_dict(&data[offset..offset + l], &mut fdt)?;
+                compress_lz4_preset_dict(&data[offset..offset + l], &mut *fdt)?;
                 offset += CHUNK_SIZE as usize;
             }
         }
@@ -218,7 +223,7 @@ pub fn write(
     if total_chunks > 0 {
         docs_writer.add(num_docs as i64);
     }
-    docs_writer.finish(&mut fdm, &mut fdx)?;
+    docs_writer.finish(&mut *fdm, &mut *fdx)?;
 
     // docsEndPointer = startPointersStartPointer
     fdm.write_le_long(fdx.file_pointer() as i64)?;
@@ -229,13 +234,13 @@ pub fn write(
         fp_writer.add(chunk_start_pointer);
     }
     fp_writer.add(max_pointer);
-    fp_writer.finish(&mut fdm, &mut fdx)?;
+    fp_writer.finish(&mut *fdm, &mut *fdx)?;
 
     // startPointersEndPointer
     fdm.write_le_long(fdx.file_pointer() as i64)?;
 
     // .fdx footer
-    codec_util::write_footer(&mut fdx)?;
+    codec_util::write_footer(&mut *fdx)?;
 
     // maxPointer (into .fdt)
     fdm.write_le_long(max_pointer)?;
@@ -250,10 +255,10 @@ pub fn write(
     fdm.write_vlong(num_dirty_docs)?;
 
     // Footers for .fdm and .fdt
-    codec_util::write_footer(&mut fdm)?;
-    codec_util::write_footer(&mut fdt)?;
+    codec_util::write_footer(&mut *fdm)?;
+    codec_util::write_footer(&mut *fdt)?;
 
-    Ok(vec![fdt.into_inner(), fdx.into_inner(), fdm.into_inner()])
+    Ok(vec![fdt_name, fdx_name, fdm_name])
 }
 
 // ============================================================
@@ -518,6 +523,11 @@ fn write_zdouble(out: &mut dyn DataOutput, d: f64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{Directory, MemoryDirectory, MemoryIndexOutput, SharedDirectory};
+
+    fn test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
 
     #[test]
     fn test_write_tlong_zero() {
@@ -619,35 +629,39 @@ mod tests {
         ];
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &stored_docs, 3).unwrap();
-        assert_eq!(result.len(), 3);
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &stored_docs, 3).unwrap();
+        assert_eq!(names.len(), 3);
 
         // Verify filenames
-        assert_eq!(result[0].name, "_0.fdt");
-        assert_eq!(result[1].name, "_0.fdx");
-        assert_eq!(result[2].name, "_0.fdm");
+        assert_eq!(names[0], "_0.fdt");
+        assert_eq!(names[1], "_0.fdx");
+        assert_eq!(names[2], "_0.fdm");
+
+        let fdt_data = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let fdx_data = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let fdm_data = dir.lock().unwrap().read_file(&names[2]).unwrap();
 
         // All files should have content
-        assert!(!result[0].data.is_empty());
-        assert!(!result[1].data.is_empty());
-        assert!(!result[2].data.is_empty());
+        assert!(!fdt_data.is_empty());
+        assert!(!fdx_data.is_empty());
+        assert!(!fdm_data.is_empty());
 
         // Verify .fdt header magic
-        assert_eq!(&result[0].data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
+        assert_eq!(&fdt_data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
 
         // Verify .fdt footer magic
-        let fdt = &result[0].data;
-        let footer_start = fdt.len() - 16;
+        let footer_start = fdt_data.len() - 16;
         assert_eq!(
-            &fdt[footer_start..footer_start + 4],
+            &fdt_data[footer_start..footer_start + 4],
             &[0xc0, 0x28, 0x93, 0xe8]
         );
 
         // Verify .fdx header magic
-        assert_eq!(&result[1].data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
+        assert_eq!(&fdx_data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
 
         // Verify .fdm header magic
-        assert_eq!(&result[2].data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
+        assert_eq!(&fdm_data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
     }
 
     /// Verifies .fdm layout matches Java's FieldsIndexReader read sequence:
@@ -670,9 +684,10 @@ mod tests {
         ];
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &stored_docs, 3).unwrap();
-        let fdm = &result[2].data;
-        let fdx = &result[1].data;
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &stored_docs, 3).unwrap();
+        let fdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
+        let fdx = dir.lock().unwrap().read_file(&names[1]).unwrap();
 
         // Compute header length for the meta codec name
         let hdr_len = codec_util::index_header_length(INDEX_CODEC_NAME_META, "");
@@ -775,24 +790,27 @@ mod tests {
         }];
 
         let segment_id = [1u8; 16];
-        let result = write("_0", "0", &segment_id, &stored_docs, 1).unwrap();
+        let dir = test_directory();
+        let names = write(&dir, "_0", "0", &segment_id, &stored_docs, 1).unwrap();
 
         // With suffix "0", filenames should include it
-        assert_eq!(result[0].name, "_0_0.fdt");
-        assert_eq!(result[1].name, "_0_0.fdx");
-        assert_eq!(result[2].name, "_0_0.fdm");
+        assert_eq!(names[0], "_0_0.fdt");
+        assert_eq!(names[1], "_0_0.fdx");
+        assert_eq!(names[2], "_0_0.fdm");
     }
 
     #[test]
     fn test_write_stored_fields_empty() {
         // No stored docs - should still produce valid files
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &[], 0).unwrap();
-        assert_eq!(result.len(), 3);
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &[], 0).unwrap();
+        assert_eq!(names.len(), 3);
 
         // Files should have at least headers and footers
-        for f in &result {
-            assert!(!f.data.is_empty());
+        let locked = dir.lock().unwrap();
+        for name in &names {
+            assert!(!locked.read_file(name).unwrap().is_empty());
         }
     }
 
@@ -964,11 +982,13 @@ mod tests {
         }];
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &stored_docs, 1).unwrap();
-        assert_eq!(result.len(), 3);
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &stored_docs, 1).unwrap();
+        assert_eq!(names.len(), 3);
         // All files should have content
-        for f in &result {
-            assert!(!f.data.is_empty());
+        let locked = dir.lock().unwrap();
+        for name in &names {
+            assert!(!locked.read_file(name).unwrap().is_empty());
         }
     }
 }

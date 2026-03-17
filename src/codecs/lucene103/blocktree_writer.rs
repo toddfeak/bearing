@@ -11,8 +11,7 @@ use crate::document::IndexOptions;
 use crate::index::index_file_names::segment_file_name;
 use crate::index::indexing_chain::PostingList;
 use crate::index::{FieldInfo, FieldInfos};
-use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, IndexOutput, VecOutput};
+use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
 
 use super::postings_format::{
@@ -50,9 +49,9 @@ struct FieldWriteContext<'a> {
 
 /// Writes .tim, .tip, .tmd files plus delegates to PostingsWriter for .doc/.pos/.psm.
 pub struct BlockTreeTermsWriter {
-    terms_out: MemoryIndexOutput,
-    index_out: MemoryIndexOutput,
-    meta_out: MemoryIndexOutput,
+    terms_out: Box<dyn IndexOutput>,
+    index_out: Box<dyn IndexOutput>,
+    meta_out: Box<dyn IndexOutput>,
     postings_writer: PostingsWriter,
     min_items_in_block: usize,
     max_items_in_block: usize,
@@ -60,39 +59,44 @@ pub struct BlockTreeTermsWriter {
 }
 
 impl BlockTreeTermsWriter {
+    /// Creates a new BlockTreeTermsWriter that streams to outputs from the directory.
     pub fn new(
+        directory: &SharedDirectory,
         segment: &str,
         suffix: &str,
         id: &[u8; 16],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // Create .tim output
+        // Create outputs from directory
         let tim_name = segment_file_name(segment, suffix, TERMS_EXTENSION);
-        let mut terms_out = MemoryIndexOutput::new(tim_name);
+        let tip_name = segment_file_name(segment, suffix, TERMS_INDEX_EXTENSION);
+        let tmd_name = segment_file_name(segment, suffix, TERMS_META_EXTENSION);
+
+        let (mut terms_out, mut index_out, mut meta_out) = {
+            let mut dir = directory.lock().unwrap();
+            (
+                dir.create_output(&tim_name)?,
+                dir.create_output(&tip_name)?,
+                dir.create_output(&tmd_name)?,
+            )
+        };
+
         codec_util::write_index_header(
-            &mut terms_out,
+            &mut *terms_out,
             TERMS_CODEC_NAME,
             BLOCKTREE_VERSION_CURRENT,
             id,
             suffix,
         )?;
-
-        // Create .tip output
-        let tip_name = segment_file_name(segment, suffix, TERMS_INDEX_EXTENSION);
-        let mut index_out = MemoryIndexOutput::new(tip_name);
         codec_util::write_index_header(
-            &mut index_out,
+            &mut *index_out,
             TERMS_INDEX_CODEC_NAME,
             BLOCKTREE_VERSION_CURRENT,
             id,
             suffix,
         )?;
-
-        // Create .tmd output
-        let tmd_name = segment_file_name(segment, suffix, TERMS_META_EXTENSION);
-        let mut meta_out = MemoryIndexOutput::new(tmd_name);
         codec_util::write_index_header(
-            &mut meta_out,
+            &mut *meta_out,
             TERMS_META_CODEC_NAME,
             BLOCKTREE_VERSION_CURRENT,
             id,
@@ -101,12 +105,12 @@ impl BlockTreeTermsWriter {
 
         // Create PostingsWriter (which creates .doc, .pos, .psm)
         let has_positions = field_infos.has_prox();
-        let postings_writer = PostingsWriter::new(segment, suffix, id, has_positions)?;
+        let postings_writer = PostingsWriter::new(directory, segment, suffix, id, has_positions)?;
 
         // Write postings header into .tmd
         // In Java: postingsWriter.init(metaOut, state) writes TERMS_CODEC header + BLOCK_SIZE
         // to the metaOut (.tmd), not termsOut (.tim).
-        codec_util::write_index_header(&mut meta_out, TERMS_CODEC, VERSION_CURRENT, id, suffix)?;
+        codec_util::write_index_header(&mut *meta_out, TERMS_CODEC, VERSION_CURRENT, id, suffix)?;
         meta_out.write_vint(postings_format::BLOCK_SIZE as i32)?;
 
         Ok(Self {
@@ -176,7 +180,7 @@ impl BlockTreeTermsWriter {
             tw.add_term(
                 &term,
                 state,
-                &mut self.terms_out,
+                &mut *self.terms_out,
                 &self.postings_writer,
                 field_info,
             )?;
@@ -185,8 +189,8 @@ impl BlockTreeTermsWriter {
         tw.doc_count = docs_seen.len() as i32;
 
         tw.finish(
-            &mut self.terms_out,
-            &mut self.index_out,
+            &mut *self.terms_out,
+            &mut *self.index_out,
             &self.postings_writer,
             field_info,
             &mut self.field_metas,
@@ -195,9 +199,10 @@ impl BlockTreeTermsWriter {
         Ok(())
     }
 
-    /// Finalize: write footers, return all [`SegmentFile`]s.
-    pub fn finish(mut self) -> io::Result<Vec<crate::store::SegmentFile>> {
-        let mut all_files = Vec::new();
+    /// Finalize: write footers, drop outputs (auto-persists to directory).
+    /// Returns the file names written.
+    pub fn finish(mut self) -> io::Result<Vec<String>> {
+        let mut all_names = Vec::new();
 
         // Write .tmd field count + field metas
         self.meta_out.write_vint(self.field_metas.len() as i32)?;
@@ -206,30 +211,31 @@ impl BlockTreeTermsWriter {
         }
 
         // Write .tip footer
-        codec_util::write_footer(&mut self.index_out)?;
+        codec_util::write_footer(&mut *self.index_out)?;
         // Write .tip end pointer to .tmd
         self.meta_out
             .write_le_long(self.index_out.file_pointer() as i64)?;
 
         // Write .tim footer
-        codec_util::write_footer(&mut self.terms_out)?;
+        codec_util::write_footer(&mut *self.terms_out)?;
         // Write .tim end pointer to .tmd
         self.meta_out
             .write_le_long(self.terms_out.file_pointer() as i64)?;
 
         // Write .tmd footer
-        codec_util::write_footer(&mut self.meta_out)?;
+        codec_util::write_footer(&mut *self.meta_out)?;
 
-        // Collect all files
-        all_files.push(self.terms_out.into_inner());
-        all_files.push(self.index_out.into_inner());
-        all_files.push(self.meta_out.into_inner());
+        // Collect file names
+        all_names.push(self.terms_out.name().to_string());
+        all_names.push(self.index_out.name().to_string());
+        all_names.push(self.meta_out.name().to_string());
 
-        // Get postings files
-        let postings_files = self.postings_writer.finish()?;
-        all_files.extend(postings_files);
+        // Get postings file names
+        let postings_names = self.postings_writer.finish()?;
+        all_names.extend(postings_names);
 
-        Ok(all_files)
+        // Dropping self auto-persists all outputs to directory
+        Ok(all_names)
     }
 }
 
@@ -1234,7 +1240,12 @@ mod tests {
     use crate::document::DocValuesType;
     use crate::index::PointDimensionConfig;
     use crate::index::indexing_chain::PostingList;
+    use crate::store::{Directory, MemoryDirectory, MemoryIndexOutput, SharedDirectory};
     use std::collections::HashMap;
+
+    fn test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
 
     fn make_field_info(name: &str, number: u32, index_options: IndexOptions) -> FieldInfo {
         FieldInfo::new(
@@ -1469,19 +1480,18 @@ mod tests {
         );
 
         let id = [0u8; 16];
-        let mut btw = BlockTreeTermsWriter::new("_0", "", &id, &field_infos).unwrap();
+        let dir = test_directory();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
         btw.write_field(&fi, &terms).unwrap();
-        let files = btw.finish().unwrap();
+        let names = btw.finish().unwrap();
 
         // Should produce .tim, .tip, .tmd, .doc, .psm files (no .pos since no positions)
         assert!(
-            files.len() >= 4,
+            names.len() >= 4,
             "expected at least 4 files, got {}",
-            files.len()
+            names.len()
         );
 
-        // Verify file names
-        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert!(
             names.iter().any(|n| n.ends_with(".tim")),
             "missing .tim: {:?}",
@@ -1509,8 +1519,9 @@ mod tests {
         );
 
         // Verify all files have content
-        for f in &files {
-            assert!(!f.data.is_empty(), "file {} is empty", f.name);
+        for name in &names {
+            let data = dir.lock().unwrap().read_file(name).unwrap();
+            assert!(!data.is_empty(), "file {name} is empty");
         }
     }
 
@@ -1530,12 +1541,12 @@ mod tests {
         );
 
         let id = [0u8; 16];
-        let mut btw = BlockTreeTermsWriter::new("_0", "", &id, &field_infos).unwrap();
+        let dir = test_directory();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
         btw.write_field(&fi, &terms).unwrap();
-        let files = btw.finish().unwrap();
+        let names = btw.finish().unwrap();
 
         // Should produce .tim, .tip, .tmd, .doc, .pos, .psm files
-        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert!(
             names.iter().any(|n| n.ends_with(".pos")),
             "missing .pos: {:?}",
@@ -1581,12 +1592,12 @@ mod tests {
         }
 
         let id = [0u8; 16];
-        let mut btw = BlockTreeTermsWriter::new("_0", "", &id, &field_infos).unwrap();
+        let dir = test_directory();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
         // This panicked before the fix with "attempt to subtract with overflow"
         btw.write_field(&fi, &terms).unwrap();
-        let files = btw.finish().unwrap();
+        let names = btw.finish().unwrap();
 
-        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert!(
             names.iter().any(|n| n.ends_with(".tim")),
             "missing .tim: {:?}",
@@ -1611,13 +1622,14 @@ mod tests {
         );
 
         let id = [0u8; 16];
-        let mut btw = BlockTreeTermsWriter::new("_0", "", &id, &field_infos).unwrap();
+        let dir = test_directory();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
         btw.write_field(&fi, &terms).unwrap();
-        let files = btw.finish().unwrap();
+        let names = btw.finish().unwrap();
 
         // Find .tmd and parse the field metadata to check doc_count
-        let tmd = files.iter().find(|f| f.name.ends_with(".tmd")).unwrap();
-        let tmd_bytes = &tmd.data;
+        let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
+        let tmd_bytes = dir.lock().unwrap().read_file(tmd_name).unwrap();
 
         // After the BlockTreeTermsMeta header, the postingsWriter.init writes
         // a TERMS_CODEC header + BLOCK_SIZE(VInt), then numFields(VInt), then per-field metadata.
@@ -1736,11 +1748,11 @@ mod tests {
         }
 
         let id = [0u8; 16];
-        let mut btw = BlockTreeTermsWriter::new("_0", "", &id, &field_infos).unwrap();
+        let dir = test_directory();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
         btw.write_field(&fi, &terms).unwrap();
-        let files = btw.finish().unwrap();
+        let names = btw.finish().unwrap();
 
-        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert!(
             names.iter().any(|n| n.ends_with(".tim")),
             "missing .tim: {:?}",

@@ -10,8 +10,7 @@ use crate::codecs::codec_util;
 use crate::index::FieldInfos;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::PerFieldData;
-use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, IndexOutput, SegmentFile, VecOutput};
+use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 
 // File extensions
 const DATA_EXTENSION: &str = "kdd";
@@ -38,16 +37,17 @@ const DELTA_BPV_16: u8 = 16;
 const BPV_32: u8 = 32;
 
 /// Writes points files (.kdd, .kdi, .kdm) for a segment.
-/// Returns a list of [`SegmentFile`]s.
+/// Returns a list of file names written.
 ///
 pub fn write(
+    directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
     field_infos: &FieldInfos,
     per_field: &HashMap<String, PerFieldData>,
     _num_docs: i32,
-) -> io::Result<Vec<SegmentFile>> {
+) -> io::Result<Vec<String>> {
     let kdd_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
     let kdi_name =
@@ -55,27 +55,32 @@ pub fn write(
     let kdm_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
 
-    let mut data = MemoryIndexOutput::new(kdd_name);
-    let mut index = MemoryIndexOutput::new(kdi_name);
-    let mut meta = MemoryIndexOutput::new(kdm_name);
+    let (mut data, mut index, mut meta) = {
+        let mut dir = directory.lock().unwrap();
+        (
+            dir.create_output(&kdd_name)?,
+            dir.create_output(&kdi_name)?,
+            dir.create_output(&kdm_name)?,
+        )
+    };
 
     // Write index headers to all 3 files
     codec_util::write_index_header(
-        &mut data,
+        &mut *data,
         DATA_CODEC,
         FORMAT_VERSION,
         segment_id,
         segment_suffix,
     )?;
     codec_util::write_index_header(
-        &mut index,
+        &mut *index,
         INDEX_CODEC,
         FORMAT_VERSION,
         segment_id,
         segment_suffix,
     )?;
     codec_util::write_index_header(
-        &mut meta,
+        &mut *meta,
         META_CODEC,
         FORMAT_VERSION,
         segment_id,
@@ -106,9 +111,9 @@ pub fn write(
 
         let pc = fi.point_config();
         write_bkd_field(
-            &mut data,
-            &mut index,
-            &mut meta,
+            &mut *data,
+            &mut *index,
+            &mut *meta,
             points,
             pc.dimension_count,
             pc.index_dimension_count,
@@ -120,21 +125,17 @@ pub fn write(
     meta.write_le_int(-1)?;
 
     // Write footers for index and data first (order matters for meta pointers)
-    codec_util::write_footer(&mut index)?;
-    codec_util::write_footer(&mut data)?;
+    codec_util::write_footer(&mut *index)?;
+    codec_util::write_footer(&mut *data)?;
 
     // Write total file sizes to meta
     meta.write_le_long(index.file_pointer() as i64)?;
     meta.write_le_long(data.file_pointer() as i64)?;
 
     // Write footer for meta
-    codec_util::write_footer(&mut meta)?;
+    codec_util::write_footer(&mut *meta)?;
 
-    Ok(vec![
-        data.into_inner(),
-        index.into_inner(),
-        meta.into_inner(),
-    ])
+    Ok(vec![kdd_name, kdi_name, kdm_name])
 }
 
 /// Writes BKD tree data for a single field.
@@ -784,7 +785,12 @@ mod tests {
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
+    use crate::store::{Directory, MemoryDirectory, MemoryIndexOutput, SharedDirectory};
     use std::collections::HashMap;
+
+    fn make_test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
 
     // Ported from org.apache.lucene.util.bkd.TestBKD
 
@@ -951,10 +957,20 @@ mod tests {
         per_field.insert("modified".to_string(), make_per_field_with_points(points));
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "Lucene90_0", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let dir = make_test_directory();
+        let names = write(
+            &dir,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
 
-        assert_eq!(result.len(), 3);
-        let kdm = &result[2].data;
+        assert_eq!(names.len(), 3);
+        let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
 
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
 
@@ -1048,36 +1064,51 @@ mod tests {
         per_field.insert("modified".to_string(), make_per_field_with_points(points));
 
         let segment_id = [0xABu8; 16];
-        let result = write("_0", "Lucene90_0", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let dir = make_test_directory();
+        let names = write(
+            &dir,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
 
         // Check file names
-        assert_eq!(result[0].name, "_0_Lucene90_0.kdd");
-        assert_eq!(result[1].name, "_0_Lucene90_0.kdi");
-        assert_eq!(result[2].name, "_0_Lucene90_0.kdm");
+        assert_eq!(names[0], "_0_Lucene90_0.kdd");
+        assert_eq!(names[1], "_0_Lucene90_0.kdi");
+        assert_eq!(names[2], "_0_Lucene90_0.kdm");
+
+        let files: Vec<Vec<u8>> = names
+            .iter()
+            .map(|n| dir.lock().unwrap().read_file(n).unwrap())
+            .collect();
 
         // All 3 files should start with codec magic
-        for f in &result {
+        for (name, data) in names.iter().zip(files.iter()) {
             assert_eq!(
-                &f.data[0..4],
+                &data[0..4],
                 &[0x3f, 0xd7, 0x6c, 0x17],
                 "{} should start with codec magic",
-                f.name
+                name
             );
         }
 
         // All 3 files should end with footer magic
-        for f in &result {
-            let footer_start = f.data.len() - FOOTER_LENGTH;
+        for (name, data) in names.iter().zip(files.iter()) {
+            let footer_start = data.len() - FOOTER_LENGTH;
             assert_eq!(
-                &f.data[footer_start..footer_start + 4],
+                &data[footer_start..footer_start + 4],
                 &[0xc0, 0x28, 0x93, 0xe8],
                 "{} should end with footer magic",
-                f.name
+                name
             );
         }
 
         // Verify segment ID is in headers (at offset after header_length("codec"))
-        let kdd = &result[0].data;
+        let kdd = &files[0];
         let data_codec_header_len = header_length(DATA_CODEC);
         assert_eq!(
             &kdd[data_codec_header_len..data_codec_header_len + 16],
@@ -1111,11 +1142,12 @@ mod tests {
         per_field.insert("modified".to_string(), make_per_field_with_points(points));
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
-        assert_eq!(result.len(), 3);
+        let dir = make_test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        assert_eq!(names.len(), 3);
 
         // Verify the .kdd leaf block contains correctly sorted data
-        let kdd = &result[0].data;
+        let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let data_header_len = index_header_length(DATA_CODEC, "");
 
         // After header: VInt(3)=03, CONTINUOUS_IDS=FE, VInt(0)=00
@@ -1157,11 +1189,12 @@ mod tests {
         per_field.insert("modified".to_string(), make_per_field_with_points(points));
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let dir = make_test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
 
-        let kdd = &result[0].data;
-        let kdi = &result[1].data;
-        let kdm = &result[2].data;
+        let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let kdi = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
 
         // The last 16 bytes before the footer in .kdm are:
         // writeLong(indexFilePointer) + writeLong(dataFilePointer)
@@ -1204,13 +1237,14 @@ mod tests {
         per_field.insert("modified".to_string(), make_per_field_with_points(points));
 
         let segment_id = [0u8; 16];
-        let result = write("_0", "", &segment_id, &field_infos, &per_field, 1).unwrap();
+        let dir = make_test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 1).unwrap();
 
         // Should succeed and produce 3 files
-        assert_eq!(result.len(), 3);
+        assert_eq!(names.len(), 3);
 
         // In the .kdm, the first field number should be 1 (modified), not 0 (contents)
-        let kdm = &result[2].data;
+        let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         assert_eq!(
             &kdm[meta_header_len..meta_header_len + 4],
@@ -1282,8 +1316,8 @@ mod tests {
         assert_eq!(get_num_left_leaf_nodes(100), 64);
     }
 
-    /// Helper to build a BKD via the full write() pipeline and return the 3 files.
-    fn write_bkd_with_n_points(n: usize) -> Vec<SegmentFile> {
+    /// Helper to build a BKD via the full write() pipeline and return the 3 file byte vecs.
+    fn write_bkd_with_n_points(n: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let fi = make_point_field_info("modified", 1);
         let field_infos = FieldInfos::new(vec![fi]);
 
@@ -1295,7 +1329,21 @@ mod tests {
         per_field.insert("modified".to_string(), make_per_field_with_points(points));
 
         let segment_id = [0u8; 16];
-        write("_0", "", &segment_id, &field_infos, &per_field, n as i32).unwrap()
+        let dir = make_test_directory();
+        let names = write(
+            &dir,
+            "_0",
+            "",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            n as i32,
+        )
+        .unwrap();
+        let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let kdi = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
+        (kdd, kdi, kdm)
     }
 
     /// Reads numLeaves from .kdm metadata (after BKD header + config fields).
@@ -1327,54 +1375,39 @@ mod tests {
     #[test]
     fn test_two_leaf_bkd() {
         // 513 points exceeds single leaf (512), should produce 2 leaves
-        let result = write_bkd_with_n_points(513);
-        assert_eq!(result.len(), 3);
-
-        let kdm = &result[2].data;
-        let num_leaves = read_num_leaves_from_kdm(kdm);
+        let (_kdd, _kdi, kdm) = write_bkd_with_n_points(513);
+        let num_leaves = read_num_leaves_from_kdm(&kdm);
         assert_eq!(num_leaves, 2, "513 points should produce 2 leaves");
     }
 
     #[test]
     fn test_three_leaf_bkd() {
         // 1025 points should produce 3 leaves (512 + 512 + 1)
-        let result = write_bkd_with_n_points(1025);
-        assert_eq!(result.len(), 3);
-
-        let kdm = &result[2].data;
-        let num_leaves = read_num_leaves_from_kdm(kdm);
+        let (_kdd, _kdi, kdm) = write_bkd_with_n_points(1025);
+        let num_leaves = read_num_leaves_from_kdm(&kdm);
         assert_eq!(num_leaves, 3, "1025 points should produce 3 leaves");
     }
 
     #[test]
     fn test_exact_boundary_512() {
         // Exactly 512 points should still produce 1 leaf
-        let result = write_bkd_with_n_points(512);
-        assert_eq!(result.len(), 3);
-
-        let kdm = &result[2].data;
-        let num_leaves = read_num_leaves_from_kdm(kdm);
+        let (_kdd, _kdi, kdm) = write_bkd_with_n_points(512);
+        let num_leaves = read_num_leaves_from_kdm(&kdm);
         assert_eq!(num_leaves, 1, "512 points should produce 1 leaf");
     }
 
     #[test]
     fn test_exact_boundary_1024() {
         // Exactly 1024 points should produce 2 leaves (512 + 512)
-        let result = write_bkd_with_n_points(1024);
-        assert_eq!(result.len(), 3);
-
-        let kdm = &result[2].data;
-        let num_leaves = read_num_leaves_from_kdm(kdm);
+        let (_kdd, _kdi, kdm) = write_bkd_with_n_points(1024);
+        let num_leaves = read_num_leaves_from_kdm(&kdm);
         assert_eq!(num_leaves, 2, "1024 points should produce 2 leaves");
     }
 
     #[test]
     fn test_single_leaf_fp_fix() {
         // Verify packed index for single leaf contains data_start_fp, not 0
-        let result = write_bkd_with_n_points(3);
-        assert_eq!(result.len(), 3);
-
-        let kdi = &result[1].data;
+        let (_kdd, kdi, _kdm) = write_bkd_with_n_points(3);
         let index_header_len = index_header_length(INDEX_CODEC, "");
 
         // The packed index is written right after the .kdi header.
@@ -1407,11 +1440,7 @@ mod tests {
     #[test]
     fn test_multi_leaf_file_sizes_consistent() {
         // Verify .kdm contains correct total file sizes for multi-leaf index
-        let result = write_bkd_with_n_points(1025);
-
-        let kdd = &result[0].data;
-        let kdi = &result[1].data;
-        let kdm = &result[2].data;
+        let (kdd, kdi, kdm) = write_bkd_with_n_points(1025);
 
         let footer_start = kdm.len() - FOOTER_LENGTH;
         let total_sizes_start = footer_start - 16;

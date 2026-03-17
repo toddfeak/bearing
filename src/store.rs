@@ -246,8 +246,11 @@ pub(crate) fn align_offset(offset: u64, alignment: usize) -> u64 {
     (offset + a - 1) & !(a - 1)
 }
 
+/// A [`Directory`] behind a [`Mutex`](std::sync::Mutex) for shared concurrent access.
+pub type SharedDirectory = std::sync::Mutex<Box<dyn Directory>>;
+
 /// Trait for a directory that can create and manage index files.
-pub trait Directory {
+pub trait Directory: Send {
     /// Creates a new output file with the given name.
     fn create_output(&mut self, name: &str) -> io::Result<Box<dyn IndexOutput>>;
 
@@ -263,8 +266,8 @@ pub trait Directory {
     /// Renames a file. Used for atomic commit of segments_N.
     fn rename(&mut self, source: &str, dest: &str) -> io::Result<()>;
 
-    /// Returns the raw bytes of a file (for compound file building).
-    fn file_bytes(&self, name: &str) -> io::Result<&[u8]>;
+    /// Reads the raw bytes of a file into memory.
+    fn read_file(&self, name: &str) -> io::Result<Vec<u8>>;
 
     /// Writes complete byte contents to a file in this directory.
     /// Default implementation uses `create_output` + `write_bytes`.

@@ -9,8 +9,7 @@ use crate::codecs::codec_util;
 use crate::document::{DocValuesType, IndexOptions};
 use crate::index::index_file_names;
 use crate::index::{FieldInfos, SegmentInfo};
-use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, SegmentFile};
+use crate::store::SharedDirectory;
 
 const CODEC_NAME: &str = "Lucene94FieldInfos";
 const FORMAT_CURRENT: i32 = 2; // FORMAT_DOCVALUE_SKIPPER
@@ -23,19 +22,20 @@ const STORE_PAYLOADS: u8 = 0x4;
 const SOFT_DELETES_FIELD: u8 = 0x8;
 const PARENT_FIELD_FIELD: u8 = 0x10;
 
-/// Writes the .fnm (field infos) file.
-/// Returns a [`SegmentFile`] for the .fnm file.
+/// Writes the .fnm (field infos) file to the directory.
+/// Returns the file name written.
 pub fn write(
+    directory: &SharedDirectory,
     segment_info: &SegmentInfo,
     segment_suffix: &str,
     field_infos: &FieldInfos,
-) -> io::Result<SegmentFile> {
+) -> io::Result<String> {
     let file_name =
         index_file_names::segment_file_name(&segment_info.name, segment_suffix, EXTENSION);
-    let mut output = MemoryIndexOutput::new(file_name.clone());
+    let mut output = directory.lock().unwrap().create_output(&file_name)?;
 
     codec_util::write_index_header(
-        &mut output,
+        &mut *output,
         CODEC_NAME,
         FORMAT_CURRENT,
         &segment_info.id,
@@ -108,9 +108,9 @@ pub fn write(
         output.write_byte(0)?;
     }
 
-    codec_util::write_footer(&mut output)?;
+    codec_util::write_footer(&mut *output)?;
 
-    Ok(output.into_inner())
+    Ok(file_name)
 }
 
 fn index_options_byte(opts: IndexOptions) -> u8 {
@@ -141,7 +141,12 @@ fn doc_values_byte(dvt: DocValuesType) -> u8 {
 mod tests {
     use super::*;
     use crate::index::{FieldInfo, PointDimensionConfig};
+    use crate::store::{MemoryDirectory, SharedDirectory};
     use std::collections::HashMap;
+
+    fn test_directory() -> SharedDirectory {
+        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
 
     // Ported from org.apache.lucene.codecs.lucene94.TestLucene94FieldInfosFormat
 
@@ -158,6 +163,7 @@ mod tests {
 
     #[test]
     fn test_write_single_field() {
+        let dir = test_directory();
         let si = make_test_segment();
         let fi = FieldInfo::new(
             "test".to_string(),
@@ -170,17 +176,19 @@ mod tests {
         );
         let fis = FieldInfos::new(vec![fi]);
 
-        let file = write(&si, "", &fis).unwrap();
-        assert_eq!(file.name, "_0.fnm");
-        assert!(!file.data.is_empty());
+        let name = write(&dir, &si, "", &fis).unwrap();
+        assert_eq!(name, "_0.fnm");
+
+        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        assert!(!data.is_empty());
 
         // Verify header magic (first 4 bytes, BE)
-        assert_eq!(&file.data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
+        assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
 
         // Verify footer magic (last 16 bytes)
-        let footer_start = file.data.len() - 16;
+        let footer_start = data.len() - 16;
         assert_eq!(
-            &file.data[footer_start..footer_start + 4],
+            &data[footer_start..footer_start + 4],
             &[0xc0, 0x28, 0x93, 0xe8]
         );
     }
@@ -253,14 +261,17 @@ mod tests {
         fi_contents.put_attribute("PerFieldPostingsFormat.suffix".to_string(), "0".to_string());
 
         let fis = FieldInfos::new(vec![fi_path, fi_modified, fi_contents]);
-        let file = write(&si, "", &fis).unwrap();
+        let dir = test_directory();
+        let name = write(&dir, &si, "", &fis).unwrap();
 
-        assert_eq!(file.name, "_0.fnm");
-        assert!(!file.data.is_empty());
+        assert_eq!(name, "_0.fnm");
+
+        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        assert!(!data.is_empty());
 
         // Basic structural checks:
         // Header + 3 fields + footer, should be substantial
-        assert!(file.data.len() > 100);
+        assert!(data.len() > 100);
     }
 
     #[test]
