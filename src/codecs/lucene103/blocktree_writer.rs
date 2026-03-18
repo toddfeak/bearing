@@ -1029,26 +1029,34 @@ fn save_node_recursive(
         // Single child node
         let child_delta_fp = node_fp - child_fps[0];
         let child_fp_bytes = bytes_required_vlong(child_delta_fp);
+        let encoded_output_fp_bytes: u32 = match node.output {
+            Some(ref output) => bytes_required_vlong(encode_fp(output)),
+            None => 0,
+        };
+
+        let sign: u32 = if node.output.is_some() {
+            SIGN_SINGLE_CHILD_WITH_OUTPUT as u32
+        } else {
+            SIGN_SINGLE_CHILD_WITHOUT_OUTPUT as u32
+        };
+
+        // Java unconditionally includes encoded_output_fp_bytes in the header.
+        // When output is absent (encoded_output_fp_bytes=0), the (0-1)<<5 overflow
+        // sets the high bits to 0xE0. The reader ignores these bits for
+        // SIGN_SINGLE_CHILD_WITHOUT_OUTPUT, but we must match the bytes.
+        let header = (sign
+            | ((child_fp_bytes - 1) << 2)
+            | (encoded_output_fp_bytes.wrapping_sub(1) << 5)) as u8;
+        index.write_byte(header)?;
+        index.write_byte(node.children[0].label)?;
+        write_long_n_bytes(child_delta_fp, child_fp_bytes, index)?;
 
         if let Some(ref output) = node.output {
             let encoded_fp = encode_fp(output);
-            let encoded_output_fp_bytes = bytes_required_vlong(encoded_fp);
-
-            let header: u8 = SIGN_SINGLE_CHILD_WITH_OUTPUT
-                | ((child_fp_bytes as u8 - 1) << 2)
-                | ((encoded_output_fp_bytes as u8 - 1) << 5);
-            index.write_byte(header)?;
-            index.write_byte(node.children[0].label)?;
-            write_long_n_bytes(child_delta_fp, child_fp_bytes, index)?;
             write_long_n_bytes(encoded_fp, encoded_output_fp_bytes, index)?;
             if let Some(ref floor_data) = output.floor_data {
                 index.write_bytes(floor_data.as_slice())?;
             }
-        } else {
-            let header: u8 = SIGN_SINGLE_CHILD_WITHOUT_OUTPUT | ((child_fp_bytes as u8 - 1) << 2);
-            index.write_byte(header)?;
-            index.write_byte(node.children[0].label)?;
-            write_long_n_bytes(child_delta_fp, child_fp_bytes, index)?;
         }
     } else {
         // Multi-children node
@@ -1890,6 +1898,63 @@ mod tests {
             names.iter().any(|n| n.ends_with(".tim")),
             "missing .tim: {:?}",
             names
+        );
+    }
+
+    /// Regression test: Java's TrieBuilder unconditionally includes
+    /// `(encodedOutputFpBytes - 1) << 5` in the single-child node header, even
+    /// when the node has no output (encodedOutputFpBytes=0). The integer overflow
+    /// `(0 - 1) << 5 = 0xE0` leaks into the high bits. The reader ignores these
+    /// bits for SIGN_SINGLE_CHILD_WITHOUT_OUTPUT, but we must write them to be
+    /// byte-identical with Java.
+    #[test]
+    fn test_trie_single_child_without_output_header_matches_java() {
+        // Key "ab" creates: root(no output) -> 'a'(no output) -> 'b'(output)
+        // Both root and 'a' are single-child-without-output nodes.
+        let output = TrieOutput {
+            fp: 42,
+            has_terms: true,
+            floor_data: None,
+        };
+        let trie = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("ab"), output);
+
+        let mut meta = Vec::new();
+        let mut index = MemoryIndexOutput::new("test.tip".to_string());
+        trie.save(&mut VecOutput(&mut meta), &mut index).unwrap();
+
+        let bytes = index.bytes();
+
+        // Post-order serialization:
+        //   offset 0: leaf 'b' — header=0x20 (SIGN_NO_CHILDREN | LEAF_NODE_HAS_TERMS), fp=42
+        //   offset 2: node 'a' — SIGN_SINGLE_CHILD_WITHOUT_OUTPUT header, label='b', deltaFP
+        //   offset 5: root    — SIGN_SINGLE_CHILD_WITHOUT_OUTPUT header, label='a', deltaFP
+
+        // Verify the single-child-without-output headers have 0xE0 high bits set
+        let a_header = bytes[2];
+        let root_header = bytes[5];
+
+        assert_eq!(
+            a_header & 0x03,
+            SIGN_SINGLE_CHILD_WITHOUT_OUTPUT,
+            "node 'a' should have SIGN_SINGLE_CHILD_WITHOUT_OUTPUT"
+        );
+        assert_eq!(
+            a_header & 0xE0,
+            0xE0,
+            "node 'a' header high bits should be 0xE0 to match Java (got {:#04x})",
+            a_header
+        );
+
+        assert_eq!(
+            root_header & 0x03,
+            SIGN_SINGLE_CHILD_WITHOUT_OUTPUT,
+            "root should have SIGN_SINGLE_CHILD_WITHOUT_OUTPUT"
+        );
+        assert_eq!(
+            root_header & 0xE0,
+            0xE0,
+            "root header high bits should be 0xE0 to match Java (got {:#04x})",
+            root_header
         );
     }
 
