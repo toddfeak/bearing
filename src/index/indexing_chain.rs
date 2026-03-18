@@ -372,6 +372,12 @@ impl PerFieldData {
 #[derive(Clone, Debug, MemSize)]
 pub enum DocValuesAccumulator {
     None,
+    /// NUMERIC: single long value per doc.
+    Numeric(Vec<(i32, i64)>),
+    /// BINARY: per-doc byte array.
+    Binary(Vec<(i32, Vec<u8>)>),
+    /// SORTED: single byte[] value per doc (ordinal-mapped).
+    Sorted(Vec<(i32, BytesRef)>),
     /// SORTED_NUMERIC: per-doc list of long values.
     SortedNumeric(Vec<(i32, Vec<i64>)>),
     /// SORTED_SET: per-doc list of byte[] values (terms).
@@ -694,6 +700,44 @@ impl IndexingChain {
         doc_id: i32,
     ) {
         match meta.doc_values_type {
+            DocValuesType::Numeric => {
+                if let Some(v) = field.numeric_value() {
+                    if let DocValuesAccumulator::Numeric(ref mut vals) = per_field.doc_values {
+                        vals.push((doc_id, v));
+                    } else {
+                        per_field.doc_values = DocValuesAccumulator::Numeric(vec![(doc_id, v)]);
+                    }
+                }
+            }
+            DocValuesType::Binary => {
+                if let FieldValue::Bytes(b) = field.value() {
+                    if let DocValuesAccumulator::Binary(ref mut vals) = per_field.doc_values {
+                        vals.push((doc_id, b.clone()));
+                    } else {
+                        per_field.doc_values =
+                            DocValuesAccumulator::Binary(vec![(doc_id, b.clone())]);
+                    }
+                }
+            }
+            DocValuesType::Sorted => match field.value() {
+                FieldValue::Bytes(b) => {
+                    let term = BytesRef::new(b.clone());
+                    if let DocValuesAccumulator::Sorted(ref mut vals) = per_field.doc_values {
+                        vals.push((doc_id, term));
+                    } else {
+                        per_field.doc_values = DocValuesAccumulator::Sorted(vec![(doc_id, term)]);
+                    }
+                }
+                FieldValue::Text(s) => {
+                    let term = BytesRef::from_utf8(s);
+                    if let DocValuesAccumulator::Sorted(ref mut vals) = per_field.doc_values {
+                        vals.push((doc_id, term));
+                    } else {
+                        per_field.doc_values = DocValuesAccumulator::Sorted(vec![(doc_id, term)]);
+                    }
+                }
+                _ => {}
+            },
             DocValuesType::SortedNumeric => {
                 if let Some(v) = field.numeric_value() {
                     if let DocValuesAccumulator::SortedNumeric(ref mut vals) = per_field.doc_values
@@ -716,7 +760,7 @@ impl IndexingChain {
                     }
                 }
             }
-            _ => {}
+            DocValuesType::None => {}
         }
     }
 

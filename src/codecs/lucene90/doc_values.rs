@@ -27,6 +27,9 @@ const META_CODEC: &str = "Lucene90DocValuesMetadata";
 const VERSION: i32 = 0;
 
 // Doc values type bytes
+const NUMERIC: u8 = 0;
+const BINARY: u8 = 1;
+const SORTED: u8 = 2;
 const SORTED_SET: u8 = 3;
 const SORTED_NUMERIC: u8 = 4;
 
@@ -74,6 +77,39 @@ pub fn write(
         };
 
         match &pfd.doc_values {
+            DocValuesAccumulator::Numeric(vals) => {
+                debug!(
+                    "doc_values: field={:?} (#{}) -> NUMERIC, {} docs",
+                    fi.name(),
+                    fi.number(),
+                    vals.len()
+                );
+                meta.write_le_int(fi.number() as i32)?;
+                meta.write_byte(NUMERIC)?;
+                add_numeric_field(&mut *meta, &mut *data, vals, num_docs)?;
+            }
+            DocValuesAccumulator::Binary(vals) => {
+                debug!(
+                    "doc_values: field={:?} (#{}) -> BINARY, {} docs",
+                    fi.name(),
+                    fi.number(),
+                    vals.len()
+                );
+                meta.write_le_int(fi.number() as i32)?;
+                meta.write_byte(BINARY)?;
+                add_binary_field(&mut *meta, &mut *data, vals, num_docs)?;
+            }
+            DocValuesAccumulator::Sorted(vals) => {
+                debug!(
+                    "doc_values: field={:?} (#{}) -> SORTED, {} docs",
+                    fi.name(),
+                    fi.number(),
+                    vals.len()
+                );
+                meta.write_le_int(fi.number() as i32)?;
+                meta.write_byte(SORTED)?;
+                add_sorted_field(&mut *meta, &mut *data, vals, num_docs)?;
+            }
             DocValuesAccumulator::SortedNumeric(vals) => {
                 debug!(
                     "doc_values: field={:?} (#{}) -> SORTED_NUMERIC, {} docs",
@@ -108,6 +144,135 @@ pub fn write(
     codec_util::write_footer(&mut *data)?;
 
     Ok(vec![dvm_name, dvd_name])
+}
+
+/// Adds a NUMERIC field (single value per doc, no numDocsWithField).
+fn add_numeric_field(
+    meta: &mut dyn DataOutput,
+    data: &mut dyn IndexOutput,
+    vals: &[(i32, i64)],
+    num_docs: i32,
+) -> io::Result<()> {
+    // No skip index for MVP
+
+    let all_values: Vec<i64> = vals.iter().map(|(_doc_id, v)| *v).collect();
+
+    // Unlike SORTED_NUMERIC, NUMERIC does NOT write numDocsWithField after writeValues
+    write_values(meta, data, &all_values, vals.len() as i32, num_docs, false)?;
+
+    Ok(())
+}
+
+/// Adds a BINARY field.
+fn add_binary_field(
+    meta: &mut dyn IndexOutput,
+    data: &mut dyn IndexOutput,
+    vals: &[(i32, Vec<u8>)],
+    num_docs: i32,
+) -> io::Result<()> {
+    // Write data offset
+    let start = data.file_pointer() as i64;
+    meta.write_le_long(start)?;
+
+    // Write concatenated binary values to data
+    let mut min_length = i32::MAX;
+    let mut max_length = 0i32;
+    for (_doc_id, bytes) in vals {
+        let len = bytes.len() as i32;
+        min_length = min_length.min(len);
+        max_length = max_length.max(len);
+        data.write_bytes(bytes)?;
+    }
+
+    let num_docs_with_field = vals.len() as i32;
+    if num_docs_with_field == 0 {
+        min_length = 0;
+    }
+
+    // Write data length
+    meta.write_le_long(data.file_pointer() as i64 - start)?;
+
+    // Docs-with-field indicator
+    if num_docs_with_field == 0 {
+        meta.write_le_long(-2)?; // EMPTY
+        meta.write_le_long(0)?;
+        meta.write_le_short(-1)?;
+        meta.write_byte(0xFF)?;
+    } else if num_docs_with_field == num_docs {
+        meta.write_le_long(-1)?; // ALL
+        meta.write_le_long(0)?;
+        meta.write_le_short(-1)?;
+        meta.write_byte(0xFF)?;
+    } else {
+        return Err(io::Error::other(
+            "SPARSE binary doc values pattern not implemented for MVP",
+        ));
+    }
+
+    meta.write_le_int(num_docs_with_field)?;
+    meta.write_le_int(min_length)?;
+    meta.write_le_int(max_length)?;
+
+    // Variable-length encoding: write addresses
+    if max_length > min_length {
+        let addresses_start = data.file_pointer() as i64;
+        meta.write_le_long(addresses_start)?;
+        meta.write_vint(DIRECT_MONOTONIC_BLOCK_SHIFT as i32)?;
+
+        let mut address_buffer = MemoryIndexOutput::new("temp_binary_addr".to_string());
+        let mut dm_writer = DirectMonotonicWriter::new(DIRECT_MONOTONIC_BLOCK_SHIFT);
+
+        let mut cumulative: i64 = 0;
+        for (_doc_id, bytes) in vals {
+            dm_writer.add(cumulative);
+            cumulative += bytes.len() as i64;
+        }
+        dm_writer.add(cumulative); // final entry for total length
+
+        dm_writer.finish(meta, &mut address_buffer)?;
+        data.write_bytes(address_buffer.bytes())?;
+
+        meta.write_le_long(data.file_pointer() as i64 - addresses_start)?;
+    }
+
+    Ok(())
+}
+
+/// Adds a SORTED field (single ordinal per doc + terms dictionary).
+fn add_sorted_field(
+    meta: &mut dyn IndexOutput,
+    data: &mut dyn IndexOutput,
+    vals: &[(i32, BytesRef)],
+    num_docs: i32,
+) -> io::Result<()> {
+    // No skip index for MVP
+
+    // Build sorted unique terms and assign ordinals
+    let mut unique_terms: BTreeSet<BytesRef> = BTreeSet::new();
+    for (_doc_id, v) in vals {
+        unique_terms.insert(v.clone());
+    }
+
+    let mut ord_map: HashMap<BytesRef, i64> = HashMap::with_capacity(unique_terms.len());
+    let sorted_terms: Vec<BytesRef> = unique_terms
+        .into_iter()
+        .enumerate()
+        .map(|(i, term)| {
+            ord_map.insert(term.clone(), i as i64);
+            term
+        })
+        .collect();
+
+    // Build per-doc ordinal array
+    let ordinals: Vec<i64> = vals.iter().map(|(_doc_id, v)| ord_map[v]).collect();
+
+    // writeValues for ordinals (ords=true) — no multiValued byte, no numDocsWithField
+    write_values(meta, data, &ordinals, vals.len() as i32, num_docs, true)?;
+
+    // Write terms dictionary
+    add_terms_dict(meta, data, &sorted_terms)?;
+
+    Ok(())
 }
 
 /// Adds a SORTED_NUMERIC field.
@@ -593,6 +758,24 @@ mod tests {
         pfd
     }
 
+    fn make_per_field_data_numeric(values: Vec<(i32, i64)>) -> PerFieldData {
+        let mut pfd = PerFieldData::new();
+        pfd.doc_values = DocValuesAccumulator::Numeric(values);
+        pfd
+    }
+
+    fn make_per_field_data_binary(values: Vec<(i32, Vec<u8>)>) -> PerFieldData {
+        let mut pfd = PerFieldData::new();
+        pfd.doc_values = DocValuesAccumulator::Binary(values);
+        pfd
+    }
+
+    fn make_per_field_data_sorted(values: Vec<(i32, BytesRef)>) -> PerFieldData {
+        let mut pfd = PerFieldData::new();
+        pfd.doc_values = DocValuesAccumulator::Sorted(values);
+        pfd
+    }
+
     #[test]
     fn test_gcd_compute() {
         assert_eq!(gcd_compute(0, 5), 5);
@@ -970,6 +1153,32 @@ mod tests {
             let _terms_index_addresses_length = self.0.read_le_long();
         }
 
+        /// Read sorted entry (matches Java readSorted — no multiValued byte)
+        fn read_sorted(&mut self) {
+            self.read_numeric();
+            self.read_term_dict();
+        }
+
+        /// Read binary entry (matches Java readBinary)
+        fn read_binary(&mut self) {
+            let _data_offset = self.0.read_le_long();
+            let _data_length = self.0.read_le_long();
+            let _docs_with_field_offset = self.0.read_le_long();
+            let _docs_with_field_length = self.0.read_le_long();
+            let _jump_table_entry_count = self.0.read_le_short();
+            let _dense_rank_power = self.0.read_byte();
+            let num_docs_with_field = self.0.read_le_int();
+            let min_length = self.0.read_le_int();
+            let max_length = self.0.read_le_int();
+            if max_length > min_length {
+                let _addresses_offset = self.0.read_le_long();
+                let block_shift = self.0.read_vint();
+                let num_addresses = num_docs_with_field as i64 + 1;
+                self.read_dm_meta(num_addresses, block_shift);
+                let _addresses_length = self.0.read_le_long();
+            }
+        }
+
         /// Read sorted set entry (matches Java readSortedSet)
         fn read_sorted_set(&mut self) {
             let multi_valued = self.0.read_byte();
@@ -1121,5 +1330,413 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_numeric_constant() {
+        let fi = make_field_info("count", 0, DocValuesType::Numeric);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "count".to_string(),
+            make_per_field_data_numeric(vec![(0, 42), (1, 42), (2, 42)]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let entry = &dvm[meta_header_len..];
+
+        // field_number = 0
+        assert_eq!(&entry[0..4], &0i32.to_le_bytes());
+        // type byte = NUMERIC (0)
+        assert_eq!(entry[4], NUMERIC);
+        // docs_with_field_offset = -1 (ALL)
+        assert_eq!(&entry[5..13], &(-1i64).to_le_bytes());
+        // numValues = 3
+        assert_eq!(&entry[24..32], &3i64.to_le_bytes());
+        // tablesize = -1
+        assert_eq!(&entry[32..36], &(-1i32).to_le_bytes());
+        // bpv = 0 (constant)
+        assert_eq!(entry[36], 0);
+        // min = 42
+        assert_eq!(&entry[37..45], &42i64.to_le_bytes());
+    }
+
+    #[test]
+    fn test_numeric_different_values() {
+        let fi = make_field_info("score", 0, DocValuesType::Numeric);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "score".to_string(),
+            make_per_field_data_numeric(vec![(0, 10), (1, 20), (2, 30)]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
+        assert!(!dvm.is_empty());
+        assert!(!dvd.is_empty());
+    }
+
+    #[test]
+    fn test_numeric_no_num_docs_with_field() {
+        // NUMERIC must NOT write numDocsWithField — verify by parsing the metadata
+        let fi = make_field_info("count", 0, DocValuesType::Numeric);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "count".to_string(),
+            make_per_field_data_numeric(vec![(0, 100), (1, 200), (2, 300)]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        let field0 = reader.0.read_le_int();
+        assert_eq!(field0, 0);
+        let type0 = reader.0.read_byte();
+        assert_eq!(type0, NUMERIC);
+        // NUMERIC: read_numeric only (no numDocsWithField)
+        reader.read_numeric();
+
+        // Next should be EOF marker
+        let eof = reader.0.read_le_int();
+        assert_eq!(
+            eof, -1,
+            "expected EOF marker — NUMERIC should not write numDocsWithField"
+        );
+    }
+
+    #[test]
+    fn test_sorted_field() {
+        let fi = make_field_info("category", 0, DocValuesType::Sorted);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "category".to_string(),
+            make_per_field_data_sorted(vec![
+                (0, BytesRef::from_utf8("alpha")),
+                (1, BytesRef::from_utf8("beta")),
+                (2, BytesRef::from_utf8("alpha")),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let entry = &dvm[meta_header_len..];
+
+        // field_number = 0
+        assert_eq!(&entry[0..4], &0i32.to_le_bytes());
+        // type byte = SORTED (2) — no multiValued byte
+        assert_eq!(entry[4], SORTED);
+    }
+
+    #[test]
+    fn test_sorted_parseable() {
+        // Verify SORTED metadata is parseable (no multiValued byte, unlike SORTED_SET)
+        let fi = make_field_info("category", 0, DocValuesType::Sorted);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "category".to_string(),
+            make_per_field_data_sorted(vec![
+                (0, BytesRef::from_utf8("x")),
+                (1, BytesRef::from_utf8("y")),
+                (2, BytesRef::from_utf8("z")),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        let field0 = reader.0.read_le_int();
+        assert_eq!(field0, 0);
+        let type0 = reader.0.read_byte();
+        assert_eq!(type0, SORTED);
+        reader.read_sorted();
+
+        let eof = reader.0.read_le_int();
+        assert_eq!(eof, -1, "expected EOF marker");
+    }
+
+    #[test]
+    fn test_binary_fixed_length() {
+        let fi = make_field_info("hash", 0, DocValuesType::Binary);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "hash".to_string(),
+            make_per_field_data_binary(vec![
+                (0, vec![0xAA, 0xBB, 0xCC, 0xDD]),
+                (1, vec![0x11, 0x22, 0x33, 0x44]),
+                (2, vec![0xFF, 0xEE, 0xDD, 0xCC]),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let entry = &dvm[meta_header_len..];
+
+        assert_eq!(&entry[0..4], &0i32.to_le_bytes());
+        assert_eq!(entry[4], BINARY);
+    }
+
+    #[test]
+    fn test_binary_parseable() {
+        let fi = make_field_info("data", 0, DocValuesType::Binary);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "data".to_string(),
+            make_per_field_data_binary(vec![
+                (0, vec![1, 2, 3]),
+                (1, vec![4, 5, 6]),
+                (2, vec![7, 8, 9]),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        let field0 = reader.0.read_le_int();
+        assert_eq!(field0, 0);
+        let type0 = reader.0.read_byte();
+        assert_eq!(type0, BINARY);
+        reader.read_binary();
+
+        let eof = reader.0.read_le_int();
+        assert_eq!(eof, -1, "expected EOF marker");
+    }
+
+    #[test]
+    fn test_binary_variable_length() {
+        let fi = make_field_info("payload", 0, DocValuesType::Binary);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "payload".to_string(),
+            make_per_field_data_binary(vec![(0, vec![1]), (1, vec![2, 3, 4]), (2, vec![5, 6])]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        let field0 = reader.0.read_le_int();
+        assert_eq!(field0, 0);
+        let type0 = reader.0.read_byte();
+        assert_eq!(type0, BINARY);
+        reader.read_binary();
+
+        let eof = reader.0.read_le_int();
+        assert_eq!(
+            eof, -1,
+            "expected EOF marker — variable-length binary should be parseable"
+        );
+    }
+
+    #[test]
+    fn test_all_dv_types_combined() {
+        // Write all 5 doc values types in one segment and verify parseability
+        let fi0 = make_field_info("num", 0, DocValuesType::Numeric);
+        let fi1 = make_field_info("bin", 1, DocValuesType::Binary);
+        let fi2 = make_field_info("sort", 2, DocValuesType::Sorted);
+        let fi3 = make_field_info("sortset", 3, DocValuesType::SortedSet);
+        let fi4 = make_field_info("sortnum", 4, DocValuesType::SortedNumeric);
+        let field_infos = FieldInfos::new(vec![fi0, fi1, fi2, fi3, fi4]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "num".to_string(),
+            make_per_field_data_numeric(vec![(0, 10), (1, 20), (2, 30)]),
+        );
+        per_field.insert(
+            "bin".to_string(),
+            make_per_field_data_binary(vec![(0, vec![0xAA]), (1, vec![0xBB]), (2, vec![0xCC])]),
+        );
+        per_field.insert(
+            "sort".to_string(),
+            make_per_field_data_sorted(vec![
+                (0, BytesRef::from_utf8("a")),
+                (1, BytesRef::from_utf8("b")),
+                (2, BytesRef::from_utf8("c")),
+            ]),
+        );
+        per_field.insert(
+            "sortset".to_string(),
+            make_per_field_data_sorted_set(vec![
+                (0, vec![BytesRef::from_utf8("x")]),
+                (1, vec![BytesRef::from_utf8("y")]),
+                (2, vec![BytesRef::from_utf8("z")]),
+            ]),
+        );
+        per_field.insert(
+            "sortnum".to_string(),
+            make_per_field_data_sorted_numeric(vec![
+                (0, vec![100]),
+                (1, vec![200]),
+                (2, vec![300]),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        // Field 0: NUMERIC
+        assert_eq!(reader.0.read_le_int(), 0);
+        assert_eq!(reader.0.read_byte(), NUMERIC);
+        reader.read_numeric();
+
+        // Field 1: BINARY
+        assert_eq!(reader.0.read_le_int(), 1);
+        assert_eq!(reader.0.read_byte(), BINARY);
+        reader.read_binary();
+
+        // Field 2: SORTED
+        assert_eq!(reader.0.read_le_int(), 2);
+        assert_eq!(reader.0.read_byte(), SORTED);
+        reader.read_sorted();
+
+        // Field 3: SORTED_SET
+        assert_eq!(reader.0.read_le_int(), 3);
+        assert_eq!(reader.0.read_byte(), SORTED_SET);
+        reader.read_sorted_set();
+
+        // Field 4: SORTED_NUMERIC
+        assert_eq!(reader.0.read_le_int(), 4);
+        assert_eq!(reader.0.read_byte(), SORTED_NUMERIC);
+        reader.read_sorted_numeric();
+
+        // EOF
+        assert_eq!(reader.0.read_le_int(), -1);
     }
 }

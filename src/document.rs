@@ -4,9 +4,13 @@
 //!
 //! A [`Document`] is a collection of [`Field`]s, each with a name, [`FieldType`],
 //! and value. Factory functions like [`text_field`], [`keyword_field`], and
-//! [`long_field`] create fields with common configurations. The [`text_field_reader`]
-//! factory accepts a [`Read`] source for streaming tokenization without buffering
-//! the entire text in memory.
+//! [`long_field`] create fields with common configurations. Doc-values-only
+//! factories ([`numeric_doc_values_field`], [`binary_doc_values_field`],
+//! [`sorted_doc_values_field`], [`sorted_set_doc_values_field`],
+//! [`sorted_numeric_doc_values_field`]) create fields for sorting and faceting
+//! without indexing or storing. The [`text_field_reader`] factory accepts a
+//! [`Read`] source for streaming tokenization without buffering the entire
+//! text in memory.
 
 use std::fmt;
 use std::io::Read;
@@ -325,13 +329,9 @@ impl Document {
     }
 }
 
-// === Factory functions matching Java field constructors ===
-
-/// Creates a KeywordField (stored variant).
-/// Matches Java: new KeywordField("path", value, Field.Store.YES)
+/// Creates a stored keyword field with an inverted index and sorted-set doc values.
 ///
-/// IndexOptions.DOCS, omitNorms=true, tokenized=false,
-/// docValuesType=SORTED_SET, stored=true
+/// Indexed with `DOCS` only (no freqs/positions), norms omitted, not tokenized.
 pub fn keyword_field(name: &str, value: &str) -> Field {
     let mut ft = FieldType::new();
     ft.stored = true;
@@ -342,11 +342,9 @@ pub fn keyword_field(name: &str, value: &str) -> Field {
     Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
 }
 
-/// Creates a LongField (not stored).
-/// Matches Java: new LongField("modified", value)
+/// Creates an unstored long field with point indexing and sorted-numeric doc values.
 ///
-/// Points: 1 dimension, 8 bytes. DocValuesType=SORTED_NUMERIC.
-/// Not stored, not indexed (no posting list — points + doc values only).
+/// Points: 1 dimension, 8 bytes. No posting list.
 pub fn long_field(name: &str, value: i64) -> Field {
     let mut ft = FieldType::new();
     ft.point_dimension_count = 1;
@@ -356,10 +354,7 @@ pub fn long_field(name: &str, value: i64) -> Field {
     Field::new(name.to_string(), ft, FieldValue::Long(value))
 }
 
-/// Creates a TextField (not stored).
-/// Matches Java: new TextField("contents", reader)
-///
-/// IndexOptions.DOCS_AND_FREQS_AND_POSITIONS, tokenized=true
+/// Creates an unstored, tokenized text field with positions.
 pub fn text_field(name: &str, value: &str) -> Field {
     let mut ft = FieldType::new();
     ft.index_options = IndexOptions::DocsAndFreqsAndPositions;
@@ -379,10 +374,9 @@ pub fn text_field_reader(name: &str, reader: impl Read + Send + 'static) -> Fiel
     Field::new(name.to_string(), ft, FieldValue::Reader(Box::new(reader)))
 }
 
-/// Creates a StringField (inverted-only, no doc values).
-/// Matches Java: new StringField("name", value, stored)
+/// Creates an inverted-only string field (no doc values).
 ///
-/// IndexOptions.DOCS, omitNorms=true, tokenized=false, no doc values.
+/// Indexed with `DOCS` only, norms omitted, not tokenized.
 pub fn string_field(name: &str, value: &str, stored: bool) -> Field {
     let mut ft = FieldType::new();
     ft.stored = stored;
@@ -392,10 +386,9 @@ pub fn string_field(name: &str, value: &str, stored: bool) -> Field {
     Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
 }
 
-/// Creates an IntField.
-/// Matches Java: new IntField("name", value, stored)
+/// Creates an int field with point indexing and sorted-numeric doc values.
 ///
-/// Points: 1 dimension, 4 bytes. DocValuesType=SORTED_NUMERIC.
+/// Points: 1 dimension, 4 bytes.
 pub fn int_field(name: &str, value: i32, stored: bool) -> Field {
     let mut ft = FieldType::new();
     ft.stored = stored;
@@ -406,10 +399,9 @@ pub fn int_field(name: &str, value: i32, stored: bool) -> Field {
     Field::new(name.to_string(), ft, FieldValue::Int(value))
 }
 
-/// Creates a FloatField.
-/// Matches Java: new FloatField("name", value, stored)
+/// Creates a float field with point indexing and sorted-numeric doc values.
 ///
-/// Points: 1 dimension, 4 bytes. DocValuesType=SORTED_NUMERIC.
+/// Points: 1 dimension, 4 bytes.
 pub fn float_field(name: &str, value: f32, stored: bool) -> Field {
     let mut ft = FieldType::new();
     ft.stored = stored;
@@ -420,10 +412,9 @@ pub fn float_field(name: &str, value: f32, stored: bool) -> Field {
     Field::new(name.to_string(), ft, FieldValue::Float(value))
 }
 
-/// Creates a DoubleField.
-/// Matches Java: new DoubleField("name", value, stored)
+/// Creates a double field with point indexing and sorted-numeric doc values.
 ///
-/// Points: 1 dimension, 8 bytes. DocValuesType=SORTED_NUMERIC.
+/// Points: 1 dimension, 8 bytes.
 pub fn double_field(name: &str, value: f64, stored: bool) -> Field {
     let mut ft = FieldType::new();
     ft.stored = stored;
@@ -434,8 +425,52 @@ pub fn double_field(name: &str, value: f64, stored: bool) -> Field {
     Field::new(name.to_string(), ft, FieldValue::Double(value))
 }
 
+/// Creates a per-document numeric value for sorting and faceting (doc-values-only).
+///
+/// Not stored, not indexed, no points.
+pub fn numeric_doc_values_field(name: &str, value: i64) -> Field {
+    let mut ft = FieldType::new();
+    ft.doc_values_type = DocValuesType::Numeric;
+    Field::new(name.to_string(), ft, FieldValue::Long(value))
+}
+
+/// Creates a per-document byte array for arbitrary binary data (doc-values-only).
+///
+/// Not stored, not indexed, no points.
+pub fn binary_doc_values_field(name: &str, value: Vec<u8>) -> Field {
+    let mut ft = FieldType::new();
+    ft.doc_values_type = DocValuesType::Binary;
+    Field::new(name.to_string(), ft, FieldValue::Bytes(value))
+}
+
+/// Creates a per-document ordinal-mapped byte array (doc-values-only).
+///
+/// Values are deduplicated and ordinal-encoded. Not stored, not indexed, no points.
+pub fn sorted_doc_values_field(name: &str, value: &[u8]) -> Field {
+    let mut ft = FieldType::new();
+    ft.doc_values_type = DocValuesType::Sorted;
+    Field::new(name.to_string(), ft, FieldValue::Bytes(value.to_vec()))
+}
+
+/// Creates a sorted-set doc values field (doc-values-only).
+///
+/// Unlike [`keyword_field`], this has no inverted index or stored value.
+pub fn sorted_set_doc_values_field(name: &str, value: &str) -> Field {
+    let mut ft = FieldType::new();
+    ft.doc_values_type = DocValuesType::SortedSet;
+    Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
+}
+
+/// Creates a sorted-numeric doc values field (doc-values-only).
+///
+/// Unlike [`long_field`], this has no point index or stored value.
+pub fn sorted_numeric_doc_values_field(name: &str, value: i64) -> Field {
+    let mut ft = FieldType::new();
+    ft.doc_values_type = DocValuesType::SortedNumeric;
+    Field::new(name.to_string(), ft, FieldValue::Long(value))
+}
+
 /// Creates a stored-only string field (no indexing).
-/// Matches Java: new StoredField("name", stringValue)
 pub fn stored_string_field(name: &str, value: &str) -> Field {
     let mut ft = FieldType::new();
     ft.stored = true;
@@ -443,7 +478,6 @@ pub fn stored_string_field(name: &str, value: &str) -> Field {
 }
 
 /// Creates a stored-only int field (no indexing).
-/// Matches Java: new StoredField("name", intValue)
 pub fn stored_int_field(name: &str, value: i32) -> Field {
     let mut ft = FieldType::new();
     ft.stored = true;
@@ -451,7 +485,6 @@ pub fn stored_int_field(name: &str, value: i32) -> Field {
 }
 
 /// Creates a stored-only long field (no indexing).
-/// Matches Java: new StoredField("name", longValue)
 pub fn stored_long_field(name: &str, value: i64) -> Field {
     let mut ft = FieldType::new();
     ft.stored = true;
@@ -459,7 +492,6 @@ pub fn stored_long_field(name: &str, value: i64) -> Field {
 }
 
 /// Creates a stored-only float field (no indexing).
-/// Matches Java: new StoredField("name", floatValue)
 pub fn stored_float_field(name: &str, value: f32) -> Field {
     let mut ft = FieldType::new();
     ft.stored = true;
@@ -467,7 +499,6 @@ pub fn stored_float_field(name: &str, value: f32) -> Field {
 }
 
 /// Creates a stored-only double field (no indexing).
-/// Matches Java: new StoredField("name", doubleValue)
 pub fn stored_double_field(name: &str, value: f64) -> Field {
     let mut ft = FieldType::new();
     ft.stored = true;
@@ -475,7 +506,6 @@ pub fn stored_double_field(name: &str, value: f64) -> Field {
 }
 
 /// Creates a stored-only bytes field (no indexing).
-/// Matches Java: new StoredField("name", bytesValue)
 pub fn stored_bytes_field(name: &str, value: Vec<u8>) -> Field {
     let mut ft = FieldType::new();
     ft.stored = true;
@@ -735,6 +765,66 @@ mod tests {
         } else {
             panic!("expected StoredValue::Bytes");
         }
+    }
+
+    #[test]
+    fn test_numeric_doc_values_field() {
+        let f = numeric_doc_values_field("count", 42);
+        assert_eq!(f.name(), "count");
+        assert_eq!(f.field_type().doc_values_type(), DocValuesType::Numeric);
+        assert!(!f.field_type().stored());
+        assert!(!f.field_type().is_indexed());
+        assert!(!f.field_type().has_points());
+        assert_eq!(f.numeric_value(), Some(42));
+    }
+
+    #[test]
+    fn test_binary_doc_values_field() {
+        let f = binary_doc_values_field("payload", vec![1, 2, 3]);
+        assert_eq!(f.name(), "payload");
+        assert_eq!(f.field_type().doc_values_type(), DocValuesType::Binary);
+        assert!(!f.field_type().stored());
+        assert!(!f.field_type().is_indexed());
+        assert!(!f.field_type().has_points());
+        if let FieldValue::Bytes(b) = f.value() {
+            assert_eq!(b, &[1, 2, 3]);
+        } else {
+            panic!("expected FieldValue::Bytes");
+        }
+    }
+
+    #[test]
+    fn test_sorted_doc_values_field() {
+        let f = sorted_doc_values_field("category", b"animals");
+        assert_eq!(f.name(), "category");
+        assert_eq!(f.field_type().doc_values_type(), DocValuesType::Sorted);
+        assert!(!f.field_type().stored());
+        assert!(!f.field_type().is_indexed());
+        assert!(!f.field_type().has_points());
+    }
+
+    #[test]
+    fn test_sorted_set_doc_values_field() {
+        let f = sorted_set_doc_values_field("tag", "rust");
+        assert_eq!(f.name(), "tag");
+        assert_eq!(f.field_type().doc_values_type(), DocValuesType::SortedSet);
+        assert!(!f.field_type().stored());
+        assert!(!f.field_type().is_indexed());
+        assert!(!f.field_type().has_points());
+    }
+
+    #[test]
+    fn test_sorted_numeric_doc_values_field() {
+        let f = sorted_numeric_doc_values_field("timestamp", 1000);
+        assert_eq!(f.name(), "timestamp");
+        assert_eq!(
+            f.field_type().doc_values_type(),
+            DocValuesType::SortedNumeric
+        );
+        assert!(!f.field_type().stored());
+        assert!(!f.field_type().is_indexed());
+        assert!(!f.field_type().has_points());
+        assert_eq!(f.numeric_value(), Some(1000));
     }
 
     #[test]
