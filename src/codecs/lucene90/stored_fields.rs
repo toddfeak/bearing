@@ -280,9 +280,11 @@ fn compress_lz4_preset_dict(data: &[u8], out: &mut dyn DataOutput) -> io::Result
     out.write_vint(block_length as i32)?;
 
     let mut compressed_parts: Vec<Vec<u8>> = Vec::new();
+    // Reusable hash table across blocks, matching Java's FastCompressionHashTable reuse
+    let mut lz4_ht = lz4::FastHashTable::new();
 
     // Compress dictionary (no dictionary for the dict itself)
-    let dict_compressed = lz4::compress(&data[..dict_length]);
+    let dict_compressed = lz4::compress_reuse(&data[..dict_length], &mut lz4_ht);
     out.write_vint(dict_compressed.len() as i32)?;
     compressed_parts.push(dict_compressed);
 
@@ -297,7 +299,8 @@ fn compress_lz4_preset_dict(data: &[u8], out: &mut dyn DataOutput) -> io::Result
             buffer.truncate(dict_length);
             buffer.extend_from_slice(&data[start..start + l]);
 
-            let block_compressed = lz4::compress_with_dictionary(&buffer, dict_length);
+            let block_compressed =
+                lz4::compress_with_dictionary_reuse(&buffer, dict_length, &mut lz4_ht);
             out.write_vint(block_compressed.len() as i32)?;
             compressed_parts.push(block_compressed);
 

@@ -13,7 +13,7 @@ use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
 use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
-use crate::util::compress::lz4;
+use crate::util::compress::lz4::{self, FastHashTable};
 use crate::util::packed::{DirectMonotonicWriter, DirectWriter, unsigned_bits_required};
 use crate::util::string_helper;
 
@@ -418,13 +418,15 @@ fn add_terms_dict(
     let mut suffix_buffer: Vec<u8> = Vec::new();
     // We need to track the first term of the block as the LZ4 dictionary
     let mut dict_bytes: Vec<u8> = Vec::new();
+    // Reusable hash table across blocks, matching Java's FastCompressionHashTable reuse
+    let mut lz4_ht = FastHashTable::new();
 
     for (ord, term) in sorted_terms.iter().enumerate() {
         if (ord & block_mask) == 0 {
             if ord != 0 {
                 // Flush the previous block
                 let uncompressed_length =
-                    compress_and_write_terms_block(data, &dict_bytes, &suffix_buffer)?;
+                    compress_and_write_terms_block(data, &dict_bytes, &suffix_buffer, &mut lz4_ht)?;
                 max_block_length = max_block_length.max(uncompressed_length as i32);
                 suffix_buffer.clear();
             }
@@ -465,7 +467,7 @@ fn add_terms_dict(
     // Flush last block if there's suffix data
     if !suffix_buffer.is_empty() {
         let uncompressed_length =
-            compress_and_write_terms_block(data, &dict_bytes, &suffix_buffer)?;
+            compress_and_write_terms_block(data, &dict_bytes, &suffix_buffer, &mut lz4_ht)?;
         max_block_length = max_block_length.max(uncompressed_length as i32);
     }
 
@@ -496,6 +498,7 @@ fn compress_and_write_terms_block(
     data: &mut dyn DataOutput,
     dict_bytes: &[u8],
     suffix_buffer: &[u8],
+    ht: &mut FastHashTable,
 ) -> io::Result<usize> {
     let uncompressed_length = suffix_buffer.len();
     data.write_vint(uncompressed_length as i32)?;
@@ -505,7 +508,7 @@ fn compress_and_write_terms_block(
     combined.extend_from_slice(dict_bytes);
     combined.extend_from_slice(suffix_buffer);
 
-    let compressed = lz4::compress_with_dictionary(&combined, dict_bytes.len());
+    let compressed = lz4::compress_with_dictionary_reuse(&combined, dict_bytes.len(), ht);
     data.write_bytes(&compressed)?;
 
     Ok(uncompressed_length)

@@ -3,17 +3,78 @@
 
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
-const HASH_LOG: usize = 14;
-const HASH_TABLE_SIZE: usize = 1 << HASH_LOG;
+const MEMORY_USAGE: usize = 14;
 const MAX_DISTANCE: usize = 1 << 16; // 65536
 const HASH_LOG_HC: usize = 15;
 const HASH_TABLE_SIZE_HC: usize = 1 << HASH_LOG_HC;
 const MAX_ATTEMPTS: usize = 256;
 const MASK: usize = MAX_DISTANCE - 1;
 
+/// Compute hash log for the fast compressor based on input length.
+/// Matches Java's `FastCompressionHashTable.reset()`.
+fn fast_hash_log(len: usize) -> usize {
+    let bits_per_offset = if len.saturating_sub(LAST_LITERALS) < (1 << 16) {
+        16_usize
+    } else {
+        32_usize
+    };
+    let bits_per_offset_log = 32 - ((bits_per_offset - 1) as u32).leading_zeros() as usize;
+    MEMORY_USAGE + 3 - bits_per_offset_log
+}
+
+/// Reusable hash table for the fast LZ4 compressor.
+///
+/// Matches Java's `LZ4.FastCompressionHashTable`: the table is sized dynamically
+/// based on input length, and is intentionally **not** cleared between calls.
+/// Stale entries are harmless because the compression loop validates matches.
+/// Reusing across calls within the same context (e.g., multiple blocks of a terms
+/// dictionary) matches Java's compression behavior byte-for-byte.
+pub struct FastHashTable {
+    table: Vec<u32>,
+    hash_log: usize,
+}
+
+impl FastHashTable {
+    /// Create a new empty hash table.
+    pub fn new() -> Self {
+        Self {
+            table: Vec::new(),
+            hash_log: 0,
+        }
+    }
+
+    /// Reset for a new compression of `len` bytes. Grows the table if needed
+    /// but does NOT clear existing entries, matching Java's behavior.
+    fn reset(&mut self, len: usize) {
+        let hash_log = fast_hash_log(len);
+        let required = 1 << hash_log;
+        if self.table.len() < required {
+            self.table = vec![0u32; required];
+        }
+        self.hash_log = hash_log;
+    }
+
+    /// Pre-populate with dictionary positions.
+    fn init_dictionary(&mut self, buffer: &[u8], dict_len: usize) {
+        for i in 0..dict_len {
+            if i + 4 <= buffer.len() {
+                let h = hash4(buffer, i, self.hash_log);
+                self.table[h] = i as u32;
+            }
+        }
+    }
+}
+
 /// LZ4 compress a block of data.
 /// Returns the compressed bytes.
+#[cfg(test)]
 pub fn compress(input: &[u8]) -> Vec<u8> {
+    let mut ht = FastHashTable::new();
+    compress_reuse(input, &mut ht)
+}
+
+/// LZ4 compress a block of data, reusing a hash table across calls.
+pub fn compress_reuse(input: &[u8], ht: &mut FastHashTable) -> Vec<u8> {
     if input.is_empty() {
         return Vec::new();
     }
@@ -21,16 +82,21 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
         return encode_literals_only(input);
     }
 
-    let mut hash_table = [0u32; HASH_TABLE_SIZE];
-    compress_inner(input, 0, &mut hash_table)
+    ht.reset(input.len());
+    compress_inner(input, 0, ht.hash_log, &mut ht.table)
 }
 
 /// Shared compression loop used by both `compress` and `compress_with_dictionary`.
 /// `buffer` is the full input (possibly prefixed by dictionary bytes).
 /// `data_start` is the byte offset where actual data begins (0 for plain compress,
 /// dict_len for dictionary compress).
-/// `hash_table` must be pre-sized to HASH_TABLE_SIZE and pre-populated if using a dictionary.
-fn compress_inner(buffer: &[u8], data_start: usize, hash_table: &mut [u32]) -> Vec<u8> {
+/// `hash_table` must be pre-sized to `1 << hash_log` and pre-populated if using a dictionary.
+fn compress_inner(
+    buffer: &[u8],
+    data_start: usize,
+    hash_log: usize,
+    hash_table: &mut [u32],
+) -> Vec<u8> {
     let data_len = buffer.len() - data_start;
     let mut output = Vec::with_capacity(data_len);
 
@@ -40,7 +106,7 @@ fn compress_inner(buffer: &[u8], data_start: usize, hash_table: &mut [u32]) -> V
     let match_limit = limit - MIN_MATCH;
 
     while ip < match_limit {
-        let h = hash4(buffer, ip);
+        let h = hash4(buffer, ip, hash_log);
         let ref_pos = hash_table[h] as usize;
         hash_table[h] = ip as u32;
 
@@ -83,10 +149,10 @@ fn compress_inner(buffer: &[u8], data_start: usize, hash_table: &mut [u32]) -> V
     output
 }
 
-/// Hash 4 bytes at position `pos`.
-fn hash4(data: &[u8], pos: usize) -> usize {
+/// Hash 4 bytes at position `pos` using the given hash log.
+fn hash4(data: &[u8], pos: usize, hash_log: usize) -> usize {
     let v = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-    ((v.wrapping_mul(2654435761)) >> (32 - HASH_LOG)) as usize
+    ((v.wrapping_mul(2654435761)) >> (32 - hash_log)) as usize
 }
 
 /// Encode a sequence: literal_len literals + match(distance, match_len).
@@ -158,7 +224,20 @@ fn encode_literals_only(input: &[u8]) -> Vec<u8> {
 /// LZ4 compress with a preset dictionary.
 /// `buffer[0..dict_len]` is the dictionary, `buffer[dict_len..]` is the data to compress.
 /// Returns compressed bytes for the data portion only.
+#[cfg(test)]
 pub fn compress_with_dictionary(buffer: &[u8], dict_len: usize) -> Vec<u8> {
+    let mut ht = FastHashTable::new();
+    compress_with_dictionary_reuse(buffer, dict_len, &mut ht)
+}
+
+/// LZ4 compress with a preset dictionary, reusing a hash table across calls.
+/// `buffer[0..dict_len]` is the dictionary, `buffer[dict_len..]` is the data to compress.
+/// Returns compressed bytes for the data portion only.
+pub fn compress_with_dictionary_reuse(
+    buffer: &[u8],
+    dict_len: usize,
+    ht: &mut FastHashTable,
+) -> Vec<u8> {
     let data_len = buffer.len() - dict_len;
 
     if data_len == 0 {
@@ -168,19 +247,10 @@ pub fn compress_with_dictionary(buffer: &[u8], dict_len: usize) -> Vec<u8> {
         return encode_literals_only(&buffer[dict_len..]);
     }
 
-    let mut hash_table = [0u32; HASH_TABLE_SIZE];
+    ht.reset(buffer.len());
+    ht.init_dictionary(buffer, dict_len);
 
-    // Pre-populate hash table with dictionary positions.
-    // Like Java's initDictionary, we hash every position in the dict
-    // (the 4-byte read may extend into data, which is fine since the buffer is contiguous).
-    for i in 0..dict_len {
-        if i + 4 <= buffer.len() {
-            let h = hash4(buffer, i);
-            hash_table[h] = i as u32;
-        }
-    }
-
-    compress_inner(buffer, dict_len, &mut hash_table)
+    compress_inner(buffer, dict_len, ht.hash_log, &mut ht.table)
 }
 
 /// Hash function for the high-compression hash table (HASH_LOG_HC = 15 bits).

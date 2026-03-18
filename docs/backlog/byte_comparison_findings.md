@@ -10,7 +10,7 @@
 
 Every Lucene codec file contains a header with a random 16-byte segment ID and a footer with a CRC32 checksum over the file contents. These differ between any two indexing runs, even two Java runs. The comparison tool masks both before comparing payload bytes.
 
-## Results: 19 files total (8 match, 6+2 verified cause, 2+1 uninvestigated)
+## Results: 19 files total (8 match, 7+2 verified cause, 1+1 uninvestigated)
 
 ### Payload-identical after masking (8 files)
 
@@ -48,10 +48,10 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 | File | Size | Contents | Likely Cause |
 |------|-----:|---------|-------------|
 | `_0_Lucene103_0.psm` | 112 | Postings metadata | Level 1 impact metadata differs (Rust computes it eagerly, Java only when writing level 1 skip data) |
-| `_0_Lucene90_0.dvm` | 1,407 | Doc values metadata | Unknown |
+| `_0_Lucene90_0.dvm` | 1,407 | Doc values metadata | Field write order differs (Java hash table order vs Rust field number order), causing different data file pointers in per-field metadata. Per-field metadata content is identical. |
 
-### Different size — not yet investigated (1 file)
+### Different size — verified root cause (1 file)
 
-| File | Java | Rust | Delta | Contents | Likely Cause |
-|------|-----:|-----:|------:|---------|-------------|
-| `_0_Lucene90_0.dvd` | 12,443 | 12,441 | -2 | Doc values data | Unknown |
+| File | Java | Rust | Delta | Contents | Root Cause |
+|------|-----:|-----:|------:|---------|------------|
+| `_0_Lucene90_0.dvd` | 12,443 | 12,447 | +4 | Doc values data | LZ4 terms dict blocks are now byte-identical (fixed: dynamic hash log + reusable hash table matching Java's `FastCompressionHashTable`). Remaining +4 is from DirectMonotonic address encoding of different absolute file pointers due to field write order (same root cause as BKD `.kdi`). |
