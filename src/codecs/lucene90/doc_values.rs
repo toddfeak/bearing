@@ -7,6 +7,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::lucene90::indexed_disi;
 use crate::index::FieldInfos;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
@@ -155,10 +156,19 @@ fn add_numeric_field(
 ) -> io::Result<()> {
     // No skip index for MVP
 
+    let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
     let all_values: Vec<i64> = vals.iter().map(|(_doc_id, v)| *v).collect();
 
     // Unlike SORTED_NUMERIC, NUMERIC does NOT write numDocsWithField after writeValues
-    write_values(meta, data, &all_values, vals.len() as i32, num_docs, false)?;
+    write_values(
+        meta,
+        data,
+        &all_values,
+        &doc_ids,
+        vals.len() as i32,
+        num_docs,
+        false,
+    )?;
 
     Ok(())
 }
@@ -204,9 +214,14 @@ fn add_binary_field(
         meta.write_le_short(-1)?;
         meta.write_byte(0xFF)?;
     } else {
-        return Err(io::Error::other(
-            "SPARSE binary doc values pattern not implemented for MVP",
-        ));
+        // SPARSE — write IndexedDISI bitset
+        let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
+        let disi_offset = data.file_pointer() as i64;
+        meta.write_le_long(disi_offset)?;
+        let jump_table_entry_count = indexed_disi::write_bit_set(&doc_ids, num_docs, &mut *data)?;
+        meta.write_le_long(data.file_pointer() as i64 - disi_offset)?;
+        meta.write_le_short(jump_table_entry_count)?;
+        meta.write_byte(indexed_disi::DEFAULT_DENSE_RANK_POWER as u8)?;
     }
 
     meta.write_le_int(num_docs_with_field)?;
@@ -264,10 +279,19 @@ fn add_sorted_field(
         .collect();
 
     // Build per-doc ordinal array
+    let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
     let ordinals: Vec<i64> = vals.iter().map(|(_doc_id, v)| ord_map[v]).collect();
 
     // writeValues for ordinals (ords=true) — no multiValued byte, no numDocsWithField
-    write_values(meta, data, &ordinals, vals.len() as i32, num_docs, true)?;
+    write_values(
+        meta,
+        data,
+        &ordinals,
+        &doc_ids,
+        vals.len() as i32,
+        num_docs,
+        true,
+    )?;
 
     // Write terms dictionary
     add_terms_dict(meta, data, &sorted_terms)?;
@@ -291,6 +315,7 @@ fn add_sorted_numeric_field(
     }
 
     // Collect all values in doc order (flattened)
+    let doc_ids: Vec<i32> = sorted_vals.iter().map(|(doc_id, _)| *doc_id).collect();
     let all_values: Vec<i64> = sorted_vals
         .iter()
         .flat_map(|(_doc_id, values)| values.iter().copied())
@@ -301,6 +326,7 @@ fn add_sorted_numeric_field(
         meta,
         data,
         &all_values,
+        &doc_ids,
         num_docs_with_value,
         num_docs,
         false,
@@ -369,12 +395,21 @@ fn add_sorted_set_field(
         // Java's readSorted() does NOT read numDocsWithField.
         meta.write_byte(0)?;
 
+        let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
         let ordinals: Vec<i64> = vals
             .iter()
             .map(|(_doc_id, values)| ord_map[&values[0]])
             .collect();
 
-        write_values(meta, data, &ordinals, vals.len() as i32, num_docs, true)?;
+        write_values(
+            meta,
+            data,
+            &ordinals,
+            &doc_ids,
+            vals.len() as i32,
+            num_docs,
+            true,
+        )?;
         add_terms_dict(meta, data, &sorted_terms)?;
     } else {
         // Multi-valued path: doAddSortedNumericField(ords=true) writes multiValued
@@ -394,6 +429,7 @@ fn add_sorted_set_field(
 
         // Sort values within each doc (already done above via sort+dedup)
         // Flatten ordinals
+        let doc_ids: Vec<i32> = ord_vals.iter().map(|(doc_id, _)| *doc_id).collect();
         let all_ordinals: Vec<i64> = ord_vals
             .iter()
             .flat_map(|(_doc_id, ords)| ords.iter().copied())
@@ -404,6 +440,7 @@ fn add_sorted_set_field(
             meta,
             data,
             &all_ordinals,
+            &doc_ids,
             num_docs_with_value,
             num_docs,
             true,
@@ -445,6 +482,7 @@ fn write_values(
     meta: &mut dyn DataOutput,
     data: &mut dyn IndexOutput,
     all_values: &[i64],
+    doc_ids: &[i32],
     num_docs_with_value: i32,
     max_doc: i32,
     ords: bool,
@@ -465,10 +503,13 @@ fn write_values(
         meta.write_le_short(-1)?;
         meta.write_byte(0xFF)?;
     } else {
-        // SPARSE — not implemented for MVP
-        return Err(io::Error::other(
-            "SPARSE doc values pattern not implemented for MVP",
-        ));
+        // SPARSE — write IndexedDISI bitset
+        let offset = data.file_pointer() as i64;
+        meta.write_le_long(offset)?;
+        let jump_table_entry_count = indexed_disi::write_bit_set(doc_ids, max_doc, &mut *data)?;
+        meta.write_le_long(data.file_pointer() as i64 - offset)?;
+        meta.write_le_short(jump_table_entry_count)?;
+        meta.write_byte(indexed_disi::DEFAULT_DENSE_RANK_POWER as u8)?;
     }
 
     meta.write_le_long(num_values)?;
@@ -811,6 +852,7 @@ mod tests {
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::test_util::{self, TestDataReader};
+    use assertables::{assert_ge, assert_gt};
     use std::collections::HashMap;
 
     fn make_test_directory() -> SharedDirectory {
@@ -2126,5 +2168,189 @@ mod tests {
 
         // EOF
         assert_eq!(reader.0.read_le_int(), -1);
+    }
+
+    #[test]
+    fn test_sparse_numeric_field() {
+        // 3 docs with values out of 10 total — SPARSE pattern
+        let fi = make_field_info("score", 0, DocValuesType::Numeric);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "score".to_string(),
+            make_per_field_data_numeric(vec![(1, 100), (5, 200), (8, 300)]),
+        );
+
+        let segment_id = [0u8; 16];
+        let dir = make_test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 10).unwrap();
+
+        let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let dvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
+
+        let meta_header_len = index_header_length(META_CODEC, "");
+        let mut reader = TestDataReader::new(&dvm[meta_header_len..], 0);
+
+        // field_number = 0, type = NUMERIC
+        assert_eq!(reader.read_le_int(), 0);
+        assert_eq!(reader.read_byte(), NUMERIC);
+
+        // docsWithFieldOffset >= 0 means SPARSE (IndexedDISI data in .dvd)
+        let docs_with_field_offset = reader.read_le_long();
+        assert_ge!(docs_with_field_offset, 0);
+
+        // docsWithFieldLength > 0
+        let docs_with_field_length = reader.read_le_long();
+        assert_gt!(docs_with_field_length, 0);
+
+        // jumpTableEntryCount (>= 0 means real count from IndexedDISI)
+        let jump_table_entry_count = reader.read_le_short();
+        assert_ge!(jump_table_entry_count, 0);
+
+        // denseRankPower = 9 (DEFAULT_DENSE_RANK_POWER)
+        let dense_rank_power = reader.read_byte();
+        assert_eq!(dense_rank_power, 9);
+
+        // Verify IndexedDISI data was written to .dvd at the specified offset
+        let data_header_len = index_header_length(DATA_CODEC, "");
+        let disi_start = docs_with_field_offset as usize;
+        assert_ge!(disi_start, data_header_len);
+        assert_eq!(
+            docs_with_field_length as usize,
+            (disi_start + docs_with_field_length as usize) - disi_start
+        );
+
+        // Verify the IndexedDISI block header: blockID=0, cardinality-1=2 (3 docs)
+        let block_id = i16::from_le_bytes(dvd[disi_start..disi_start + 2].try_into().unwrap());
+        assert_eq!(block_id, 0);
+        let card_minus_1 =
+            i16::from_le_bytes(dvd[disi_start + 2..disi_start + 4].try_into().unwrap());
+        assert_eq!(card_minus_1, 2);
+    }
+
+    #[test]
+    fn test_sparse_binary_field() {
+        // 2 docs with values out of 5 total — SPARSE pattern
+        let fi = make_field_info("tag", 0, DocValuesType::Binary);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "tag".to_string(),
+            make_per_field_data_binary(vec![(1, b"hello".to_vec()), (3, b"world".to_vec())]),
+        );
+
+        let segment_id = [0u8; 16];
+        let dir = make_test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 5).unwrap();
+
+        let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+
+        let meta_header_len = index_header_length(META_CODEC, "");
+        let mut reader = TestDataReader::new(&dvm[meta_header_len..], 0);
+
+        // field_number = 0, type = BINARY
+        assert_eq!(reader.read_le_int(), 0);
+        assert_eq!(reader.read_byte(), BINARY);
+
+        // dataOffset, dataLength
+        let _data_offset = reader.read_le_long();
+        let _data_length = reader.read_le_long();
+
+        // docsWithFieldOffset >= 0 means SPARSE
+        let docs_with_field_offset = reader.read_le_long();
+        assert_ge!(docs_with_field_offset, 0);
+
+        let docs_with_field_length = reader.read_le_long();
+        assert_gt!(docs_with_field_length, 0);
+
+        let jump_table_entry_count = reader.read_le_short();
+        assert_ge!(jump_table_entry_count, 0);
+
+        let dense_rank_power = reader.read_byte();
+        assert_eq!(dense_rank_power, 9);
+
+        // numDocsWithField = 2
+        assert_eq!(reader.read_le_int(), 2);
+    }
+
+    #[test]
+    fn test_sparse_sorted_field() {
+        // 2 docs with values out of 5 total — SPARSE sorted
+        let fi = make_field_info("category", 0, DocValuesType::Sorted);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "category".to_string(),
+            make_per_field_data_sorted(vec![
+                (0, BytesRef::new(b"alpha".to_vec())),
+                (3, BytesRef::new(b"beta".to_vec())),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let dir = make_test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 5).unwrap();
+
+        let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+
+        let meta_header_len = index_header_length(META_CODEC, "");
+        let mut reader = TestDataReader::new(&dvm[meta_header_len..], 0);
+
+        // field_number = 0, type = SORTED
+        assert_eq!(reader.read_le_int(), 0);
+        assert_eq!(reader.read_byte(), SORTED);
+
+        // docsWithFieldOffset >= 0 means SPARSE
+        let docs_with_field_offset = reader.read_le_long();
+        assert_ge!(docs_with_field_offset, 0);
+
+        let docs_with_field_length = reader.read_le_long();
+        assert_gt!(docs_with_field_length, 0);
+
+        let _jump_table_entry_count = reader.read_le_short();
+
+        let dense_rank_power = reader.read_byte();
+        assert_eq!(dense_rank_power, 9);
+    }
+
+    #[test]
+    fn test_sparse_sorted_numeric_field() {
+        // 2 docs with values out of 5 total — SPARSE sorted numeric
+        let fi = make_field_info("counts", 0, DocValuesType::SortedNumeric);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "counts".to_string(),
+            make_per_field_data_sorted_numeric(vec![(1, vec![10, 20]), (4, vec![30])]),
+        );
+
+        let segment_id = [0u8; 16];
+        let dir = make_test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 5).unwrap();
+
+        let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+
+        let meta_header_len = index_header_length(META_CODEC, "");
+        let mut reader = TestDataReader::new(&dvm[meta_header_len..], 0);
+
+        // field_number = 0, type = SORTED_NUMERIC
+        assert_eq!(reader.read_le_int(), 0);
+        assert_eq!(reader.read_byte(), SORTED_NUMERIC);
+
+        // docsWithFieldOffset >= 0 means SPARSE
+        let docs_with_field_offset = reader.read_le_long();
+        assert_ge!(docs_with_field_offset, 0);
+
+        let docs_with_field_length = reader.read_le_long();
+        assert_gt!(docs_with_field_length, 0);
+
+        let _jump_table_entry_count = reader.read_le_short();
+
+        let dense_rank_power = reader.read_byte();
+        assert_eq!(dense_rank_power, 9);
     }
 }
