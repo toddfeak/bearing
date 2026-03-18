@@ -502,18 +502,10 @@ impl PostingsWriter {
             last_pos_block_offset = pe.finish(&mut **pos_out, total_term_freq, pos_start_fp)?;
         }
 
-        // Compute level 1 impact metadata from accumulated impacts
-        if write_freqs {
-            let level1_impacts = bfs.level1_accumulator.get_competitive_freq_norm_pairs();
-            if level1_impacts.len() as i32 > bfs.max_num_impacts_at_level1 {
-                bfs.max_num_impacts_at_level1 = level1_impacts.len() as i32;
-            }
-            let mut scratch = Vec::new();
-            let level1_bytes = write_impacts(&level1_impacts, &mut scratch)?;
-            if level1_bytes as i32 > bfs.max_impact_num_bytes_at_level1 {
-                bfs.max_impact_num_bytes_at_level1 = level1_bytes as i32;
-            }
-        }
+        // Note: level 1 impact metadata (max_num_impacts_at_level1,
+        // max_impact_num_bytes_at_level1) is only updated inside writeLevel1SkipData(),
+        // which triggers every LEVEL1_NUM_DOCS (4096) docs. For terms below that
+        // threshold, these fields correctly stay at 0 — matching Java's behavior.
 
         // Copy impact metadata back from BlockFlushState
         self.max_num_impacts_at_level0 = self
@@ -1419,5 +1411,55 @@ mod tests {
         assert_eq!(state.doc_freq, 128);
         let expected_ttf: i64 = (0..128).map(|i: i64| (i % 10) + 1).sum();
         assert_eq!(state.total_term_freq, expected_ttf);
+    }
+
+    #[test]
+    fn test_psm_level1_impact_metadata_zero_below_threshold() {
+        // Java only updates level 1 impact metadata inside writeLevel1SkipData(),
+        // which triggers every 4096 docs. For terms below that threshold, the
+        // level 1 fields must be 0. This test writes 128 docs with varied freqs
+        // (enough to produce non-zero level 0 impacts) and verifies level 1 stays 0.
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let postings: Vec<(i32, i32, &[i32])> =
+            (0..128).map(|i| (i, (i % 10) + 1, [].as_slice())).collect();
+        pw.write_term(
+            &postings,
+            IndexOptions::DocsAndFreqs,
+            &NormsLookup::no_norms(),
+        )
+        .unwrap();
+
+        let names = pw.finish().unwrap();
+        let psm_name = names.iter().find(|n| n.ends_with(".psm")).unwrap();
+        let psm_data = dir.lock().unwrap().read_file(psm_name).unwrap();
+
+        // Parse the 4 LE i32 metadata fields after the codec header
+        let header_size = codec_util::index_header_length(META_CODEC, "");
+        let meta = &psm_data[header_size..];
+        let max_num_impacts_l0 = i32::from_le_bytes(meta[0..4].try_into().unwrap());
+        let max_impact_bytes_l0 = i32::from_le_bytes(meta[4..8].try_into().unwrap());
+        let max_num_impacts_l1 = i32::from_le_bytes(meta[8..12].try_into().unwrap());
+        let max_impact_bytes_l1 = i32::from_le_bytes(meta[12..16].try_into().unwrap());
+
+        // Level 0 should be non-zero (128 docs with freqs triggers impact computation)
+        assert!(
+            max_num_impacts_l0 > 0,
+            "level 0 impact count should be > 0, got {max_num_impacts_l0}"
+        );
+        assert!(
+            max_impact_bytes_l0 > 0,
+            "level 0 impact bytes should be > 0, got {max_impact_bytes_l0}"
+        );
+
+        // Level 1 must be 0 (no level 1 skip triggered for < 4096 docs)
+        assert_eq!(
+            max_num_impacts_l1, 0,
+            "level 1 impact count should be 0, got {max_num_impacts_l1}"
+        );
+        assert_eq!(
+            max_impact_bytes_l1, 0,
+            "level 1 impact bytes should be 0, got {max_impact_bytes_l1}"
+        );
     }
 }
