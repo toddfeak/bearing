@@ -18,8 +18,7 @@ The name is a play on words. A bearing gives direction — fitting for a search 
 
 - Target: Apache Lucene 10.3.2, Lucene103 codec
 - Working: write path with multi-threaded `IndexWriter`
-- 8 field types: KeywordField, LongField, TextField, StringField, IntField, FloatField, DoubleField, StoredField
-- 353 tests passing
+- Fourteen field types: KeywordField, LongField, TextField, StringField, IntField, FloatField, DoubleField, StoredField, LatLonPoint, FeatureField, IntRange, LongRange, FloatRange, DoubleRange
 - Java Lucene VerifyIndex validates output
 
 ## Performance
@@ -49,15 +48,19 @@ Requires internet access. Not required for building or testing.
 
 ## Test Data
 
-`testdata/docs/` has 3 small files for quick tests. Generate a larger corpus for benchmarking:
+`testdata/docs/` has 4 small files for quick tests. `testdata/impact-docs/` has 150 documents for impact/feature testing. Generate a larger corpus for benchmarking:
 
     python3 testdata/gen_docs.py -n 2000    # generates to /tmp/perf-docs/
 
-## E2E Test
+## E2E Tests
 
-Roundtrip test: Bearing writes an index, Java Lucene reads and validates it.
+Roundtrip tests: Bearing writes indexes, Java Lucene reads and validates them.
 
-    ./tests/e2e_indexfiles.sh
+    ./tests/e2e_all.sh              # run all e2e tests
+    ./tests/e2e_indexfiles.sh       # basic indexing roundtrip
+    ./tests/e2e_doc_values.sh       # doc values byte-level comparison
+    ./tests/e2e_verify_impacts.sh   # feature field / impact encoding
+    ./tests/e2e_verify_tim_compression.sh  # terms dictionary compression
 
 Requires Java 21+. Gradle handles the Lucene dependency automatically.
 
