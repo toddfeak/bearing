@@ -71,7 +71,9 @@ impl DirectWriter {
                         packed |= (self.values[i + j] as u64) << (bpv * j as u32);
                     }
                 }
-                output.write_bytes(&packed.to_le_bytes())?;
+                let remaining = (up_to - i).min(values_per_long);
+                let bytes_needed = (remaining * bpv as usize).div_ceil(8);
+                output.write_bytes(&packed.to_le_bytes()[..bytes_needed])?;
                 i += values_per_long;
             }
         } else {
