@@ -95,12 +95,12 @@ pub fn write(
         field_infos,
     )?;
 
-    // Process fields in field number order
+    // Process fields in lexicographic name order (matching Java's FieldsConsumer)
     let mut indexed_fields: Vec<_> = field_infos
         .iter()
         .filter(|fi| fi.index_options() != IndexOptions::None)
         .collect();
-    indexed_fields.sort_by_key(|fi| fi.number());
+    indexed_fields.sort_by_key(|fi| fi.name().to_string());
 
     for fi in indexed_fields {
         if let Some(pfd) = per_field.get(fi.name())

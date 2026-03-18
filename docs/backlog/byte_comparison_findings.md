@@ -12,7 +12,7 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 
 ## Results: 19 files total
 
-### Payload-identical after masking (5 files)
+### Payload-identical after masking (6 files)
 
 | File | Size | Contents |
 |------|-----:|---------|
@@ -21,6 +21,7 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 | `_0.nvm` | 103 | Norms metadata (was 1-byte diff before SmallFloat.intToByte4 fix) |
 | `_0_Lucene103_0.doc` | 166,158 | Postings doc IDs + frequencies (was 1,880 bytes smaller before competitive impacts fix) |
 | `_0_Lucene103_0.pos` | 5,239,366 | Postings positions |
+| `_0_Lucene103_0.tim` | 29,613 | Term dictionary (was +5,612 bytes before suffix compression + field write order fix) |
 
 ### Same size, differ — verified root cause (2 files)
 
@@ -29,13 +30,12 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 | `_0.fnm` | 936 | Per-field attribute map iteration order differs (Java `HashMap` vs Rust `HashMap`). Both contain identical key-value pairs. Unfixable without sorting, and Java doesn't sort. |
 | `_0.fdm` | 158 | Stored fields metadata. 1 byte differs at offset 0x6e — a pointer into `.fdt`, which differs due to LZ4 compression of different content. Verified by byte inspection. |
 
-### Different size — verified root cause (3 files)
+### Different size — verified root cause (2 files)
 
 | File | Java | Rust | Delta | Root Cause |
 |------|-----:|-----:|------:|-----------|
 | `_0.fdt` | 24,105 | 24,016 | -89 | Stored fields data. LZ4-compressed blocks contain "indexed by Java" vs "indexed by Rust" (same length, different bytes). Different input produces different compressed output. Verified: both strings are 15 bytes. |
 | `_0.si` | 533 | 429 | -104 | Segment info metadata. Java writes 8 diagnostic entries (JVM version, OS details, timestamp, etc.), Rust writes 4. Files set now matches (both list 18 files including `_0.si` — this was a bug, now fixed). Verified by parsing both files field-by-field. |
-| `_0_Lucene103_0.tim` | 29,613 | 35,225 | +5,612 | Term dictionary. Rust does not implement suffix compression (LZ4 / LOWERCASE_ASCII). Block splitting, suffix length optimization, and all other encoding match Java. Verified by code review. See [tim_suffix_compression.md](tim_suffix_compression.md). |
 
 ### Same size, differ — not yet investigated (6 files)
 
