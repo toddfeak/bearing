@@ -100,7 +100,8 @@ pub fn compress(input: &[u8], len: usize) -> Option<Vec<u8>> {
 }
 
 /// Decompress data produced by [`compress`]. `len` is the original uncompressed length.
-pub fn decompress(compressed: &[u8], len: usize) -> Vec<u8> {
+#[cfg(test)]
+fn decompress(compressed: &[u8], len: usize) -> Vec<u8> {
     let saved = len >> 2;
     let compressed_len = len - saved;
 
@@ -149,6 +150,7 @@ fn write_vint(out: &mut Vec<u8>, value: i32) {
 }
 
 /// Read a VInt from a byte slice. Returns (value, bytes_consumed).
+#[cfg(test)]
 fn read_vint(data: &[u8]) -> (i32, usize) {
     let mut result: i32 = 0;
     let mut shift = 0;
