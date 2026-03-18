@@ -288,8 +288,8 @@ mod tests {
         let out = MemoryIndexOutput::new("test.bin".to_string());
         dir.insert_output(out);
 
-        assert!(dir.delete_file("test.bin").is_ok());
-        assert!(dir.delete_file("test.bin").is_err());
+        assert_ok!(dir.delete_file("test.bin"));
+        assert_err!(dir.delete_file("test.bin"));
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         dir.insert_output(out);
 
         dir.rename("old.bin", "new.bin").unwrap();
-        assert!(dir.file_length("old.bin").is_err());
+        assert_err!(dir.file_length("old.bin"));
         assert_eq!(dir.file_length("new.bin").unwrap(), 4);
     }
 
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn test_memory_directory_default() {
         let dir = MemoryDirectory::default();
-        assert!(dir.list_all().unwrap().is_empty());
+        assert_is_empty!(dir.list_all().unwrap());
     }
 
     #[test]
@@ -329,19 +329,19 @@ mod tests {
     #[test]
     fn test_memory_directory_rename_missing() {
         let mut dir = MemoryDirectory::new();
-        assert!(dir.rename("nonexistent", "dest").is_err());
+        assert_err!(dir.rename("nonexistent", "dest"));
     }
 
     #[test]
     fn test_memory_directory_read_missing() {
         let dir = MemoryDirectory::new();
-        assert!(dir.read_file("nonexistent").is_err());
+        assert_err!(dir.read_file("nonexistent"));
     }
 
     #[test]
     fn test_memory_directory_file_length_missing() {
         let dir = MemoryDirectory::new();
-        assert!(dir.file_length("nonexistent").is_err());
+        assert_err!(dir.file_length("nonexistent"));
     }
 
     #[test]

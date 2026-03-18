@@ -204,8 +204,8 @@ mod tests {
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", b"data").unwrap();
-        assert!(dir.delete_file("test.bin").is_ok());
-        assert!(dir.delete_file("test.bin").is_err());
+        assert_ok!(dir.delete_file("test.bin"));
+        assert_err!(dir.delete_file("test.bin"));
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
         dir.write_file("old.bin", b"data").unwrap();
         dir.rename("old.bin", "new.bin").unwrap();
 
-        assert!(dir.file_length("old.bin").is_err());
+        assert_err!(dir.file_length("old.bin"));
         assert_eq!(dir.file_length("new.bin").unwrap(), 4);
     }
 
@@ -269,7 +269,7 @@ mod tests {
         let data = dir.read_file("test.bin").unwrap();
         assert_eq!(data, b"hello world");
 
-        assert!(dir.read_file("nonexistent.bin").is_err());
+        assert_err!(dir.read_file("nonexistent.bin"));
     }
 
     #[test]

@@ -128,7 +128,7 @@ mod tests {
         let name = write(&dir, &si, &files).unwrap();
         assert_eq!(name, "_0.si");
         let data = dir.lock().unwrap().read_file(&name).unwrap();
-        assert!(!data.is_empty());
+        assert_not_empty!(data);
 
         // Verify header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);

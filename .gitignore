@@ -4,8 +4,9 @@
 # Rust
 /target/
 
-# Reference Lucene source (downloaded by reference/download-lucene.sh)
+# Reference sources (downloaded by reference/download-references.sh)
 /reference/lucene-*/
+/reference/assertables/
 
 # Gradle (Java test utilities)
 tests/java/.gradle/

@@ -160,7 +160,7 @@ mod tests {
         let flushed = dwpt.flush(&dir, true).unwrap();
         assert_eq!(flushed.segment_commit_info.info.name, "_0");
         assert_eq!(flushed.segment_commit_info.info.max_doc, 1);
-        assert!(!flushed.file_names.is_empty());
+        assert_not_empty!(flushed.file_names);
     }
 
     #[test]

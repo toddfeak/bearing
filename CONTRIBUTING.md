@@ -27,17 +27,17 @@ See [`CLAUDE.md`](CLAUDE.md) for the authoritative style guide, including error 
 
 Bearing is a port of **Apache Lucene 10.3.2**. Lucene is the source of truth for **behavior and storage formats** — the on-disk output must be compatible. However, the Rust code should be idiomatic Rust, not a transliteration of Java. Prefer traits, enums, and Rust's ownership model over mirroring Java's object hierarchy. Codec version naming (e.g., `lucene90`, `lucene103`) follows the Java convention.
 
-To set up the reference source (requires Java 21+):
+To set up the reference sources:
 
 ```bash
-./reference/download-lucene.sh
+./reference/download-references.sh
 ```
 
 When porting a feature, locate the corresponding Java source under `reference/lucene-10.3.2/lucene/` and port both the implementation and its tests.
 
 ## Dependency Policy
 
-Bearing uses only two external crates: `log` (logging facade) and `simple_logger` (concrete logger for the binary). Everything else uses the Rust standard library.
+Bearing uses very limited runtime dependencies and we strive to avoid adding more. At the same time, try not to reimplement common libraries.
 
 ## If PRs Open in the Future
 

@@ -177,7 +177,7 @@ mod tests {
 
     fn round_trip_len(input: &[u8], len: usize) -> bool {
         if let Some(compressed) = compress(input, len) {
-            assert!(compressed.len() < len);
+            assert_lt!(compressed.len(), len);
             let decompressed = decompress(&compressed, len);
             assert_eq!(&decompressed[..], &input[..len]);
             true

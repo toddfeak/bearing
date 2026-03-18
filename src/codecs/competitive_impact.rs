@@ -185,7 +185,7 @@ mod tests {
     fn test_impact_ord_ascending_freq() {
         let a = Impact { freq: 3, norm: 5 };
         let b = Impact { freq: 7, norm: 5 };
-        assert!(a < b);
+        assert_lt!(a, b);
     }
 
     #[test]
@@ -193,7 +193,7 @@ mod tests {
         // Higher unsigned norm compares lower (descending unsigned norm)
         let a = Impact { freq: 5, norm: 10 };
         let b = Impact { freq: 5, norm: 5 };
-        assert!(a < b); // norm 10 (unsigned larger) comes first
+        assert_lt!(a, b); // norm 10 (unsigned larger) comes first
     }
 
     // -- CompetitiveImpactAccumulator tests --
@@ -372,7 +372,7 @@ mod tests {
         acc.add(5, 10);
         acc.add(10, 20);
         acc.clear();
-        assert!(acc.get_competitive_freq_norm_pairs().is_empty());
+        assert_is_empty!(acc.get_competitive_freq_norm_pairs());
     }
 
     #[test]

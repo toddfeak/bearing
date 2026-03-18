@@ -590,7 +590,7 @@ mod tests {
     fn test_compress_decompress_empty() {
         let input = b"";
         let compressed = compress(input);
-        assert!(compressed.is_empty());
+        assert_is_empty!(compressed);
     }
 
     #[test]
@@ -598,7 +598,7 @@ mod tests {
         let input: Vec<u8> = "abcdefgh".repeat(100).into_bytes();
         let compressed = compress(&input);
         // Repetitive data should compress well
-        assert!(compressed.len() < input.len());
+        assert_lt!(compressed.len(), input.len());
         let decompressed = decompress(&compressed, input.len()).unwrap();
         assert_eq!(decompressed, input);
     }
@@ -617,7 +617,7 @@ mod tests {
     fn test_compress_all_same_byte() {
         let input = vec![0xAA; 1000];
         let compressed = compress(&input);
-        assert!(compressed.len() < input.len());
+        assert_lt!(compressed.len(), input.len());
         let decompressed = decompress(&compressed, input.len()).unwrap();
         assert_eq!(decompressed, input);
     }
@@ -690,7 +690,7 @@ mod tests {
         // Verify the compressed output ends with a valid last-literals token
         // (i.e., no spurious 0x00 byte from encode_last_literals with len=0).
         // The last token must encode at least LAST_LITERALS (5) literal bytes.
-        assert!(!compressed.is_empty());
+        assert_not_empty!(compressed);
 
         // Decompress with dictionary prefix and verify round-trip
         let decompressed = decompress_with_prefix(&compressed, data.len(), dict);
@@ -819,7 +819,7 @@ mod tests {
         for _ in 0..50 {
             input.extend_from_slice(pattern);
         }
-        assert!(input.len() > 65536);
+        assert_gt!(input.len(), 65536);
         let compressed = compress(&input);
         let decompressed = decompress(&compressed, input.len()).unwrap();
         assert_eq!(decompressed, input);
@@ -835,7 +835,7 @@ mod tests {
         for _ in 0..1500 {
             input.extend_from_slice(chunk);
         }
-        assert!(input.len() > 65536);
+        assert_gt!(input.len(), 65536);
 
         let mut ht = HighCompressionHashTable::new();
         let compressed = compress_high(&input, &mut ht);
@@ -853,7 +853,7 @@ mod tests {
         // Empty data with non-empty dictionary (line 244)
         let dict = b"some dictionary content";
         let compressed = compress_with_dictionary(dict, dict.len());
-        assert!(compressed.is_empty());
+        assert_is_empty!(compressed);
     }
 
     #[test]
@@ -894,7 +894,7 @@ mod tests {
         for i in 0u32..75 {
             input.extend_from_slice(&(i + 0x80000000).to_be_bytes());
         }
-        assert!(input.len() >= 48 + 300); // pattern + unique
+        assert_ge!(input.len(), 48 + 300); // pattern + unique
         let compressed = compress(&input);
         let decompressed = decompress(&compressed, input.len()).unwrap();
         assert_eq!(decompressed, input);
@@ -939,7 +939,7 @@ mod tests {
     fn test_compress_high_empty() {
         let mut ht = HighCompressionHashTable::new();
         let compressed = compress_high(b"", &mut ht);
-        assert!(compressed.is_empty());
+        assert_is_empty!(compressed);
     }
 
     #[test]
@@ -947,7 +947,7 @@ mod tests {
         let input: Vec<u8> = "abcdefgh".repeat(100).into_bytes();
         let mut ht = HighCompressionHashTable::new();
         let compressed = compress_high(&input, &mut ht);
-        assert!(compressed.len() < input.len());
+        assert_lt!(compressed.len(), input.len());
         let decompressed = decompress(&compressed, input.len()).unwrap();
         assert_eq!(decompressed, input);
     }
@@ -969,12 +969,7 @@ mod tests {
         assert_eq!(high_decompressed, input);
 
         // High compression should be at least as good
-        assert!(
-            high_compressed.len() <= fast_compressed.len(),
-            "high {} > fast {}",
-            high_compressed.len(),
-            fast_compressed.len()
-        );
+        assert_le!(high_compressed.len(), fast_compressed.len());
     }
 
     #[test]
@@ -997,7 +992,7 @@ mod tests {
         let input = vec![0xAA; 1000];
         let mut ht = HighCompressionHashTable::new();
         let compressed = compress_high(&input, &mut ht);
-        assert!(compressed.len() < input.len());
+        assert_lt!(compressed.len(), input.len());
         let decompressed = decompress(&compressed, input.len()).unwrap();
         assert_eq!(decompressed, input);
     }

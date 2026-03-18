@@ -494,7 +494,7 @@ mod tests {
         let mut deltas = [1i32; BLOCK_SIZE];
         deltas[0] = 2048; // bits_required(2048|1) = 12
         let bpv = for_delta_bits_required(&deltas);
-        assert!(bpv > 10, "bpv={bpv} should use collapse32");
+        assert_gt!(bpv, 10);
         for_delta_encode(bpv, &deltas, &mut out).unwrap();
         assert_eq!(out.bytes().len(), (bpv as usize) * 16);
     }

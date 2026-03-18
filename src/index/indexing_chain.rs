@@ -886,15 +886,15 @@ mod tests {
         // Check "contents" field postings (tokenized)
         let contents_data = chain.per_field().get("contents").unwrap();
         assert_eq!(contents_data.num_terms(), 2); // "hello", "world"
-        assert!(contents_data.posting_list("hello").is_some());
-        assert!(contents_data.posting_list("world").is_some());
+        assert_some!(contents_data.posting_list("hello"));
+        assert_some!(contents_data.posting_list("world"));
 
         // Check norms exist for "contents" (has norms)
         assert_eq!(contents_data.norms.len(), 1);
         assert_eq!(contents_data.norms_docs[0], 0);
 
         // Check no norms for "path" (omit_norms=true)
-        assert!(path_data.norms.is_empty());
+        assert_is_empty!(path_data.norms);
 
         // Check "modified" points
         let modified_data = chain.per_field().get("modified").unwrap();
@@ -1266,7 +1266,7 @@ mod tests {
         assert_eq!(long_to_int4(7), 7);
         // Value 8 has exactly 4 bits → normal path
         let normal = long_to_int4(8);
-        assert!(normal > 7);
+        assert_gt!(normal, 7);
     }
 
     #[test]
@@ -1545,9 +1545,9 @@ mod tests {
         let title_data = chain.per_field().get("title").unwrap();
         // StringField is not tokenized, so the whole value is one term
         assert_eq!(title_data.num_terms(), 1);
-        assert!(title_data.posting_list("hello world").is_some());
+        assert_some!(title_data.posting_list("hello world"));
         // No doc values
-        assert!(matches!(title_data.doc_values, DocValuesAccumulator::None));
+        assert_matches!(title_data.doc_values, DocValuesAccumulator::None);
         // Stored
         assert_eq!(chain.stored_docs()[0].fields.len(), 1);
     }
@@ -1569,8 +1569,8 @@ mod tests {
         for field_name in &["notes", "extra_int", "extra_float", "extra_double"] {
             let data = chain.per_field().get(*field_name).unwrap();
             assert!(!data.has_postings());
-            assert!(data.points.is_empty());
-            assert!(matches!(data.doc_values, DocValuesAccumulator::None));
+            assert_is_empty!(data.points);
+            assert_matches!(data.doc_values, DocValuesAccumulator::None);
         }
     }
 
@@ -1629,7 +1629,7 @@ mod tests {
     fn test_large_reader_field_multi_chunk() {
         // 40 KB of text — exercises multiple 8 KB chunks in analyze_reader
         let text = "the quick brown fox jumps over the lazy dog ".repeat(1000);
-        assert!(text.len() > 32_000);
+        assert_gt!(text.len(), 32_000);
 
         let mut chain_text = IndexingChain::new();
         let analyzer = make_analyzer();

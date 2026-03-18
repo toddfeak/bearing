@@ -37,9 +37,9 @@ Benchmark indexing 2,000 synthetic documents (149 MB) on Linux:
 
 ## Reference Source
 
-Download the Apache Lucene 10.3.2 source (used as the canonical reference when porting). This is primarily for Claude Code:
+Download the reference sources (Apache Lucene 10.3.2 and Assertables). This is primarily for Claude Code:
 
-    ./reference/download-lucene.sh
+    ./reference/download-references.sh
 
 Requires internet access. Not required for building or testing.
 

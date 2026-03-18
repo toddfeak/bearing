@@ -146,6 +146,6 @@ mod tests {
                 tokens.push(tr.text.to_string());
             })
             .unwrap();
-        assert!(tokens.is_empty());
+        assert_is_empty!(tokens);
     }
 }

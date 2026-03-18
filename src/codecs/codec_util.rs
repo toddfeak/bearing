@@ -219,20 +219,20 @@ mod tests {
     fn test_validate_codec_name_empty() {
         // Empty codec name is valid in Java
         let mut out = MemoryIndexOutput::new("test".to_string());
-        assert!(write_header(&mut out, "", 0).is_ok());
+        assert_ok!(write_header(&mut out, "", 0));
     }
 
     #[test]
     fn test_validate_codec_name_too_long() {
         let long_name: String = "a".repeat(128);
         let mut out = MemoryIndexOutput::new("test".to_string());
-        assert!(write_header(&mut out, &long_name, 0).is_err());
+        assert_err!(write_header(&mut out, &long_name, 0));
     }
 
     #[test]
     fn test_validate_codec_name_non_ascii() {
         let mut out = MemoryIndexOutput::new("test".to_string());
-        assert!(write_header(&mut out, "bad\x01name", 0).is_err());
+        assert_err!(write_header(&mut out, "bad\x01name", 0));
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".to_string());
         let id = [0u8; 16];
         let long_suffix: String = "x".repeat(256);
-        assert!(write_index_header(&mut out, "Test", 1, &id, &long_suffix).is_err());
+        assert_err!(write_index_header(&mut out, "Test", 1, &id, &long_suffix));
     }
 
     #[test]

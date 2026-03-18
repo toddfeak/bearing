@@ -1433,7 +1433,7 @@ mod tests {
             "single-leaf packed index should contain data_start_fp={}, got {}",
             data_header_len, value
         );
-        assert!(value > 0, "packed index FP must not be 0");
+        assert_gt!(value, 0);
     }
 
     #[test]

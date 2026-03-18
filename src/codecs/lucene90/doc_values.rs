@@ -906,8 +906,8 @@ mod tests {
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
 
         // Should succeed and produce valid output
-        assert!(!dvm.is_empty());
-        assert!(!dvd.is_empty());
+        assert_not_empty!(dvm);
+        assert_not_empty!(dvd);
 
         // Parse metadata
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -961,8 +961,8 @@ mod tests {
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
 
-        assert!(!dvm.is_empty());
-        assert!(!dvd.is_empty());
+        assert_not_empty!(dvm);
+        assert_not_empty!(dvd);
 
         // Verify codec magic
         assert_eq!(&dvm[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -1402,8 +1402,8 @@ mod tests {
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
-        assert!(!dvm.is_empty());
-        assert!(!dvd.is_empty());
+        assert_not_empty!(dvm);
+        assert_not_empty!(dvd);
     }
 
     #[test]

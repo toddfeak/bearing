@@ -4,6 +4,9 @@
 //! verifying that IndexWriter, Document, Field types, and Directory
 //! implementations work correctly together.
 
+#[macro_use]
+extern crate assertables;
+
 use std::io;
 use std::thread;
 
@@ -59,7 +62,7 @@ fn single_threaded_index_and_commit() -> io::Result<()> {
     assert_eq!(writer.num_docs(), 10);
 
     let files = result.into_segment_files()?;
-    assert!(!files.is_empty(), "commit should produce segment files");
+    assert_not_empty!(files, "commit should produce segment files");
 
     // Should have a segments_N file
     assert!(
@@ -146,7 +149,7 @@ fn config_max_buffered_docs() -> io::Result<()> {
     assert_eq!(writer.num_docs(), 20);
 
     let files = result.into_segment_files()?;
-    assert!(!files.is_empty());
+    assert_not_empty!(files);
 
     Ok(())
 }
@@ -195,7 +198,7 @@ fn all_field_types_commit_successfully() -> io::Result<()> {
     assert_eq!(writer.num_docs(), 1);
 
     let files = result.into_segment_files()?;
-    assert!(!files.is_empty());
+    assert_not_empty!(files);
 
     Ok(())
 }
@@ -219,7 +222,7 @@ fn stored_only_fields_commit_successfully() -> io::Result<()> {
     assert_eq!(writer.num_docs(), 1);
 
     let files = result.into_segment_files()?;
-    assert!(!files.is_empty());
+    assert_not_empty!(files);
 
     Ok(())
 }
@@ -263,7 +266,7 @@ fn field_accessors() {
 #[test]
 fn document_construction() {
     let mut doc = Document::new();
-    assert!(doc.fields.is_empty());
+    assert_is_empty!(doc.fields);
 
     doc.add(text_field("a", "hello"));
     doc.add(keyword_field("b", "world"));
@@ -291,7 +294,7 @@ fn memory_directory_round_trip() -> io::Result<()> {
     let mut dir = MemoryDirectory::new();
     let file_names = result.write_to_directory(&mut dir)?;
 
-    assert!(!file_names.is_empty());
+    assert_not_empty!(file_names);
     assert!(file_names.iter().any(|n| n.starts_with("segments_")));
 
     // Verify all files are accessible through the directory
@@ -302,7 +305,7 @@ fn memory_directory_round_trip() -> io::Result<()> {
             "file '{name}' written but not listed in directory"
         );
         let len = dir.file_length(name)?;
-        assert!(len > 0, "file '{name}' should have non-zero length");
+        assert_gt!(len, 0, "file '{name}' should have non-zero length");
     }
 
     Ok(())
@@ -358,7 +361,7 @@ fn fs_directory_round_trip() -> io::Result<()> {
 
     // Files are already on disk — verify via file_names()
     let file_names = result.file_names();
-    assert!(!file_names.is_empty());
+    assert_not_empty!(file_names);
     assert!(file_names.iter().any(|n| n.starts_with("segments_")));
 
     for name in file_names {
@@ -369,7 +372,7 @@ fn fs_directory_round_trip() -> io::Result<()> {
             path.display()
         );
         let meta = std::fs::metadata(&path)?;
-        assert!(meta.len() > 0, "file should be non-empty: {name}");
+        assert_gt!(meta.len(), 0, "file should be non-empty: {name}");
     }
 
     // Clean up
@@ -462,7 +465,7 @@ fn large_batch_indexing() -> io::Result<()> {
     assert_eq!(writer.num_docs(), 1000);
 
     let files = result.into_segment_files()?;
-    assert!(!files.is_empty());
+    assert_not_empty!(files);
 
     Ok(())
 }
@@ -499,11 +502,8 @@ fn non_compound_mode() -> io::Result<()> {
 
     // Can still read files via into_segment_files
     let files = result.into_segment_files()?;
-    assert!(!files.is_empty());
-    assert!(
-        files.len() > 4,
-        "non-compound should have more than 4 files"
-    );
+    assert_not_empty!(files);
+    assert_gt!(files.len(), 4);
 
     Ok(())
 }
@@ -589,7 +589,7 @@ fn doc_values_only_fields() -> io::Result<()> {
     for name in &file_names {
         if name.ends_with(".dvm") || name.ends_with(".dvd") {
             let len = dir.file_length(name)?;
-            assert!(len > 0, "{name} should have non-zero length");
+            assert_gt!(len, 0, "{name} should have non-zero length");
         }
     }
 
@@ -643,7 +643,7 @@ fn mixed_doc_values_and_regular_fields() -> io::Result<()> {
     assert_eq!(writer.num_docs(), 5);
 
     let files = result.into_segment_files()?;
-    assert!(!files.is_empty());
+    assert_not_empty!(files);
 
     Ok(())
 }

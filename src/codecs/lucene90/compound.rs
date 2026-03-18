@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(length2 as usize, file2_total_len);
 
         // Second file must start after first file ends
-        assert!(offset2 >= offset1 + length1);
+        assert_ge!(offset2, offset1 + length1);
     }
 
     #[test]
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(names[2], ".fdt");
 
         // Lengths should be in ascending order
-        assert!(lengths[0] <= lengths[1]);
-        assert!(lengths[1] <= lengths[2]);
+        assert_le!(lengths[0], lengths[1]);
+        assert_le!(lengths[1], lengths[2]);
     }
 }

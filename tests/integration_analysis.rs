@@ -3,6 +3,9 @@
 //! Tests the StandardAnalyzer, tokenization, and the zero-allocation
 //! analyze_to callback API.
 
+#[macro_use]
+extern crate assertables;
+
 use bearing::analysis::{Analyzer, StandardAnalyzer, Token, TokenRef};
 
 // ---------------------------------------------------------------------------
@@ -36,14 +39,14 @@ fn standard_analyzer_lowercases() {
 fn standard_analyzer_empty_input() {
     let analyzer = StandardAnalyzer::new();
     let tokens = analyzer.analyze("");
-    assert!(tokens.is_empty());
+    assert_is_empty!(tokens);
 }
 
 #[test]
 fn standard_analyzer_whitespace_only() {
     let analyzer = StandardAnalyzer::new();
     let tokens = analyzer.analyze("   \t\n  ");
-    assert!(tokens.is_empty());
+    assert_is_empty!(tokens);
 }
 
 #[test]
@@ -150,7 +153,7 @@ fn unicode_cjk_characters() {
     // CJK characters — StandardTokenizer behavior may vary,
     // but should not panic
     let tokens = analyzer.analyze("hello 世界");
-    assert!(!tokens.is_empty());
+    assert_not_empty!(tokens);
     assert_eq!(tokens[0].text, "hello");
 }
 
@@ -179,7 +182,7 @@ fn numeric_text_tokenization() {
 
     let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
     // Numbers should be tokenized as words
-    assert!(texts.contains(&"version"));
-    assert!(texts.contains(&"release"));
-    assert!(texts.contains(&"42"));
+    assert_contains!(texts, &"version");
+    assert_contains!(texts, &"release");
+    assert_contains!(texts, &"42");
 }

@@ -4,6 +4,9 @@
 //! When RUST_DV_INDEX_DIR is set, writes the index to that directory for
 //! cross-validation with the Java IndexDocValues utility.
 
+#[macro_use]
+extern crate assertables;
+
 use std::io;
 
 use bearing::document::{
@@ -81,7 +84,7 @@ fn write_doc_values_index() -> io::Result<()> {
             file_path.display()
         );
         let meta = std::fs::metadata(&file_path)?;
-        assert!(meta.len() > 0, "file should be non-empty: {name}");
+        assert_gt!(meta.len(), 0, "file should be non-empty: {name}");
     }
 
     Ok(())

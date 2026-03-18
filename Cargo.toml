@@ -20,6 +20,9 @@ log = "0.4"
 mem_dbg = "0.4"
 simple_logger = { version = "5.2", default-features = false }
 
+[dev-dependencies]
+assertables = "9.8.6"
+
 [[bin]]
 name = "indexfiles"
 path = "src/bin/indexfiles.rs"

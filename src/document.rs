@@ -579,20 +579,23 @@ mod tests {
     #[test]
     fn test_stored_value() {
         let f = keyword_field("path", "/foo.txt");
-        assert!(f.stored_value().is_some());
+        assert_some!(f.stored_value());
 
         let f = text_field("contents", "hello");
-        assert!(f.stored_value().is_none()); // not stored
+        assert_none!(f.stored_value()); // not stored
     }
 
     #[test]
     fn test_index_options_ordering() {
-        assert!(IndexOptions::None < IndexOptions::Docs);
-        assert!(IndexOptions::Docs < IndexOptions::DocsAndFreqs);
-        assert!(IndexOptions::DocsAndFreqs < IndexOptions::DocsAndFreqsAndPositions);
-        assert!(
+        assert_lt!(IndexOptions::None, IndexOptions::Docs);
+        assert_lt!(IndexOptions::Docs, IndexOptions::DocsAndFreqs);
+        assert_lt!(
+            IndexOptions::DocsAndFreqs,
             IndexOptions::DocsAndFreqsAndPositions
-                < IndexOptions::DocsAndFreqsAndPositionsAndOffsets
+        );
+        assert_lt!(
+            IndexOptions::DocsAndFreqsAndPositions,
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets
         );
     }
 
@@ -629,7 +632,7 @@ mod tests {
 
         let f_unstored = string_field("tag", "rust", false);
         assert!(!f_unstored.field_type().stored());
-        assert!(f_unstored.stored_value().is_none());
+        assert_none!(f_unstored.stored_value());
     }
 
     #[test]
@@ -847,13 +850,13 @@ mod tests {
     #[test]
     fn test_numeric_value_non_numeric() {
         let f = keyword_field("path", "/foo");
-        assert!(f.numeric_value().is_none());
+        assert_none!(f.numeric_value());
     }
 
     #[test]
     fn test_point_bytes_non_point() {
         let f = text_field("contents", "hello");
-        assert!(f.point_bytes().is_none());
+        assert_none!(f.point_bytes());
     }
 
     #[test]
@@ -886,7 +889,7 @@ mod tests {
         ];
         for val in &cases {
             let s = format!("{:?}", val);
-            assert!(!s.is_empty());
+            assert_not_empty!(s);
         }
     }
 
@@ -894,8 +897,8 @@ mod tests {
     fn test_int_field_not_stored() {
         let f = int_field("x", 10, false);
         assert!(!f.field_type().stored());
-        assert!(f.stored_value().is_none());
-        assert!(f.point_bytes().is_some());
+        assert_none!(f.stored_value());
+        assert_some!(f.point_bytes());
     }
 
     #[test]
@@ -908,16 +911,16 @@ mod tests {
         );
         assert!(f.field_type().tokenized());
         assert!(!f.field_type().stored());
-        assert!(matches!(f.value(), FieldValue::Reader(_)));
-        assert!(f.string_value().is_none());
-        assert!(f.stored_value().is_none());
-        assert!(f.point_bytes().is_none());
+        assert_matches!(f.value(), FieldValue::Reader(_));
+        assert_none!(f.string_value());
+        assert_none!(f.stored_value());
+        assert_none!(f.point_bytes());
     }
 
     #[test]
     fn test_field_value_debug() {
         let reader_val = FieldValue::Reader(Box::new(std::io::Cursor::new(vec![])));
         let debug_str = format!("{:?}", reader_val);
-        assert!(debug_str.contains("Reader"));
+        assert_contains!(debug_str, "Reader");
     }
 }

@@ -13,7 +13,7 @@ The Java implementation of **Apache Lucene 10.3.2** is the canonical source. All
 | `src/` | Library and binary source code |
 | `tests/` | Integration tests, E2E scripts, Java validation utilities (see `tests/CLAUDE.md`) |
 | `testdata/` | Test corpus and data generation scripts |
-| `reference/` | Lucene 10.3.2 Java source and format documentation (see `reference/CLAUDE.md`) |
+| `reference/` | Reference sources and format documentation (see `reference/CLAUDE.md`) |
 | `docs/` | Roadmap and planning documents |
 | `docs/backlog/` | Known issues and gaps to address in future work |
 
@@ -37,7 +37,7 @@ cargo clippy                   # lint
 ## Conventions
 
 - Write idiomatic Rust. Use traits, enums, `Result`/`Option` — not 1:1 Java translation.
-- No external dependencies except `log` (logging facade), `simple_logger` (binary logger), and `mem_dbg` (memory measurement).
+- Runtime dependencies extremely limited. Avoid adding more without explicit request, but also avoid reimplementing common libraries.
 - Use `io::Result<T>` for all fallible operations. Create errors with `io::Error::other("message")`.
 - No unsafe code.
 - Unimplemented methods should use `todo!("description")` or return `Err(...)`.

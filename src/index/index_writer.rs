@@ -635,9 +635,9 @@ mod tests {
         // segments_1 + _0.si + _0.cfs + _0.cfe = 4
         assert_eq!(names.len(), 4);
         assert_eq!(names[0], "segments_1");
-        assert!(names.contains(&"_0.si"));
-        assert!(names.contains(&"_0.cfs"));
-        assert!(names.contains(&"_0.cfe"));
+        assert_contains!(names, &"_0.si");
+        assert_contains!(names, &"_0.cfs");
+        assert_contains!(names, &"_0.cfe");
     }
 
     #[test]
@@ -688,9 +688,9 @@ mod tests {
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names[0], "segments_1");
-        assert!(names.contains(&"_0.si"));
-        assert!(names.contains(&"_0.cfs"));
-        assert!(names.contains(&"_0.cfe"));
+        assert_contains!(names, &"_0.si");
+        assert_contains!(names, &"_0.cfs");
+        assert_contains!(names, &"_0.cfe");
     }
 
     #[test]
@@ -767,15 +767,15 @@ mod tests {
         assert_eq!(files[0].name, "segments_1");
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains(&"_0.si"));
-        assert!(names.contains(&"_0.cfs"));
-        assert!(names.contains(&"_0.cfe"));
-        assert!(names.contains(&"_1.si"));
-        assert!(names.contains(&"_1.cfs"));
-        assert!(names.contains(&"_1.cfe"));
-        assert!(names.contains(&"_2.si"));
-        assert!(names.contains(&"_2.cfs"));
-        assert!(names.contains(&"_2.cfe"));
+        assert_contains!(names, &"_0.si");
+        assert_contains!(names, &"_0.cfs");
+        assert_contains!(names, &"_0.cfe");
+        assert_contains!(names, &"_1.si");
+        assert_contains!(names, &"_1.cfs");
+        assert_contains!(names, &"_1.cfe");
+        assert_contains!(names, &"_2.si");
+        assert_contains!(names, &"_2.cfs");
+        assert_contains!(names, &"_2.cfe");
 
         assert_eq!(writer.num_docs(), 5);
     }
@@ -801,7 +801,7 @@ mod tests {
         assert_eq!(files.len(), 4);
         assert_eq!(files[0].name, "segments_1");
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains(&"_0.si"));
+        assert_contains!(names, &"_0.si");
     }
 
     #[test]
@@ -917,12 +917,12 @@ mod tests {
         let files = writer.commit().unwrap().into_segment_files().unwrap();
 
         // Should have segments_1 + some number of segments (at least 1)
-        assert!(files.len() >= 4, "expected at least segments_1 + 1 segment");
+        assert_ge!(files.len(), 4, "expected at least segments_1 + 1 segment");
         assert_eq!(files[0].name, "segments_1");
 
         // Count total segments
         let num_segments = files.iter().filter(|f| f.name.ends_with(".si")).count();
-        assert!(num_segments >= 1, "expected at least 1 segment");
+        assert_ge!(num_segments, 1);
     }
 
     #[test]
@@ -993,7 +993,7 @@ mod tests {
 
         assert_eq!(writer.num_docs(), 40);
         let files = writer.commit().unwrap().into_segment_files().unwrap();
-        assert!(files.len() >= 2); // at least segments_1 + some segment
+        assert_ge!(files.len(), 2); // at least segments_1 + some segment
     }
 
     // --- RAM-based flush tests ---
@@ -1079,9 +1079,9 @@ mod tests {
         // segments_1 + _0.si + _0.cfs + _0.cfe = 4
         assert_eq!(written.len(), 4);
         assert_eq!(written[0], "segments_1");
-        assert!(written.contains(&"_0.si".to_string()));
-        assert!(written.contains(&"_0.cfs".to_string()));
-        assert!(written.contains(&"_0.cfe".to_string()));
+        assert_contains!(written, &"_0.si".to_string());
+        assert_contains!(written, &"_0.cfs".to_string());
+        assert_contains!(written, &"_0.cfe".to_string());
 
         // All files should exist in the directory
         let files = dir.list_all().unwrap();

@@ -1,16 +1,18 @@
-# Reference: Apache Lucene 10.3.2 Source
+# Reference Sources
 
-This directory contains the canonical Apache Lucene 10.3.2 Java source used as the reference implementation for this Rust port.
+This directory contains reference source code used during development.
 
 ## Setup
 
-Run the download script to fetch the Lucene source:
+Run the download script to fetch all reference sources:
 
 ```bash
-./reference/download-lucene.sh
+./reference/download-references.sh
 ```
 
-This downloads the source tarball from the Apache archive and extracts it to `reference/lucene-10.3.2/`.
+This downloads:
+- **Apache Lucene 10.3.2** source from the Apache archive into `reference/lucene-10.3.2/`
+- **Assertables 9.8.6** source from crates.io into `reference/assertables/`
 
 ## Rules
 
@@ -37,8 +39,9 @@ Start with `MAINTAINING.md` for the codec version mapping table — it shows whi
 
 | Path | Purpose |
 |---|---|
-| `reference/lucene-10.3.2/lucene/core/src/java/org/apache/lucene/` | Main source code |
-| `reference/lucene-10.3.2/lucene/core/src/test/java/org/apache/lucene/` | Test source code |
+| `reference/lucene-10.3.2/lucene/core/src/java/org/apache/lucene/` | Lucene main source code |
+| `reference/lucene-10.3.2/lucene/core/src/test/java/org/apache/lucene/` | Lucene test source code |
+| `reference/assertables/src/` | Assertables macro source code |
 
 ## Java Package Guide
 

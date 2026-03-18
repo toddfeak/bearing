@@ -487,10 +487,10 @@ mod tests {
         let fi = make_test_field_info("test", 42, IndexOptions::Docs);
         let fis = FieldInfos::new(vec![fi]);
 
-        assert!(fis.field_info_by_name("test").is_some());
+        assert_some!(fis.field_info_by_name("test"));
         assert_eq!(fis.field_info_by_name("test").unwrap().number(), 42);
-        assert!(fis.field_info_by_number(42).is_some());
-        assert!(fis.field_info_by_name("missing").is_none());
+        assert_some!(fis.field_info_by_number(42));
+        assert_none!(fis.field_info_by_name("missing"));
     }
 
     #[test]

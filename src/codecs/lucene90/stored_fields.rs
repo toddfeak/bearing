@@ -614,7 +614,7 @@ mod tests {
         let data = b"hello world from stored fields";
         let mut out = MemoryIndexOutput::new("test".to_string());
         compress_lz4_preset_dict(data, &mut out).unwrap();
-        assert!(!out.bytes().is_empty());
+        assert_not_empty!(out.bytes());
     }
 
     #[test]
@@ -646,9 +646,9 @@ mod tests {
         let fdm_data = dir.lock().unwrap().read_file(&names[2]).unwrap();
 
         // All files should have content
-        assert!(!fdt_data.is_empty());
-        assert!(!fdx_data.is_empty());
-        assert!(!fdm_data.is_empty());
+        assert_not_empty!(fdt_data);
+        assert_not_empty!(fdx_data);
+        assert_not_empty!(fdm_data);
 
         // Verify .fdt header magic
         assert_eq!(&fdt_data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -813,7 +813,7 @@ mod tests {
         // Files should have at least headers and footers
         let locked = dir.lock().unwrap();
         for name in &names {
-            assert!(!locked.read_file(name).unwrap().is_empty());
+            assert_not_empty!(locked.read_file(name).unwrap());
         }
     }
 
@@ -991,7 +991,7 @@ mod tests {
         // All files should have content
         let locked = dir.lock().unwrap();
         for name in &names {
-            assert!(!locked.read_file(name).unwrap().is_empty());
+            assert_not_empty!(locked.read_file(name).unwrap());
         }
     }
 }

@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(name, "_0.fnm");
 
         let data = dir.lock().unwrap().read_file(&name).unwrap();
-        assert!(!data.is_empty());
+        assert_not_empty!(data);
 
         // Verify header magic (first 4 bytes, BE)
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -267,11 +267,11 @@ mod tests {
         assert_eq!(name, "_0.fnm");
 
         let data = dir.lock().unwrap().read_file(&name).unwrap();
-        assert!(!data.is_empty());
+        assert_not_empty!(data);
 
         // Basic structural checks:
         // Header + 3 fields + footer, should be substantial
-        assert!(data.len() > 100);
+        assert_gt!(data.len(), 100);
     }
 
     #[test]

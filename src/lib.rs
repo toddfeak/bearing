@@ -33,6 +33,10 @@
 //! - [`store`] — Storage abstraction (in-memory and filesystem directories).
 //! - [`util`] — Utility types such as [`util::BytesRef`].
 
+#[cfg(test)]
+#[macro_use]
+extern crate assertables;
+
 pub mod analysis;
 pub(crate) mod codecs;
 pub mod document;

@@ -353,7 +353,7 @@ mod tests {
     fn test_standard_tokenizer_empty() {
         let tokenizer = StandardTokenizer;
         let tokens = tokenizer.tokenize("");
-        assert!(tokens.is_empty());
+        assert_is_empty!(tokens);
     }
 
     #[test]
@@ -608,7 +608,7 @@ mod tests {
                 tokens.push(tr.text.to_string());
             })
             .unwrap();
-        assert!(tokens.is_empty());
+        assert_is_empty!(tokens);
     }
 
     #[test]

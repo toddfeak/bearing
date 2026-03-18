@@ -759,7 +759,7 @@ mod tests {
         assert_eq!(state.total_term_freq, 5); // 1 + 3 + 1
         assert_eq!(state.doc_start_fp, header_size as i64);
         // Something was written to .doc
-        assert!(pw.doc_out.file_pointer() > header_size);
+        assert_gt!(pw.doc_out.file_pointer(), header_size);
     }
 
     #[test]
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(state.doc_freq, 2);
         assert_eq!(state.singleton_doc_id, -1);
         assert_eq!(state.total_term_freq, -1); // DOCS only
-        assert!(pw.doc_out.file_pointer() > header_size);
+        assert_gt!(pw.doc_out.file_pointer(), header_size);
     }
 
     #[test]
@@ -796,7 +796,7 @@ mod tests {
 
         assert_eq!(state.doc_freq, 2);
         assert_eq!(state.total_term_freq, 4);
-        assert!(state.pos_start_fp >= 0);
+        assert_ge!(state.pos_start_fp, 0);
         // No PFOR blocks: last_pos_block_offset must be -1
         assert_eq!(state.last_pos_block_offset, -1);
 
@@ -846,7 +846,7 @@ mod tests {
         let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
         // Must have written something (PFOR block, not empty)
-        assert!(pos_data_len > 0, "PFOR block should produce output");
+        assert_gt!(pos_data_len, 0);
     }
 
     #[test]
@@ -875,21 +875,23 @@ mod tests {
         assert_eq!(state.total_term_freq, 130);
         // totalTermFreq > BLOCK_SIZE: last_pos_block_offset must be set (not -1)
         assert_ne!(state.last_pos_block_offset, -1);
-        assert!(state.last_pos_block_offset > 0);
+        assert_gt!(state.last_pos_block_offset, 0);
 
         // Verify the .pos file has data (PFOR block + VInt tail)
         let pos_out = pw.pos_out.as_ref().unwrap();
         let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
-        assert!(
-            pos_data_len > 0,
+        assert_gt!(
+            pos_data_len,
+            0,
             "PFOR block + VInt tail should produce output"
         );
 
         // last_pos_block_offset points to the start of the VInt tail
         // It must be less than the total pos data length (tail comes after blocks)
-        assert!(
-            (state.last_pos_block_offset as usize) < pos_data_len,
+        assert_lt!(
+            state.last_pos_block_offset as usize,
+            pos_data_len,
             "last_pos_block_offset ({}) should be < total pos data ({})",
             state.last_pos_block_offset,
             pos_data_len
@@ -923,14 +925,16 @@ mod tests {
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
 
         // Must have written data (2 PFOR blocks + 44 VInt tail)
-        assert!(
-            pos_data_len > 44,
+        assert_gt!(
+            pos_data_len,
+            44,
             "2 PFOR blocks + tail should be larger than tail alone"
         );
 
         // last_pos_block_offset should point past the 2 PFOR blocks, before the VInt tail
-        assert!(
-            (state.last_pos_block_offset as usize) < pos_data_len,
+        assert_lt!(
+            state.last_pos_block_offset as usize,
+            pos_data_len,
             "last_pos_block_offset ({}) should be < total pos data ({})",
             state.last_pos_block_offset,
             pos_data_len
@@ -962,7 +966,7 @@ mod tests {
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
 
         // 2 PFOR blocks, no VInt tail
-        assert!(pos_data_len > 0, "2 PFOR blocks should produce output");
+        assert_gt!(pos_data_len, 0);
 
         // last_pos_block_offset should equal total length (tail is empty, offset is at end)
         assert_eq!(
@@ -1001,7 +1005,7 @@ mod tests {
         // Verify positions were written (no panic from negative deltas)
         let pos_out = pw.pos_out.as_ref().unwrap();
         let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
-        assert!(pos_out.file_pointer() as usize > pos_header_size);
+        assert_gt!(pos_out.file_pointer() as usize, pos_header_size);
     }
 
     #[test]
@@ -1078,8 +1082,9 @@ mod tests {
         // With varied deltas (max ~15, ~4 bpv), PFOR should be much smaller than VInt.
         // VInt for 256 values averaging ~2 bytes each = ~512 bytes.
         // PFOR for 2 blocks at ~4bpv each = 2*(1 + 64) = ~130 bytes.
-        assert!(
-            pos_data_len < 256,
+        assert_lt!(
+            pos_data_len,
+            256,
             "PFOR should compress 256 varied position deltas below 256 bytes, got {}",
             pos_data_len
         );
@@ -1127,15 +1132,16 @@ mod tests {
 
         // Should produce .doc, .pos, .psm files
         assert_eq!(names.len(), 3);
-        assert!(names[0].ends_with(".doc"));
-        assert!(names[1].ends_with(".pos"));
-        assert!(names[2].ends_with(".psm"));
+        assert_ends_with!(names[0], ".doc");
+        assert_ends_with!(names[1], ".pos");
+        assert_ends_with!(names[2], ".psm");
 
         // Each file should have at least header + footer
         for name in &names {
             let data = dir.lock().unwrap().read_file(name).unwrap();
-            assert!(
-                data.len() >= codec_util::FOOTER_LENGTH,
+            assert_ge!(
+                data.len(),
+                codec_util::FOOTER_LENGTH,
                 "file {name} too small: {} bytes",
                 data.len()
             );
@@ -1161,7 +1167,7 @@ mod tests {
         // Value > 0x7FFF needs 2 bytes (short with high bit) + VLong
         let mut buf = Vec::new();
         write_vint15(&mut VecOutput(&mut buf), 0x8000).unwrap();
-        assert!(buf.len() > 2); // short + at least 1 vlong byte
+        assert_gt!(buf.len(), 2); // short + at least 1 vlong byte
         // High bit of first short should be set
         // Low byte first, high byte second
         assert_ne!(buf[1] & 0x80, 0, "high bit of short should be set");
@@ -1173,7 +1179,7 @@ mod tests {
         for v in [0i64, 1, 127, 128, 0x7FFF, 0x8000, 0xFFFF, 100000] {
             let mut buf = Vec::new();
             write_vlong15(&mut VecOutput(&mut buf), v).unwrap();
-            assert!(!buf.is_empty());
+            assert_not_empty!(buf);
         }
     }
 
@@ -1216,14 +1222,14 @@ mod tests {
         let impacts = [Impact { freq: 3, norm: 5 }];
         let mut buf = Vec::new();
         let len = write_impacts(&impacts, &mut buf).unwrap();
-        assert!(len >= 2); // At least VInt + ZLong
+        assert_ge!(len, 2); // At least VInt + ZLong
         assert_eq!(buf[0], 5); // (2 << 1) | 1
 
         // Two impacts: delta-encoded
         let impacts = [Impact { freq: 3, norm: 5 }, Impact { freq: 10, norm: 13 }];
         let mut buf = Vec::new();
         let len = write_impacts(&impacts, &mut buf).unwrap();
-        assert!(len > 2); // Two impacts encoded
+        assert_gt!(len, 2); // Two impacts encoded
     }
 
     // --- Tests for block encoding (docFreq >= 128) ---
@@ -1246,12 +1252,13 @@ mod tests {
 
         assert_eq!(state.doc_freq, 128);
         assert_eq!(state.singleton_doc_id, -1);
-        assert!(pw.doc_out.file_pointer() > header_size);
+        assert_gt!(pw.doc_out.file_pointer(), header_size);
         // Should have written block data (skip header + doc encoding + freq encoding)
         // Consecutive docs with freq=1 are very compact (~10 bytes per block)
         let written = pw.doc_out.file_pointer() - header_size;
-        assert!(
-            written >= 8,
+        assert_ge!(
+            written,
+            8,
             "block encoding should produce output, got {written}"
         );
     }
@@ -1275,8 +1282,9 @@ mod tests {
         assert_eq!(state.doc_freq, 130);
         assert_eq!(state.singleton_doc_id, -1);
         let written = pw.doc_out.file_pointer() - header_size;
-        assert!(
-            written > 10,
+        assert_gt!(
+            written,
+            10,
             "block + tail should produce output, got {written}"
         );
     }
@@ -1300,10 +1308,7 @@ mod tests {
         assert_eq!(state.doc_freq, 256);
         let written = pw.doc_out.file_pointer() - header_size;
         // 2 blocks should produce more output than 1
-        assert!(
-            written >= 16,
-            "2 blocks should produce output, got {written}"
-        );
+        assert_ge!(written, 16);
     }
 
     #[test]
@@ -1332,7 +1337,7 @@ mod tests {
         // Verify pos data was written
         let pos_out = pw.pos_out.as_ref().unwrap();
         let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
-        assert!(pos_out.file_pointer() as usize > pos_header_size);
+        assert_gt!(pos_out.file_pointer() as usize, pos_header_size);
     }
 
     #[test]
@@ -1443,12 +1448,14 @@ mod tests {
         let max_impact_bytes_l1 = i32::from_le_bytes(meta[12..16].try_into().unwrap());
 
         // Level 0 should be non-zero (128 docs with freqs triggers impact computation)
-        assert!(
-            max_num_impacts_l0 > 0,
+        assert_gt!(
+            max_num_impacts_l0,
+            0,
             "level 0 impact count should be > 0, got {max_num_impacts_l0}"
         );
-        assert!(
-            max_impact_bytes_l0 > 0,
+        assert_gt!(
+            max_impact_bytes_l0,
+            0,
             "level 0 impact bytes should be > 0, got {max_impact_bytes_l0}"
         );
 

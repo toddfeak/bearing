@@ -109,8 +109,8 @@ mod tests {
         let neg = long_to_sortable_bytes(-100);
         let zero = long_to_sortable_bytes(0);
         let pos = long_to_sortable_bytes(100);
-        assert!(neg < zero);
-        assert!(zero < pos);
+        assert_lt!(neg, zero);
+        assert_lt!(zero, pos);
     }
 
     #[test]
@@ -170,10 +170,10 @@ mod tests {
         let inf = float_to_sortable_int(f32::INFINITY);
         let nan = float_to_sortable_int(f32::NAN);
 
-        assert!(neg < zero);
-        assert!(zero < pos);
-        assert!(pos < inf);
-        assert!(inf < nan); // NaN sorts after infinity
+        assert_lt!(neg, zero);
+        assert_lt!(zero, pos);
+        assert_lt!(pos, inf);
+        assert_lt!(inf, nan); // NaN sorts after infinity
     }
 
     #[test]
@@ -209,10 +209,10 @@ mod tests {
         let inf = double_to_sortable_long(f64::INFINITY);
         let nan = double_to_sortable_long(f64::NAN);
 
-        assert!(neg < zero);
-        assert!(zero < pos);
-        assert!(pos < inf);
-        assert!(inf < nan);
+        assert_lt!(neg, zero);
+        assert_lt!(zero, pos);
+        assert_lt!(pos, inf);
+        assert_lt!(inf, nan);
     }
 
     #[test]

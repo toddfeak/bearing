@@ -1363,7 +1363,7 @@ mod tests {
         };
         let trie = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("abc"), output);
 
-        assert!(trie.root.output.is_none());
+        assert_none!(trie.root.output);
         assert_eq!(trie.root.children.len(), 1);
         assert_eq!(trie.root.children[0].label, b'a');
     }
@@ -1377,8 +1377,8 @@ mod tests {
         };
         let trie = TrieBuilder::from_bytes_ref(&BytesRef::new(Vec::new()), output);
 
-        assert!(trie.root.output.is_some());
-        assert!(trie.root.children.is_empty());
+        assert_some!(trie.root.output);
+        assert_is_empty!(trie.root.children);
     }
 
     #[test]
@@ -1428,9 +1428,9 @@ mod tests {
         trie.save(&mut VecOutput(&mut meta), &mut index).unwrap();
 
         // Index should have some bytes
-        assert!(index.file_pointer() > 0);
+        assert_gt!(index.file_pointer(), 0);
         // Meta should have indexStartFP, rootFP, indexEndFP
-        assert!(!meta.is_empty());
+        assert_not_empty!(meta);
     }
 
     #[test]
@@ -1471,12 +1471,14 @@ mod tests {
             index_start_fp, 0,
             "indexStartFP should be 0 (start of .tip)"
         );
-        assert!(
-            root_fp > 0,
+        assert_gt!(
+            root_fp,
+            0,
             "rootFP must be > 0 for a trie with children (got {root_fp})"
         );
-        assert!(
-            index_end_fp > root_fp,
+        assert_gt!(
+            index_end_fp,
+            root_fp,
             "indexEndFP ({index_end_fp}) should be > rootFP ({root_fp})"
         );
     }
@@ -1536,8 +1538,9 @@ mod tests {
         let names = btw.finish().unwrap();
 
         // Should produce .tim, .tip, .tmd, .doc, .psm files (no .pos since no positions)
-        assert!(
-            names.len() >= 4,
+        assert_ge!(
+            names.len(),
+            4,
             "expected at least 4 files, got {}",
             names.len()
         );
@@ -1571,7 +1574,7 @@ mod tests {
         // Verify all files have content
         for name in &names {
             let data = dir.lock().unwrap().read_file(name).unwrap();
-            assert!(!data.is_empty(), "file {name} is empty");
+            assert_not_empty!(data, "file {name} is empty");
         }
     }
 
