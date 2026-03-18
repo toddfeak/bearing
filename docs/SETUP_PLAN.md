@@ -150,7 +150,7 @@ Bearing is a Rust port of Apache Lucene, evolving from the existing `toddfeak/ru
 
 **Dependencies**: Section 5 (CI checks must exist before requiring them)
 
-- [ ] Branch protection on `main` — **deferred to Section 12** (requires GitHub Pro for private repos):
+- [x] Branch protection on `main` — **deferred to Section 12** (requires GitHub Pro for private repos):
   - Require status checks to pass: `test`, `clippy`, `fmt`
   - Require branches to be up to date before merging
   - Allow force pushes: no
@@ -275,15 +275,15 @@ Additional cleanup:
 
 **Dependencies**: ALL previous sections
 
-- [ ] **Secrets audit**: Scan codebase for `.env`, `.pem`, `.key`, credentials (fresh repo has no history to audit)
-- [ ] **Content audit**: No hardcoded local paths (`/home/rfeak/...`), no inappropriate TODOs, no personal info beyond git author
-- [ ] **Legal audit**: LICENSE exists, NOTICE exists, Cargo.toml has `license = "Apache-2.0"`, no verbatim Lucene copies without attribution
-- [ ] **Branch protection**: Enable branch protection on `main` (deferred from Section 6 — requires GitHub Pro or public repo)
-- [ ] **CI verification**: All checks pass on `main`, branch protection active
-- [ ] **Documentation verification**: README complete, CONTRIBUTING exists, no "rust-lucene-indexer" references remain
-- [ ] **Build verification**: `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` all clean
-- [ ] **History review**: Fresh repo with no prior history — verify initial commit is clean
-- [ ] **Flip to public**: Settings > Danger Zone > Change visibility
+- [x] **Secrets audit**: Scan codebase for `.env`, `.pem`, `.key`, credentials (fresh repo has no history to audit)
+- [x] **Content audit**: No hardcoded local paths (`/home/rfeak/...`), no inappropriate TODOs, no personal info beyond git author
+- [x] **Legal audit**: LICENSE exists, NOTICE exists, Cargo.toml has `license = "Apache-2.0"`, no verbatim Lucene copies without attribution
+- [x] **Branch protection**: Enable branch protection on `main` (deferred from Section 6 — requires GitHub Pro or public repo)
+- [x] **CI verification**: All checks pass on `main`, branch protection active
+- [x] **Documentation verification**: README complete, CONTRIBUTING exists, no "rust-lucene-indexer" references remain
+- [x] **Build verification**: `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` all clean
+- [x] **History review**: Fresh repo with no prior history — verify initial commit is clean
+- [x] **Flip to public**: Settings > Danger Zone > Change visibility
 
 ---
 
@@ -293,8 +293,8 @@ Additional cleanup:
 - [ ] Annotated git tags (`git tag -a v0.1.0 -m "Initial release"`)
 - [ ] GitHub Releases with changelog excerpts
 - [ ] Crates.io publishing (after API surface stabilizes)
-- [ ] README badges: CI status, crates.io, docs.rs, license, MSRV
-- [ ] Ensure `cargo doc` builds cleanly for docs.rs
+- [x] README badges: CI status, crates.io, docs.rs, license, MSRV
+- [x] Ensure `cargo doc` builds cleanly for docs.rs
 - [ ] Enable GitHub Discussions when community grows
 - [ ] `criterion` benchmark suite with CI tracking
 - [ ] `cargo fuzz` for codec edge cases

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Filesystem-backed [`Directory`](super::Directory) implementation.
+//! Filesystem-backed [`Directory`] implementation.
 
 use std::fs;
 use std::fs::File;
@@ -92,7 +92,7 @@ impl Directory for FSDirectory {
     }
 }
 
-/// Filesystem-backed IndexOutput wrapping a BufWriter<File> with CRC32 tracking.
+/// Filesystem-backed IndexOutput wrapping a `BufWriter<File>` with CRC32 tracking.
 pub struct FSIndexOutput {
     name: String,
     writer: Option<BufWriter<File>>,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-memory [`Directory`](super::Directory) implementation, useful for tests.
+//! In-memory [`Directory`] implementation, useful for tests.
 
 use std::collections::HashMap;
 use std::io;
@@ -171,7 +171,7 @@ impl IndexOutput for MemoryDirectoryOutput {
 
 /// Standalone in-memory IndexOutput that writes to a `Vec<u8>` with running CRC32.
 ///
-/// Unlike [`MemoryDirectoryOutput`], this does **not** auto-persist to a directory.
+/// Unlike `MemoryDirectoryOutput`, this does **not** auto-persist to a directory.
 /// Use it for unit tests (via [`bytes()`](MemoryIndexOutput::bytes)) and as scratch
 /// buffers (e.g., `address_buffer` in doc_values).
 pub struct MemoryIndexOutput {

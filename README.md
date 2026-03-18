@@ -1,5 +1,9 @@
 # Bearing
 
+[![CI](https://github.com/toddfeak/bearing/actions/workflows/ci.yml/badge.svg)](https://github.com/toddfeak/bearing/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.88-orange.svg)](https://blog.rust-lang.org/)
+
 A Rust port of Apache Lucene.
 
 ## About

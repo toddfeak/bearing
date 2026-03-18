@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Configuration for [`IndexWriter`](super::IndexWriter) flush behavior.
+//! Configuration for [`IndexWriter`] flush behavior.
 
 /// Configuration for an IndexWriter.
 ///
