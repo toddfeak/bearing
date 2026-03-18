@@ -718,7 +718,7 @@ fn write_vint_block_impl(
 mod tests {
     use super::*;
     use crate::index::PointDimensionConfig;
-    use crate::store::{Directory, MemoryDirectory, SharedDirectory};
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))

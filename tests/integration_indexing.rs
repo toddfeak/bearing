@@ -32,7 +32,7 @@ fn make_all_fields_doc() -> Document {
     doc.add(string_field("id", "doc-1", true));
     doc.add(long_field("timestamp", 1_700_000_000));
     doc.add(int_field("count", 42, true));
-    doc.add(float_field("score", 3.14, true));
+    doc.add(float_field("score", 3.125, true));
     doc.add(double_field("price", 99.99, true));
     doc.add(stored_string_field("author", "Todd"));
     doc
@@ -111,7 +111,7 @@ fn multi_threaded_indexing() -> io::Result<()> {
     }
 
     let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), (num_threads * docs_per_thread) as i32);
+    assert_eq!(writer.num_docs(), num_threads * docs_per_thread);
 
     let files = result.into_segment_files()?;
     assert!(
@@ -206,8 +206,8 @@ fn stored_only_fields_commit_successfully() -> io::Result<()> {
     doc.add(stored_string_field("s", "hello"));
     doc.add(stored_int_field("i", 42));
     doc.add(stored_long_field("l", 123_456_789));
-    doc.add(stored_float_field("f", 2.718));
-    doc.add(stored_double_field("d", 3.14159));
+    doc.add(stored_float_field("f", 2.75));
+    doc.add(stored_double_field("d", 3.125));
     doc.add(stored_bytes_field("b", vec![0xDE, 0xAD, 0xBE, 0xEF]));
     // Need at least one indexed field for the document to be valid
     doc.add(keyword_field("id", "stored-only"));

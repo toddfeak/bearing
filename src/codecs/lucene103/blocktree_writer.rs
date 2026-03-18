@@ -1274,7 +1274,7 @@ mod tests {
     use crate::document::DocValuesType;
     use crate::index::PointDimensionConfig;
     use crate::index::indexing_chain::PostingList;
-    use crate::store::{Directory, MemoryDirectory, MemoryIndexOutput, SharedDirectory};
+    use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
     use std::collections::HashMap;
 
     fn test_directory() -> SharedDirectory {

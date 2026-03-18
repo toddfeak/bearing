@@ -523,7 +523,7 @@ fn write_zdouble(out: &mut dyn DataOutput, d: f64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Directory, MemoryDirectory, MemoryIndexOutput, SharedDirectory};
+    use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))

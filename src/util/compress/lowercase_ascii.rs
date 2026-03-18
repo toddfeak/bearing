@@ -229,14 +229,14 @@ mod tests {
         for iter in 0..100 {
             let len = 8 + (iter * 7) % 200;
             let mut bytes = vec![0u8; len];
-            for i in 0..len {
+            for (i, byte) in bytes.iter_mut().enumerate().take(len) {
                 let mut hasher = DefaultHasher::new();
                 (iter, i).hash(&mut hasher);
                 let seed = hasher.finish();
                 // Generate compressible byte: map to [0x1F,0x3F) or [0x5F,0x7F)
                 let b = (seed % 32) as u8;
                 let v = b | 0x20 | ((b & 0x20) << 1);
-                bytes[i] = v.wrapping_sub(1);
+                *byte = v.wrapping_sub(1);
             }
             assert!(round_trip(&bytes), "failed at iter {}", iter);
         }
@@ -252,17 +252,17 @@ mod tests {
             let max_exceptions = len >> 5;
             let mut exceptions = 0;
             let mut bytes = vec![0u8; len];
-            for i in 0..len {
+            for (i, byte) in bytes.iter_mut().enumerate().take(len) {
                 let mut hasher = DefaultHasher::new();
                 (iter, i, "exc").hash(&mut hasher);
                 let seed = hasher.finish();
-                if exceptions < max_exceptions && seed % 50 == 0 {
-                    bytes[i] = (seed % 256) as u8;
+                if exceptions < max_exceptions && seed.is_multiple_of(50) {
+                    *byte = (seed % 256) as u8;
                     exceptions += 1;
                 } else {
                     let b = (seed % 32) as u8;
                     let v = b | 0x20 | ((b & 0x20) << 1);
-                    bytes[i] = v.wrapping_sub(1);
+                    *byte = v.wrapping_sub(1);
                 }
             }
             assert!(round_trip(&bytes), "failed at iter {}", iter);
@@ -279,8 +279,8 @@ mod tests {
     fn test_mixed_case_long_enough() {
         // Mostly lowercase with a few uppercase — should compress if enough chars
         let mut input = vec![0u8; 256];
-        for i in 0..256 {
-            input[i] = b'a' + (i % 26) as u8;
+        for (i, byte) in input.iter_mut().enumerate().take(256) {
+            *byte = b'a' + (i % 26) as u8;
         }
         // Sprinkle a few uppercase (exceptions)
         input[50] = b'A';

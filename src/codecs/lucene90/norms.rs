@@ -181,7 +181,7 @@ mod tests {
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::indexing_chain::PerFieldData;
     use crate::index::{FieldInfo, FieldInfos};
-    use crate::store::{Directory, MemoryDirectory, SharedDirectory};
+    use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::test_util;
     use std::collections::HashMap;
 

@@ -37,18 +37,22 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 | `_0.fdt` | 24,105 | 24,016 | -89 | Stored fields data. LZ4-compressed blocks contain "indexed by Java" vs "indexed by Rust" (same length, different bytes). Different input produces different compressed output. Verified: both strings are 15 bytes. |
 | `_0.si` | 533 | 429 | -104 | Segment info metadata. Java writes 8 diagnostic entries (JVM version, OS details, timestamp, etc.), Rust writes 4. Files set now matches (both list 18 files including `_0.si` — this was a bug, now fixed). Verified by parsing both files field-by-field. |
 
-### Same size, differ — not yet investigated (6 files)
+### Same size, differ — verified root cause (3 files)
 
-These likely cascade from the verified differences above (`.fnm` attribute ordering, `.tim` size), but this has not been confirmed by byte-level analysis.
+| File | Size | Root Cause |
+|------|-----:|-----------|
+| `_0.kdd` | 8,293 | BKD points data. Field write order differs — Java iterates `fieldHash[]` (hash table order), Rust iterates by ascending field number. This reorders per-field data blocks but per-field content is otherwise identical. (Low cardinality VInt off-by-one was fixed — Rust now writes `VInt(cardinality)` matching Java.) |
+| `_0.kdi` | 74 | BKD points index. Per-field data is identical except VLong-encoded file pointers differ due to field write order in `.kdd` (different dataFP values encode to different VLong sizes). |
+| `_0.kdm` | 306 | BKD points metadata. Field write order differs (hash table vs field number order), causing field numbers and file pointers to appear in different sequence. Per-field metadata content is identical. |
+
+### Same size, differ — not yet investigated (4 files)
 
 | File | Size | Contents | Likely Cause |
 |------|-----:|---------|-------------|
-| `_0.kdd` | 8,768 | BKD points data | Document insertion order affects BKD tree layout |
-| `_0.kdi` | 74 | BKD points index | Cascades from `.kdd` |
-| `_0.kdm` | 306 | BKD points metadata | Cascades from `.kdd` |
 | `_0_Lucene103_0.psm` | 112 | Postings metadata | Level 1 impact metadata differs (Rust computes it eagerly, Java only when writing level 1 skip data) |
 | `_0_Lucene103_0.tip` | 397 | Term index | Likely cascades from `.tim` block offsets |
 | `_0_Lucene90_0.dvm` | 1,407 | Doc values metadata | Unknown |
+| `segments_1` | 155 | Segment commit metadata | Contains segment ID bytes that differ between runs |
 
 ### Different size — not yet investigated (2 files)
 
@@ -56,9 +60,3 @@ These likely cascade from the verified differences above (`.fnm` attribute order
 |------|-----:|-----:|------:|---------|-------------|
 | `_0_Lucene103_0.tmd` | 351 | 283 | -68 | Term dictionary metadata | Likely cascades from `.tim` — contains file pointers and per-field stats |
 | `_0_Lucene90_0.dvd` | 12,443 | 12,441 | -2 | Doc values data | Unknown |
-
-### Same size, differ — not yet investigated (1 file)
-
-| File | Size | Contents | Likely Cause |
-|------|-----:|---------|-------------|
-| `segments_1` | 155 | Segment commit metadata | Contains segment ID bytes that differ between runs |

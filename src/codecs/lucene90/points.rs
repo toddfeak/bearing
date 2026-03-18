@@ -427,7 +427,7 @@ fn write_low_cardinality_leaf_block(
         // Write suffix bytes
         data.write_bytes(&sorted_points[i].1[common_prefix_len..bytes_per_dim])?;
         // Write run length as VInt
-        data.write_vint((run_len - 1) as i32)?;
+        data.write_vint(run_len as i32)?;
         debug!(
             "points: low cardinality run: suffix={:02x?} count={}",
             &sorted_points[i].1[common_prefix_len..bytes_per_dim],
@@ -785,7 +785,7 @@ mod tests {
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::indexing_chain::PerFieldData;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
-    use crate::store::{Directory, MemoryDirectory, MemoryIndexOutput, SharedDirectory};
+    use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
     use std::collections::HashMap;
 
     fn make_test_directory() -> SharedDirectory {
@@ -1251,7 +1251,9 @@ mod tests {
 
     #[test]
     fn test_low_cardinality_encoding() {
-        // Test with 3 points where 2 are identical → low cardinality may be chosen
+        // 3 points: two identical (1000) and one different (2000).
+        // bpd=8, common_prefix_len=6, suffix_len=2, cardinality=2.
+        // Low cardinality cost (6) < high cardinality cost (7), so low-card wins.
         let val_a = long_to_sortable_bytes(1000);
         let val_b = long_to_sortable_bytes(1000);
         let val_c = long_to_sortable_bytes(2000);
@@ -1259,6 +1261,7 @@ mod tests {
         let sorted_points: Vec<(i32, Vec<u8>)> = vec![(0, val_a), (1, val_b), (2, val_c)];
 
         let common_prefix_len = common_prefix_length(&sorted_points[0].1, &sorted_points[2].1);
+        assert_eq!(common_prefix_len, 6);
         let cardinality = compute_cardinality(&sorted_points);
         assert_eq!(cardinality, 2);
 
@@ -1273,11 +1276,11 @@ mod tests {
         .unwrap();
 
         let bytes = data.bytes();
-        // Should use either low or high cardinality encoding depending on cost
-        // Both are valid; just verify it produces valid output
-        assert!(!bytes.is_empty());
-        // First byte should be sorted_dim (0x00) for high card, 0xFE for low card
-        assert!(bytes[0] == 0x00 || bytes[0] == 0xFE);
+        // Low cardinality encoding:
+        //   0xFE marker
+        //   suffix of value 1000 [0x03, 0xE8], VInt(2) for cardinality
+        //   suffix of value 2000 [0x07, 0xD0], VInt(1) for cardinality
+        assert_eq!(bytes, &[0xFE, 0x03, 0xE8, 0x02, 0x07, 0xD0, 0x01]);
     }
 
     #[test]

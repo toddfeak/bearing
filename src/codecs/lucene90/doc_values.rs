@@ -566,7 +566,7 @@ mod tests {
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
     use crate::index::{FieldInfo, FieldInfos};
-    use crate::store::{Directory, MemoryDirectory, SharedDirectory};
+    use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::test_util::{self, TestDataReader};
     use std::collections::HashMap;
 
