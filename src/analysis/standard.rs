@@ -639,6 +639,146 @@ mod tests {
     }
 
     #[test]
+    fn test_apostrophe_at_end_of_input() {
+        // Apostrophe at end of word at end of input (line 76-77)
+        let tokenizer = StandardTokenizer;
+        let tokens = tokenizer.tokenize("don't");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].text, "don't");
+
+        // Trailing apostrophe with no following char
+        let tokens = tokenizer.tokenize("hello'");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].text, "hello");
+    }
+
+    #[test]
+    fn test_apostrophe_followed_by_non_alpha() {
+        // Apostrophe followed by non-alphanumeric (line 72-73)
+        let tokenizer = StandardTokenizer;
+        let tokens = tokenizer.tokenize("it' s");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].text, "it");
+        assert_eq!(tokens[1].text, "s");
+
+        // Apostrophe followed by space
+        let tokens = tokenizer.tokenize("don' t");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].text, "don");
+        assert_eq!(tokens[1].text, "t");
+    }
+
+    #[test]
+    fn test_analyze_reader_all_whitespace_chunk() {
+        // A chunk of only whitespace produces no tokens (lines 287-291)
+        let analyzer = StandardAnalyzer::new();
+        let spaces = " ".repeat(8192); // exactly one chunk of spaces
+        let text = format!("{spaces}hello");
+
+        let mut buf1 = String::new();
+        let mut tokens_to = Vec::new();
+        analyzer.analyze_to(&text, &mut buf1, &mut |tr| {
+            tokens_to.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+        });
+
+        let mut buf2 = String::new();
+        let mut tokens_reader = Vec::new();
+        let mut cursor = std::io::Cursor::new(text.as_bytes());
+        analyzer
+            .analyze_reader(&mut cursor, &mut buf2, &mut |tr| {
+                tokens_reader.push((tr.text.to_string(), tr.start_offset, tr.end_offset));
+            })
+            .unwrap();
+
+        assert_eq!(tokens_to, tokens_reader);
+    }
+
+    #[test]
+    fn test_analyze_reader_utf8_carry_over() {
+        // Force a multi-byte UTF-8 char to be split across read boundaries
+        // by using a reader that delivers exactly N bytes at a time.
+        // "ä" is 0xC3 0xA4 (2 bytes). Place it so byte 0xC3 is the last
+        // byte of one read and 0xA4 is the first byte of the next.
+        let analyzer = StandardAnalyzer::new();
+
+        // Use a custom reader that yields exactly 3 bytes at a time.
+        // Input: "ab" (2 bytes) + "ä" (2 bytes) + "cd" (2 bytes) = 6 bytes total.
+        // Reads: [a, b, 0xC3] then [0xA4, c, d] — splits the ä.
+        struct ChunkedReader {
+            data: Vec<u8>,
+            pos: usize,
+            chunk_size: usize,
+        }
+        impl std::io::Read for ChunkedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.pos >= self.data.len() {
+                    return Ok(0);
+                }
+                let end = (self.pos + self.chunk_size)
+                    .min(self.data.len())
+                    .min(self.pos + buf.len());
+                let n = end - self.pos;
+                buf[..n].copy_from_slice(&self.data[self.pos..end]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+
+        let input = "abäcd";
+        let mut buf_to = String::new();
+        let mut tokens_to = Vec::new();
+        analyzer.analyze_to(input, &mut buf_to, &mut |tr| {
+            tokens_to.push(tr.text.to_string());
+        });
+
+        let mut buf_reader = String::new();
+        let mut tokens_reader = Vec::new();
+        let mut reader = ChunkedReader {
+            data: input.as_bytes().to_vec(),
+            pos: 0,
+            chunk_size: 3, // splits the 2-byte ä across reads
+        };
+        analyzer
+            .analyze_reader(&mut reader, &mut buf_reader, &mut |tr| {
+                tokens_reader.push(tr.text.to_string());
+            })
+            .unwrap();
+
+        assert_eq!(tokens_to, tokens_reader);
+    }
+
+    #[test]
+    fn test_standard_analyzer_default() {
+        let analyzer = StandardAnalyzer::default();
+        let tokens = analyzer.analyze("hello");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].text, "hello");
+    }
+
+    #[test]
+    fn test_token_exceeding_max_length() {
+        let tokenizer = StandardTokenizer;
+        // A single token of exactly MAX_TOKEN_LENGTH (255) chars should be kept
+        let long_word: String = "a".repeat(255);
+        let tokens = tokenizer.tokenize(&long_word);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].text.len(), 255);
+
+        // A token exceeding MAX_TOKEN_LENGTH (256+ chars) is truncated to 255
+        let too_long: String = "b".repeat(300);
+        let tokens = tokenizer.tokenize(&too_long);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].text.len(), 255);
+
+        // A long token followed by a separator and another token
+        let input = format!("{} short", "c".repeat(300));
+        let tokens = tokenizer.tokenize(&input);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].text.len(), 255);
+        assert_eq!(tokens[1].text, "short");
+    }
+
+    #[test]
     fn test_analyze_to_matches_analyze() {
         let analyzer = StandardAnalyzer::new();
         let test_cases = [

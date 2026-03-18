@@ -315,6 +315,45 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_directory_default() {
+        let dir = MemoryDirectory::default();
+        assert!(dir.list_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_memory_output_name() {
+        let out = MemoryIndexOutput::new("my_file.bin".to_string());
+        assert_eq!(out.name(), "my_file.bin");
+    }
+
+    #[test]
+    fn test_memory_directory_rename_missing() {
+        let mut dir = MemoryDirectory::new();
+        assert!(dir.rename("nonexistent", "dest").is_err());
+    }
+
+    #[test]
+    fn test_memory_directory_read_missing() {
+        let dir = MemoryDirectory::new();
+        assert!(dir.read_file("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_memory_directory_file_length_missing() {
+        let dir = MemoryDirectory::new();
+        assert!(dir.file_length("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_memory_output_write_byte() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        out.write_byte(0x42).unwrap();
+        out.write_byte(0x43).unwrap();
+        assert_eq!(out.bytes(), &[0x42, 0x43]);
+        assert_eq!(out.file_pointer(), 2);
+    }
+
+    #[test]
     fn test_memory_output_int_le() {
         let mut out = MemoryIndexOutput::new("test".to_string());
         out.write_le_int(0x01020304).unwrap();

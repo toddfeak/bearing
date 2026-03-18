@@ -273,6 +273,42 @@ mod tests {
     }
 
     #[test]
+    fn test_fs_directory_sync() {
+        let dir_path = temp_dir("sync");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("sync_test.bin", b"data").unwrap();
+        dir.sync(&["sync_test.bin"]).unwrap();
+    }
+
+    #[test]
+    fn test_fs_directory_sync_meta_data() {
+        let dir_path = temp_dir("sync_meta");
+        let dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.sync_meta_data().unwrap();
+    }
+
+    #[test]
+    fn test_fs_output_write_byte() {
+        let dir_path = temp_dir("write_byte");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        {
+            let mut out = dir.create_output("byte_test.bin").unwrap();
+            out.write_byte(0x42).unwrap();
+            out.write_byte(0x43).unwrap();
+            assert_eq!(out.file_pointer(), 2);
+        }
+
+        let contents = fs::read(dir_path.join("byte_test.bin")).unwrap();
+        assert_eq!(contents, &[0x42, 0x43]);
+    }
+
+    #[test]
     fn test_fs_output_checksum() {
         let dir_path = temp_dir("checksum");
         let mut dir = FSDirectory::open(&dir_path).unwrap();

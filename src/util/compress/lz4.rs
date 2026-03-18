@@ -807,6 +807,117 @@ mod tests {
     }
 
     #[test]
+    fn test_compress_decompress_large_input() {
+        // >64KB input exercises the 32-bit offset path in fast_hash_log
+        let mut input = Vec::with_capacity(70_000);
+        // Non-repeating pattern followed by repeating data
+        for i in 0u32..17500 {
+            input.extend_from_slice(&i.to_le_bytes());
+        }
+        // Add repeating section for compression
+        let pattern = b"compress me please! ";
+        for _ in 0..50 {
+            input.extend_from_slice(pattern);
+        }
+        assert!(input.len() > 65536);
+        let compressed = compress(&input);
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_compress_high_large_input() {
+        // >64KB exercises HC reset for large previous compression
+        // and the distance limit branches in get() and previous()
+        let mut input = Vec::with_capacity(70_000);
+        // Create data with matches at various distances
+        let chunk = b"the quick brown fox jumps over the lazy dog and ";
+        for _ in 0..1500 {
+            input.extend_from_slice(chunk);
+        }
+        assert!(input.len() > 65536);
+
+        let mut ht = HighCompressionHashTable::new();
+        let compressed = compress_high(&input, &mut ht);
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(decompressed, input);
+
+        // Compress again — exercises reset with large previous end-base
+        let compressed2 = compress_high(&input, &mut ht);
+        let decompressed2 = decompress(&compressed2, input.len()).unwrap();
+        assert_eq!(decompressed2, input);
+    }
+
+    #[test]
+    fn test_compress_with_dictionary_empty_data() {
+        // Empty data with non-empty dictionary (line 244)
+        let dict = b"some dictionary content";
+        let compressed = compress_with_dictionary(dict, dict.len());
+        assert!(compressed.is_empty());
+    }
+
+    #[test]
+    fn test_compress_decompress_long_literal_run() {
+        // Input with a long non-repeating section (>255 bytes of literals)
+        // followed by repeating data to get a match.
+        let mut input = Vec::new();
+        // 300 bytes of incrementing data (won't match anything)
+        for i in 0..300u16 {
+            input.push((i % 251) as u8); // prime modulus avoids accidental 4-byte repeats
+        }
+        // Then repeating data to exercise match encoding
+        let repeat = b"ABCDEFGHIJKLMNOP";
+        for _ in 0..20 {
+            input.extend_from_slice(repeat);
+        }
+        let compressed = compress(&input);
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_compress_decompress_long_trailing_literals() {
+        // Input where the final unmatched section is >=270 bytes,
+        // exercising the while remaining >= 255 loop in encode_last_literals.
+        // We need LAST_LITERALS (5) + 270 = 275 trailing non-matching bytes
+        // minimum. Use 300 to be safe.
+        // The trailing section must be truly unmatchable — no 4-byte sequence
+        // can repeat within MAX_DISTANCE (64KB).
+        let mut input = Vec::new();
+        // Short repeating prefix to seed the hash table
+        let pattern = b"ABCDEFGHIJKLMNOP";
+        for _ in 0..3 {
+            input.extend_from_slice(pattern);
+        }
+        // 300 bytes where every 4-byte window is unique: use a counter
+        // encoded big-endian so no 4-byte subsequence repeats.
+        for i in 0u32..75 {
+            input.extend_from_slice(&(i + 0x80000000).to_be_bytes());
+        }
+        assert!(input.len() >= 48 + 300); // pattern + unique
+        let compressed = compress(&input);
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_compress_decompress_long_match() {
+        // Input with a very long match (>19 bytes, exercises extended match length)
+        let pattern = b"the quick brown fox ";
+        let mut input = Vec::new();
+        input.extend_from_slice(pattern);
+        // Add unrelated filler so the hash table gets populated
+        input.extend_from_slice(b"ZZZZ filler text!! ");
+        // Repeat the pattern — will produce a long match
+        for _ in 0..5 {
+            input.extend_from_slice(pattern);
+        }
+        let compressed = compress(&input);
+        let decompressed = decompress(&compressed, input.len()).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
     fn test_compress_high_simple() {
         let input = b"hello world hello world hello world!";
         let mut ht = HighCompressionHashTable::new();

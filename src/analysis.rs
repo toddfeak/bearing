@@ -87,3 +87,65 @@ pub trait Analyzer: Send + Sync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal analyzer that only implements `analyze()`, exercising the
+    /// default `analyze_to()` and `analyze_reader()` trait methods.
+    struct SplitAnalyzer;
+
+    impl Analyzer for SplitAnalyzer {
+        fn analyze(&self, text: &str) -> Vec<Token> {
+            text.split_whitespace()
+                .enumerate()
+                .map(|(i, word)| Token {
+                    text: word.to_string(),
+                    start_offset: 0,
+                    end_offset: word.len(),
+                    position_increment: if i == 0 { 1 } else { 1 },
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn test_default_analyze_to() {
+        let analyzer = SplitAnalyzer;
+        let mut buf = String::new();
+        let mut tokens = Vec::new();
+        analyzer.analyze_to("hello world", &mut buf, &mut |tr| {
+            tokens.push(tr.text.to_string());
+        });
+        assert_eq!(tokens, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_default_analyze_reader() {
+        let analyzer = SplitAnalyzer;
+        let mut buf = String::new();
+        let mut tokens = Vec::new();
+        let mut cursor = std::io::Cursor::new(b"hello world");
+        analyzer
+            .analyze_reader(&mut cursor, &mut buf, &mut |tr| {
+                tokens.push(tr.text.to_string());
+            })
+            .unwrap();
+        assert_eq!(tokens, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_default_analyze_reader_empty() {
+        let analyzer = SplitAnalyzer;
+        let mut buf = String::new();
+        let mut tokens = Vec::new();
+        let mut cursor = std::io::Cursor::new(b"");
+        analyzer
+            .analyze_reader(&mut cursor, &mut buf, &mut |tr| {
+                tokens.push(tr.text.to_string());
+            })
+            .unwrap();
+        assert!(tokens.is_empty());
+    }
+}

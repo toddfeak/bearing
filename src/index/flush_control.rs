@@ -103,6 +103,13 @@ mod tests {
     }
 
     #[test]
+    fn test_flush_control_default() {
+        let fc = FlushControl::default();
+        assert_eq!(fc.pending_count(), 0);
+        assert_eq!(fc.flushing_count(), 0);
+    }
+
+    #[test]
     fn test_enqueue_and_dequeue() {
         let fc = FlushControl::new();
         fc.enqueue_for_flush(make_dwpt("_0"));

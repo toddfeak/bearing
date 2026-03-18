@@ -230,6 +230,29 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_codec_name_non_ascii() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        assert!(write_header(&mut out, "bad\x01name", 0).is_err());
+    }
+
+    #[test]
+    fn test_index_header_suffix_too_long() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let id = [0u8; 16];
+        let long_suffix: String = "x".repeat(256);
+        assert!(write_index_header(&mut out, "Test", 1, &id, &long_suffix).is_err());
+    }
+
+    #[test]
+    fn test_vint_size_multi_byte() {
+        // header_length uses vint_size internally. A codec name of length 128+
+        // would need 2 vint bytes, but validate_codec_name rejects >= 128.
+        // So test via header_length with a 127-char name (vint = 1 byte).
+        let name = "a".repeat(127);
+        assert_eq!(header_length(&name), 4 + 1 + 127 + 4);
+    }
+
+    #[test]
     fn test_footer_covers_preceding_bytes() {
         // The CRC in the footer covers all bytes up to and including
         // the first 8 bytes of the footer (magic + algorithm ID)

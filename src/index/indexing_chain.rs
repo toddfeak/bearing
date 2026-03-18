@@ -1021,6 +1021,291 @@ mod tests {
     }
 
     #[test]
+    fn test_doc_values_numeric() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::numeric_doc_values_field("count", 99));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let count_data = chain.per_field().get("count").unwrap();
+        if let DocValuesAccumulator::Numeric(ref vals) = count_data.doc_values {
+            assert_eq!(vals.len(), 1);
+            assert_eq!(vals[0], (0, 99));
+        } else {
+            panic!("expected Numeric");
+        }
+    }
+
+    #[test]
+    fn test_doc_values_binary() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::binary_doc_values_field("payload", vec![1, 2, 3]));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let payload_data = chain.per_field().get("payload").unwrap();
+        if let DocValuesAccumulator::Binary(ref vals) = payload_data.doc_values {
+            assert_eq!(vals.len(), 1);
+            assert_eq!(vals[0], (0, vec![1, 2, 3]));
+        } else {
+            panic!("expected Binary");
+        }
+    }
+
+    #[test]
+    fn test_doc_values_sorted() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::sorted_doc_values_field("category", b"animals"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let cat_data = chain.per_field().get("category").unwrap();
+        if let DocValuesAccumulator::Sorted(ref vals) = cat_data.doc_values {
+            assert_eq!(vals.len(), 1);
+            assert_eq!(vals[0].0, 0);
+            assert_eq!(vals[0].1, BytesRef::new(b"animals".to_vec()));
+        } else {
+            panic!("expected Sorted");
+        }
+    }
+
+    #[test]
+    fn test_doc_values_numeric_multiple_docs() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        for i in 0..3 {
+            let mut doc = Document::new();
+            doc.add(document::numeric_doc_values_field("count", i * 10));
+            chain.process_document(doc, &analyzer).unwrap();
+        }
+
+        let count_data = chain.per_field().get("count").unwrap();
+        if let DocValuesAccumulator::Numeric(ref vals) = count_data.doc_values {
+            assert_eq!(vals.len(), 3);
+            assert_eq!(vals[0], (0, 0));
+            assert_eq!(vals[1], (1, 10));
+            assert_eq!(vals[2], (2, 20));
+        } else {
+            panic!("expected Numeric");
+        }
+    }
+
+    #[test]
+    fn test_posting_list_with_offsets_roundtrip() {
+        // Exercises offset recording in record_occurrence AND offset
+        // consumption in decode()
+        let mut pl = PostingList::new(true, true, true);
+
+        // Doc 0: two occurrences
+        pl.record_occurrence(0, 0, 0, 5);
+        pl.record_occurrence(0, 1, 6, 11);
+
+        // Doc 1: one occurrence
+        pl.record_occurrence(1, 0, 0, 3);
+
+        pl.finalize_current_doc();
+
+        let decoded = pl.decode();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].doc_id, 0);
+        assert_eq!(decoded[0].freq, 2);
+        assert_eq!(decoded[0].positions, vec![0, 1]);
+        assert_eq!(decoded[1].doc_id, 1);
+        assert_eq!(decoded[1].freq, 1);
+        assert_eq!(decoded[1].positions, vec![0]);
+
+        // Verify offset data was encoded (byte_stream is larger than without offsets)
+        let mut pl_no_offsets = PostingList::new(true, true, false);
+        pl_no_offsets.record_occurrence(0, 0, 0, 5);
+        pl_no_offsets.record_occurrence(0, 1, 6, 11);
+        pl_no_offsets.record_occurrence(1, 0, 0, 3);
+        pl_no_offsets.finalize_current_doc();
+        assert!(
+            pl.byte_stream.len() > pl_no_offsets.byte_stream.len(),
+            "offset posting should be larger"
+        );
+    }
+
+    #[test]
+    fn test_indexing_chain_default() {
+        let chain = IndexingChain::default();
+        assert_eq!(chain.num_docs(), 0);
+    }
+
+    #[test]
+    fn test_doc_values_numeric_appends_to_existing() {
+        // Exercises the append-to-existing-accumulator branch (not just initial creation)
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::numeric_doc_values_field("count", 10));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let mut doc = Document::new();
+        doc.add(document::numeric_doc_values_field("count", 20));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let data = chain.per_field().get("count").unwrap();
+        if let DocValuesAccumulator::Numeric(ref vals) = data.doc_values {
+            assert_eq!(vals, &[(0, 10), (1, 20)]);
+        } else {
+            panic!("expected Numeric");
+        }
+    }
+
+    #[test]
+    fn test_doc_values_binary_appends_to_existing() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::binary_doc_values_field("payload", vec![1]));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let mut doc = Document::new();
+        doc.add(document::binary_doc_values_field("payload", vec![2]));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let data = chain.per_field().get("payload").unwrap();
+        if let DocValuesAccumulator::Binary(ref vals) = data.doc_values {
+            assert_eq!(vals.len(), 2);
+            assert_eq!(vals[1], (1, vec![2]));
+        } else {
+            panic!("expected Binary");
+        }
+    }
+
+    #[test]
+    fn test_doc_values_sorted_appends_to_existing() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::sorted_doc_values_field("cat", b"a"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let mut doc = Document::new();
+        doc.add(document::sorted_doc_values_field("cat", b"b"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let data = chain.per_field().get("cat").unwrap();
+        if let DocValuesAccumulator::Sorted(ref vals) = data.doc_values {
+            assert_eq!(vals.len(), 2);
+        } else {
+            panic!("expected Sorted");
+        }
+    }
+
+    #[test]
+    fn test_doc_values_sorted_set_appends_to_existing() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::sorted_set_doc_values_field("tag", "rust"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let mut doc = Document::new();
+        doc.add(document::sorted_set_doc_values_field("tag", "java"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let data = chain.per_field().get("tag").unwrap();
+        if let DocValuesAccumulator::SortedSet(ref vals) = data.doc_values {
+            assert_eq!(vals.len(), 2);
+        } else {
+            panic!("expected SortedSet");
+        }
+    }
+
+    #[test]
+    fn test_doc_values_sorted_numeric_appends_to_existing() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::sorted_numeric_doc_values_field("ts", 100));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let mut doc = Document::new();
+        doc.add(document::sorted_numeric_doc_values_field("ts", 200));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let data = chain.per_field().get("ts").unwrap();
+        if let DocValuesAccumulator::SortedNumeric(ref vals) = data.doc_values {
+            assert_eq!(vals.len(), 2);
+        } else {
+            panic!("expected SortedNumeric");
+        }
+    }
+
+    #[test]
+    fn test_encode_norm_subnormal_and_negative() {
+        // field_length=0 → intToByte4(0) = 0
+        assert_eq!(encode_norm_value(0), 0);
+        // field_length < 0 → intToByte4 returns 0
+        assert_eq!(encode_norm_value(-1), 0);
+        // Small field lengths (1-15) exercise the subnormal path in long_to_int4
+        for len in 1..=15 {
+            assert_ne!(encode_norm_value(len), 0);
+        }
+    }
+
+    #[test]
+    fn test_long_to_int4_subnormal() {
+        // Values 0-7 have fewer than 4 significant bits → subnormal path
+        assert_eq!(long_to_int4(0), 0);
+        assert_eq!(long_to_int4(1), 1);
+        assert_eq!(long_to_int4(7), 7);
+        // Value 8 has exactly 4 bits → normal path
+        let normal = long_to_int4(8);
+        assert!(normal > 7);
+    }
+
+    #[test]
+    fn test_process_doc_values_sorted_text_variant() {
+        // Exercises the FieldValue::Text branch for DocValuesType::Sorted
+        // by calling process_doc_values directly.
+        let meta = FieldMeta {
+            number: 0,
+            index_options: IndexOptions::None,
+            doc_values_type: DocValuesType::Sorted,
+            omit_norms: true,
+            has_point_values: false,
+        };
+
+        let field1 = crate::document::Field::new(
+            "category".to_string(),
+            crate::document::FieldType::new(),
+            crate::document::FieldValue::Text("animals".to_string()),
+        );
+        let field2 = crate::document::Field::new(
+            "category".to_string(),
+            crate::document::FieldType::new(),
+            crate::document::FieldValue::Text("plants".to_string()),
+        );
+
+        let mut per_field = PerFieldData::new();
+        IndexingChain::process_doc_values(&mut per_field, &meta, &field1, 0);
+        IndexingChain::process_doc_values(&mut per_field, &meta, &field2, 1);
+
+        if let DocValuesAccumulator::Sorted(ref vals) = per_field.doc_values {
+            assert_eq!(vals.len(), 2);
+            assert_eq!(vals[0].1, BytesRef::from_utf8("animals"));
+            assert_eq!(vals[1].1, BytesRef::from_utf8("plants"));
+        } else {
+            panic!("expected Sorted");
+        }
+    }
+
+    #[test]
     fn test_field_infos_have_per_field_codec_attributes() {
         let mut chain = IndexingChain::new();
         let analyzer = make_analyzer();

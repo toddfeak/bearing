@@ -828,6 +828,69 @@ mod tests {
     }
 
     #[test]
+    fn test_field_type_default() {
+        let ft = FieldType::default();
+        assert!(!ft.stored());
+        assert!(!ft.tokenized());
+        assert!(!ft.omit_norms());
+        assert_eq!(ft.index_options(), IndexOptions::None);
+        assert_eq!(ft.doc_values_type(), DocValuesType::None);
+        assert!(!ft.store_term_vectors());
+        assert!(!ft.store_term_vector_offsets());
+        assert!(!ft.store_term_vector_positions());
+        assert!(!ft.store_term_vector_payloads());
+        assert_eq!(ft.point_dimension_count(), 0);
+        assert_eq!(ft.point_index_dimension_count(), 0);
+        assert_eq!(ft.point_num_bytes(), 0);
+    }
+
+    #[test]
+    fn test_numeric_value_non_numeric() {
+        let f = keyword_field("path", "/foo");
+        assert!(f.numeric_value().is_none());
+    }
+
+    #[test]
+    fn test_point_bytes_non_point() {
+        let f = text_field("contents", "hello");
+        assert!(f.point_bytes().is_none());
+    }
+
+    #[test]
+    fn test_point_bytes_bytes_field() {
+        // A field type with points and a Bytes value
+        let mut ft = FieldType::new();
+        ft.point_dimension_count = 1;
+        ft.point_index_dimension_count = 1;
+        ft.point_num_bytes = 4;
+        let f = Field::new(
+            "raw_point".to_string(),
+            ft,
+            FieldValue::Bytes(vec![0x80, 0x00, 0x00, 0x2A]),
+        );
+        let pb = f.point_bytes().unwrap();
+        assert_eq!(pb, vec![0x80, 0x00, 0x00, 0x2A]);
+    }
+
+    #[test]
+    fn test_field_value_debug_all_variants() {
+        // Exercise Debug for all FieldValue variants
+        let cases: Vec<FieldValue> = vec![
+            FieldValue::Text("hello".to_string()),
+            FieldValue::Int(42),
+            FieldValue::Long(100),
+            FieldValue::Float(1.5),
+            FieldValue::Double(2.5),
+            FieldValue::Bytes(vec![1, 2]),
+            FieldValue::Reader(Box::new(std::io::Cursor::new(vec![]))),
+        ];
+        for val in &cases {
+            let s = format!("{:?}", val);
+            assert!(!s.is_empty());
+        }
+    }
+
+    #[test]
     fn test_int_field_not_stored() {
         let f = int_field("x", 10, false);
         assert!(!f.field_type().stored());
