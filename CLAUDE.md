@@ -21,7 +21,7 @@ The Java implementation of **Apache Lucene 10.3.2** is the canonical source. All
 
 - Target codec: **Lucene103**
 - Multi-threaded `IndexWriter` with DWPT pool (no merging, no deletes)
-- Eight field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`
+- Fourteen field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`, `LatLonPoint`, `FeatureField`, `IntRange`, `LongRange`, `FloatRange`, `DoubleRange`
 
 ## Build & Test
 
@@ -53,5 +53,6 @@ cargo clippy                   # lint
 - When porting Java Lucene code, port the applicable tests from `reference/lucene-10.3.2/lucene/core/src/test/java/org/apache/lucene/`.
 - Test functions should reference the Java test class they were ported from (e.g., `// Ported from org.apache.lucene.codecs.TestCodecUtil`).
 - Use the in-memory `Directory` implementation for unit tests.
+- Prefer [Assertables](https://docs.rs/assertables) macros over plain `assert!` for more expressive and descriptive test assertions (e.g., `assert_lt!`, `assert_in_delta!`, `assert_len_eq_x!`, `assert_matches!`, `assert_none!`). Reference source is in `reference/assertables/src/`.
 - Integration tests in `tests/*.rs` use only `pub` items from `bearing::*`.
 - See `tests/CLAUDE.md` for E2E tests, Java utilities, performance comparison, and profiling.

@@ -35,14 +35,14 @@ The canonical reference is **Apache Lucene 10.3.2** (`reference/lucene-10.3.2/`)
 | `SortedNumericDocValuesField` | **Implemented** | Doc-values-only sorted longs (single and multi-valued) |
 | `KnnFloatVectorField` | Not implemented | Float vectors for HNSW-based nearest-neighbor search |
 | `KnnByteVectorField` | Not implemented | Byte vectors for HNSW-based nearest-neighbor search |
-| `FeatureField` | Not implemented | Static feature scores (BM25 boosting) |
-| `LatLonPoint` | Not implemented | Latitude/longitude points for geo queries |
-| Range fields | Not implemented | `IntRange`, `LongRange`, `FloatRange`, `DoubleRange` |
+| `FeatureField` | **Implemented** | Static feature scores (BM25 boosting) |
+| `LatLonPoint` | **Implemented** | Latitude/longitude points for geo queries |
+| Range fields | **Implemented** | `IntRange`, `LongRange`, `FloatRange`, `DoubleRange` |
 | Shape fields | Not implemented | Geo and XY shape indexing |
 
-**Rust status:** The Rust port supports 13 field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`, plus 5 doc-values-only types (`NumericDocValuesField`, `BinaryDocValuesField`, `SortedDocValuesField`, `SortedSetDocValuesField`, `SortedNumericDocValuesField`). The codec writes all 5 doc values types (NUMERIC, BINARY, SORTED, SORTED_SET, SORTED_NUMERIC).
+**Rust status:** The Rust port supports 20 field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`, `LatLonPoint`, `FeatureField`, 4 range types (`IntRange`, `LongRange`, `FloatRange`, `DoubleRange`), plus 5 doc-values-only types (`NumericDocValuesField`, `BinaryDocValuesField`, `SortedDocValuesField`, `SortedSetDocValuesField`, `SortedNumericDocValuesField`). The codec writes all 5 doc values types (NUMERIC, BINARY, SORTED, SORTED_SET, SORTED_NUMERIC).
 
-**Priority:** Medium — remaining types (KNN vectors, LatLonPoint, range fields, shape fields) require multi-dimensional BKD, geo encoding, or HNSW codec work.
+**Priority:** Medium — remaining types (KNN vectors, shape fields) require HNSW codec or additional geo encoding work.
 
 ## 4. Multi-Valued Fields
 

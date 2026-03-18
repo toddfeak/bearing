@@ -313,6 +313,45 @@ fn make_document(path: &Path) -> Document {
         file_size as f64 * 0.123,
     ));
 
+    // LatLonPoint
+    let lat = 40.7128 + (file_size % 10) as f64 * 0.01;
+    let lon = -74.006 + (file_size % 10) as f64 * 0.01;
+    doc.add(document::lat_lon_point("location", lat, lon));
+
+    // Range fields
+    doc.add(document::int_range_field(
+        "int_range",
+        &[file_size as i32],
+        &[file_size as i32 + 100],
+    ));
+    doc.add(document::long_range_field(
+        "long_range",
+        &[file_size as i64],
+        &[file_size as i64 + 1000],
+    ));
+    doc.add(document::float_range_field(
+        "float_range",
+        &[file_size as f32 / 10.0],
+        &[file_size as f32 / 10.0 + 1.0],
+    ));
+    doc.add(document::double_range_field(
+        "double_range",
+        &[file_size as f64 * 0.1],
+        &[file_size as f64 * 0.1 + 1.0],
+    ));
+
+    // FeatureField
+    doc.add(document::feature_field(
+        "features",
+        "pagerank",
+        (file_size % 100) as f32 / 10.0 + 0.5,
+    ));
+    doc.add(document::feature_field(
+        "features",
+        "freshness",
+        (file_size % 50) as f32 / 5.0 + 1.0,
+    ));
+
     // Doc-values-only fields
     doc.add(document::numeric_doc_values_field(
         "dv_count",

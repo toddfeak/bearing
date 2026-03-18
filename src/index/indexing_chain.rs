@@ -144,6 +144,14 @@ impl PostingList {
         self.current_freq += 1;
     }
 
+    /// Sets the frequency for the current in-progress document to an explicit value.
+    ///
+    /// Used by FeatureField to encode the feature value as a term frequency.
+    /// Must be called after `start_doc` and before `finalize_current_doc`.
+    pub fn set_freq(&mut self, freq: i32) {
+        self.current_freq = freq;
+    }
+
     /// Records a position for the current document.
     pub fn add_position(&mut self, position: i32) {
         self.current_positions.push(position);
@@ -647,6 +655,14 @@ impl IndexingChain {
                 token_ref.end_offset as i32,
             );
         };
+
+        // Feature fields: single term with explicit frequency, no positions/norms
+        if let FieldValue::Feature { term, freq } = field.value() {
+            let posting_list = per_field.get_or_insert_posting_list(term, has_freqs, false, false);
+            posting_list.start_doc(doc_id);
+            posting_list.set_freq(*freq);
+            return Ok(());
+        }
 
         if field.field_type().tokenized() {
             match field.value() {

@@ -26,6 +26,12 @@ import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
+import org.apache.lucene.document.DoubleRange;
+import org.apache.lucene.document.FeatureField;
+import org.apache.lucene.document.FloatRange;
+import org.apache.lucene.document.IntRange;
+import org.apache.lucene.document.LatLonPoint;
+import org.apache.lucene.document.LongRange;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
@@ -135,6 +141,21 @@ public class IndexAllFields {
         doc.add(new StoredField("extra_int", (int) (fileSize % 1000)));
         doc.add(new StoredField("extra_float", (float) (fileSize % 100) / 3.0f));
         doc.add(new StoredField("extra_double", fileSize * 0.123));
+
+        // LatLonPoint
+        double lat = 40.7128 + (fileSize % 10) * 0.01;
+        double lon = -74.006 + (fileSize % 10) * 0.01;
+        doc.add(new LatLonPoint("location", lat, lon));
+
+        // Range fields
+        doc.add(new IntRange("int_range", new int[]{(int) fileSize}, new int[]{(int) fileSize + 100}));
+        doc.add(new LongRange("long_range", new long[]{fileSize}, new long[]{fileSize + 1000}));
+        doc.add(new FloatRange("float_range", new float[]{fileSize / 10.0f}, new float[]{fileSize / 10.0f + 1.0f}));
+        doc.add(new DoubleRange("double_range", new double[]{fileSize * 0.1}, new double[]{fileSize * 0.1 + 1.0}));
+
+        // FeatureField
+        doc.add(new FeatureField("features", "pagerank", (fileSize % 100) / 10.0f + 0.5f));
+        doc.add(new FeatureField("features", "freshness", (fileSize % 50) / 5.0f + 1.0f));
 
         // Doc-values-only fields
         doc.add(new NumericDocValuesField("dv_count", fileSize));

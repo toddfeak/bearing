@@ -11,8 +11,9 @@ use std::io;
 use std::thread;
 
 use bearing::document::{
-    Document, FieldValue, binary_doc_values_field, double_field, float_field, int_field,
-    keyword_field, long_field, numeric_doc_values_field, sorted_doc_values_field,
+    Document, FieldValue, binary_doc_values_field, double_field, double_range_field, feature_field,
+    float_field, float_range_field, int_field, int_range_field, keyword_field, lat_lon_point,
+    long_field, long_range_field, numeric_doc_values_field, sorted_doc_values_field,
     sorted_numeric_doc_values_field, sorted_set_doc_values_field, stored_bytes_field,
     stored_double_field, stored_float_field, stored_int_field, stored_long_field,
     stored_string_field, string_field, text_field,
@@ -669,6 +670,92 @@ fn multi_valued_sorted_numeric_and_sorted_set() -> io::Result<()> {
         files.iter().any(|f| f.name.ends_with(".cfs")),
         "should contain compound file"
     );
+
+    Ok(())
+}
+
+#[test]
+fn lat_lon_point_fields() -> io::Result<()> {
+    let writer = IndexWriter::new();
+
+    for i in 0..5 {
+        let mut doc = Document::new();
+        doc.add(text_field("body", &format!("geo doc {i}")));
+        doc.add(lat_lon_point(
+            "location",
+            40.7128 + i as f64 * 0.01,
+            -74.006 + i as f64 * 0.01,
+        ));
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 5);
+
+    let files = result.into_segment_files()?;
+    assert_not_empty!(files);
+
+    Ok(())
+}
+
+#[test]
+fn range_fields() -> io::Result<()> {
+    let writer = IndexWriter::new();
+
+    for i in 0..5 {
+        let mut doc = Document::new();
+        doc.add(text_field("body", &format!("range doc {i}")));
+        doc.add(int_range_field("int_range", &[i * 10], &[i * 10 + 5]));
+        doc.add(long_range_field(
+            "long_range",
+            &[i as i64 * 100],
+            &[i as i64 * 100 + 50],
+        ));
+        doc.add(float_range_field(
+            "float_range",
+            &[i as f32 * 1.0],
+            &[i as f32 * 1.0 + 0.5],
+        ));
+        doc.add(double_range_field(
+            "double_range",
+            &[i as f64 * 10.0],
+            &[i as f64 * 10.0 + 5.0],
+        ));
+        // Multi-dimensional range
+        doc.add(int_range_field(
+            "multi_range",
+            &[i * 10, i * 20],
+            &[i * 10 + 5, i * 20 + 10],
+        ));
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 5);
+
+    let files = result.into_segment_files()?;
+    assert_not_empty!(files);
+
+    Ok(())
+}
+
+#[test]
+fn feature_fields() -> io::Result<()> {
+    let writer = IndexWriter::new();
+
+    for i in 0..5 {
+        let mut doc = Document::new();
+        doc.add(text_field("body", &format!("feature doc {i}")));
+        doc.add(feature_field("features", "pagerank", (i + 1) as f32 * 0.5));
+        doc.add(feature_field("features", "freshness", (i + 1) as f32 * 2.0));
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 5);
+
+    let files = result.into_segment_files()?;
+    assert_not_empty!(files);
 
     Ok(())
 }

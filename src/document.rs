@@ -4,8 +4,12 @@
 //!
 //! A [`Document`] is a collection of [`Field`]s, each with a name, [`FieldType`],
 //! and value. Factory functions like [`text_field`], [`keyword_field`], and
-//! [`long_field`] create fields with common configurations. Doc-values-only
-//! factories ([`numeric_doc_values_field`], [`binary_doc_values_field`],
+//! [`long_field`] create fields with common configurations. Specialized point
+//! fields ([`lat_lon_point`], [`int_range_field`], [`long_range_field`],
+//! [`float_range_field`], [`double_range_field`]) encode multi-dimensional
+//! data for BKD tree indexing. [`feature_field`] stores feature name/value
+//! pairs as term frequencies for static scoring. Doc-values-only factories
+//! ([`numeric_doc_values_field`], [`binary_doc_values_field`],
 //! [`sorted_doc_values_field`], [`sorted_set_doc_values_field`],
 //! [`sorted_numeric_doc_values_field`]) create fields for sorting and faceting
 //! without indexing or storing. The [`text_field_reader`] factory accepts a
@@ -190,6 +194,16 @@ pub enum FieldValue {
     /// for doc values or point lookups. Use [`text_field_reader`] to create
     /// a field with this variant.
     Reader(Box<dyn Read + Send>),
+    /// A feature field that stores a term with an explicit frequency.
+    ///
+    /// Used by [`feature_field`] to encode feature name/value pairs in the
+    /// posting list without tokenization.
+    Feature {
+        /// The feature name, stored as the indexed term.
+        term: String,
+        /// The encoded frequency (feature_value bits >> 15).
+        freq: i32,
+    },
 }
 
 impl fmt::Debug for FieldValue {
@@ -202,6 +216,11 @@ impl fmt::Debug for FieldValue {
             FieldValue::Double(v) => f.debug_tuple("Double").field(v).finish(),
             FieldValue::Bytes(b) => f.debug_tuple("Bytes").field(b).finish(),
             FieldValue::Reader(_) => f.debug_tuple("Reader").field(&"...").finish(),
+            FieldValue::Feature { term, freq } => f
+                .debug_struct("Feature")
+                .field("term", term)
+                .field("freq", freq)
+                .finish(),
         }
     }
 }
@@ -244,6 +263,7 @@ impl Field {
     pub fn string_value(&self) -> Option<&str> {
         match &self.value {
             FieldValue::Text(s) => Some(s),
+            FieldValue::Feature { term, .. } => Some(term),
             _ => None,
         }
     }
@@ -297,7 +317,7 @@ impl Field {
             FieldValue::Float(v) => Some(StoredValue::Float(*v)),
             FieldValue::Double(v) => Some(StoredValue::Double(*v)),
             FieldValue::Bytes(b) => Some(StoredValue::Bytes(b.clone())),
-            FieldValue::Reader(_) => None,
+            FieldValue::Reader(_) | FieldValue::Feature { .. } => None,
         }
     }
 }
@@ -510,6 +530,104 @@ pub fn stored_bytes_field(name: &str, value: Vec<u8>) -> Field {
     let mut ft = FieldType::new();
     ft.stored = true;
     Field::new(name.to_string(), ft, FieldValue::Bytes(value))
+}
+
+/// Creates an indexed lat/lon point field.
+///
+/// Points: 2 dimensions, 4 bytes each. Not stored, no doc values.
+/// Latitude must be in [-90, 90], longitude in [-180, 180].
+pub fn lat_lon_point(name: &str, lat: f64, lon: f64) -> Field {
+    let encoded_lat = crate::util::numeric_utils::encode_latitude(lat);
+    let encoded_lon = crate::util::numeric_utils::encode_longitude(lon);
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(&crate::util::numeric_utils::int_to_sortable_bytes(
+        encoded_lat,
+    ));
+    bytes.extend_from_slice(&crate::util::numeric_utils::int_to_sortable_bytes(
+        encoded_lon,
+    ));
+    let mut ft = FieldType::new();
+    ft.point_dimension_count = 2;
+    ft.point_index_dimension_count = 2;
+    ft.point_num_bytes = 4;
+    Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
+}
+
+/// Creates an integer range field for indexing a range per dimension.
+///
+/// Points: `dims*2` dimensions, 4 bytes each. Layout: `[min1..minN, max1..maxN]`.
+pub fn int_range_field(name: &str, mins: &[i32], maxs: &[i32]) -> Field {
+    let bytes = crate::util::numeric_utils::encode_int_range(mins, maxs);
+    let dims = (mins.len() * 2) as u32;
+    let mut ft = FieldType::new();
+    ft.point_dimension_count = dims;
+    ft.point_index_dimension_count = dims;
+    ft.point_num_bytes = 4;
+    Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
+}
+
+/// Creates a long range field for indexing a range per dimension.
+///
+/// Points: `dims*2` dimensions, 8 bytes each. Layout: `[min1..minN, max1..maxN]`.
+pub fn long_range_field(name: &str, mins: &[i64], maxs: &[i64]) -> Field {
+    let bytes = crate::util::numeric_utils::encode_long_range(mins, maxs);
+    let dims = (mins.len() * 2) as u32;
+    let mut ft = FieldType::new();
+    ft.point_dimension_count = dims;
+    ft.point_index_dimension_count = dims;
+    ft.point_num_bytes = 8;
+    Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
+}
+
+/// Creates a float range field for indexing a range per dimension.
+///
+/// Points: `dims*2` dimensions, 4 bytes each. Layout: `[min1..minN, max1..maxN]`.
+pub fn float_range_field(name: &str, mins: &[f32], maxs: &[f32]) -> Field {
+    let bytes = crate::util::numeric_utils::encode_float_range(mins, maxs);
+    let dims = (mins.len() * 2) as u32;
+    let mut ft = FieldType::new();
+    ft.point_dimension_count = dims;
+    ft.point_index_dimension_count = dims;
+    ft.point_num_bytes = 4;
+    Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
+}
+
+/// Creates a double range field for indexing a range per dimension.
+///
+/// Points: `dims*2` dimensions, 8 bytes each. Layout: `[min1..minN, max1..maxN]`.
+pub fn double_range_field(name: &str, mins: &[f64], maxs: &[f64]) -> Field {
+    let bytes = crate::util::numeric_utils::encode_double_range(mins, maxs);
+    let dims = (mins.len() * 2) as u32;
+    let mut ft = FieldType::new();
+    ft.point_dimension_count = dims;
+    ft.point_index_dimension_count = dims;
+    ft.point_num_bytes = 8;
+    Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
+}
+
+/// Creates a feature field that stores a feature name/value pair in the posting list.
+///
+/// The feature value is encoded as a term frequency: `float_bits >> 15`.
+/// FieldType: not tokenized, omit_norms, DocsAndFreqs.
+/// The feature name becomes the indexed term.
+pub fn feature_field(name: &str, feature_name: &str, feature_value: f32) -> Field {
+    assert!(
+        feature_value.is_finite() && feature_value > 0.0,
+        "feature_value must be finite and positive, got {feature_value}"
+    );
+    let freq = (f32::to_bits(feature_value) >> 15) as i32;
+    let mut ft = FieldType::new();
+    ft.tokenized = false;
+    ft.omit_norms = true;
+    ft.index_options = IndexOptions::DocsAndFreqs;
+    Field::new(
+        name.to_string(),
+        ft,
+        FieldValue::Feature {
+            term: feature_name.to_string(),
+            freq,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -886,6 +1004,10 @@ mod tests {
             FieldValue::Double(2.5),
             FieldValue::Bytes(vec![1, 2]),
             FieldValue::Reader(Box::new(std::io::Cursor::new(vec![]))),
+            FieldValue::Feature {
+                term: "feat".to_string(),
+                freq: 100,
+            },
         ];
         for val in &cases {
             let s = format!("{:?}", val);
@@ -922,5 +1044,131 @@ mod tests {
         let reader_val = FieldValue::Reader(Box::new(std::io::Cursor::new(vec![])));
         let debug_str = format!("{:?}", reader_val);
         assert_contains!(debug_str, "Reader");
+    }
+
+    #[test]
+    fn test_lat_lon_point() {
+        let f = lat_lon_point("location", 40.7128, -74.006);
+        assert_eq!(f.name(), "location");
+        assert_eq!(f.field_type().point_dimension_count(), 2);
+        assert_eq!(f.field_type().point_index_dimension_count(), 2);
+        assert_eq!(f.field_type().point_num_bytes(), 4);
+        assert!(!f.field_type().stored());
+        assert_eq!(f.field_type().doc_values_type(), DocValuesType::None);
+        assert!(!f.field_type().is_indexed());
+        assert!(f.field_type().has_points());
+
+        let pb = f.point_bytes().unwrap();
+        assert_len_eq_x!(&pb, 8);
+
+        // Verify encoded bytes match expected values
+        let expected_lat = crate::util::numeric_utils::int_to_sortable_bytes(
+            crate::util::numeric_utils::encode_latitude(40.7128),
+        );
+        let expected_lon = crate::util::numeric_utils::int_to_sortable_bytes(
+            crate::util::numeric_utils::encode_longitude(-74.006),
+        );
+        assert_eq!(&pb[0..4], &expected_lat);
+        assert_eq!(&pb[4..8], &expected_lon);
+    }
+
+    #[test]
+    fn test_int_range_field() {
+        let f = int_range_field("range", &[10, 20], &[30, 40]);
+        assert_eq!(f.name(), "range");
+        assert_eq!(f.field_type().point_dimension_count(), 4);
+        assert_eq!(f.field_type().point_index_dimension_count(), 4);
+        assert_eq!(f.field_type().point_num_bytes(), 4);
+        assert!(!f.field_type().stored());
+
+        let pb = f.point_bytes().unwrap();
+        assert_len_eq_x!(&pb, 16); // 2 dims * 2 * 4 bytes
+    }
+
+    #[test]
+    fn test_long_range_field() {
+        let f = long_range_field("range", &[100], &[200]);
+        assert_eq!(f.field_type().point_dimension_count(), 2);
+        assert_eq!(f.field_type().point_num_bytes(), 8);
+
+        let pb = f.point_bytes().unwrap();
+        assert_len_eq_x!(&pb, 16); // 1 dim * 2 * 8 bytes
+    }
+
+    #[test]
+    fn test_float_range_field() {
+        let f = float_range_field("range", &[1.0], &[2.0]);
+        assert_eq!(f.field_type().point_dimension_count(), 2);
+        assert_eq!(f.field_type().point_num_bytes(), 4);
+
+        let pb = f.point_bytes().unwrap();
+        assert_len_eq_x!(&pb, 8);
+    }
+
+    #[test]
+    fn test_double_range_field() {
+        let f = double_range_field("range", &[1.0, 2.0], &[3.0, 4.0]);
+        assert_eq!(f.field_type().point_dimension_count(), 4);
+        assert_eq!(f.field_type().point_num_bytes(), 8);
+
+        let pb = f.point_bytes().unwrap();
+        assert_len_eq_x!(&pb, 32); // 2 dims * 2 * 8 bytes
+    }
+
+    #[test]
+    fn test_feature_field() {
+        let f = feature_field("features", "pagerank", 1.0);
+        assert_eq!(f.name(), "features");
+        assert!(!f.field_type().tokenized());
+        assert!(f.field_type().omit_norms());
+        assert_eq!(f.field_type().index_options(), IndexOptions::DocsAndFreqs);
+        assert!(!f.field_type().stored());
+        assert!(!f.field_type().has_points());
+
+        // 1.0f32 bits = 0x3F800000, >> 15 = 0x7F00 = 32512
+        assert_matches!(f.value(), FieldValue::Feature { term, freq }
+            if term == "pagerank" && *freq == 32512);
+
+        assert_eq!(f.string_value(), Some("pagerank"));
+        assert_none!(f.numeric_value());
+        assert_none!(f.stored_value());
+        assert_none!(f.point_bytes());
+    }
+
+    #[test]
+    fn test_feature_field_encoding_known_values() {
+        // 0.5f32 bits = 0x3F000000, >> 15 = 0x7E00 = 32256
+        let f = feature_field("f", "x", 0.5);
+        assert_matches!(f.value(), FieldValue::Feature { freq, .. } if *freq == 32256);
+
+        // 10.0f32 bits = 0x41200000, >> 15 = 0x8240 = 33344
+        let f = feature_field("f", "x", 10.0);
+        assert_matches!(f.value(), FieldValue::Feature { freq, .. } if *freq == 33344);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite and positive")]
+    fn test_feature_field_zero_value() {
+        feature_field("f", "x", 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite and positive")]
+    fn test_feature_field_negative_value() {
+        feature_field("f", "x", -1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite and positive")]
+    fn test_feature_field_nan_value() {
+        feature_field("f", "x", f32::NAN);
+    }
+
+    #[test]
+    fn test_feature_field_debug() {
+        let f = feature_field("features", "pagerank", 1.0);
+        let debug_str = format!("{:?}", f.value());
+        assert_contains!(debug_str, "Feature");
+        assert_contains!(debug_str, "pagerank");
     }
 }

@@ -311,6 +311,108 @@ public class VerifyIndex {
                 System.out.println("  extra_double: " + extraDoubleCount + "/" + numDocs + " docs");
             }
 
+            // Check LatLonPoint "location" — should have 2 dims, 4 bytes
+            FieldInfo locationFi = fieldInfos.fieldInfo("location");
+            if (locationFi != null) {
+                PointValues locationPoints = leaf.getPointValues("location");
+                if (locationPoints == null) {
+                    System.err.println("FAIL: 'location' LatLonPoint has no point values");
+                    ok = false;
+                } else {
+                    System.out.println("  location: " + locationPoints.size() + " points, "
+                        + locationPoints.getNumDimensions() + " dims, "
+                        + locationPoints.getBytesPerDimension() + " bytes/dim (OK)");
+                    if (locationPoints.getNumDimensions() != 2 || locationPoints.getBytesPerDimension() != 4) {
+                        System.err.println("FAIL: 'location' expected 2 dims, 4 bytes");
+                        ok = false;
+                    }
+                }
+            }
+
+            // Check IntRange "int_range" — should have 2 dims (1 range dim * 2), 4 bytes
+            FieldInfo intRangeFi = fieldInfos.fieldInfo("int_range");
+            if (intRangeFi != null) {
+                PointValues intRangePoints = leaf.getPointValues("int_range");
+                if (intRangePoints == null) {
+                    System.err.println("FAIL: 'int_range' has no point values");
+                    ok = false;
+                } else {
+                    System.out.println("  int_range: " + intRangePoints.size() + " points, "
+                        + intRangePoints.getNumDimensions() + " dims, "
+                        + intRangePoints.getBytesPerDimension() + " bytes/dim (OK)");
+                    if (intRangePoints.getNumDimensions() != 2 || intRangePoints.getBytesPerDimension() != 4) {
+                        System.err.println("FAIL: 'int_range' expected 2 dims, 4 bytes");
+                        ok = false;
+                    }
+                }
+            }
+
+            // Check LongRange "long_range" — should have 2 dims, 8 bytes
+            FieldInfo longRangeFi = fieldInfos.fieldInfo("long_range");
+            if (longRangeFi != null) {
+                PointValues longRangePoints = leaf.getPointValues("long_range");
+                if (longRangePoints == null) {
+                    System.err.println("FAIL: 'long_range' has no point values");
+                    ok = false;
+                } else {
+                    System.out.println("  long_range: " + longRangePoints.size() + " points, "
+                        + longRangePoints.getNumDimensions() + " dims, "
+                        + longRangePoints.getBytesPerDimension() + " bytes/dim (OK)");
+                    if (longRangePoints.getNumDimensions() != 2 || longRangePoints.getBytesPerDimension() != 8) {
+                        System.err.println("FAIL: 'long_range' expected 2 dims, 8 bytes");
+                        ok = false;
+                    }
+                }
+            }
+
+            // Check FloatRange "float_range" — should have 2 dims, 4 bytes
+            FieldInfo floatRangeFi = fieldInfos.fieldInfo("float_range");
+            if (floatRangeFi != null) {
+                PointValues floatRangePoints = leaf.getPointValues("float_range");
+                if (floatRangePoints == null) {
+                    System.err.println("FAIL: 'float_range' has no point values");
+                    ok = false;
+                } else {
+                    System.out.println("  float_range: " + floatRangePoints.size() + " points, "
+                        + floatRangePoints.getNumDimensions() + " dims, "
+                        + floatRangePoints.getBytesPerDimension() + " bytes/dim (OK)");
+                    if (floatRangePoints.getNumDimensions() != 2 || floatRangePoints.getBytesPerDimension() != 4) {
+                        System.err.println("FAIL: 'float_range' expected 2 dims, 4 bytes");
+                        ok = false;
+                    }
+                }
+            }
+
+            // Check DoubleRange "double_range" — should have 2 dims, 8 bytes
+            FieldInfo doubleRangeFi = fieldInfos.fieldInfo("double_range");
+            if (doubleRangeFi != null) {
+                PointValues doubleRangePoints = leaf.getPointValues("double_range");
+                if (doubleRangePoints == null) {
+                    System.err.println("FAIL: 'double_range' has no point values");
+                    ok = false;
+                } else {
+                    System.out.println("  double_range: " + doubleRangePoints.size() + " points, "
+                        + doubleRangePoints.getNumDimensions() + " dims, "
+                        + doubleRangePoints.getBytesPerDimension() + " bytes/dim (OK)");
+                    if (doubleRangePoints.getNumDimensions() != 2 || doubleRangePoints.getBytesPerDimension() != 8) {
+                        System.err.println("FAIL: 'double_range' expected 2 dims, 8 bytes");
+                        ok = false;
+                    }
+                }
+            }
+
+            // Check FeatureField "features" — DOCS_AND_FREQS index options
+            FieldInfo featuresFi = fieldInfos.fieldInfo("features");
+            if (featuresFi != null) {
+                Terms featuresTerms = leaf.terms("features");
+                if (featuresTerms == null || featuresTerms.size() == 0) {
+                    System.err.println("FAIL: 'features' FeatureField has no terms");
+                    ok = false;
+                } else {
+                    System.out.println("  features: " + featuresTerms.size() + " terms (OK)");
+                }
+            }
+
             // Check doc-values-only fields (if present)
             int leafDocs = leaf.numDocs();
             int leafSampleSize = Math.min(leafDocs, 3);
