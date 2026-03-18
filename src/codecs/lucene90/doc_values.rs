@@ -277,53 +277,74 @@ fn add_sorted_field(
 
 /// Adds a SORTED_NUMERIC field.
 fn add_sorted_numeric_field(
-    meta: &mut dyn DataOutput,
+    meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
     vals: &[(i32, Vec<i64>)],
     num_docs: i32,
 ) -> io::Result<()> {
     // No skip index for MVP
 
+    // Sort values within each doc (Java's SortedNumericDocValues contract)
+    let mut sorted_vals: Vec<(i32, Vec<i64>)> = vals.to_vec();
+    for (_doc_id, values) in sorted_vals.iter_mut() {
+        values.sort();
+    }
+
     // Collect all values in doc order (flattened)
-    let all_values: Vec<i64> = vals
+    let all_values: Vec<i64> = sorted_vals
         .iter()
         .flat_map(|(_doc_id, values)| values.iter().copied())
         .collect();
 
-    let (num_docs_with_field, num_values) =
-        write_values(meta, data, &all_values, vals.len() as i32, num_docs, false)?;
+    let num_docs_with_value = sorted_vals.len() as i32;
+    let (num_docs_with_field, num_values) = write_values(
+        meta,
+        data,
+        &all_values,
+        num_docs_with_value,
+        num_docs,
+        false,
+    )?;
 
     meta.write_le_int(num_docs_with_field)?;
 
-    // If multi-valued (numValues > numDocsWithField), write addresses
-    // For MVP with 1 value per doc, this is skipped
+    // If multi-valued (numValues > numDocsWithField), write address table
     if num_values > num_docs_with_field as i64 {
-        return Err(io::Error::other(
-            "multi-valued SORTED_NUMERIC not implemented for MVP",
-        ));
+        let addresses_start = data.file_pointer() as i64;
+        meta.write_le_long(addresses_start)?;
+        meta.write_vint(DIRECT_MONOTONIC_BLOCK_SHIFT as i32)?;
+
+        let mut address_buffer = MemoryIndexOutput::new("temp_sn_addr".to_string());
+        let mut dm_writer = DirectMonotonicWriter::new(DIRECT_MONOTONIC_BLOCK_SHIFT);
+
+        let mut cumulative: i64 = 0;
+        for (_doc_id, values) in &sorted_vals {
+            dm_writer.add(cumulative);
+            cumulative += values.len() as i64;
+        }
+        dm_writer.add(cumulative);
+
+        dm_writer.finish(meta, &mut address_buffer)?;
+        data.write_bytes(address_buffer.bytes())?;
+
+        meta.write_le_long(data.file_pointer() as i64 - addresses_start)?;
     }
 
     Ok(())
 }
 
-/// Adds a SORTED_SET field (single-valued optimization).
+/// Adds a SORTED_SET field.
+///
+/// Single-valued: uses the SORTED reader path (writeByte(0), writeValues, termDict).
+/// Multi-valued: uses the SORTED_NUMERIC reader path (writeByte(1), writeValues,
+/// numDocsWithField, address table, termDict).
 fn add_sorted_set_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
     vals: &[(i32, Vec<BytesRef>)],
     num_docs: i32,
 ) -> io::Result<()> {
-    // Check single-valued: all docs have exactly 1 value
-    for (_doc_id, values) in vals {
-        if values.len() != 1 {
-            return Err(io::Error::other(
-                "multi-valued SORTED_SET not implemented for MVP",
-            ));
-        }
-    }
-
-    // meta.writeByte(0) for singleValued (addTypeByte=true path in doAddSortedField)
-    meta.write_byte(0)?; // multiValued = false
+    let is_single_valued = vals.iter().all(|(_, v)| v.len() == 1);
 
     // Build sorted unique terms and assign ordinals
     let mut unique_terms: BTreeSet<BytesRef> = BTreeSet::new();
@@ -333,7 +354,6 @@ fn add_sorted_set_field(
         }
     }
 
-    // Build sorted terms and term → ordinal map in a single pass
     let mut ord_map: HashMap<BytesRef, i64> = HashMap::with_capacity(unique_terms.len());
     let sorted_terms: Vec<BytesRef> = unique_terms
         .into_iter()
@@ -344,22 +364,77 @@ fn add_sorted_set_field(
         })
         .collect();
 
-    // Build per-doc ordinal array (in doc order)
-    let ordinals: Vec<i64> = vals
-        .iter()
-        .map(|(_doc_id, values)| ord_map[&values[0]])
-        .collect();
+    if is_single_valued {
+        // Single-valued path: writeByte(0), writeValues (ords), termDict
+        // Java's readSorted() does NOT read numDocsWithField.
+        meta.write_byte(0)?;
 
-    // No skip index for MVP
+        let ordinals: Vec<i64> = vals
+            .iter()
+            .map(|(_doc_id, values)| ord_map[&values[0]])
+            .collect();
 
-    // writeValues for ordinals (ords=true)
-    // Note: Java's readSorted() (used for single-valued SORTED_SET) does NOT read
-    // numDocsWithField — only readSortedNumeric does. So we must NOT write it here.
-    let (_num_docs_with_field, _num_values) =
         write_values(meta, data, &ordinals, vals.len() as i32, num_docs, true)?;
+        add_terms_dict(meta, data, &sorted_terms)?;
+    } else {
+        // Multi-valued path: doAddSortedNumericField(ords=true) writes multiValued
+        // byte (1), writeValues, numDocsWithField, address table. Then termDict.
+        meta.write_byte(1)?;
 
-    // Write terms dictionary
-    add_terms_dict(meta, data, &sorted_terms)?;
+        // Build per-doc ordinal lists: map terms → ordinals, sort, dedup (set semantics)
+        let ord_vals: Vec<(i32, Vec<i64>)> = vals
+            .iter()
+            .map(|(doc_id, values)| {
+                let mut ords: Vec<i64> = values.iter().map(|v| ord_map[v]).collect();
+                ords.sort();
+                ords.dedup();
+                (*doc_id, ords)
+            })
+            .collect();
+
+        // Sort values within each doc (already done above via sort+dedup)
+        // Flatten ordinals
+        let all_ordinals: Vec<i64> = ord_vals
+            .iter()
+            .flat_map(|(_doc_id, ords)| ords.iter().copied())
+            .collect();
+
+        let num_docs_with_value = ord_vals.len() as i32;
+        let (num_docs_with_field, num_values) = write_values(
+            meta,
+            data,
+            &all_ordinals,
+            num_docs_with_value,
+            num_docs,
+            true,
+        )?;
+
+        meta.write_le_int(num_docs_with_field)?;
+
+        // If multi-valued, write address table
+        if num_values > num_docs_with_field as i64 {
+            let addresses_start = data.file_pointer() as i64;
+            meta.write_le_long(addresses_start)?;
+            meta.write_vint(DIRECT_MONOTONIC_BLOCK_SHIFT as i32)?;
+
+            let mut address_buffer = MemoryIndexOutput::new("temp_ss_addr".to_string());
+            let mut dm_writer = DirectMonotonicWriter::new(DIRECT_MONOTONIC_BLOCK_SHIFT);
+
+            let mut cumulative: i64 = 0;
+            for (_doc_id, ords) in &ord_vals {
+                dm_writer.add(cumulative);
+                cumulative += ords.len() as i64;
+            }
+            dm_writer.add(cumulative);
+
+            dm_writer.finish(meta, &mut address_buffer)?;
+            data.write_bytes(address_buffer.bytes())?;
+
+            meta.write_le_long(data.file_pointer() as i64 - addresses_start)?;
+        }
+
+        add_terms_dict(meta, data, &sorted_terms)?;
+    }
 
     Ok(())
 }
@@ -1098,13 +1173,14 @@ mod tests {
             Self(TestDataReader::new(data, start))
         }
 
-        /// Read a numeric entry (matches Java readNumeric)
-        fn read_numeric(&mut self) {
+        /// Read a numeric entry (matches Java readNumeric).
+        /// Returns num_values for multi-valued detection.
+        fn read_numeric(&mut self) -> i64 {
             let _docs_with_field_offset = self.0.read_le_long();
             let _docs_with_field_length = self.0.read_le_long();
             let _jump_table_entry_count = self.0.read_le_short();
             let _dense_rank_power = self.0.read_byte();
-            let _num_values = self.0.read_le_long();
+            let num_values = self.0.read_le_long();
             let table_size = self.0.read_le_int();
             if table_size >= 0 {
                 for _ in 0..table_size {
@@ -1117,6 +1193,7 @@ mod tests {
             let _values_offset = self.0.read_le_long();
             let _values_length = self.0.read_le_long();
             let _value_jump_table_offset = self.0.read_le_long();
+            num_values
         }
 
         /// Read DirectMonotonicReader.loadMeta (matches Java)
@@ -1155,7 +1232,7 @@ mod tests {
 
         /// Read sorted entry (matches Java readSorted — no multiValued byte)
         fn read_sorted(&mut self) {
-            self.read_numeric();
+            let _ = self.read_numeric();
             self.read_term_dict();
         }
 
@@ -1182,20 +1259,29 @@ mod tests {
         /// Read sorted set entry (matches Java readSortedSet)
         fn read_sorted_set(&mut self) {
             let multi_valued = self.0.read_byte();
-            assert_eq!(multi_valued, 0, "expected single-valued sorted set");
-            // Single-valued: readSorted = readNumeric + readTermDict
-            self.read_numeric();
-            self.read_term_dict();
+            if multi_valued == 0 {
+                // Single-valued: readSorted path (readNumeric + readTermDict)
+                let _ = self.read_numeric();
+                self.read_term_dict();
+            } else {
+                // Multi-valued: readSortedNumeric path + readTermDict
+                self.read_sorted_numeric();
+                self.read_term_dict();
+            }
         }
 
         /// Read sorted numeric entry (matches Java readSortedNumeric)
         fn read_sorted_numeric(&mut self) {
-            self.read_numeric();
+            let num_values = self.read_numeric();
             let num_docs_with_field = self.0.read_le_int();
-            // re-read numValues from numeric entry to check multi-valued
-            // For simplicity, just trust the write is correct
-            let _ = num_docs_with_field;
-            // If multi-valued, would read addresses — skip for MVP
+            // If multi-valued, read address table
+            if num_values > num_docs_with_field as i64 {
+                let _addresses_offset = self.0.read_le_long();
+                let block_shift = self.0.read_vint();
+                let num_addresses = num_docs_with_field as i64 + 1;
+                self.read_dm_meta(num_addresses, block_shift);
+                let _addresses_length = self.0.read_le_long();
+            }
         }
     }
 
@@ -1733,6 +1819,308 @@ mod tests {
 
         // Field 4: SORTED_NUMERIC
         assert_eq!(reader.0.read_le_int(), 4);
+        assert_eq!(reader.0.read_byte(), SORTED_NUMERIC);
+        reader.read_sorted_numeric();
+
+        // EOF
+        assert_eq!(reader.0.read_le_int(), -1);
+    }
+
+    #[test]
+    fn test_sorted_numeric_multi_valued() {
+        // 3 docs with varying value counts: 1, 2, 3 values
+        let fi = make_field_info("tags", 0, DocValuesType::SortedNumeric);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "tags".to_string(),
+            make_per_field_data_sorted_numeric(vec![
+                (0, vec![100]),
+                (1, vec![300, 200]),      // unsorted — should be sorted by codec
+                (2, vec![600, 400, 500]), // unsorted — should be sorted by codec
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Verify MetaReader can parse the full metadata
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        assert_eq!(reader.0.read_le_int(), 0);
+        assert_eq!(reader.0.read_byte(), SORTED_NUMERIC);
+        reader.read_sorted_numeric();
+
+        // EOF
+        assert_eq!(reader.0.read_le_int(), -1);
+    }
+
+    #[test]
+    fn test_sorted_numeric_multi_valued_values_sorted() {
+        // Verify that values are sorted within each doc by checking the flattened
+        // data output: for doc1=[300,200] and doc2=[600,400,500], the flattened
+        // values should be [100, 200, 300, 400, 500, 600].
+        let fi = make_field_info("nums", 0, DocValuesType::SortedNumeric);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "nums".to_string(),
+            make_per_field_data_sorted_numeric(vec![
+                (0, vec![100]),
+                (1, vec![300, 200]),
+                (2, vec![600, 400, 500]),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        // The .dvm metadata should have numValues=6 (total across all docs)
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let entry = &dvm[meta_header_len..];
+
+        // Skip field_number (4) + type byte (1) + docs_with_field (8+8+2+1) = 24 bytes
+        // numValues is at offset 24
+        let num_values = i64::from_le_bytes(entry[24..32].try_into().unwrap());
+        assert_eq!(num_values, 6, "total values across all docs should be 6");
+    }
+
+    #[test]
+    fn test_two_fields_multi_valued_sorted_numeric_dvm_parseable() {
+        // Two-field test: multi-valued SORTED_SET (single-valued) + multi-valued SORTED_NUMERIC
+        let fi_path = make_field_info("path", 0, DocValuesType::SortedSet);
+        let fi_counts = make_field_info("counts", 1, DocValuesType::SortedNumeric);
+        let field_infos = FieldInfos::new(vec![fi_path, fi_counts]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "path".to_string(),
+            make_per_field_data_sorted_set(vec![
+                (0, vec![BytesRef::from_utf8("/a.txt")]),
+                (1, vec![BytesRef::from_utf8("/b.txt")]),
+                (2, vec![BytesRef::from_utf8("/c.txt")]),
+            ]),
+        );
+        per_field.insert(
+            "counts".to_string(),
+            make_per_field_data_sorted_numeric(vec![
+                (0, vec![10, 20]),
+                (1, vec![30]),
+                (2, vec![40, 50, 60]),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        // Field 0: SORTED_SET (single-valued)
+        assert_eq!(reader.0.read_le_int(), 0);
+        assert_eq!(reader.0.read_byte(), SORTED_SET);
+        reader.read_sorted_set();
+
+        // Field 1: SORTED_NUMERIC (multi-valued)
+        assert_eq!(reader.0.read_le_int(), 1);
+        assert_eq!(reader.0.read_byte(), SORTED_NUMERIC);
+        reader.read_sorted_numeric();
+
+        // EOF
+        assert_eq!(reader.0.read_le_int(), -1);
+    }
+
+    #[test]
+    fn test_sorted_set_multi_valued() {
+        // 3 docs with 1, 2, 3 values respectively
+        let fi = make_field_info("tags", 0, DocValuesType::SortedSet);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "tags".to_string(),
+            make_per_field_data_sorted_set(vec![
+                (0, vec![BytesRef::from_utf8("alpha")]),
+                (
+                    1,
+                    vec![BytesRef::from_utf8("gamma"), BytesRef::from_utf8("beta")],
+                ),
+                (
+                    2,
+                    vec![
+                        BytesRef::from_utf8("delta"),
+                        BytesRef::from_utf8("alpha"),
+                        BytesRef::from_utf8("gamma"),
+                    ],
+                ),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Verify MetaReader can parse the full metadata
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        assert_eq!(reader.0.read_le_int(), 0);
+        assert_eq!(reader.0.read_byte(), SORTED_SET);
+        reader.read_sorted_set();
+
+        // EOF
+        assert_eq!(reader.0.read_le_int(), -1);
+    }
+
+    #[test]
+    fn test_sorted_set_multi_valued_dedup() {
+        // Doc with duplicate terms should produce unique ordinals
+        let fi = make_field_info("tags", 0, DocValuesType::SortedSet);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "tags".to_string(),
+            make_per_field_data_sorted_set(vec![
+                (
+                    0,
+                    vec![
+                        BytesRef::from_utf8("alpha"),
+                        BytesRef::from_utf8("alpha"),
+                        BytesRef::from_utf8("beta"),
+                    ],
+                ),
+                (
+                    1,
+                    vec![BytesRef::from_utf8("beta"), BytesRef::from_utf8("beta")],
+                ),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            2,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Verify MetaReader can parse the full metadata
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        assert_eq!(reader.0.read_le_int(), 0);
+        assert_eq!(reader.0.read_byte(), SORTED_SET);
+        reader.read_sorted_set();
+
+        // EOF
+        assert_eq!(reader.0.read_le_int(), -1);
+    }
+
+    #[test]
+    fn test_two_fields_multi_valued_sorted_set_and_sorted_numeric() {
+        // Two multi-valued fields: SORTED_SET + SORTED_NUMERIC
+        let fi_tags = make_field_info("tags", 0, DocValuesType::SortedSet);
+        let fi_nums = make_field_info("nums", 1, DocValuesType::SortedNumeric);
+        let field_infos = FieldInfos::new(vec![fi_tags, fi_nums]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "tags".to_string(),
+            make_per_field_data_sorted_set(vec![
+                (0, vec![BytesRef::from_utf8("a"), BytesRef::from_utf8("b")]),
+                (1, vec![BytesRef::from_utf8("c")]),
+                (2, vec![BytesRef::from_utf8("a"), BytesRef::from_utf8("c")]),
+            ]),
+        );
+        per_field.insert(
+            "nums".to_string(),
+            make_per_field_data_sorted_numeric(vec![
+                (0, vec![10, 20]),
+                (1, vec![30]),
+                (2, vec![40, 50, 60]),
+            ]),
+        );
+
+        let segment_id = [0u8; 16];
+        let directory = make_test_directory();
+        let result = write(
+            &directory,
+            "_0",
+            "Lucene90_0",
+            &segment_id,
+            &field_infos,
+            &per_field,
+            3,
+        )
+        .unwrap();
+
+        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
+        let mut reader = DvmReader::new(&dvm, meta_header_len);
+
+        // Field 0: SORTED_SET (multi-valued)
+        assert_eq!(reader.0.read_le_int(), 0);
+        assert_eq!(reader.0.read_byte(), SORTED_SET);
+        reader.read_sorted_set();
+
+        // Field 1: SORTED_NUMERIC (multi-valued)
+        assert_eq!(reader.0.read_le_int(), 1);
         assert_eq!(reader.0.read_byte(), SORTED_NUMERIC);
         reader.read_sorted_numeric();
 

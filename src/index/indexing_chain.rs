@@ -742,7 +742,11 @@ impl IndexingChain {
                 if let Some(v) = field.numeric_value() {
                     if let DocValuesAccumulator::SortedNumeric(ref mut vals) = per_field.doc_values
                     {
-                        vals.push((doc_id, vec![v]));
+                        if let Some(last) = vals.last_mut().filter(|(id, _)| *id == doc_id) {
+                            last.1.push(v);
+                        } else {
+                            vals.push((doc_id, vec![v]));
+                        }
                     } else {
                         per_field.doc_values =
                             DocValuesAccumulator::SortedNumeric(vec![(doc_id, vec![v])]);
@@ -753,7 +757,11 @@ impl IndexingChain {
                 if let FieldValue::Text(s) = field.value() {
                     let term = BytesRef::from_utf8(s);
                     if let DocValuesAccumulator::SortedSet(ref mut vals) = per_field.doc_values {
-                        vals.push((doc_id, vec![term]));
+                        if let Some(last) = vals.last_mut().filter(|(id, _)| *id == doc_id) {
+                            last.1.push(term);
+                        } else {
+                            vals.push((doc_id, vec![term]));
+                        }
                     } else {
                         per_field.doc_values =
                             DocValuesAccumulator::SortedSet(vec![(doc_id, vec![term])]);
