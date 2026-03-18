@@ -12,7 +12,7 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 
 ## Results: 19 files total
 
-### Payload-identical after masking (6 files)
+### Payload-identical after masking (7 files)
 
 | File | Size | Contents |
 |------|-----:|---------|
@@ -21,6 +21,7 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 | `_0.nvm` | 103 | Norms metadata (was 1-byte diff before SmallFloat.intToByte4 fix) |
 | `_0_Lucene103_0.doc` | 166,158 | Postings doc IDs + frequencies (was 1,880 bytes smaller before competitive impacts fix) |
 | `_0_Lucene103_0.pos` | 5,239,366 | Postings positions |
+| `_0_Lucene103_0.tmd` | 351 | Term dictionary metadata (was -68 bytes before first_term_bytes fix; has two codec headers so compare script must mask both segment IDs) |
 | `_0_Lucene103_0.tim` | 29,613 | Term dictionary (was +5,612 bytes before suffix compression + field write order fix) |
 
 ### Same size, differ — verified root cause (2 files)
@@ -54,9 +55,8 @@ Every Lucene codec file contains a header with a random 16-byte segment ID and a
 | `_0_Lucene90_0.dvm` | 1,407 | Doc values metadata | Unknown |
 | `segments_1` | 155 | Segment commit metadata | Contains segment ID bytes that differ between runs |
 
-### Different size — not yet investigated (2 files)
+### Different size — not yet investigated (1 file)
 
 | File | Java | Rust | Delta | Contents | Likely Cause |
 |------|-----:|-----:|------:|---------|-------------|
-| `_0_Lucene103_0.tmd` | 351 | 283 | -68 | Term dictionary metadata | Likely cascades from `.tim` — contains file pointers and per-field stats |
 | `_0_Lucene90_0.dvd` | 12,443 | 12,441 | -2 | Doc values data | Unknown |

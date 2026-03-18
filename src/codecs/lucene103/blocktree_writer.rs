@@ -328,7 +328,7 @@ impl TermsWriter {
         }
         self.num_terms += 1;
 
-        if self.num_terms == 0 {
+        if self.num_terms == 1 {
             self.first_term_bytes.clear();
             self.first_term_bytes.extend_from_slice(&term.bytes);
         }
@@ -1719,6 +1719,93 @@ mod tests {
         // doc_count (VInt) — this is what we're testing
         let (doc_count, _) = read_vint(&tmd_bytes[pos..]);
         assert_eq!(doc_count, 3, "doc_count should be 3 (unique docs: 0, 1, 2)");
+    }
+
+    /// Regression: first_term_bytes was never captured because num_terms was
+    /// incremented before the `== 0` check, so min term was always empty.
+    #[test]
+    fn test_min_max_terms_written_to_tmd() {
+        let fi = make_field_info("test", 0, IndexOptions::DocsAndFreqs);
+        let field_infos = FieldInfos::new(vec![fi.clone()]);
+
+        let mut terms = HashMap::new();
+        terms.insert(
+            "apple".to_string(),
+            make_posting_list(&[(0, 2, &[])], false),
+        );
+        terms.insert(
+            "banana".to_string(),
+            make_posting_list(&[(0, 1, &[]), (1, 3, &[])], false),
+        );
+        terms.insert(
+            "cherry".to_string(),
+            make_posting_list(&[(2, 1, &[])], false),
+        );
+
+        let id = [0u8; 16];
+        let dir = test_directory();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
+        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+            .unwrap();
+        let names = btw.finish().unwrap();
+
+        let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
+        let tmd_bytes = dir.lock().unwrap().read_file(tmd_name).unwrap();
+
+        // Skip headers: BlockTreeTermsMeta + Lucene103PostingsWriterTerms + BLOCK_SIZE VInt
+        let meta_hdr_len = codec_util::index_header_length(
+            crate::codecs::lucene103::postings_format::TERMS_META_CODEC_NAME,
+            "",
+        );
+        let terms_hdr_len = codec_util::index_header_length(
+            crate::codecs::lucene103::postings_format::TERMS_CODEC,
+            "",
+        );
+        let mut pos = meta_hdr_len + terms_hdr_len;
+        let (_, n) = read_vint(&tmd_bytes[pos..]); // BLOCK_SIZE
+        pos += n;
+
+        let (num_fields, n) = read_vint(&tmd_bytes[pos..]);
+        assert_eq!(num_fields, 1);
+        pos += n;
+
+        // field_number
+        let (_, n) = read_vint(&tmd_bytes[pos..]);
+        pos += n;
+        // num_terms
+        let (_, n) = read_vlong(&tmd_bytes[pos..]);
+        pos += n;
+        // sum_total_term_freq (non-DOCS field)
+        let (_, n) = read_vlong(&tmd_bytes[pos..]);
+        pos += n;
+        // sum_doc_freq
+        let (_, n) = read_vlong(&tmd_bytes[pos..]);
+        pos += n;
+        // doc_count
+        let (_, n) = read_vint(&tmd_bytes[pos..]);
+        pos += n;
+
+        // min term: VInt length + bytes
+        let (min_len, n) = read_vint(&tmd_bytes[pos..]);
+        pos += n;
+        let min_term = &tmd_bytes[pos..pos + min_len as usize];
+        pos += min_len as usize;
+
+        // max term: VInt length + bytes
+        let (max_len, n) = read_vint(&tmd_bytes[pos..]);
+        pos += n;
+        let max_term = &tmd_bytes[pos..pos + max_len as usize];
+
+        assert_eq!(
+            std::str::from_utf8(min_term).unwrap(),
+            "apple",
+            "min term should be the first term in sorted order"
+        );
+        assert_eq!(
+            std::str::from_utf8(max_term).unwrap(),
+            "cherry",
+            "max term should be the last term in sorted order"
+        );
     }
 
     /// Helper to read a VInt from a byte slice. Returns (value, bytes_consumed).
