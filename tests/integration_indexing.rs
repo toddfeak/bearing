@@ -8,9 +8,11 @@ use std::io;
 use std::thread;
 
 use bearing::document::{
-    Document, FieldValue, double_field, float_field, int_field, keyword_field, long_field,
-    stored_bytes_field, stored_double_field, stored_float_field, stored_int_field,
-    stored_long_field, stored_string_field, string_field, text_field,
+    Document, FieldValue, binary_doc_values_field, double_field, float_field, int_field,
+    keyword_field, long_field, numeric_doc_values_field, sorted_doc_values_field,
+    sorted_numeric_doc_values_field, sorted_set_doc_values_field, stored_bytes_field,
+    stored_double_field, stored_float_field, stored_int_field, stored_long_field,
+    stored_string_field, string_field, text_field,
 };
 use bearing::index::{IndexWriter, IndexWriterConfig};
 use bearing::store::{Directory, FSDirectory, MemoryDirectory};
@@ -535,5 +537,113 @@ fn fs_directory_non_compound() -> io::Result<()> {
     }
 
     std::fs::remove_dir_all(&tmp_dir)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Doc-values-only field types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn doc_values_only_fields() -> io::Result<()> {
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..10 {
+        let mut doc = Document::new();
+        doc.add(text_field("body", &format!("doc values test {i}")));
+        doc.add(numeric_doc_values_field("count", i * 10));
+        doc.add(binary_doc_values_field(
+            "hash",
+            vec![(i as u8) * 11, (i as u8) * 22],
+        ));
+        doc.add(sorted_doc_values_field(
+            "category",
+            format!("cat-{}", i % 3).as_bytes(),
+        ));
+        doc.add(sorted_set_doc_values_field(
+            "tag",
+            &format!("tag-{}", i % 5),
+        ));
+        doc.add(sorted_numeric_doc_values_field("priority", (i % 4) as i64));
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 10);
+
+    let mut dir = MemoryDirectory::new();
+    let file_names = result.write_to_directory(&mut dir)?;
+
+    // Doc values files should exist
+    assert!(
+        file_names.iter().any(|n| n.ends_with(".dvm")),
+        "expected .dvm file"
+    );
+    assert!(
+        file_names.iter().any(|n| n.ends_with(".dvd")),
+        "expected .dvd file"
+    );
+
+    // Verify files have content
+    for name in &file_names {
+        if name.ends_with(".dvm") || name.ends_with(".dvd") {
+            let len = dir.file_length(name)?;
+            assert!(len > 0, "{name} should have non-zero length");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn doc_values_only_fields_non_compound() -> io::Result<()> {
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..5 {
+        let mut doc = Document::new();
+        doc.add(text_field("body", &format!("non-compound dv test {i}")));
+        doc.add(numeric_doc_values_field("count", i * 100));
+        doc.add(binary_doc_values_field("payload", vec![i as u8; 4]));
+        doc.add(sorted_doc_values_field("status", b"active"));
+        doc.add(sorted_set_doc_values_field("region", "us-east"));
+        doc.add(sorted_numeric_doc_values_field("score", i * 10));
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    let file_names = result.file_names().to_vec();
+
+    // Non-compound: .dvm and .dvd should be individual files
+    assert!(file_names.iter().any(|n| n.ends_with(".dvm")));
+    assert!(file_names.iter().any(|n| n.ends_with(".dvd")));
+
+    Ok(())
+}
+
+#[test]
+fn mixed_doc_values_and_regular_fields() -> io::Result<()> {
+    let writer = IndexWriter::new();
+
+    for i in 0..5 {
+        let mut doc = Document::new();
+        // Regular fields
+        doc.add(keyword_field("id", &format!("doc-{i}")));
+        doc.add(long_field("timestamp", 1_700_000_000 + i));
+        doc.add(text_field("body", &format!("mixed field test {i}")));
+        // Doc-values-only fields
+        doc.add(numeric_doc_values_field("weight", i * 100));
+        doc.add(sorted_doc_values_field("tier", b"gold"));
+        doc.add(binary_doc_values_field("blob", vec![0xFF; 8]));
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 5);
+
+    let files = result.into_segment_files()?;
+    assert!(!files.is_empty());
+
     Ok(())
 }

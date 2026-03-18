@@ -12,7 +12,7 @@ The canonical reference is **Apache Lucene 10.3.2** (`reference/lucene-10.3.2/`)
 
 **Rust status:** Not implemented. Only `add_document` (single document) is supported. There is no mechanism for updates, deletes, or bulk operations.
 
-**Priority:** High — deletes and updates are essential for any production indexer that manages a changing corpus.
+**Priority:** Blocked — all operations except bulk `addDocuments` require a read path (parsing `segments_N`, reading the terms index, etc.) which does not exist yet. Deletes and updates need to resolve existing documents in prior segments; `deleteAll` needs to parse segment metadata. Bulk `addDocuments` is the only item here that is purely write-path and could be implemented independently as an API convenience over `add_document`.
 
 ## 2. Merging
 
@@ -20,29 +20,29 @@ The canonical reference is **Apache Lucene 10.3.2** (`reference/lucene-10.3.2/`)
 
 **Rust status:** Not implemented. Each flush creates a new segment; segments are never combined.
 
-**Priority:** High — without merging, segment count grows unboundedly, degrading search performance and increasing file handle usage.
+**Priority:** Blocked — merging fundamentally requires reading existing segments to combine them. No part of this feature is possible without a read path implementation.
 
 ## 3. Field Types
 
 **Java feature:** Lucene provides many specialized field types beyond what the Rust port supports:
 
-| Field Type | Purpose |
-|---|---|
-| `NumericDocValuesField` | Per-document long values for sorting/faceting |
-| `BinaryDocValuesField` | Per-document arbitrary byte arrays |
-| `SortedDocValuesField` | Per-document ordinal-mapped byte arrays |
-| `SortedSetDocValuesField` | Multi-valued sorted byte arrays |
-| `SortedNumericDocValuesField` | Multi-valued sorted longs |
-| `KnnFloatVectorField` | Float vectors for HNSW-based nearest-neighbor search |
-| `KnnByteVectorField` | Byte vectors for HNSW-based nearest-neighbor search |
-| `FeatureField` | Static feature scores (BM25 boosting) |
-| `LatLonPoint` | Latitude/longitude points for geo queries |
-| Range fields | `IntRange`, `LongRange`, `FloatRange`, `DoubleRange` |
-| Shape fields | Geo and XY shape indexing |
+| Field Type | Status | Purpose |
+|---|---|---|
+| `NumericDocValuesField` | **Implemented** | Per-document long values for sorting/faceting |
+| `BinaryDocValuesField` | **Implemented** | Per-document arbitrary byte arrays |
+| `SortedDocValuesField` | **Implemented** | Per-document ordinal-mapped byte arrays |
+| `SortedSetDocValuesField` | **Implemented** | Doc-values-only sorted byte arrays (single-valued) |
+| `SortedNumericDocValuesField` | **Implemented** | Doc-values-only sorted longs (single-valued) |
+| `KnnFloatVectorField` | Not implemented | Float vectors for HNSW-based nearest-neighbor search |
+| `KnnByteVectorField` | Not implemented | Byte vectors for HNSW-based nearest-neighbor search |
+| `FeatureField` | Not implemented | Static feature scores (BM25 boosting) |
+| `LatLonPoint` | Not implemented | Latitude/longitude points for geo queries |
+| Range fields | Not implemented | `IntRange`, `LongRange`, `FloatRange`, `DoubleRange` |
+| Shape fields | Not implemented | Geo and XY shape indexing |
 
-**Rust status:** Not implemented. The Rust port supports 8 field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`.
+**Rust status:** The Rust port supports 13 field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`, plus 5 doc-values-only types (`NumericDocValuesField`, `BinaryDocValuesField`, `SortedDocValuesField`, `SortedSetDocValuesField`, `SortedNumericDocValuesField`). The codec writes all 5 doc values types (NUMERIC, BINARY, SORTED, SORTED_SET, SORTED_NUMERIC).
 
-**Priority:** Medium — the current set covers common use cases. Additional types can be added incrementally as needed.
+**Priority:** Medium — remaining types (KNN vectors, LatLonPoint, range fields, shape fields) require multi-dimensional BKD, geo encoding, or HNSW codec work.
 
 ## 4. Multi-Valued Fields
 

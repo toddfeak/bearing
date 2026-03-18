@@ -40,6 +40,13 @@ tasks.register<JavaExec>("verifyTimCompression") {
     args = listOfNotNull(indexDir)
 }
 
+tasks.register<JavaExec>("indexDocValues") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "IndexDocValues"
+    val indexDir = project.findProperty("indexDir") as? String
+    args = listOfNotNull(indexDir)
+}
+
 tasks.register<JavaExec>("indexAllFields") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass = "IndexAllFields"
