@@ -312,7 +312,9 @@ public class VerifyIndex {
             }
 
             // Check doc-values-only fields (if present)
-            ok = checkDocValues(leaf, numDocs, sampleSize, ok);
+            int leafDocs = leaf.numDocs();
+            int leafSampleSize = Math.min(leafDocs, 3);
+            ok = checkDocValues(leaf, leafDocs, leafSampleSize, ok);
         }
 
         return ok;

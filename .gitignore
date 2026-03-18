@@ -9,7 +9,8 @@
 /reference/assertables/
 
 # Gradle (Java test utilities)
-tests/java/.gradle/
+tests/java/.*
+tests/java/bin/
 tests/java/build/
 
 # JetBrains IDE (keep project files, exclude user-specific state)
