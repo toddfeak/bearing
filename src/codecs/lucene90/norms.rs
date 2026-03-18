@@ -7,6 +7,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::lucene90::indexed_disi;
 use crate::index::FieldInfos;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::PerFieldData;
@@ -107,13 +108,39 @@ pub fn write(
                 write_norm_values(&mut *nvd, norms, bytes_per_norm)?;
             }
         } else {
-            // SPARSE pattern — not implemented for MVP
-            return Err(io::Error::other(format!(
-                "SPARSE norms pattern not implemented: field '{}' has {} docs with norms out of {} total",
+            // SPARSE pattern: some but not all documents have norms
+            debug!(
+                "norms: field={:?} (#{}) -> SPARSE pattern, bytes_per_norm={}, min={}, max={}, num_docs_with_field={}/{}",
                 fi.name(),
+                fi.number(),
+                bytes_per_norm,
+                min,
+                max,
                 num_docs_with_value,
                 num_docs
-            )));
+            );
+            nvm.write_le_int(fi.number() as i32)?;
+
+            // Write IndexedDISI bitset to .nvd
+            let disi_offset = nvd.file_pointer() as i64;
+            nvm.write_le_long(disi_offset)?;
+            let jump_table_entry_count =
+                indexed_disi::write_bit_set(norms_docs, num_docs, &mut *nvd)?;
+            nvm.write_le_long(nvd.file_pointer() as i64 - disi_offset)?;
+            nvm.write_le_short(jump_table_entry_count)?;
+            nvm.write_byte(indexed_disi::DEFAULT_DENSE_RANK_POWER as u8)?;
+
+            nvm.write_le_int(num_docs_with_value)?;
+
+            if bytes_per_norm == 0 {
+                nvm.write_byte(0)?;
+                nvm.write_le_long(min)?;
+            } else {
+                nvm.write_byte(bytes_per_norm)?;
+                let data_offset = nvd.file_pointer() as i64;
+                nvm.write_le_long(data_offset)?;
+                write_norm_values(&mut *nvd, norms, bytes_per_norm)?;
+            }
         }
     }
 
@@ -182,7 +209,8 @@ mod tests {
     use crate::index::indexing_chain::PerFieldData;
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
-    use crate::test_util;
+    use crate::test_util::{self, TestDataReader};
+    use assertables::{assert_ge, assert_gt};
     use std::collections::HashMap;
 
     fn make_field_info(name: &str, number: u32, has_norms: bool) -> FieldInfo {
@@ -510,5 +538,111 @@ mod tests {
             &nvm[meta_header_len + 2 * META_ENTRY_SIZE..meta_header_len + 2 * META_ENTRY_SIZE + 4],
             &(-1i32).to_le_bytes()
         );
+    }
+
+    #[test]
+    fn test_sparse_norms() {
+        // 2 docs with norms out of 5 total — SPARSE pattern
+        let fi = make_field_info("contents", 0, true);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "contents".to_string(),
+            make_per_field_data(vec![12, 8], vec![1, 3]),
+        );
+
+        let segment_id = [0u8; 16];
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 5).unwrap();
+
+        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
+
+        let meta_header_len = index_header_length(META_CODEC, "");
+        let mut reader = TestDataReader::new(&nvm[meta_header_len..], 0);
+
+        // field_number = 0
+        assert_eq!(reader.read_le_int(), 0);
+
+        // docsWithFieldOffset >= 0 means SPARSE (IndexedDISI in .nvd)
+        let docs_with_field_offset = reader.read_le_long();
+        assert_ge!(docs_with_field_offset, 0);
+
+        // docsWithFieldLength > 0
+        let docs_with_field_length = reader.read_le_long();
+        assert_gt!(docs_with_field_length, 0);
+
+        // jumpTableEntryCount
+        let jump_table_entry_count = reader.read_le_short();
+        assert_ge!(jump_table_entry_count, 0);
+
+        // denseRankPower = 9
+        assert_eq!(reader.read_byte(), 9);
+
+        // numDocsWithField = 2
+        assert_eq!(reader.read_le_int(), 2);
+
+        // bytesPerNorm = 1 (different values: 12, 8)
+        assert_eq!(reader.read_byte(), 1);
+
+        // normsOffset points into .nvd after the IndexedDISI data
+        let norms_offset = reader.read_le_long();
+        let disi_end = docs_with_field_offset + docs_with_field_length;
+        assert_eq!(norms_offset, disi_end);
+
+        // Verify norm values in .nvd
+        assert_eq!(nvd[norms_offset as usize], 12u8);
+        assert_eq!(nvd[norms_offset as usize + 1], 8u8);
+
+        // Verify IndexedDISI block header in .nvd: blockID=0, cardinality-1=1
+        let disi_start = docs_with_field_offset as usize;
+        let block_id = i16::from_le_bytes(nvd[disi_start..disi_start + 2].try_into().unwrap());
+        assert_eq!(block_id, 0);
+        let card_minus_1 =
+            i16::from_le_bytes(nvd[disi_start + 2..disi_start + 4].try_into().unwrap());
+        assert_eq!(card_minus_1, 1); // 2 docs - 1
+    }
+
+    #[test]
+    fn test_sparse_constant_norms() {
+        // 3 docs with identical norms out of 5 total — SPARSE + constant
+        let fi = make_field_info("title", 0, true);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "title".to_string(),
+            make_per_field_data(vec![42, 42, 42], vec![0, 2, 4]),
+        );
+
+        let segment_id = [0u8; 16];
+        let dir = test_directory();
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 5).unwrap();
+
+        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+
+        let meta_header_len = index_header_length(META_CODEC, "");
+        let mut reader = TestDataReader::new(&nvm[meta_header_len..], 0);
+
+        // field_number = 0
+        assert_eq!(reader.read_le_int(), 0);
+
+        // SPARSE: offset >= 0
+        let docs_with_field_offset = reader.read_le_long();
+        assert_ge!(docs_with_field_offset, 0);
+
+        let _docs_with_field_length = reader.read_le_long();
+        let _jump_table_entry_count = reader.read_le_short();
+        assert_eq!(reader.read_byte(), 9); // denseRankPower
+
+        // numDocsWithField = 3
+        assert_eq!(reader.read_le_int(), 3);
+
+        // bytesPerNorm = 0 (constant)
+        assert_eq!(reader.read_byte(), 0);
+
+        // normsOffset = constant value = 42
+        assert_eq!(reader.read_le_long(), 42);
     }
 }
