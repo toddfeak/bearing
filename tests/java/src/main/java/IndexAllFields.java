@@ -14,6 +14,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.DoubleField;
 import org.apache.lucene.document.Field;
@@ -21,9 +22,14 @@ import org.apache.lucene.document.FloatField;
 import org.apache.lucene.document.IntField;
 import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.document.LongField;
+import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.SortedDocValuesField;
+import org.apache.lucene.document.SortedNumericDocValuesField;
+import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.store.FSDirectory;
@@ -129,6 +135,14 @@ public class IndexAllFields {
         doc.add(new StoredField("extra_int", (int) (fileSize % 1000)));
         doc.add(new StoredField("extra_float", (float) (fileSize % 100) / 3.0f));
         doc.add(new StoredField("extra_double", fileSize * 0.123));
+
+        // Doc-values-only fields
+        doc.add(new NumericDocValuesField("dv_count", fileSize));
+        doc.add(new BinaryDocValuesField("dv_hash",
+            new BytesRef(String.format("%016x", fileSize))));
+        doc.add(new SortedDocValuesField("dv_category", new BytesRef(title)));
+        doc.add(new SortedSetDocValuesField("dv_tag", new BytesRef(title)));
+        doc.add(new SortedNumericDocValuesField("dv_priority", fileSize % 10));
 
         writer.addDocument(doc);
         System.out.println("  indexed: " + file);

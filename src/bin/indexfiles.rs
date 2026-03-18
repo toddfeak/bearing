@@ -245,18 +245,7 @@ fn main() {
     println!("\nIndex written to '{}'", args.index_path);
 }
 
-/// Creates a Document from a file path, matching Java's IndexAllFields:
-/// - "path": KeywordField (stored)
-/// - "modified": LongField (milliseconds since epoch)
-/// - "contents": TextField (tokenized, not stored)
-/// - "title": StringField (stored) — filename without extension
-/// - "size": IntField (stored) — file size in bytes
-/// - "score": FloatField (stored) — (file_size % 100) / 10.0
-/// - "rating": DoubleField (stored) — file_size * 1.5
-/// - "notes": StoredField(String) — "indexed by Rust"
-/// - "extra_int": StoredField(int) — file_size % 1000
-/// - "extra_float": StoredField(float) — (file_size % 100) / 3.0
-/// - "extra_double": StoredField(double) — file_size * 0.123
+/// Creates a Document from a file path, exercising all supported field types.
 fn make_document(path: &Path) -> Document {
     let mut doc = Document::new();
 
@@ -311,20 +300,36 @@ fn make_document(path: &Path) -> Document {
 
     // Stored-only fields
     doc.add(document::stored_string_field("notes", "indexed by Rust"));
-    // extra_int = file_size % 1000
     doc.add(document::stored_int_field(
         "extra_int",
         (file_size % 1000) as i32,
     ));
-    // extra_float = (file_size % 100) / 3.0
     doc.add(document::stored_float_field(
         "extra_float",
         (file_size % 100) as f32 / 3.0,
     ));
-    // extra_double = file_size * 0.123
     doc.add(document::stored_double_field(
         "extra_double",
         file_size as f64 * 0.123,
+    ));
+
+    // Doc-values-only fields
+    doc.add(document::numeric_doc_values_field(
+        "dv_count",
+        file_size as i64,
+    ));
+    doc.add(document::binary_doc_values_field(
+        "dv_hash",
+        format!("{:016x}", file_size).into_bytes(),
+    ));
+    doc.add(document::sorted_doc_values_field(
+        "dv_category",
+        title.as_bytes(),
+    ));
+    doc.add(document::sorted_set_doc_values_field("dv_tag", title));
+    doc.add(document::sorted_numeric_doc_values_field(
+        "dv_priority",
+        (file_size % 10) as i64,
     ));
 
     doc
