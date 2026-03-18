@@ -398,19 +398,26 @@ public class VerifyIndex {
                 System.err.println("FAIL: 'dv_tag' has no SortedSetDocValues");
                 ok = false;
             } else {
-                int count = 0;
+                int docCount = 0;
+                int totalValues = 0;
                 while (ssdv.nextDoc() != SortedSetDocValues.NO_MORE_DOCS) {
-                    if (count < sampleSize) {
-                        long ord = ssdv.nextOrd();
-                        System.out.println("  doc " + ssdv.docID() + ": dv_tag = "
-                            + ssdv.lookupOrd(ord).utf8ToString());
+                    int valueCount = ssdv.docValueCount();
+                    totalValues += valueCount;
+                    if (docCount < sampleSize) {
+                        StringBuilder sb = new StringBuilder();
+                        for (int j = 0; j < valueCount; j++) {
+                            if (j > 0) sb.append(", ");
+                            sb.append(ssdv.lookupOrd(ssdv.nextOrd()).utf8ToString());
+                        }
+                        System.out.println("  doc " + ssdv.docID() + ": dv_tag = [" + sb + "]");
                     }
-                    count++;
+                    docCount++;
                 }
-                System.out.println("  dv_tag: " + count + "/" + numDocs
-                    + " docs, " + ssdv.getValueCount() + " unique values (OK)");
-                if (count != numDocs) {
-                    System.err.println("FAIL: dv_tag has " + count + " values, expected " + numDocs);
+                System.out.println("  dv_tag: " + docCount + "/" + numDocs
+                    + " docs, " + totalValues + " total values, "
+                    + ssdv.getValueCount() + " unique terms (OK)");
+                if (docCount != numDocs) {
+                    System.err.println("FAIL: dv_tag has " + docCount + " docs, expected " + numDocs);
                     ok = false;
                 }
             }
@@ -423,16 +430,25 @@ public class VerifyIndex {
                 System.err.println("FAIL: 'dv_priority' has no SortedNumericDocValues");
                 ok = false;
             } else {
-                int count = 0;
+                int docCount = 0;
+                int totalValues = 0;
                 while (sndv.nextDoc() != SortedNumericDocValues.NO_MORE_DOCS) {
-                    if (count < sampleSize) {
-                        System.out.println("  doc " + sndv.docID() + ": dv_priority = " + sndv.nextValue());
+                    int valueCount = sndv.docValueCount();
+                    totalValues += valueCount;
+                    if (docCount < sampleSize) {
+                        StringBuilder sb = new StringBuilder();
+                        for (int j = 0; j < valueCount; j++) {
+                            if (j > 0) sb.append(", ");
+                            sb.append(sndv.nextValue());
+                        }
+                        System.out.println("  doc " + sndv.docID() + ": dv_priority = [" + sb + "]");
                     }
-                    count++;
+                    docCount++;
                 }
-                System.out.println("  dv_priority: " + count + "/" + numDocs + " docs (OK)");
-                if (count != numDocs) {
-                    System.err.println("FAIL: dv_priority has " + count + " values, expected " + numDocs);
+                System.out.println("  dv_priority: " + docCount + "/" + numDocs
+                    + " docs, " + totalValues + " total values (OK)");
+                if (docCount != numDocs) {
+                    System.err.println("FAIL: dv_priority has " + docCount + " docs, expected " + numDocs);
                     ok = false;
                 }
             }

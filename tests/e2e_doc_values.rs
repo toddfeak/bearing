@@ -31,11 +31,25 @@ fn make_doc_values_docs() -> Vec<Document> {
                 "category",
                 format!("cat-{}", i % 3).as_bytes(),
             ));
+            // Multi-valued SORTED_SET: first tag for all, second for even docs
             doc.add(sorted_set_doc_values_field(
                 "tag",
                 &format!("tag-{}", i % 5),
             ));
+            if i % 2 == 0 {
+                doc.add(sorted_set_doc_values_field(
+                    "tag",
+                    &format!("tag-{}", (i + 1) % 5),
+                ));
+            }
+            // Multi-valued SORTED_NUMERIC: first value for all, second for even docs
             doc.add(sorted_numeric_doc_values_field("priority", (i % 4) as i64));
+            if i % 2 == 0 {
+                doc.add(sorted_numeric_doc_values_field(
+                    "priority",
+                    ((i + 1) % 4) as i64,
+                ));
+            }
             doc
         })
         .collect()

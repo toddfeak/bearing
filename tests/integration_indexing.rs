@@ -623,6 +623,57 @@ fn doc_values_only_fields_non_compound() -> io::Result<()> {
 }
 
 #[test]
+fn multi_valued_sorted_numeric_and_sorted_set() -> io::Result<()> {
+    let writer = IndexWriter::new();
+
+    for i in 0..10 {
+        let mut doc = Document::new();
+        doc.add(text_field("body", &format!("multi-valued doc {i}")));
+
+        // Multi-valued SORTED_NUMERIC: each doc gets 1-3 values
+        doc.add(sorted_numeric_doc_values_field("priorities", i * 10));
+        if i % 2 == 0 {
+            doc.add(sorted_numeric_doc_values_field("priorities", i * 10 + 1));
+        }
+        if i % 3 == 0 {
+            doc.add(sorted_numeric_doc_values_field("priorities", i * 10 + 2));
+        }
+
+        // Multi-valued SORTED_SET: each doc gets 1-3 tags
+        doc.add(sorted_set_doc_values_field(
+            "tags",
+            &format!("tag-{}", i % 5),
+        ));
+        if i % 2 == 0 {
+            doc.add(sorted_set_doc_values_field(
+                "tags",
+                &format!("tag-{}", (i + 1) % 5),
+            ));
+        }
+        if i % 3 == 0 {
+            doc.add(sorted_set_doc_values_field(
+                "tags",
+                &format!("tag-{}", (i + 2) % 5),
+            ));
+        }
+
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 10);
+
+    let files = result.into_segment_files()?;
+    assert_not_empty!(files);
+    assert!(
+        files.iter().any(|f| f.name.ends_with(".cfs")),
+        "should contain compound file"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn mixed_doc_values_and_regular_fields() -> io::Result<()> {
     let writer = IndexWriter::new();
 

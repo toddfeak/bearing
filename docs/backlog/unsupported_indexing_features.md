@@ -31,8 +31,8 @@ The canonical reference is **Apache Lucene 10.3.2** (`reference/lucene-10.3.2/`)
 | `NumericDocValuesField` | **Implemented** | Per-document long values for sorting/faceting |
 | `BinaryDocValuesField` | **Implemented** | Per-document arbitrary byte arrays |
 | `SortedDocValuesField` | **Implemented** | Per-document ordinal-mapped byte arrays |
-| `SortedSetDocValuesField` | **Implemented** | Doc-values-only sorted byte arrays (single-valued) |
-| `SortedNumericDocValuesField` | **Implemented** | Doc-values-only sorted longs (single-valued) |
+| `SortedSetDocValuesField` | **Implemented** | Doc-values-only sorted byte arrays (single and multi-valued) |
+| `SortedNumericDocValuesField` | **Implemented** | Doc-values-only sorted longs (single and multi-valued) |
 | `KnnFloatVectorField` | Not implemented | Float vectors for HNSW-based nearest-neighbor search |
 | `KnnByteVectorField` | Not implemented | Byte vectors for HNSW-based nearest-neighbor search |
 | `FeatureField` | Not implemented | Static feature scores (BM25 boosting) |
@@ -48,9 +48,7 @@ The canonical reference is **Apache Lucene 10.3.2** (`reference/lucene-10.3.2/`)
 
 **Java feature:** `SORTED_SET` and `SORTED_NUMERIC` doc values support multiple values per document (e.g., a document with multiple tags or multiple timestamps).
 
-**Rust status:** Partial — the doc values types exist but indexing multiple values per document currently returns `Err`.
-
-**Priority:** Medium — required for faceting and multi-valued sorting use cases.
+**Rust status:** **Implemented** — the indexing chain merges values for the same doc, the codec writes address tables for multi-valued fields, and the output is byte-identical to Java Lucene.
 
 ## 5. Sparse Doc Values / Norms
 

@@ -53,9 +53,18 @@ public class IndexDocValues {
                     new BytesRef(new byte[]{ (byte)(i * 11), (byte)(i * 22) })));
                 doc.add(new SortedDocValuesField("category",
                     new BytesRef("cat-" + (i % 3))));
+                // Multi-valued SORTED_SET: first tag for all, second for even docs
                 doc.add(new SortedSetDocValuesField("tag",
                     new BytesRef("tag-" + (i % 5))));
+                if (i % 2 == 0) {
+                    doc.add(new SortedSetDocValuesField("tag",
+                        new BytesRef("tag-" + ((i + 1) % 5))));
+                }
+                // Multi-valued SORTED_NUMERIC: first value for all, second for even docs
                 doc.add(new SortedNumericDocValuesField("priority", i % 4));
+                if (i % 2 == 0) {
+                    doc.add(new SortedNumericDocValuesField("priority", (i + 1) % 4));
+                }
                 writer.addDocument(doc);
             }
         }
