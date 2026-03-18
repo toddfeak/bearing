@@ -365,12 +365,22 @@ fn write_leaf_block_packed_values(
 ) -> io::Result<()> {
     let bpd = bytes_per_dim as usize;
     let count = sorted_points.len();
+    let packed_len = sorted_points[0].1.len();
+    let num_dims = packed_len / bpd;
 
-    // If all values are identical (common prefix covers entire value)
-    if common_prefix_len == bpd {
+    // Compute per-dimension common prefix lengths
+    let prefix_lengths = compute_per_dim_prefix_lengths(sorted_points, bpd, num_dims);
+
+    // If all values are identical (sum of per-dim prefixes covers entire packed value)
+    let prefix_len_sum: usize = prefix_lengths.iter().sum();
+    if prefix_len_sum == packed_len {
         data.write_byte(0xFF)?; // -1 as byte: all identical marker
         return Ok(());
     }
+
+    // Select sorted dimension: the one with fewest unique bytes at its prefix boundary
+    let sorted_dim = select_sorted_dim(sorted_points, &prefix_lengths, bpd);
+    let compressed_byte_offset = sorted_dim * bpd + prefix_lengths[sorted_dim];
 
     // Determine encoding: compare low vs high cardinality cost
     let (high_cardinality_cost, low_cardinality_cost) = if count == leaf_cardinality {
@@ -378,7 +388,6 @@ fn write_leaf_block_packed_values(
         (0usize, 1usize)
     } else {
         // Compute cost of runLen compression
-        let compressed_byte_offset = common_prefix_len;
         let mut num_run_lens = 0usize;
         let mut i = 0;
         while i < count {
@@ -387,54 +396,120 @@ fn write_leaf_block_packed_values(
             num_run_lens += 1;
             i += rl;
         }
-        let high_cost = count * (bpd - common_prefix_len - 1) + 2 * num_run_lens;
-        let low_cost = leaf_cardinality * (bpd - common_prefix_len + 1);
+        let high_cost = count * (packed_len - prefix_len_sum - 1) + 2 * num_run_lens;
+        let low_cost = leaf_cardinality * (packed_len - prefix_len_sum + 1);
         (high_cost, low_cost)
     };
 
     if low_cardinality_cost <= high_cardinality_cost {
-        // Low cardinality encoding
-        write_low_cardinality_leaf_block(data, sorted_points, common_prefix_len, bpd)?;
+        write_low_cardinality_leaf_block(data, sorted_points, &prefix_lengths, bpd)?;
     } else {
-        // High cardinality encoding
-        write_high_cardinality_leaf_block(data, sorted_points, common_prefix_len, bpd)?;
+        write_high_cardinality_leaf_block(
+            data,
+            sorted_points,
+            &prefix_lengths,
+            bpd,
+            sorted_dim,
+            compressed_byte_offset,
+        )?;
     }
 
+    // For backwards compatibility: use the overall common_prefix_len in debug logging
+    let _ = common_prefix_len;
+
     Ok(())
+}
+
+/// Computes per-dimension common prefix lengths across all points in a leaf.
+fn compute_per_dim_prefix_lengths(
+    sorted_points: &[(i32, Vec<u8>)],
+    bpd: usize,
+    num_dims: usize,
+) -> Vec<usize> {
+    let mut prefix_lengths = vec![bpd; num_dims];
+    if sorted_points.len() <= 1 {
+        return prefix_lengths;
+    }
+    let first = &sorted_points[0].1;
+    for point in &sorted_points[1..] {
+        for (dim, prefix_len) in prefix_lengths.iter_mut().enumerate() {
+            let offset = dim * bpd;
+            let mut common = 0;
+            while common < *prefix_len && first[offset + common] == point.1[offset + common] {
+                common += 1;
+            }
+            *prefix_len = common;
+        }
+    }
+    prefix_lengths
+}
+
+/// Selects the dimension with the fewest unique bytes at its prefix boundary.
+fn select_sorted_dim(
+    sorted_points: &[(i32, Vec<u8>)],
+    prefix_lengths: &[usize],
+    bpd: usize,
+) -> usize {
+    let mut best_dim = 0;
+    let mut best_cardinality = usize::MAX;
+    for (dim, &prefix_len) in prefix_lengths.iter().enumerate() {
+        if prefix_len < bpd {
+            let byte_offset = dim * bpd + prefix_len;
+            let mut unique = [false; 256];
+            let mut card = 0;
+            for point in sorted_points {
+                let b = point.1[byte_offset] as usize;
+                if !unique[b] {
+                    unique[b] = true;
+                    card += 1;
+                }
+            }
+            if card < best_cardinality {
+                best_cardinality = card;
+                best_dim = dim;
+            }
+        }
+    }
+    best_dim
 }
 
 /// Writes low cardinality encoding: marker -2, then unique values with run lengths.
 fn write_low_cardinality_leaf_block(
     data: &mut dyn DataOutput,
     sorted_points: &[(i32, Vec<u8>)],
-    common_prefix_len: usize,
-    bytes_per_dim: usize,
+    prefix_lengths: &[usize],
+    bpd: usize,
 ) -> io::Result<()> {
     data.write_byte(0xFE)?; // -2 as byte: low cardinality marker
 
     let count = sorted_points.len();
-    let suffix_len = bytes_per_dim - common_prefix_len;
     let mut i = 0;
     while i < count {
-        // Find run of identical values
-        let mut run_len = 1;
-        while i + run_len < count
-            && sorted_points[i].1[common_prefix_len..bytes_per_dim]
-                == sorted_points[i + run_len].1[common_prefix_len..bytes_per_dim]
-        {
-            run_len += 1;
+        // Find run of identical values (compare per-dimension suffixes)
+        let mut run = 1;
+        while i + run < count {
+            let mut same = true;
+            for (dim, &prefix_len) in prefix_lengths.iter().enumerate() {
+                let start = dim * bpd + prefix_len;
+                let end = (dim + 1) * bpd;
+                if sorted_points[i].1[start..end] != sorted_points[i + run].1[start..end] {
+                    same = false;
+                    break;
+                }
+            }
+            if !same {
+                break;
+            }
+            run += 1;
         }
-        // Write suffix bytes
-        data.write_bytes(&sorted_points[i].1[common_prefix_len..bytes_per_dim])?;
-        // Write run length as VInt
-        data.write_vint(run_len as i32)?;
-        debug!(
-            "points: low cardinality run: suffix={:02x?} count={}",
-            &sorted_points[i].1[common_prefix_len..bytes_per_dim],
-            run_len
-        );
-        let _ = suffix_len; // used for documentation
-        i += run_len;
+        // Write suffix bytes for each dimension
+        for (dim, &prefix_len) in prefix_lengths.iter().enumerate() {
+            let start = dim * bpd + prefix_len;
+            let end = (dim + 1) * bpd;
+            data.write_bytes(&sorted_points[i].1[start..end])?;
+        }
+        data.write_vint(run as i32)?;
+        i += run;
     }
 
     Ok(())
@@ -444,36 +519,77 @@ fn write_low_cardinality_leaf_block(
 fn write_high_cardinality_leaf_block(
     data: &mut dyn DataOutput,
     sorted_points: &[(i32, Vec<u8>)],
-    common_prefix_len: usize,
-    bytes_per_dim: usize,
+    prefix_lengths: &[usize],
+    bpd: usize,
+    sorted_dim: usize,
+    compressed_byte_offset: usize,
 ) -> io::Result<()> {
-    let sorted_dim = 0; // For 1D, always dimension 0
     data.write_byte(sorted_dim as u8)?;
 
-    // Note: numIndexDims == 1, so we do NOT write actual bounds
-
-    let compressed_byte_offset = common_prefix_len;
-    let compressed_common_prefix = common_prefix_len + 1;
-    let count = sorted_points.len();
-
-    let mut i = 0;
-    while i < count {
-        // Run-length encode byte at compressed_byte_offset
-        let end = (i + 0xFF).min(count);
-        let prefix_byte = sorted_points[i].1[compressed_byte_offset];
-        let run_len = run_len(sorted_points, i, end, compressed_byte_offset);
-
-        data.write_byte(prefix_byte)?;
-        data.write_byte(run_len as u8)?;
-
-        // Write suffix bytes for each value in the run
-        for point in sorted_points.iter().skip(i).take(run_len) {
-            data.write_bytes(&point.1[compressed_common_prefix..bytes_per_dim])?;
-        }
-
-        i += run_len;
+    // For multi-index-dim, write actual bounds (min/max suffix per dimension)
+    if prefix_lengths.len() > 1 {
+        write_actual_bounds(data, sorted_points, prefix_lengths, bpd)?;
     }
 
+    // Increment prefix for sorted dim (the compressed byte is handled by run-length)
+    let mut adjusted_prefixes = prefix_lengths.to_vec();
+    adjusted_prefixes[sorted_dim] += 1;
+
+    let count = sorted_points.len();
+    let mut i = 0;
+    while i < count {
+        let end = (i + 0xFF).min(count);
+        let prefix_byte = sorted_points[i].1[compressed_byte_offset];
+        let rl = run_len(sorted_points, i, end, compressed_byte_offset);
+
+        data.write_byte(prefix_byte)?;
+        data.write_byte(rl as u8)?;
+
+        // Write per-dimension suffix bytes for each value in the run
+        for point in sorted_points.iter().skip(i).take(rl) {
+            for (dim, &adj_prefix) in adjusted_prefixes.iter().enumerate() {
+                let start = dim * bpd + adj_prefix;
+                let end = (dim + 1) * bpd;
+                if start < end {
+                    data.write_bytes(&point.1[start..end])?;
+                }
+            }
+        }
+
+        i += rl;
+    }
+
+    Ok(())
+}
+
+/// Writes actual min/max bounds for each index dimension (multi-dim only).
+fn write_actual_bounds(
+    data: &mut dyn DataOutput,
+    sorted_points: &[(i32, Vec<u8>)],
+    prefix_lengths: &[usize],
+    bpd: usize,
+) -> io::Result<()> {
+    for (dim, &prefix) in prefix_lengths.iter().enumerate() {
+        let suffix_len = bpd - prefix;
+        if suffix_len > 0 {
+            let dim_start = dim * bpd + prefix;
+            let dim_end = (dim + 1) * bpd;
+            // Find min and max suffix bytes for this dimension
+            let mut min_suffix = &sorted_points[0].1[dim_start..dim_end];
+            let mut max_suffix = min_suffix;
+            for point in &sorted_points[1..] {
+                let suffix = &point.1[dim_start..dim_end];
+                if suffix < min_suffix {
+                    min_suffix = suffix;
+                }
+                if suffix > max_suffix {
+                    max_suffix = suffix;
+                }
+            }
+            data.write_bytes(min_suffix)?;
+            data.write_bytes(max_suffix)?;
+        }
+    }
     Ok(())
 }
 
@@ -791,8 +907,6 @@ mod tests {
     fn make_test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
-
-    // Ported from org.apache.lucene.util.bkd.TestBKD
 
     /// Helper to create sortable bytes for a long value (same as long_to_sortable_bytes).
     fn long_to_sortable_bytes(v: i64) -> Vec<u8> {
@@ -1457,5 +1571,132 @@ mod tests {
 
         assert_eq!(index_total_size, kdi.len() as i64);
         assert_eq!(data_total_size, kdd.len() as i64);
+    }
+
+    fn int_to_sortable_bytes(v: i32) -> Vec<u8> {
+        let flipped = (v ^ i32::MIN) as u32;
+        flipped.to_be_bytes().to_vec()
+    }
+
+    /// Makes a 2D packed point (e.g., LatLonPoint) from two i32 values.
+    fn make_2d_point(a: i32, b: i32) -> Vec<u8> {
+        let mut bytes = int_to_sortable_bytes(a);
+        bytes.extend_from_slice(&int_to_sortable_bytes(b));
+        bytes
+    }
+
+    fn make_2d_point_field_info(name: &str, number: u32) -> FieldInfo {
+        FieldInfo::new(
+            name.to_string(),
+            number,
+            false,
+            false,
+            IndexOptions::None,
+            DocValuesType::None,
+            PointDimensionConfig {
+                dimension_count: 2,
+                index_dimension_count: 2,
+                num_bytes: 4,
+            },
+        )
+    }
+
+    #[test]
+    fn test_2d_all_equal() {
+        // All points identical — common prefix covers full packed length (8 bytes),
+        // which exceeds bytes_per_dim (4). Must write the all-identical marker (-1).
+        let points: Vec<(i32, Vec<u8>)> = (0..3).map(|i| (i, make_2d_point(100, 200))).collect();
+
+        let mut data = MemoryIndexOutput::new("test".to_string());
+        let mut sorted = points.clone();
+        sorted.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let common_prefix_len = common_prefix_length(&sorted[0].1, &sorted[2].1);
+        assert_eq!(common_prefix_len, 8); // full packed length
+
+        let cardinality = compute_cardinality(&sorted);
+        assert_eq!(cardinality, 1);
+
+        write_leaf_block_packed_values(&mut data, &sorted, common_prefix_len, 4, cardinality)
+            .unwrap();
+
+        // Should write the all-identical marker (0xFF = -1 as byte)
+        assert_eq!(data.bytes(), &[0xFF]);
+    }
+
+    #[test]
+    fn test_2d_one_dim_equal() {
+        // First dimension identical, second dimension varies.
+        // common_prefix_length across full packed value = 4 (first dim fully equal).
+        // bytes_per_dim = 4, so common_prefix_len == bpd but not > bpd.
+        let points: Vec<(i32, Vec<u8>)> = vec![
+            (0, make_2d_point(100, 10)),
+            (1, make_2d_point(100, 20)),
+            (2, make_2d_point(100, 30)),
+        ];
+
+        let mut data = MemoryIndexOutput::new("test".to_string());
+        let mut sorted = points.clone();
+        sorted.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let common_prefix_len = common_prefix_length(&sorted[0].1, &sorted[2].1);
+        // First 4 bytes (dim 0) identical + 3 bytes of dim 1 identical = 7
+        assert_eq!(common_prefix_len, 7);
+
+        let cardinality = compute_cardinality(&sorted);
+        assert_eq!(cardinality, 3);
+
+        write_leaf_block_packed_values(&mut data, &sorted, common_prefix_len, 4, cardinality)
+            .unwrap();
+
+        // Should NOT be all-identical marker; should use high cardinality encoding
+        assert_ne!(data.bytes()[0], 0xFF);
+    }
+
+    // Regression: 2D points where common prefix > bytes_per_dim
+    #[test]
+    fn test_2d_common_prefix_exceeds_bytes_per_dim() {
+        // Two 2D points that share 6 bytes of prefix (exceeding bytes_per_dim=4).
+        // Only the last 2 bytes of dimension 1 differ.
+        let points: Vec<(i32, Vec<u8>)> = vec![
+            (0, make_2d_point(100, 256)), // dim1: 80 00 01 00
+            (1, make_2d_point(100, 257)), // dim1: 80 00 01 01
+        ];
+
+        let mut data = MemoryIndexOutput::new("test".to_string());
+        let mut sorted = points.clone();
+        sorted.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let common_prefix_len = common_prefix_length(&sorted[0].1, &sorted[1].1);
+        // First 4 bytes identical (dim 0), next 3 bytes identical (dim 1 prefix)
+        assert_eq!(common_prefix_len, 7);
+
+        let cardinality = compute_cardinality(&sorted);
+        assert_eq!(cardinality, 2);
+
+        // This previously panicked with index out of bounds
+        write_leaf_block_packed_values(&mut data, &sorted, common_prefix_len, 4, cardinality)
+            .unwrap();
+    }
+
+    // Full write_bkd_field test with 2D points
+    #[test]
+    fn test_write_bkd_2d_single_leaf() {
+        let fi = make_2d_point_field_info("location", 0);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let points = vec![
+            (0, make_2d_point(100, 200)),
+            (1, make_2d_point(100, 200)),
+            (2, make_2d_point(100, 200)),
+        ];
+
+        let mut per_field = HashMap::new();
+        per_field.insert("location".to_string(), make_per_field_with_points(points));
+
+        let dir = make_test_directory();
+        let segment_id = [0u8; 16];
+        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        assert_eq!(names.len(), 3);
     }
 }

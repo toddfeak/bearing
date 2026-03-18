@@ -956,3 +956,65 @@ fn sparse_fields_with_fs_directory() -> io::Result<()> {
     std::fs::remove_dir_all(&tmp_dir)?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Multi-threaded indexing with point fields (regression for BKD empty segment)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multi_threaded_few_docs_with_points() -> io::Result<()> {
+    // 4 docs with point fields across 4 threads — some threads get empty segments.
+    // Regression test: empty/small segments with multi-dim points (LatLonPoint, ranges)
+    // previously panicked in the BKD writer.
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    let handles: Vec<_> = (0..4)
+        .map(|i| {
+            let w = writer.clone();
+            thread::spawn(move || {
+                let mut doc = Document::new();
+                doc.add(keyword_field("id", &format!("doc-{i}")));
+                doc.add(long_field("ts", 1_700_000_000 + i));
+                doc.add(int_field("count", i as i32 * 10, true));
+                doc.add(float_field("score", i as f32 * 1.5, true));
+                doc.add(double_field("price", i as f64 * 99.99, true));
+                doc.add(lat_lon_point(
+                    "location",
+                    40.7128 + i as f64 * 0.01,
+                    -74.006 + i as f64 * 0.01,
+                ));
+                doc.add(int_range_field("int_range", &[i as i32], &[i as i32 + 100]));
+                doc.add(long_range_field(
+                    "long_range",
+                    &[i as i64],
+                    &[i as i64 + 1000],
+                ));
+                doc.add(float_range_field(
+                    "float_range",
+                    &[i as f32 / 10.0],
+                    &[i as f32 / 10.0 + 1.0],
+                ));
+                doc.add(double_range_field(
+                    "double_range",
+                    &[i as f64 * 0.1],
+                    &[i as f64 * 0.1 + 1.0],
+                ));
+                w.add_document(doc).expect("add_document failed");
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("thread panicked");
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 4);
+
+    let mut dir = MemoryDirectory::new();
+    let file_names = result.write_to_directory(&mut dir)?;
+    assert_not_empty!(file_names);
+
+    Ok(())
+}
