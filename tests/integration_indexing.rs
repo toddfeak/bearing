@@ -785,3 +785,174 @@ fn mixed_doc_values_and_regular_fields() -> io::Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Sparse fields (field present in some but not all documents)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sparse_numeric_doc_values() -> io::Result<()> {
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..10 {
+        let mut doc = Document::new();
+        doc.add(keyword_field("id", &format!("doc-{i}")));
+        // Only even-numbered docs have the numeric doc values field
+        if i % 2 == 0 {
+            doc.add(numeric_doc_values_field("score", i * 100));
+        }
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 10);
+
+    let mut dir = MemoryDirectory::new();
+    let file_names = result.write_to_directory(&mut dir)?;
+
+    assert!(
+        file_names.iter().any(|n| n.ends_with(".dvm")),
+        "expected .dvm file"
+    );
+    assert!(
+        file_names.iter().any(|n| n.ends_with(".dvd")),
+        "expected .dvd file"
+    );
+
+    for name in &file_names {
+        if name.ends_with(".dvm") || name.ends_with(".dvd") {
+            let len = dir.file_length(name)?;
+            assert_gt!(len, 0, "{name} should have non-zero length");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn sparse_norms_text_field() -> io::Result<()> {
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..10 {
+        let mut doc = Document::new();
+        doc.add(keyword_field("id", &format!("doc-{i}")));
+        // Only some docs have the text field (which generates norms)
+        if i % 3 == 0 {
+            doc.add(text_field("body", &format!("sparse norms test {i}")));
+        }
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 10);
+
+    let mut dir = MemoryDirectory::new();
+    let file_names = result.write_to_directory(&mut dir)?;
+
+    assert!(
+        file_names.iter().any(|n| n.ends_with(".nvm")),
+        "expected .nvm file"
+    );
+    assert!(
+        file_names.iter().any(|n| n.ends_with(".nvd")),
+        "expected .nvd file"
+    );
+
+    for name in &file_names {
+        if name.ends_with(".nvm") || name.ends_with(".nvd") {
+            let len = dir.file_length(name)?;
+            assert_gt!(len, 0, "{name} should have non-zero length");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn sparse_mixed_doc_values_types() -> io::Result<()> {
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..10 {
+        let mut doc = Document::new();
+        doc.add(keyword_field("id", &format!("doc-{i}")));
+
+        // Each doc values type is sparse (present in different subsets)
+        if i < 5 {
+            doc.add(numeric_doc_values_field("num", i as i64));
+        }
+        if i % 2 == 0 {
+            doc.add(binary_doc_values_field("bin", vec![i as u8; 4]));
+        }
+        if i % 3 != 0 {
+            doc.add(sorted_doc_values_field(
+                "sorted",
+                format!("val-{i}").as_bytes(),
+            ));
+        }
+        if i >= 3 {
+            doc.add(sorted_numeric_doc_values_field("sn", (i * 10) as i64));
+        }
+
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 10);
+
+    let mut dir = MemoryDirectory::new();
+    let file_names = result.write_to_directory(&mut dir)?;
+    assert_not_empty!(file_names);
+
+    // Verify doc values files exist and have content
+    for name in &file_names {
+        if name.ends_with(".dvm") || name.ends_with(".dvd") {
+            let len = dir.file_length(name)?;
+            assert_gt!(len, 0, "{name} should have non-zero length");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn sparse_fields_with_fs_directory() -> io::Result<()> {
+    let tmp_dir = std::env::temp_dir().join("bearing_integration_test_sparse_fs");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir)?;
+    }
+
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let fs_dir = FSDirectory::open(&tmp_dir)?;
+    let writer = IndexWriter::with_config_and_directory(config, Box::new(fs_dir));
+
+    for i in 0..10 {
+        let mut doc = Document::new();
+        doc.add(keyword_field("id", &format!("doc-{i}")));
+        // Sparse text field (norms) + sparse numeric doc values
+        if i % 2 == 0 {
+            doc.add(text_field("body", &format!("fs sparse test {i}")));
+        }
+        if i % 3 == 0 {
+            doc.add(numeric_doc_values_field("count", i as i64));
+        }
+        writer.add_document(doc)?;
+    }
+
+    let result = writer.commit()?;
+    assert_eq!(writer.num_docs(), 10);
+
+    let file_names = result.file_names();
+    assert_not_empty!(file_names);
+
+    // Verify files exist on disk
+    for name in file_names {
+        let path = tmp_dir.join(name);
+        assert!(path.exists(), "expected file {} on disk", path.display());
+    }
+
+    std::fs::remove_dir_all(&tmp_dir)?;
+    Ok(())
+}
