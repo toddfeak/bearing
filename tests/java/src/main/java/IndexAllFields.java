@@ -165,7 +165,29 @@ public class IndexAllFields {
         doc.add(new SortedSetDocValuesField("dv_tag", new BytesRef(title)));
         doc.add(new SortedNumericDocValuesField("dv_priority", fileSize % 10));
 
+        // Sparse doc values — only even-numbered docs (parsed from filename like "doc_003")
+        int docNum = parseDocNum(title);
+        if (docNum >= 0 && docNum % 2 == 0) {
+            doc.add(new NumericDocValuesField("sparse_count", docNum * 100L));
+        }
+
         writer.addDocument(doc);
         System.out.println("  indexed: " + file);
+    }
+
+    /**
+     * Extracts a doc number from a title like "doc_003" or "science".
+     * Returns -1 if no number can be parsed.
+     */
+    static int parseDocNum(String title) {
+        int underscoreIdx = title.lastIndexOf('_');
+        if (underscoreIdx < 0 || underscoreIdx == title.length() - 1) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(title.substring(underscoreIdx + 1));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 }

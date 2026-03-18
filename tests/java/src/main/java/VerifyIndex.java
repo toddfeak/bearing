@@ -527,6 +527,42 @@ public class VerifyIndex {
             }
         }
 
+        // Sparse NumericDocValues "sparse_count" — only even-numbered docs
+        if (fieldInfos.fieldInfo("sparse_count") != null) {
+            NumericDocValues sparseNdv = leaf.getNumericDocValues("sparse_count");
+            if (sparseNdv == null) {
+                System.err.println("FAIL: 'sparse_count' has no NumericDocValues");
+                ok = false;
+            } else {
+                StoredFields sf = leaf.storedFields();
+                int count = 0;
+                while (sparseNdv.nextDoc() != NumericDocValues.NO_MORE_DOCS) {
+                    int docId = sparseNdv.docID();
+                    Document doc = sf.document(docId);
+                    // Parse doc number from "id" (e.g., "doc-003") or "title" (e.g., "doc_001")
+                    int docNum = parseDocNum(doc);
+                    if (docNum >= 0) {
+                        if (docNum % 2 != 0) {
+                            System.err.println("FAIL: sparse_count present for odd doc " + docNum);
+                            ok = false;
+                        }
+                        long expected = docNum * 100L;
+                        long actual = sparseNdv.longValue();
+                        if (actual != expected) {
+                            System.err.println("FAIL: sparse_count for doc " + docNum
+                                + ": expected " + expected + ", got " + actual);
+                            ok = false;
+                        }
+                    }
+                    if (count < sampleSize) {
+                        System.out.println("  doc " + docId + ": sparse_count = " + sparseNdv.longValue());
+                    }
+                    count++;
+                }
+                System.out.println("  sparse_count: " + count + "/" + numDocs + " docs (sparse, OK)");
+            }
+        }
+
         // SortedNumericDocValues "dv_priority"
         if (fieldInfos.fieldInfo("dv_priority") != null) {
             SortedNumericDocValues sndv = leaf.getSortedNumericDocValues("dv_priority");
@@ -559,5 +595,31 @@ public class VerifyIndex {
         }
 
         return ok;
+    }
+
+    /**
+     * Extracts a doc number from stored fields.
+     * Tries "id" (e.g., "doc-003") then "title" (e.g., "doc_001").
+     * Returns -1 if no number can be parsed.
+     */
+    static int parseDocNum(Document doc) {
+        // Try "id" field (IndexDocValues format: "doc-003")
+        String id = doc.get("id");
+        if (id != null && id.startsWith("doc-")) {
+            try {
+                return Integer.parseInt(id.substring(4));
+            } catch (NumberFormatException ignored) {}
+        }
+        // Try "title" field (IndexAllFields format: "doc_001")
+        String title = doc.get("title");
+        if (title != null) {
+            int underscoreIdx = title.lastIndexOf('_');
+            if (underscoreIdx >= 0 && underscoreIdx < title.length() - 1) {
+                try {
+                    return Integer.parseInt(title.substring(underscoreIdx + 1));
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        return -1;
     }
 }

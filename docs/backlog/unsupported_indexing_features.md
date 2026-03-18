@@ -34,9 +34,7 @@ Remaining field types (KNN vectors, shape fields) are deferred — see below.
 
 **Java feature:** Fields do not need to be present in every document. Lucene tracks which documents have a given field via dense/sparse encoding and a `docsWithField` bitset.
 
-**Rust status:** Partial — sparse fields currently return `Err`. All demo fields are present in every document, masking this gap.
-
-**Priority:** Medium — most real-world schemas have optional fields.
+**Rust status:** **Implemented** — IndexedDISI bitset writer encodes which documents have values. Both doc values (all 5 types) and norms support sparse fields. Output is byte-identical to Java Lucene for sparse numeric doc values.
 
 ## 4. Term Vectors
 

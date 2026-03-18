@@ -11,7 +11,7 @@ use std::io;
 
 use bearing::document::{
     Document, binary_doc_values_field, numeric_doc_values_field, sorted_doc_values_field,
-    sorted_numeric_doc_values_field, sorted_set_doc_values_field, text_field,
+    sorted_numeric_doc_values_field, sorted_set_doc_values_field, string_field, text_field,
 };
 use bearing::index::{IndexWriter, IndexWriterConfig};
 use bearing::store::FSDirectory;
@@ -21,6 +21,8 @@ fn make_doc_values_docs() -> Vec<Document> {
     (0..10)
         .map(|i| {
             let mut doc = Document::new();
+            let doc_id = format!("doc-{i:03}");
+            doc.add(string_field("id", &doc_id, true));
             doc.add(text_field("body", &format!("doc values test {i}")));
             doc.add(numeric_doc_values_field("count", i * 10));
             doc.add(binary_doc_values_field(
@@ -49,6 +51,10 @@ fn make_doc_values_docs() -> Vec<Document> {
                     "priority",
                     ((i + 1) % 4) as i64,
                 ));
+            }
+            // Sparse NUMERIC: only even-numbered docs have this field
+            if i % 2 == 0 {
+                doc.add(numeric_doc_values_field("sparse_count", i * 100));
             }
             doc
         })

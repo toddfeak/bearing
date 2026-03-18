@@ -371,7 +371,24 @@ fn make_document(path: &Path) -> Document {
         (file_size % 10) as i64,
     ));
 
+    // Sparse doc values — only even-numbered docs (parsed from filename like "doc_003")
+    if let Some(doc_num) = parse_doc_num(title)
+        && doc_num % 2 == 0
+    {
+        doc.add(document::numeric_doc_values_field(
+            "sparse_count",
+            (doc_num * 100) as i64,
+        ));
+    }
+
     doc
+}
+
+/// Extracts a doc number from a title like "doc_003" or "science".
+/// Returns `None` if no number can be parsed.
+fn parse_doc_num(title: &str) -> Option<i32> {
+    let suffix = title.rsplit('_').next()?;
+    suffix.parse().ok()
 }
 
 /// Recursively collects file paths from a directory.

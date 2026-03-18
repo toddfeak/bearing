@@ -8,10 +8,12 @@ import java.nio.file.Paths;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Document;
+import org.apache.lucene.document.Field;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
@@ -47,6 +49,8 @@ public class IndexDocValues {
         try (IndexWriter writer = new IndexWriter(FSDirectory.open(indexDir), config)) {
             for (int i = 0; i < 10; i++) {
                 Document doc = new Document();
+                String docId = String.format("doc-%03d", i);
+                doc.add(new StringField("id", docId, Field.Store.YES));
                 doc.add(new TextField("body", "doc values test " + i, TextField.Store.NO));
                 doc.add(new NumericDocValuesField("count", i * 10L));
                 doc.add(new BinaryDocValuesField("hash",
@@ -64,6 +68,10 @@ public class IndexDocValues {
                 doc.add(new SortedNumericDocValuesField("priority", i % 4));
                 if (i % 2 == 0) {
                     doc.add(new SortedNumericDocValuesField("priority", (i + 1) % 4));
+                }
+                // Sparse NUMERIC: only even-numbered docs have this field
+                if (i % 2 == 0) {
+                    doc.add(new NumericDocValuesField("sparse_count", i * 100L));
                 }
                 writer.addDocument(doc);
             }
