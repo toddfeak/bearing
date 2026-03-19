@@ -24,7 +24,7 @@ echo "PASSED"
 
 echo ""
 echo "=== Test: verify non-compound index files exist on disk ==="
-EXPECTED_FILES="segments_1 _0.si _0.fnm _0_Lucene103_0.doc _0_Lucene103_0.pos _0_Lucene103_0.tim _0_Lucene103_0.tip _0.fdt _0.fdm _0.fdx _0.kdm _0.kdi _0.kdd _0.nvm _0.nvd"
+EXPECTED_FILES="segments_1 _0.si _0.fnm _0_Lucene103_0.doc _0_Lucene103_0.pos _0_Lucene103_0.tim _0_Lucene103_0.tip _0.fdt _0.fdm _0.fdx _0.kdm _0.kdi _0.kdd _0.nvm _0.nvd _0.tvd _0.tvx _0.tvm"
 for f in $EXPECTED_FILES; do
     if [ ! -f "$INDEX_DIR/$f" ]; then
         echo "FAILED: expected file '$f' not found in $INDEX_DIR"

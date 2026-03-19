@@ -38,11 +38,9 @@ Remaining field types (KNN vectors, shape fields) are deferred — see below.
 
 ## 4. Term Vectors
 
-**Java feature:** Per-document term vectors (`.tvd`/`.tvx` files) store the terms, frequencies, positions, and offsets for a document's fields, enabling features like "more like this" and hit highlighting.
+**Java feature:** Per-document term vectors (`.tvd`/`.tvx`/`.tvm` files) store the terms, frequencies, positions, and offsets for a document's fields, enabling features like "more like this" and hit highlighting.
 
-**Rust status:** Not implemented. `FieldType::store_term_vectors` is ignored.
-
-**Priority:** Medium — needed for hit highlighting and document similarity.
+**Rust status:** **Implemented** — writes `.tvd`/`.tvx`/`.tvm` files via `Lucene90CompressingTermVectorsWriter` format. Supports term vectors with positions, offsets, and structural payload support. Output is byte-identical to Java Lucene and cross-validated with `VerifyIndex`.
 
 ## 5. Payloads
 

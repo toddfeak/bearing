@@ -11,6 +11,7 @@ TESTS=(
     "$SCRIPT_DIR/e2e_verify_impacts.sh"
     "$SCRIPT_DIR/e2e_verify_tim_compression.sh"
     "$SCRIPT_DIR/e2e_doc_values.sh"
+    "$SCRIPT_DIR/e2e_term_vectors.sh"
 )
 
 PASSED=0

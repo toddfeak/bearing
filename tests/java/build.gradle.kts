@@ -47,6 +47,13 @@ tasks.register<JavaExec>("indexDocValues") {
     args = listOfNotNull(indexDir)
 }
 
+tasks.register<JavaExec>("indexTermVectors") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "IndexTermVectors"
+    val indexDir = project.findProperty("indexDir") as? String
+    args = listOfNotNull(indexDir)
+}
+
 tasks.register<JavaExec>("indexAllFields") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass = "IndexAllFields"

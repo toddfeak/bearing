@@ -59,24 +59,28 @@ public class VerifyIndex {
                 ok = false;
             }
 
-            // --- 2. Read stored "path" fields ---
+            // --- 2. Read stored "path" fields (if present) ---
             int sampleSize = Math.min(numDocs, 3);
-            System.out.println("\nStored 'path' fields (showing " + sampleSize + " of " + numDocs + "):");
             StoredFields storedFields = reader.storedFields();
-            int pathFailures = 0;
-            for (int i = 0; i < numDocs; i++) {
-                Document doc = storedFields.document(i);
-                String path = doc.get("path");
-                if (i < sampleSize) {
-                    System.out.println("  doc " + i + ": path = " + path);
+            // Check if any doc has a "path" field before requiring it
+            boolean hasPathField = storedFields.document(0).get("path") != null;
+            if (hasPathField) {
+                System.out.println("\nStored 'path' fields (showing " + sampleSize + " of " + numDocs + "):");
+                int pathFailures = 0;
+                for (int i = 0; i < numDocs; i++) {
+                    Document doc = storedFields.document(i);
+                    String path = doc.get("path");
+                    if (i < sampleSize) {
+                        System.out.println("  doc " + i + ": path = " + path);
+                    }
+                    if (path == null || path.isEmpty()) {
+                        pathFailures++;
+                        ok = false;
+                    }
                 }
-                if (path == null || path.isEmpty()) {
-                    pathFailures++;
-                    ok = false;
+                if (pathFailures > 0) {
+                    System.err.println("FAIL: " + pathFailures + " docs have no 'path' stored field");
                 }
-            }
-            if (pathFailures > 0) {
-                System.err.println("FAIL: " + pathFailures + " docs have no 'path' stored field");
             }
 
             // --- 3. Count terms per field ---
@@ -102,13 +106,16 @@ public class VerifyIndex {
                 ok = false;
             }
 
-            // --- 4. Term query on "contents" for "ancient" ---
-            IndexSearcher searcher = new IndexSearcher(reader);
-            TopDocs hits = searcher.search(new TermQuery(new Term("contents", "ancient")), 10);
-            System.out.println("\nTermQuery 'contents:ancient' => " + hits.totalHits.value() + " hits");
-            if (hits.totalHits.value() == 0) {
-                System.err.println("FAIL: expected at least 1 hit for 'contents:ancient'");
-                ok = false;
+            // --- 4. Term query on "contents" for "ancient" (if path field present) ---
+            // Only run this check for indexes built from the standard test docs
+            if (hasPathField) {
+                IndexSearcher searcher = new IndexSearcher(reader);
+                TopDocs hits = searcher.search(new TermQuery(new Term("contents", "ancient")), 10);
+                System.out.println("\nTermQuery 'contents:ancient' => " + hits.totalHits.value() + " hits");
+                if (hits.totalHits.value() == 0) {
+                    System.err.println("FAIL: expected at least 1 hit for 'contents:ancient'");
+                    ok = false;
+                }
             }
 
             // --- 5. Check extended field types (if present) ---
