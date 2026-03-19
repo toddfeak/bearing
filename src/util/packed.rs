@@ -214,6 +214,227 @@ mod tests {
     use super::*;
     use crate::store::memory::MemoryIndexOutput;
 
+    // Port of Lucene's BlockPackedWriter and PackedInts MSB-first integer packing codec.
+    // Key Java sources: AbstractBlockPackedWriter, BlockPackedWriter, BulkOperationPacked.
+
+    /// Returns the raw number of bits required to represent `value`, treating it as unsigned.
+    ///
+    /// Unlike [`unsigned_bits_required`], this does NOT round up to a supported BPV.
+    /// Returns `max(1, 64 - leading_zeros)`.
+    pub fn packed_bits_required(value: i64) -> u32 {
+        if value == 0 {
+            1
+        } else {
+            64 - (value as u64).leading_zeros()
+        }
+    }
+
+    /// Returns the maximum value representable with the given number of bits.
+    fn packed_max_value(bits_per_value: u32) -> i64 {
+        if bits_per_value == 64 {
+            i64::MAX
+        } else {
+            !(!0i64 << bits_per_value)
+        }
+    }
+
+    /// Packs `count` values MSB-first into bytes.
+    ///
+    /// Returns exactly `ceil(count * bits_per_value / 8)` bytes.
+    fn pack_msb(values: &[i64], count: usize, bits_per_value: u32) -> Vec<u8> {
+        let total_bytes = (count as u64 * bits_per_value as u64).div_ceil(8) as usize;
+        let mut blocks = vec![0u8; total_bytes];
+        let mut blocks_offset = 0;
+        let mut next_block: u8 = 0;
+        let mut bits_left: u32 = 8;
+        let bpv = bits_per_value;
+
+        for &value in values.iter().take(count) {
+            let v = value as u64;
+            if bpv < bits_left {
+                // just buffer
+                next_block |= (v << (bits_left - bpv)) as u8;
+                bits_left -= bpv;
+            } else {
+                // flush as many blocks as possible
+                let mut bits = bpv - bits_left;
+                blocks[blocks_offset] = next_block | (v >> bits) as u8;
+                blocks_offset += 1;
+                while bits >= 8 {
+                    bits -= 8;
+                    blocks[blocks_offset] = (v >> bits) as u8;
+                    blocks_offset += 1;
+                }
+                // then buffer
+                bits_left = 8 - bits;
+                next_block = ((v & ((1u64 << bits) - 1)) << bits_left) as u8;
+            }
+        }
+
+        // Write final partial byte if there are buffered bits
+        if bits_left < 8 && blocks_offset < total_bytes {
+            blocks[blocks_offset] = next_block;
+        }
+
+        blocks
+    }
+
+    /// Writes packed integers MSB-first (big-endian bit packing).
+    ///
+    /// Values are packed contiguously with high-order bits first, producing
+    /// `ceil(count * bpv / 8)` bytes.
+    pub fn packed_ints_write(
+        output: &mut dyn DataOutput,
+        values: &[i64],
+        bits_per_value: u32,
+    ) -> io::Result<()> {
+        let packed = pack_msb(values, values.len(), bits_per_value);
+        output.write_bytes(&packed)
+    }
+
+    /// Writes a variable-length long that handles negative values via unsigned right shift.
+    ///
+    /// NOT the same as `DataOutput::write_vlong`.
+    fn write_block_packed_vlong(output: &mut dyn DataOutput, value: i64) -> io::Result<()> {
+        let mut i = value as u64;
+        let mut k = 0;
+        while (i & !0x7F) != 0 && k < 8 {
+            output.write_byte((i & 0x7F | 0x80) as u8)?;
+            i >>= 7;
+            k += 1;
+        }
+        output.write_byte(i as u8)
+    }
+
+    /// Zigzag-encodes a signed long into an unsigned representation.
+    fn zigzag_encode(v: i64) -> i64 {
+        (v << 1) ^ (v >> 63)
+    }
+
+    /// Writes large sequences of longs using block-level delta compression.
+    ///
+    /// Values are split into fixed-size blocks. For each block, the minimum value is subtracted
+    /// and the deltas are packed MSB-first using the minimum number of bits required. Each block
+    /// has a 1–10 byte header encoding the bits-per-value and optional minimum.
+    pub struct BlockPackedWriter {
+        block_size: usize,
+        values: Vec<i64>,
+        off: usize,
+        ord: u64,
+        finished: bool,
+    }
+
+    /// Token byte layout: bits 1-7 = bitsPerValue, bit 0 = min-is-zero flag.
+    const BPV_SHIFT: u32 = 1;
+    const MIN_VALUE_EQUALS_0: u8 = 1;
+
+    impl BlockPackedWriter {
+        /// Creates a new writer with the given block size, which must be a multiple of 64.
+        pub fn new(block_size: usize) -> Self {
+            assert!(
+                block_size >= 64 && block_size.is_multiple_of(64),
+                "block_size must be a multiple of 64, got {block_size}"
+            );
+            Self {
+                block_size,
+                values: vec![0i64; block_size],
+                off: 0,
+                ord: 0,
+                finished: false,
+            }
+        }
+
+        /// Appends a value, flushing the current block if full.
+        pub fn add(&mut self, output: &mut dyn DataOutput, value: i64) -> io::Result<()> {
+            assert!(!self.finished, "already finished");
+            if self.off == self.block_size {
+                self.flush(output)?;
+            }
+            self.values[self.off] = value;
+            self.off += 1;
+            self.ord += 1;
+            Ok(())
+        }
+
+        /// Flushes any remaining values and marks the writer as finished.
+        pub fn finish(&mut self, output: &mut dyn DataOutput) -> io::Result<()> {
+            assert!(!self.finished, "already finished");
+            if self.off > 0 {
+                self.flush(output)?;
+            }
+            self.finished = true;
+            Ok(())
+        }
+
+        /// Returns the number of values added so far.
+        pub fn ord(&self) -> u64 {
+            self.ord
+        }
+
+        /// Resets the writer for reuse with a new output.
+        pub fn reset(&mut self) {
+            self.off = 0;
+            self.ord = 0;
+            self.finished = false;
+        }
+
+        fn flush(&mut self, output: &mut dyn DataOutput) -> io::Result<()> {
+            assert!(self.off > 0);
+
+            let mut min = i64::MAX;
+            let mut max = i64::MIN;
+            for i in 0..self.off {
+                min = min.min(self.values[i]);
+                max = max.max(self.values[i]);
+            }
+
+            let delta = max.wrapping_sub(min);
+            let bpv = if delta == 0 {
+                0
+            } else {
+                packed_bits_required(delta)
+            };
+
+            if bpv == 64 {
+                // No need to delta-encode
+                min = 0;
+            } else if min > 0 {
+                // Shrink min so writeVLong needs fewer bytes
+                min = 0i64.max(max - packed_max_value(bpv));
+            }
+
+            let token = ((bpv << BPV_SHIFT)
+                | if min == 0 {
+                    MIN_VALUE_EQUALS_0 as u32
+                } else {
+                    0
+                }) as u8;
+            output.write_byte(token)?;
+
+            if min != 0 {
+                write_block_packed_vlong(output, zigzag_encode(min) - 1)?;
+            }
+
+            if bpv > 0 {
+                if min != 0 {
+                    for i in 0..self.off {
+                        self.values[i] -= min;
+                    }
+                }
+                // Zero-fill remainder so pack_msb doesn't read stale values
+                for i in self.off..self.block_size {
+                    self.values[i] = 0;
+                }
+
+                let packed = pack_msb(&self.values, self.off, bpv);
+                output.write_bytes(&packed)?;
+            }
+
+            self.off = 0;
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_bits_required() {
         assert_eq!(bits_required(0), 0);
@@ -426,5 +647,416 @@ mod tests {
 
         writer.finish(&mut meta, &mut data).unwrap();
         assert_eq!(data.bytes().len(), 0); // no data for constant values
+    }
+
+    #[test]
+    fn test_packed_bits_required() {
+        assert_eq!(packed_bits_required(0), 1);
+        assert_eq!(packed_bits_required(1), 1);
+        assert_eq!(packed_bits_required(2), 2);
+        assert_eq!(packed_bits_required(3), 2);
+        assert_eq!(packed_bits_required(255), 8);
+        assert_eq!(packed_bits_required(256), 9);
+        assert_eq!(packed_bits_required(i64::MAX), 63);
+        assert_eq!(packed_bits_required(-1), 64);
+    }
+
+    #[test]
+    fn test_packed_max_value() {
+        assert_eq!(packed_max_value(1), 1);
+        assert_eq!(packed_max_value(8), 255);
+        assert_eq!(packed_max_value(16), 65535);
+        assert_eq!(packed_max_value(63), i64::MAX);
+        assert_eq!(packed_max_value(64), i64::MAX);
+    }
+
+    #[test]
+    fn test_pack_msb_4bit() {
+        // Two 4-bit values [0xA, 0xB] → packed MSB-first into [0xAB]
+        let values = [0xA_i64, 0xB];
+        let result = pack_msb(&values, 2, 4);
+        assert_eq!(result, vec![0xAB]);
+    }
+
+    #[test]
+    fn test_pack_msb_8bit() {
+        let values = [0x12_i64, 0x34, 0xAB];
+        let result = pack_msb(&values, 3, 8);
+        assert_eq!(result, vec![0x12, 0x34, 0xAB]);
+    }
+
+    #[test]
+    fn test_pack_msb_1bit() {
+        // 8 one-bit values: 1,0,1,0,1,1,0,0 → MSB first → 0b10101100 = 0xAC
+        let values = [1_i64, 0, 1, 0, 1, 1, 0, 0];
+        let result = pack_msb(&values, 8, 1);
+        assert_eq!(result, vec![0xAC]);
+    }
+
+    #[test]
+    fn test_pack_msb_5bit_spanning() {
+        // Three 5-bit values spanning bytes: 0b11111=31, 0b10101=21, 0b00001=1
+        // Packed MSB: 11111_10101_00001_0 = 0xFD42 (but only 15 bits = 2 bytes)
+        // Byte 0: 11111_101 = 0xFD
+        // Byte 1: 01_00001_0 = 0x42
+        let values = [31_i64, 21, 1];
+        let result = pack_msb(&values, 3, 5);
+        assert_eq!(result.len(), 2); // ceil(15/8) = 2
+        assert_eq!(result, vec![0xFD, 0x42]);
+    }
+
+    #[test]
+    fn test_pack_msb_64bit() {
+        let values = [0x0102030405060708_i64];
+        let result = pack_msb(&values, 1, 64);
+        assert_eq!(result, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    }
+
+    #[test]
+    fn test_packed_ints_write() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let values = [0xA_i64, 0xB];
+        packed_ints_write(&mut out, &values, 4).unwrap();
+        assert_eq!(out.bytes(), &[0xAB]);
+    }
+
+    #[test]
+    fn test_write_block_packed_vlong_small() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_block_packed_vlong(&mut out, 42).unwrap();
+        assert_eq!(out.bytes(), &[42]);
+    }
+
+    #[test]
+    fn test_write_block_packed_vlong_large() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        // 128 = 0x80 → needs 2 bytes in VLong: 0x80|0x00=0x80, then 0x01
+        write_block_packed_vlong(&mut out, 128).unwrap();
+        assert_eq!(out.bytes(), &[0x80, 0x01]);
+    }
+
+    #[test]
+    fn test_write_block_packed_vlong_negative() {
+        // -1 as u64 = 0xFFFFFFFFFFFFFFFF → should write 9 bytes (k<8 loop + final byte)
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_block_packed_vlong(&mut out, -1).unwrap();
+        // 8 continuation bytes of 0xFF, then final byte 0xFF
+        let bytes = out.bytes();
+        assert_eq!(bytes.len(), 9);
+        for &b in &bytes[..8] {
+            assert_eq!(b, 0xFF);
+        }
+        assert_eq!(bytes[8], 0xFF);
+    }
+
+    #[test]
+    fn test_zigzag_encode() {
+        assert_eq!(zigzag_encode(0), 0);
+        assert_eq!(zigzag_encode(-1), 1);
+        assert_eq!(zigzag_encode(1), 2);
+        assert_eq!(zigzag_encode(-2), 3);
+        assert_eq!(zigzag_encode(i64::MAX), -2);
+        assert_eq!(zigzag_encode(i64::MIN), -1);
+    }
+
+    #[test]
+    fn test_block_packed_writer_all_same() {
+        // All-same values → bpv=0, only a token byte per block
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for _ in 0..64 {
+            w.add(&mut out, 42).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        // Token: bpv=0, min=42≠0 → bit0=0 → token=0x00
+        // Then VLong(zigzag(42)-1) = VLong(84-1) = VLong(83) = single byte 83
+        // No packed data since bpv=0
+        assert_eq!(out.bytes().len(), 2);
+        assert_eq!(out.bytes()[0], 0x00); // token
+        assert_eq!(out.bytes()[1], 83); // zigzag(42)-1 = 83
+    }
+
+    #[test]
+    fn test_block_packed_writer_all_zeros() {
+        // All zeros → bpv=0, min=0 → token has MIN_VALUE_EQUALS_0 flag
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for _ in 0..64 {
+            w.add(&mut out, 0).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        // Token: bpv=0, min=0 → bit0=1 → token=0x01
+        // No VLong, no packed data
+        assert_eq!(out.bytes().len(), 1);
+        assert_eq!(out.bytes()[0], 0x01);
+    }
+
+    #[test]
+    fn test_block_packed_writer_sequential() {
+        // Values 0..63 → delta=63, bpv=6
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for i in 0..64 {
+            w.add(&mut out, i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        let bytes = out.bytes();
+        // Token: bpv=6, min=0 → (6<<1)|1 = 13 = 0x0D
+        assert_eq!(bytes[0], 0x0D);
+        // Packed data: 64 values × 6 bits = 384 bits = 48 bytes
+        assert_eq!(bytes.len(), 1 + 48);
+    }
+
+    #[test]
+    fn test_block_packed_writer_partial_block() {
+        // Fewer than block_size values → flushed on finish()
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for i in 0..10 {
+            w.add(&mut out, i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        let bytes = out.bytes();
+        // Token: delta=9, bpv=4, min=0 → (4<<1)|1 = 9
+        assert_eq!(bytes[0], 9);
+        // Packed data: 10 values × 4 bits = 40 bits = 5 bytes
+        assert_eq!(bytes.len(), 1 + 5);
+    }
+
+    #[test]
+    fn test_block_packed_writer_multiple_blocks() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        // 100 values → 1 full block (64) + 1 partial block (36)
+        for i in 0..100 {
+            w.add(&mut out, i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        assert_eq!(w.ord(), 100);
+
+        let bytes = out.bytes();
+        // Block 1: values 0..63, delta=63, bpv=6, min=0
+        // Token = (6<<1)|1 = 13
+        assert_eq!(bytes[0], 13);
+        // Block 1 packed data: 64×6=384 bits = 48 bytes
+        // Block 2 starts at offset 1+48=49
+        // Block 2: values 64..99, delta=35, bpv=6, min=64>0
+        // min optimization: max(0, 99 - maxValue(6)) = max(0, 99-63) = 36
+        // After subtracting min=36: values become 28..63, still fits in 6 bits
+        let block2_token = bytes[49];
+        let block2_bpv = (block2_token >> BPV_SHIFT) as u32;
+        assert_eq!(block2_bpv, 6);
+        // min≠0, so bit0=0
+        assert_eq!(block2_token & 1, 0);
+    }
+
+    #[test]
+    fn test_block_packed_writer_delta_with_min() {
+        // Values with large min: [1000, 1001, 1002, 1003]
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for i in 0..4 {
+            w.add(&mut out, 1000 + i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        let bytes = out.bytes();
+        // delta=3, bpv=2, min=1000>0
+        // min optimization: max(0, 1003 - maxValue(2)) = max(0, 1003-3) = 1000
+        // So min stays 1000
+        let token = bytes[0];
+        let bpv = (token >> BPV_SHIFT) as u32;
+        assert_eq!(bpv, 2);
+        assert_eq!(token & 1, 0); // min≠0
+    }
+
+    #[test]
+    fn test_block_packed_writer_bpv64() {
+        // min=i64::MIN, max=i64::MAX → wrapping delta = -1 → bpv=64, min forced to 0
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        w.add(&mut out, i64::MIN).unwrap();
+        w.add(&mut out, i64::MAX).unwrap();
+        for _ in 2..64 {
+            w.add(&mut out, 0).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        let bytes = out.bytes();
+        // bpv=64, min forced to 0 → token = (64<<1)|1 = 129
+        assert_eq!(bytes[0], 129u8);
+        // No VLong (min=0)
+        // Packed data: 64 values × 64 bits = 512 bytes
+        assert_eq!(bytes.len(), 1 + 512);
+    }
+
+    #[test]
+    fn test_block_packed_writer_ord() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        assert_eq!(w.ord(), 0);
+        for i in 0..10 {
+            w.add(&mut out, i).unwrap();
+        }
+        assert_eq!(w.ord(), 10);
+        w.finish(&mut out).unwrap();
+        assert_eq!(w.ord(), 10);
+    }
+
+    #[test]
+    fn test_block_packed_writer_reset() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for i in 0..10 {
+            w.add(&mut out, i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+
+        // After reset, can reuse
+        w.reset();
+        assert_eq!(w.ord(), 0);
+        let mut out2 = MemoryIndexOutput::new("test2".to_string());
+        for i in 0..5 {
+            w.add(&mut out2, i).unwrap();
+        }
+        w.finish(&mut out2).unwrap();
+        assert_eq!(w.ord(), 5);
+    }
+
+    // Cross-validation tests: expected bytes from Java Lucene's BlockPackedWriter
+
+    #[test]
+    fn test_block_packed_writer_java_64x42() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for _ in 0..64 {
+            w.add(&mut out, 42).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[0x00, 0x53];
+        assert_eq!(out.bytes(), expected);
+    }
+
+    #[test]
+    fn test_block_packed_writer_java_0_to_63() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for i in 0..64 {
+            w.add(&mut out, i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            0x0D, 0x00, 0x10, 0x83, 0x10, 0x51, 0x87, 0x20,
+            0x92, 0x8B, 0x30, 0xD3, 0x8F, 0x41, 0x14, 0x93,
+            0x51, 0x55, 0x97, 0x61, 0x96, 0x9B, 0x71, 0xD7,
+            0x9F, 0x82, 0x18, 0xA3, 0x92, 0x59, 0xA7, 0xA2,
+            0x9A, 0xAB, 0xB2, 0xDB, 0xAF, 0xC3, 0x1C, 0xB3,
+            0xD3, 0x5D, 0xB7, 0xE3, 0x9E, 0xBB, 0xF3, 0xDF,
+            0xBF,
+        ];
+        assert_eq!(out.bytes(), expected);
+    }
+
+    #[test]
+    fn test_block_packed_writer_java_0_to_99() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for i in 0..100 {
+            w.add(&mut out, i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            0x0D, 0x00, 0x10, 0x83, 0x10, 0x51, 0x87, 0x20,
+            0x92, 0x8B, 0x30, 0xD3, 0x8F, 0x41, 0x14, 0x93,
+            0x51, 0x55, 0x97, 0x61, 0x96, 0x9B, 0x71, 0xD7,
+            0x9F, 0x82, 0x18, 0xA3, 0x92, 0x59, 0xA7, 0xA2,
+            0x9A, 0xAB, 0xB2, 0xDB, 0xAF, 0xC3, 0x1C, 0xB3,
+            0xD3, 0x5D, 0xB7, 0xE3, 0x9E, 0xBB, 0xF3, 0xDF,
+            0xBF, 0x0C, 0x47, 0x71, 0xD7, 0x9F, 0x82, 0x18,
+            0xA3, 0x92, 0x59, 0xA7, 0xA2, 0x9A, 0xAB, 0xB2,
+            0xDB, 0xAF, 0xC3, 0x1C, 0xB3, 0xD3, 0x5D, 0xB7,
+            0xE3, 0x9E, 0xBB, 0xF3, 0xDF, 0xBF,
+        ];
+        assert_eq!(out.bytes(), expected);
+    }
+
+    #[test]
+    fn test_block_packed_writer_java_1000_to_1063() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for i in 0..64 {
+            w.add(&mut out, 1000 + i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            0x0C, 0xCF, 0x0F, 0x00, 0x10, 0x83, 0x10, 0x51,
+            0x87, 0x20, 0x92, 0x8B, 0x30, 0xD3, 0x8F, 0x41,
+            0x14, 0x93, 0x51, 0x55, 0x97, 0x61, 0x96, 0x9B,
+            0x71, 0xD7, 0x9F, 0x82, 0x18, 0xA3, 0x92, 0x59,
+            0xA7, 0xA2, 0x9A, 0xAB, 0xB2, 0xDB, 0xAF, 0xC3,
+            0x1C, 0xB3, 0xD3, 0x5D, 0xB7, 0xE3, 0x9E, 0xBB,
+            0xF3, 0xDF, 0xBF,
+        ];
+        assert_eq!(out.bytes(), expected);
+    }
+
+    #[test]
+    fn test_block_packed_writer_java_0_to_9() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for i in 0..10 {
+            w.add(&mut out, i).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[0x09, 0x01, 0x23, 0x45, 0x67, 0x89];
+        assert_eq!(out.bytes(), expected);
+    }
+
+    #[test]
+    fn test_block_packed_writer_java_64x0() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut w = BlockPackedWriter::new(64);
+        for _ in 0..64 {
+            w.add(&mut out, 0).unwrap();
+        }
+        w.finish(&mut out).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[0x01];
+        assert_eq!(out.bytes(), expected);
+    }
+
+    // Cross-validation: PackedInts (packed_ints_write) vs Java PackedInts.getWriterNoHeader(PACKED)
+
+    #[test]
+    fn test_packed_ints_write_java_4bpv() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let values: Vec<i64> = (0..10).collect();
+        packed_ints_write(&mut out, &values, 4).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[0x01, 0x23, 0x45, 0x67, 0x89];
+        assert_eq!(out.bytes(), expected);
+    }
+
+    #[test]
+    fn test_packed_ints_write_java_5bpv() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let values = [31_i64, 21, 1, 0, 15, 7, 3, 30];
+        packed_ints_write(&mut out, &values, 5).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[0xFD, 0x42, 0x07, 0x9C, 0x7E];
+        assert_eq!(out.bytes(), expected);
+    }
+
+    #[test]
+    fn test_packed_ints_write_java_8bpv() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let values = [0x12_i64, 0x34, 0xAB];
+        packed_ints_write(&mut out, &values, 8).unwrap();
+        #[rustfmt::skip]
+        let expected: &[u8] = &[0x12, 0x34, 0xAB];
+        assert_eq!(out.bytes(), expected);
     }
 }
