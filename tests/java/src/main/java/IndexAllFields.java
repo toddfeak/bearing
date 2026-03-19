@@ -34,7 +34,8 @@ import org.apache.lucene.document.LatLonPoint;
 import org.apache.lucene.document.LongRange;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
-import org.apache.lucene.document.TextField;
+import org.apache.lucene.document.FieldType;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
@@ -46,6 +47,18 @@ import org.apache.lucene.store.FSDirectory;
  * Usage: java IndexAllFields <docs-dir> <index-dir> [--threads N]
  */
 public class IndexAllFields {
+
+    /** FieldType matching Rust's text_field_with_term_vectors: indexed with positions, term vectors with positions and offsets. */
+    private static final FieldType TV_TYPE;
+    static {
+        TV_TYPE = new FieldType();
+        TV_TYPE.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS);
+        TV_TYPE.setTokenized(true);
+        TV_TYPE.setStoreTermVectors(true);
+        TV_TYPE.setStoreTermVectorPositions(true);
+        TV_TYPE.setStoreTermVectorOffsets(true);
+        TV_TYPE.freeze();
+    }
 
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
@@ -130,7 +143,7 @@ public class IndexAllFields {
         // Same 3 fields as the standard indexer
         doc.add(new KeywordField("path", file.toString(), Field.Store.YES));
         doc.add(new LongField("modified", modified, Field.Store.NO));
-        doc.add(new TextField("contents", contents, Field.Store.NO));
+        doc.add(new Field("contents", contents, TV_TYPE));
 
         // New field types
         doc.add(new StringField("title", title, Field.Store.YES));

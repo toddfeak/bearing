@@ -515,6 +515,24 @@ pub fn text_field_reader(name: &str, reader: impl Read + Send + 'static) -> Fiel
     Field::new(name.to_string(), ft, FieldValue::Reader(Box::new(reader)))
 }
 
+/// Creates a tokenized text field backed by a [`Read`] source with term vectors.
+///
+/// Same as [`text_field_reader`] but additionally stores term vectors with
+/// position and offset information for hit highlighting and document similarity.
+pub fn text_field_reader_with_term_vectors(
+    name: &str,
+    reader: impl Read + Send + 'static,
+) -> Field {
+    let ft = FieldTypeBuilder::new()
+        .index_options(IndexOptions::DocsAndFreqsAndPositions)
+        .tokenized(true)
+        .store_term_vectors(true)
+        .store_term_vector_positions(true)
+        .store_term_vector_offsets(true)
+        .build();
+    Field::new(name.to_string(), ft, FieldValue::Reader(Box::new(reader)))
+}
+
 /// Creates a tokenized text field with term vectors, positions, and offsets.
 ///
 /// Same as [`text_field`] but additionally stores term vectors with position
@@ -1361,5 +1379,24 @@ mod tests {
         assert!(!f.field_type().store_term_vector_payloads());
         assert!(f.field_type().has_norms());
         assert_eq!(f.string_value(), Some("hello world"));
+    }
+
+    #[test]
+    fn test_text_field_reader_with_term_vectors() {
+        let reader = std::io::Cursor::new(b"hello world");
+        let f = text_field_reader_with_term_vectors("contents", reader);
+        assert_eq!(f.name(), "contents");
+        assert_eq!(
+            f.field_type().index_options(),
+            IndexOptions::DocsAndFreqsAndPositions
+        );
+        assert!(f.field_type().tokenized());
+        assert!(!f.field_type().stored());
+        assert!(f.field_type().store_term_vectors());
+        assert!(f.field_type().store_term_vector_positions());
+        assert!(f.field_type().store_term_vector_offsets());
+        assert!(!f.field_type().store_term_vector_payloads());
+        assert!(f.field_type().has_norms());
+        assert_matches!(f.value(), FieldValue::Reader(_));
     }
 }

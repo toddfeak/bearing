@@ -266,11 +266,11 @@ fn make_document(path: &Path) -> Document {
 
     // "contents" field — streamed from file
     match File::open(path) {
-        Ok(file) => doc.add(document::text_field_reader(
+        Ok(file) => doc.add(document::text_field_reader_with_term_vectors(
             "contents",
             BufReader::new(file),
         )),
-        Err(_) => doc.add(document::text_field("contents", "")),
+        Err(_) => doc.add(document::text_field_with_term_vectors("contents", "")),
     }
 
     // "title" field — filename without extension

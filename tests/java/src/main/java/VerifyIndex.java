@@ -7,6 +7,8 @@ import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
+import org.apache.lucene.index.Fields;
+import org.apache.lucene.index.TermVectors;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
@@ -15,9 +17,12 @@ import org.apache.lucene.index.PointValues;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
+import org.apache.lucene.index.PostingsEnum;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.Terms;
+import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
@@ -413,10 +418,102 @@ public class VerifyIndex {
                 }
             }
 
+            // Check term vectors (if present)
+            ok = checkTermVectors(leaf, ok);
+
             // Check doc-values-only fields (if present)
             int leafDocs = leaf.numDocs();
             int leafSampleSize = Math.min(leafDocs, 3);
             ok = checkDocValues(leaf, leafDocs, leafSampleSize, ok);
+        }
+
+        return ok;
+    }
+
+    /**
+     * Checks term vectors for fields that have them.
+     * Backward-compatible: skips if no fields have vectors.
+     */
+    static boolean checkTermVectors(LeafReader leaf, boolean ok) throws Exception {
+        FieldInfos fieldInfos = leaf.getFieldInfos();
+        int numDocs = leaf.numDocs();
+        int sampleSize = Math.min(numDocs, 5);
+
+        for (FieldInfo fi : fieldInfos) {
+            if (!fi.hasTermVectors()) continue;
+
+            System.out.println("\nTerm vector checks for field '" + fi.name + "':");
+            TermVectors tv = leaf.termVectors();
+            int docsChecked = 0;
+
+            for (int docId = 0; docId < numDocs && docsChecked < sampleSize; docId++) {
+                Fields tvFields = tv.get(docId);
+                if (tvFields == null) continue;
+
+                Terms tvTerms = tvFields.terms(fi.name);
+                if (tvTerms == null) continue;
+
+                TermsEnum termsEnum = tvTerms.iterator();
+                int termCount = 0;
+                int prevPosition = -1;
+
+                while (termsEnum.next() != null) {
+                    termCount++;
+                    String termText = termsEnum.term().utf8ToString();
+
+                    PostingsEnum postings = termsEnum.postings(null, PostingsEnum.ALL);
+                    if (postings.nextDoc() == DocIdSetIterator.NO_MORE_DOCS) {
+                        System.err.println("FAIL: term '" + termText + "' has no postings in TV for doc " + docId);
+                        ok = false;
+                        continue;
+                    }
+
+                    int freq = postings.freq();
+                    if (freq <= 0) {
+                        System.err.println("FAIL: term '" + termText + "' has freq=" + freq + " in TV for doc " + docId);
+                        ok = false;
+                    }
+
+                    prevPosition = -1;
+                    for (int p = 0; p < freq; p++) {
+                        int position = postings.nextPosition();
+                        if (position < 0) {
+                            System.err.println("FAIL: negative position " + position + " for term '" + termText + "' in doc " + docId);
+                            ok = false;
+                        }
+                        if (position <= prevPosition) {
+                            System.err.println("FAIL: non-increasing position " + position + " (prev=" + prevPosition + ") for term '" + termText + "' in doc " + docId);
+                            ok = false;
+                        }
+
+                        int startOffset = postings.startOffset();
+                        int endOffset = postings.endOffset();
+                        if (startOffset < 0) {
+                            System.err.println("FAIL: negative startOffset " + startOffset + " for term '" + termText + "' in doc " + docId);
+                            ok = false;
+                        }
+                        if (endOffset <= startOffset) {
+                            System.err.println("FAIL: endOffset " + endOffset + " <= startOffset " + startOffset + " for term '" + termText + "' in doc " + docId);
+                            ok = false;
+                        }
+
+                        prevPosition = position;
+                    }
+                }
+
+                if (termCount == 0) {
+                    System.err.println("FAIL: no terms in TV for doc " + docId + " field '" + fi.name + "'");
+                    ok = false;
+                } else if (docsChecked < 3) {
+                    System.out.println("  doc " + docId + ": " + termCount + " terms (OK)");
+                }
+
+                docsChecked++;
+            }
+
+            if (docsChecked > 0) {
+                System.out.println("  checked " + docsChecked + "/" + numDocs + " docs (OK)");
+            }
         }
 
         return ok;
