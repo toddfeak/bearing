@@ -453,9 +453,9 @@ fn flush_offsets(
         };
     }
 
-    // Write charsPerTerm as BE ints
+    // Write charsPerTerm as LE ints
     for &cpt in &chars_per_term {
-        output.write_be_int(f32::to_bits(cpt) as i32)?;
+        output.write_le_int(f32::to_bits(cpt) as i32)?;
     }
 
     // Start offset deltas
@@ -665,6 +665,55 @@ mod tests {
         }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
         assert_eq!(files.len(), 3);
+    }
+
+    /// Verifies charsPerTerm is written as LE int (matching Lucene's
+    /// DataOutput.writeInt) rather than BE. The reader patches offsets using
+    /// Float.intBitsToFloat(readInt()) which expects LE byte order.
+    #[test]
+    fn test_chars_per_term_le_byte_order() {
+        let dir = make_directory();
+        // charsPerTerm = sumOffsets / sumPos. With one term at position 2
+        // and start_offset 10: charsPerTerm = 10/2 = 5.0f.
+        // IEEE 754 for 5.0f = 0x40A00000.
+        // LE bytes: [00, 00, A0, 40].
+        let docs = vec![TermVectorDoc {
+            fields: vec![TermVectorField {
+                field_number: 0,
+                has_positions: true,
+                has_offsets: true,
+                has_payloads: false,
+                terms: vec![TermVectorTerm {
+                    term: "hello".to_string(),
+                    freq: 1,
+                    positions: vec![2],
+                    offsets: Some(Box::new(OffsetBuffers {
+                        start_offsets: vec![10],
+                        end_offsets: vec![15],
+                    })),
+                }],
+            }],
+        }];
+        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
+        assert_eq!(files.len(), 3);
+
+        // Read the .tvd bytes and verify charsPerTerm byte order
+        let dir_guard = dir.lock().unwrap();
+        let tvd_bytes = dir_guard.read_file(&files[0]).unwrap();
+        assert_gt!(tvd_bytes.len(), 40);
+
+        // LE representation of 5.0f (0x40A00000): bytes [00, 00, A0, 40]
+        let le_5_0 = [0x00u8, 0x00, 0xA0, 0x40];
+        // BE representation would be [40, A0, 00, 00]
+        let be_5_0 = [0x40u8, 0xA0, 0x00, 0x00];
+
+        let has_le = tvd_bytes.windows(4).any(|w| w == le_5_0);
+        let has_be = tvd_bytes.windows(4).any(|w| w == be_5_0);
+        assert!(has_le, "charsPerTerm 5.0f should appear in LE byte order");
+        assert!(
+            !has_be,
+            "charsPerTerm 5.0f should NOT appear in BE byte order"
+        );
     }
 
     #[test]
