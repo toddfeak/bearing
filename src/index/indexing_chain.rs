@@ -87,6 +87,9 @@ pub struct OffsetBuffers {
 /// Stores finalized document postings as a compact vInt-encoded byte stream,
 /// using ~3-5 bytes per posting instead of ~80 bytes with the old Vec<Posting>
 /// approach. Only the current in-progress document uses temporary Vecs.
+///
+/// When term vectors are enabled for the field, TV accumulators are stored
+/// directly on the posting list, eliminating a redundant HashMap lookup.
 #[derive(Clone, Debug, MemSize)]
 pub struct PostingList {
     /// Compact storage: all finalized docs encoded as vInt byte stream.
@@ -104,11 +107,23 @@ pub struct PostingList {
     has_freqs: bool,
     has_positions: bool,
     has_offsets: bool,
+    /// Term vector frequency for the current document. Zero when no TV data recorded.
+    tv_freq: i32,
+    /// Term vector positions for the current document. `None` when TV positions not configured.
+    tv_positions: Option<Vec<i32>>,
+    /// Term vector offsets for the current document. `None` when TV offsets not configured.
+    tv_offsets: Option<Box<OffsetBuffers>>,
 }
 
 impl PostingList {
     /// Creates a new empty posting list with the given index options.
-    pub fn new(has_freqs: bool, has_positions: bool, has_offsets: bool) -> Self {
+    pub fn new(
+        has_freqs: bool,
+        has_positions: bool,
+        has_offsets: bool,
+        tv_positions: bool,
+        tv_offsets: bool,
+    ) -> Self {
         Self {
             byte_stream: Vec::new(),
             total_term_freq: 0,
@@ -128,6 +143,16 @@ impl PostingList {
             has_freqs,
             has_positions,
             has_offsets,
+            tv_freq: 0,
+            tv_positions: if tv_positions { Some(Vec::new()) } else { None },
+            tv_offsets: if tv_offsets {
+                Some(Box::new(OffsetBuffers {
+                    start_offsets: Vec::new(),
+                    end_offsets: Vec::new(),
+                }))
+            } else {
+                None
+            },
         }
     }
 
@@ -197,6 +222,20 @@ impl PostingList {
             if self.has_offsets {
                 self.add_offset(start_offset, end_offset);
             }
+        }
+    }
+
+    /// Records a term vector occurrence: increments TV freq and pushes
+    /// position/offset data if configured.
+    #[inline]
+    pub fn record_tv_occurrence(&mut self, position: i32, start_offset: i32, end_offset: i32) {
+        self.tv_freq += 1;
+        if let Some(ref mut positions) = self.tv_positions {
+            positions.push(position);
+        }
+        if let Some(ref mut offsets) = self.tv_offsets {
+            offsets.start_offsets.push(start_offset);
+            offsets.end_offsets.push(end_offset);
         }
     }
 
@@ -336,13 +375,21 @@ impl PerFieldData {
         has_freqs: bool,
         has_positions: bool,
         has_offsets: bool,
+        tv_positions: bool,
+        tv_offsets: bool,
     ) -> &mut PostingList {
-        let posting_lists = &mut self.posting_lists;
-        let id = *self.term_ids.entry(term.to_string()).or_insert_with(|| {
-            let id = posting_lists.len() as u32;
-            posting_lists.push(PostingList::new(has_freqs, has_positions, has_offsets));
-            id
-        });
+        if let Some(&id) = self.term_ids.get(term) {
+            return &mut self.posting_lists[id as usize];
+        }
+        let id = self.posting_lists.len() as u32;
+        self.posting_lists.push(PostingList::new(
+            has_freqs,
+            has_positions,
+            has_offsets,
+            tv_positions,
+            tv_offsets,
+        ));
+        self.term_ids.insert(term.to_string(), id);
         &mut self.posting_lists[id as usize]
     }
 
@@ -360,6 +407,58 @@ impl PerFieldData {
     /// Returns true if this field has any postings.
     pub fn has_postings(&self) -> bool {
         !self.term_ids.is_empty()
+    }
+
+    /// Extracts term vector data from posting lists and returns a `TermVectorField`.
+    ///
+    /// Iterates all terms, collecting those with `tv_freq > 0`, drains their TV
+    /// accumulators (preserving Vec capacity), and returns a sorted `TermVectorField`.
+    /// Returns `None` if no posting list has TV data for the current document.
+    fn take_term_vector_data(
+        &mut self,
+        field_number: u32,
+        tv_positions: bool,
+        tv_offsets: bool,
+        tv_payloads: bool,
+    ) -> Option<TermVectorField> {
+        let mut terms: Vec<TermVectorTerm> = Vec::new();
+
+        for (term_text, &id) in &self.term_ids {
+            let pl = &mut self.posting_lists[id as usize];
+            if pl.tv_freq > 0 {
+                let positions = pl
+                    .tv_positions
+                    .as_mut()
+                    .map(std::mem::take)
+                    .unwrap_or_default();
+                let offsets = pl.tv_offsets.as_mut().map(|ob| {
+                    Box::new(OffsetBuffers {
+                        start_offsets: std::mem::take(&mut ob.start_offsets),
+                        end_offsets: std::mem::take(&mut ob.end_offsets),
+                    })
+                });
+                terms.push(TermVectorTerm {
+                    term: term_text.clone(),
+                    freq: pl.tv_freq,
+                    positions,
+                    offsets,
+                });
+                pl.tv_freq = 0;
+            }
+        }
+
+        if terms.is_empty() {
+            return None;
+        }
+
+        terms.sort_by(|a, b| a.term.as_bytes().cmp(b.term.as_bytes()));
+        Some(TermVectorField {
+            field_number,
+            has_positions: tv_positions,
+            has_offsets: tv_offsets,
+            has_payloads: tv_payloads,
+            terms,
+        })
     }
 }
 
@@ -694,16 +793,10 @@ impl IndexingChain {
         let tv_offsets = field.field_type().store_term_vector_offsets();
         let tv_payloads = field.field_type().store_term_vector_payloads();
 
-        type TvTermMap = HashMap<String, (i32, Vec<i32>, Vec<i32>, Vec<i32>)>;
-
-        let mut tv_terms: Option<TvTermMap> = if store_tv { Some(HashMap::new()) } else { None };
-
         let mut position: i32 = -1;
         let mut field_length: i32 = 0;
 
-        let mut record_token = |per_field: &mut PerFieldData,
-                                tv_terms: &mut Option<TvTermMap>,
-                                token_ref: TokenRef<'_>| {
+        let mut record_token = |per_field: &mut PerFieldData, token_ref: TokenRef<'_>| {
             position += token_ref.position_increment as i32;
             field_length += 1;
 
@@ -712,6 +805,8 @@ impl IndexingChain {
                 has_freqs,
                 has_positions,
                 has_offsets,
+                tv_positions,
+                tv_offsets,
             );
 
             posting_list.record_occurrence(
@@ -721,24 +816,19 @@ impl IndexingChain {
                 token_ref.end_offset as i32,
             );
 
-            if let Some(map) = tv_terms {
-                let entry = map
-                    .entry(token_ref.text.to_string())
-                    .or_insert_with(|| (0, Vec::new(), Vec::new(), Vec::new()));
-                entry.0 += 1;
-                if tv_positions {
-                    entry.1.push(position);
-                }
-                if tv_offsets {
-                    entry.2.push(token_ref.start_offset as i32);
-                    entry.3.push(token_ref.end_offset as i32);
-                }
+            if store_tv {
+                posting_list.record_tv_occurrence(
+                    position,
+                    token_ref.start_offset as i32,
+                    token_ref.end_offset as i32,
+                );
             }
         };
 
         // Feature fields: single term with explicit frequency, no positions/norms
         if let FieldValue::Feature { term, freq } = field.value() {
-            let posting_list = per_field.get_or_insert_posting_list(term, has_freqs, false, false);
+            let posting_list =
+                per_field.get_or_insert_posting_list(term, has_freqs, false, false, false, false);
             posting_list.start_doc(doc_id);
             posting_list.set_freq(*freq);
             return Ok(None);
@@ -748,7 +838,7 @@ impl IndexingChain {
             match field.value() {
                 FieldValue::Text(text) => {
                     analyzer.analyze_to(text, buf, &mut |tr| {
-                        record_token(per_field, &mut tv_terms, tr);
+                        record_token(per_field, tr);
                     });
                 }
                 FieldValue::Reader(_) => {
@@ -758,7 +848,7 @@ impl IndexingChain {
                         unreachable!()
                     };
                     analyzer.analyze_reader(&mut *reader, buf, &mut |tr| {
-                        record_token(per_field, &mut tv_terms, tr);
+                        record_token(per_field, tr);
                     })?;
                 }
                 _ => return Ok(None),
@@ -773,20 +863,19 @@ impl IndexingChain {
             position += 1;
             field_length = 1;
 
-            let posting_list =
-                per_field.get_or_insert_posting_list(text, has_freqs, has_positions, has_offsets);
+            let posting_list = per_field.get_or_insert_posting_list(
+                text,
+                has_freqs,
+                has_positions,
+                has_offsets,
+                tv_positions,
+                tv_offsets,
+            );
 
             posting_list.record_occurrence(doc_id, position, 0, text.len() as i32);
 
-            if let Some(ref mut map) = tv_terms {
-                let pos = if tv_positions { vec![position] } else { vec![] };
-                let starts = if tv_offsets { vec![0] } else { vec![] };
-                let ends = if tv_offsets {
-                    vec![text.len() as i32]
-                } else {
-                    vec![]
-                };
-                map.insert(text.to_string(), (1, pos, starts, ends));
+            if store_tv {
+                posting_list.record_tv_occurrence(position, 0, text.len() as i32);
             }
         }
 
@@ -798,36 +887,13 @@ impl IndexingChain {
             per_field.norms_docs.push(doc_id);
         }
 
-        if let Some(tv_map) = tv_terms
-            && !tv_map.is_empty()
-        {
-            let mut terms: Vec<TermVectorTerm> = tv_map
-                .into_iter()
-                .map(|(text, (freq, positions, start_offsets, end_offsets))| {
-                    let offsets = if start_offsets.is_empty() {
-                        None
-                    } else {
-                        Some(Box::new(OffsetBuffers {
-                            start_offsets,
-                            end_offsets,
-                        }))
-                    };
-                    TermVectorTerm {
-                        term: text,
-                        freq,
-                        positions,
-                        offsets,
-                    }
-                })
-                .collect();
-            terms.sort_by(|a, b| a.term.as_bytes().cmp(b.term.as_bytes()));
-            return Ok(Some(TermVectorField {
-                field_number: meta.number,
-                has_positions: tv_positions,
-                has_offsets: tv_offsets,
-                has_payloads: tv_payloads,
-                terms,
-            }));
+        if store_tv {
+            return Ok(per_field.take_term_vector_data(
+                meta.number,
+                tv_positions,
+                tv_offsets,
+                tv_payloads,
+            ));
         }
         Ok(None)
     }
@@ -1249,7 +1315,7 @@ mod tests {
     fn test_posting_list_with_offsets_roundtrip() {
         // Exercises offset recording in record_occurrence AND offset
         // consumption in decode()
-        let mut pl = PostingList::new(true, true, true);
+        let mut pl = PostingList::new(true, true, true, false, false);
 
         // Doc 0: two occurrences
         pl.record_occurrence(0, 0, 0, 5);
@@ -1270,7 +1336,7 @@ mod tests {
         assert_eq!(decoded[1].positions, vec![0]);
 
         // Verify offset data was encoded (byte_stream is larger than without offsets)
-        let mut pl_no_offsets = PostingList::new(true, true, false);
+        let mut pl_no_offsets = PostingList::new(true, true, false, false, false);
         pl_no_offsets.record_occurrence(0, 0, 0, 5);
         pl_no_offsets.record_occurrence(0, 1, 6, 11);
         pl_no_offsets.record_occurrence(1, 0, 0, 3);
@@ -1583,7 +1649,7 @@ mod tests {
     fn test_posting_list_byte_stream_compact() {
         // Build a PostingList with 10 docs via the API, then verify the
         // byte_stream is much smaller than old Posting-based storage would be.
-        let mut pl = PostingList::new(true, true, false);
+        let mut pl = PostingList::new(true, true, false, false, false);
         for doc_id in 0..10 {
             pl.start_doc(doc_id);
             pl.add_position(0);
@@ -2041,5 +2107,32 @@ mod tests {
         let body_fi = chain.build_field_infos();
         let body_number = body_fi.field_info_by_name("body").unwrap().number();
         assert_eq!(tv_doc.fields[0].field_number, body_number);
+    }
+
+    #[test]
+    fn measure_tv_ram_overhead() {
+        let analyzer = make_analyzer();
+        let text = "hello world foo bar baz alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega ".repeat(60);
+
+        for n in [1, 10, 50] {
+            let mut chain_no_tv = IndexingChain::new();
+            let mut chain_tv = IndexingChain::new();
+            for _ in 0..n {
+                let mut doc = Document::new();
+                doc.add(document::text_field("contents", &text));
+                chain_no_tv.process_document(doc, &analyzer).unwrap();
+
+                let mut doc2 = Document::new();
+                doc2.add(document::text_field_with_term_vectors("contents", &text));
+                chain_tv.process_document(doc2, &analyzer).unwrap();
+            }
+            let no_tv = chain_no_tv.ram_bytes_used();
+            let tv = chain_tv.ram_bytes_used();
+            eprintln!(
+                "{n:>3} docs: no_tv={no_tv:>8}, tv={tv:>8}, overhead={:>8} ({:.1}x)",
+                tv - no_tv,
+                tv as f64 / no_tv as f64
+            );
+        }
     }
 }

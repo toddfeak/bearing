@@ -1313,7 +1313,7 @@ mod tests {
     /// would build postings during document processing.
     fn make_posting_list(postings: &[(i32, i32, &[i32])], has_positions: bool) -> PostingList {
         let has_freqs = true; // all test cases use freqs
-        let mut pl = PostingList::new(has_freqs, has_positions, false);
+        let mut pl = PostingList::new(has_freqs, has_positions, false, false, false);
         for &(doc_id, freq, positions) in postings {
             pl.start_doc(doc_id);
             // freq starts at 1 from start_doc, so increment (freq-1) times
