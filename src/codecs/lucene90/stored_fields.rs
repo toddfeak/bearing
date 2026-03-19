@@ -267,7 +267,7 @@ pub fn write(
 
 /// Compress data using LZ4 with preset dictionary format.
 /// Matches Java's LZ4WithPresetDictCompressor.compress().
-fn compress_lz4_preset_dict(data: &[u8], out: &mut dyn DataOutput) -> io::Result<()> {
+pub(crate) fn compress_lz4_preset_dict(data: &[u8], out: &mut dyn DataOutput) -> io::Result<()> {
     let len = data.len();
     let dict_length = std::cmp::min(LZ4_MAX_DISTANCE, len / (NUM_SUB_BLOCKS * DICT_SIZE_FACTOR));
     let block_length = if len <= dict_length {

@@ -28,6 +28,7 @@ The Java implementation of **Apache Lucene 10.3.2** is the canonical source. All
 ```bash
 cargo build                    # debug build
 cargo test                     # run all tests
+cargo fmt                      # format code after editing
 cargo clippy                   # lint
 ./tests/e2e_all.sh             # all e2e tests (indexing, impacts, compression)
 ```
@@ -38,14 +39,13 @@ cargo clippy                   # lint
 
 - Write idiomatic Rust. Use traits, enums, `Result`/`Option` — not 1:1 Java translation.
 - Runtime dependencies extremely limited. Avoid adding more without explicit request, but also avoid reimplementing common libraries.
-- Use `io::Result<T>` for all fallible operations. Create errors with `io::Error::other("message")`.
-- No unsafe code.
 - Unimplemented methods should use `todo!("description")` or return `Err(...)`.
 - **Byte order**: Little-endian (LE) for data, big-endian (BE) for codec headers/footers. This is the #1 source of bugs — always verify against the Java source.
 - **CRC32**: Must match `java.util.zip.CRC32` (polynomial `0xEDB88320`).
 - **Codec module naming**: Codec implementations live under version-named modules matching the Java package (e.g., `codecs::lucene90`, `codecs::lucene103`). Version-agnostic utilities stay directly under `codecs`.
 - **Logging**: Use `log::debug!` at semantic boundaries (codec headers/footers, flush decisions). Do not log in hot loops.
 - **Rustdoc**: Keep `///` and `//!` documentation up to date when changing public API. All public items must be documented.
+- Only mention that something is ported from Lucene if it is very specific to Lucene, like a custom compression algorithm. The whole project is a port, we don't need to repeat it in comments.
 
 ## Testing
 

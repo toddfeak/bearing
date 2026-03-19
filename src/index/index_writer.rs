@@ -477,6 +477,20 @@ pub(crate) fn flush_segment_to_files(
     }
     all_file_names.extend(sf_names);
 
+    // 7. Term vectors (.tvd, .tvx, .tvm)
+    let tv_names = lucene90::term_vectors::write(
+        directory,
+        &si.name,
+        "",
+        &si.id,
+        chain.term_vector_docs(),
+        chain.num_docs(),
+    )?;
+    for name in &tv_names {
+        debug!("flush: wrote {}", name);
+    }
+    all_file_names.extend(tv_names);
+
     debug!("flush: {} per-segment files", all_file_names.len());
 
     // All codec files are already written to directory (auto-persisted on drop).

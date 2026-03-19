@@ -516,6 +516,11 @@ impl IndexingChain {
         &self.stored_docs
     }
 
+    /// Returns the term vector data for all documents, in doc order.
+    pub fn term_vector_docs(&self) -> &[TermVectorDoc] {
+        &self.term_vector_docs
+    }
+
     pub fn num_docs(&self) -> i32 {
         self.num_docs
     }
@@ -913,14 +918,6 @@ impl IndexingChain {
         let mut fields: Vec<FieldInfo> = self.field_infos.values().cloned().collect();
         fields.sort_by_key(|fi| fi.number());
         FieldInfos::new(fields)
-    }
-}
-
-#[cfg(test)]
-impl IndexingChain {
-    /// Returns the term vector data for all documents, in doc order.
-    pub fn term_vector_docs(&self) -> &[TermVectorDoc] {
-        &self.term_vector_docs
     }
 }
 

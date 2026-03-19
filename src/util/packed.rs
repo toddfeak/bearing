@@ -31,6 +31,7 @@ pub struct DirectWriter {
 }
 
 impl DirectWriter {
+    /// Creates a new writer with the given bits-per-value.
     pub fn new(bits_per_value: u32) -> Self {
         Self {
             bits_per_value,
@@ -38,6 +39,7 @@ impl DirectWriter {
         }
     }
 
+    /// Adds a value to the writer.
     pub fn add(&mut self, value: i64) {
         self.values.push(value);
     }
@@ -131,6 +133,7 @@ pub struct DirectMonotonicWriter {
 }
 
 impl DirectMonotonicWriter {
+    /// Creates a new writer with the given block shift.
     pub fn new(block_shift: u32) -> Self {
         Self {
             block_shift,
@@ -138,6 +141,7 @@ impl DirectMonotonicWriter {
         }
     }
 
+    /// Adds a value to the writer.
     pub fn add(&mut self, value: i64) {
         self.values.push(value);
     }
@@ -209,231 +213,232 @@ pub fn bits_required(value: u64) -> u32 {
     }
 }
 
+// Port of Lucene's BlockPackedWriter and PackedInts MSB-first integer packing codec.
+// Key Java sources: AbstractBlockPackedWriter, BlockPackedWriter, BulkOperationPacked.
+
+/// Returns the raw number of bits required to represent `value`, treating it as unsigned.
+///
+/// Unlike [`unsigned_bits_required`], this does NOT round up to a supported BPV.
+/// Returns `max(1, 64 - leading_zeros)`.
+pub(crate) fn packed_bits_required(value: i64) -> u32 {
+    if value == 0 {
+        1
+    } else {
+        64 - (value as u64).leading_zeros()
+    }
+}
+
+/// Returns the maximum value representable with the given number of bits.
+fn packed_max_value(bits_per_value: u32) -> i64 {
+    if bits_per_value == 64 {
+        i64::MAX
+    } else {
+        !(!0i64 << bits_per_value)
+    }
+}
+
+/// Packs `count` values MSB-first into bytes.
+///
+/// Returns exactly `ceil(count * bits_per_value / 8)` bytes.
+fn pack_msb(values: &[i64], count: usize, bits_per_value: u32) -> Vec<u8> {
+    let total_bytes = (count as u64 * bits_per_value as u64).div_ceil(8) as usize;
+    let mut blocks = vec![0u8; total_bytes];
+    let mut blocks_offset = 0;
+    let mut next_block: u8 = 0;
+    let mut bits_left: u32 = 8;
+    let bpv = bits_per_value;
+
+    for &value in values.iter().take(count) {
+        let v = value as u64;
+        if bpv < bits_left {
+            // just buffer
+            next_block |= (v << (bits_left - bpv)) as u8;
+            bits_left -= bpv;
+        } else {
+            // flush as many blocks as possible
+            let mut bits = bpv - bits_left;
+            blocks[blocks_offset] = next_block | (v >> bits) as u8;
+            blocks_offset += 1;
+            while bits >= 8 {
+                bits -= 8;
+                blocks[blocks_offset] = (v >> bits) as u8;
+                blocks_offset += 1;
+            }
+            // then buffer
+            bits_left = 8 - bits;
+            next_block = ((v & ((1u64 << bits) - 1)) << bits_left) as u8;
+        }
+    }
+
+    // Write final partial byte if there are buffered bits
+    if bits_left < 8 && blocks_offset < total_bytes {
+        blocks[blocks_offset] = next_block;
+    }
+
+    blocks
+}
+
+/// Writes packed integers MSB-first (big-endian bit packing).
+///
+/// Values are packed contiguously with high-order bits first, producing
+/// `ceil(count * bpv / 8)` bytes.
+pub(crate) fn packed_ints_write(
+    output: &mut dyn DataOutput,
+    values: &[i64],
+    bits_per_value: u32,
+) -> io::Result<()> {
+    let packed = pack_msb(values, values.len(), bits_per_value);
+    output.write_bytes(&packed)
+}
+
+/// Writes a variable-length long that handles negative values via unsigned right shift.
+///
+/// NOT the same as `DataOutput::write_vlong`.
+fn write_block_packed_vlong(output: &mut dyn DataOutput, value: i64) -> io::Result<()> {
+    let mut i = value as u64;
+    let mut k = 0;
+    while (i & !0x7F) != 0 && k < 8 {
+        output.write_byte((i & 0x7F | 0x80) as u8)?;
+        i >>= 7;
+        k += 1;
+    }
+    output.write_byte(i as u8)
+}
+
+/// Zigzag-encodes a signed long into an unsigned representation.
+fn zigzag_encode(v: i64) -> i64 {
+    (v << 1) ^ (v >> 63)
+}
+
+/// Token byte layout: bits 1-7 = bitsPerValue, bit 0 = min-is-zero flag.
+const BPV_SHIFT: u32 = 1;
+const MIN_VALUE_EQUALS_0: u8 = 1;
+
+/// Writes large sequences of longs using block-level delta compression.
+///
+/// Values are split into fixed-size blocks. For each block, the minimum value is subtracted
+/// and the deltas are packed MSB-first using the minimum number of bits required. Each block
+/// has a 1–10 byte header encoding the bits-per-value and optional minimum.
+pub(crate) struct BlockPackedWriter {
+    block_size: usize,
+    values: Vec<i64>,
+    off: usize,
+    ord: u64,
+    finished: bool,
+}
+
+impl BlockPackedWriter {
+    /// Creates a new writer with the given block size, which must be a multiple of 64.
+    pub(crate) fn new(block_size: usize) -> Self {
+        assert!(
+            block_size >= 64 && block_size.is_multiple_of(64),
+            "block_size must be a multiple of 64, got {block_size}"
+        );
+        Self {
+            block_size,
+            values: vec![0i64; block_size],
+            off: 0,
+            ord: 0,
+            finished: false,
+        }
+    }
+
+    /// Appends a value, flushing the current block if full.
+    pub(crate) fn add(&mut self, output: &mut dyn DataOutput, value: i64) -> io::Result<()> {
+        assert!(!self.finished, "already finished");
+        if self.off == self.block_size {
+            self.flush(output)?;
+        }
+        self.values[self.off] = value;
+        self.off += 1;
+        self.ord += 1;
+        Ok(())
+    }
+
+    /// Flushes any remaining values and marks the writer as finished.
+    pub(crate) fn finish(&mut self, output: &mut dyn DataOutput) -> io::Result<()> {
+        assert!(!self.finished, "already finished");
+        if self.off > 0 {
+            self.flush(output)?;
+        }
+        self.finished = true;
+        Ok(())
+    }
+
+    /// Returns the number of values added so far.
+    #[cfg(test)]
+    pub(crate) fn ord(&self) -> u64 {
+        self.ord
+    }
+
+    /// Resets the writer for reuse with a new output.
+    pub(crate) fn reset(&mut self) {
+        self.off = 0;
+        self.ord = 0;
+        self.finished = false;
+    }
+
+    fn flush(&mut self, output: &mut dyn DataOutput) -> io::Result<()> {
+        assert!(self.off > 0);
+
+        let mut min = i64::MAX;
+        let mut max = i64::MIN;
+        for i in 0..self.off {
+            min = min.min(self.values[i]);
+            max = max.max(self.values[i]);
+        }
+
+        let delta = max.wrapping_sub(min);
+        let bpv = if delta == 0 {
+            0
+        } else {
+            packed_bits_required(delta)
+        };
+
+        if bpv == 64 {
+            // No need to delta-encode
+            min = 0;
+        } else if min > 0 {
+            // Shrink min so writeVLong needs fewer bytes
+            min = 0i64.max(max - packed_max_value(bpv));
+        }
+
+        let token = ((bpv << BPV_SHIFT)
+            | if min == 0 {
+                MIN_VALUE_EQUALS_0 as u32
+            } else {
+                0
+            }) as u8;
+        output.write_byte(token)?;
+
+        if min != 0 {
+            write_block_packed_vlong(output, zigzag_encode(min) - 1)?;
+        }
+
+        if bpv > 0 {
+            if min != 0 {
+                for i in 0..self.off {
+                    self.values[i] -= min;
+                }
+            }
+            // Zero-fill remainder so pack_msb doesn't read stale values
+            for i in self.off..self.block_size {
+                self.values[i] = 0;
+            }
+
+            let packed = pack_msb(&self.values, self.off, bpv);
+            output.write_bytes(&packed)?;
+        }
+
+        self.off = 0;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::memory::MemoryIndexOutput;
-
-    // Port of Lucene's BlockPackedWriter and PackedInts MSB-first integer packing codec.
-    // Key Java sources: AbstractBlockPackedWriter, BlockPackedWriter, BulkOperationPacked.
-
-    /// Returns the raw number of bits required to represent `value`, treating it as unsigned.
-    ///
-    /// Unlike [`unsigned_bits_required`], this does NOT round up to a supported BPV.
-    /// Returns `max(1, 64 - leading_zeros)`.
-    pub fn packed_bits_required(value: i64) -> u32 {
-        if value == 0 {
-            1
-        } else {
-            64 - (value as u64).leading_zeros()
-        }
-    }
-
-    /// Returns the maximum value representable with the given number of bits.
-    fn packed_max_value(bits_per_value: u32) -> i64 {
-        if bits_per_value == 64 {
-            i64::MAX
-        } else {
-            !(!0i64 << bits_per_value)
-        }
-    }
-
-    /// Packs `count` values MSB-first into bytes.
-    ///
-    /// Returns exactly `ceil(count * bits_per_value / 8)` bytes.
-    fn pack_msb(values: &[i64], count: usize, bits_per_value: u32) -> Vec<u8> {
-        let total_bytes = (count as u64 * bits_per_value as u64).div_ceil(8) as usize;
-        let mut blocks = vec![0u8; total_bytes];
-        let mut blocks_offset = 0;
-        let mut next_block: u8 = 0;
-        let mut bits_left: u32 = 8;
-        let bpv = bits_per_value;
-
-        for &value in values.iter().take(count) {
-            let v = value as u64;
-            if bpv < bits_left {
-                // just buffer
-                next_block |= (v << (bits_left - bpv)) as u8;
-                bits_left -= bpv;
-            } else {
-                // flush as many blocks as possible
-                let mut bits = bpv - bits_left;
-                blocks[blocks_offset] = next_block | (v >> bits) as u8;
-                blocks_offset += 1;
-                while bits >= 8 {
-                    bits -= 8;
-                    blocks[blocks_offset] = (v >> bits) as u8;
-                    blocks_offset += 1;
-                }
-                // then buffer
-                bits_left = 8 - bits;
-                next_block = ((v & ((1u64 << bits) - 1)) << bits_left) as u8;
-            }
-        }
-
-        // Write final partial byte if there are buffered bits
-        if bits_left < 8 && blocks_offset < total_bytes {
-            blocks[blocks_offset] = next_block;
-        }
-
-        blocks
-    }
-
-    /// Writes packed integers MSB-first (big-endian bit packing).
-    ///
-    /// Values are packed contiguously with high-order bits first, producing
-    /// `ceil(count * bpv / 8)` bytes.
-    pub fn packed_ints_write(
-        output: &mut dyn DataOutput,
-        values: &[i64],
-        bits_per_value: u32,
-    ) -> io::Result<()> {
-        let packed = pack_msb(values, values.len(), bits_per_value);
-        output.write_bytes(&packed)
-    }
-
-    /// Writes a variable-length long that handles negative values via unsigned right shift.
-    ///
-    /// NOT the same as `DataOutput::write_vlong`.
-    fn write_block_packed_vlong(output: &mut dyn DataOutput, value: i64) -> io::Result<()> {
-        let mut i = value as u64;
-        let mut k = 0;
-        while (i & !0x7F) != 0 && k < 8 {
-            output.write_byte((i & 0x7F | 0x80) as u8)?;
-            i >>= 7;
-            k += 1;
-        }
-        output.write_byte(i as u8)
-    }
-
-    /// Zigzag-encodes a signed long into an unsigned representation.
-    fn zigzag_encode(v: i64) -> i64 {
-        (v << 1) ^ (v >> 63)
-    }
-
-    /// Writes large sequences of longs using block-level delta compression.
-    ///
-    /// Values are split into fixed-size blocks. For each block, the minimum value is subtracted
-    /// and the deltas are packed MSB-first using the minimum number of bits required. Each block
-    /// has a 1–10 byte header encoding the bits-per-value and optional minimum.
-    pub struct BlockPackedWriter {
-        block_size: usize,
-        values: Vec<i64>,
-        off: usize,
-        ord: u64,
-        finished: bool,
-    }
-
-    /// Token byte layout: bits 1-7 = bitsPerValue, bit 0 = min-is-zero flag.
-    const BPV_SHIFT: u32 = 1;
-    const MIN_VALUE_EQUALS_0: u8 = 1;
-
-    impl BlockPackedWriter {
-        /// Creates a new writer with the given block size, which must be a multiple of 64.
-        pub fn new(block_size: usize) -> Self {
-            assert!(
-                block_size >= 64 && block_size.is_multiple_of(64),
-                "block_size must be a multiple of 64, got {block_size}"
-            );
-            Self {
-                block_size,
-                values: vec![0i64; block_size],
-                off: 0,
-                ord: 0,
-                finished: false,
-            }
-        }
-
-        /// Appends a value, flushing the current block if full.
-        pub fn add(&mut self, output: &mut dyn DataOutput, value: i64) -> io::Result<()> {
-            assert!(!self.finished, "already finished");
-            if self.off == self.block_size {
-                self.flush(output)?;
-            }
-            self.values[self.off] = value;
-            self.off += 1;
-            self.ord += 1;
-            Ok(())
-        }
-
-        /// Flushes any remaining values and marks the writer as finished.
-        pub fn finish(&mut self, output: &mut dyn DataOutput) -> io::Result<()> {
-            assert!(!self.finished, "already finished");
-            if self.off > 0 {
-                self.flush(output)?;
-            }
-            self.finished = true;
-            Ok(())
-        }
-
-        /// Returns the number of values added so far.
-        pub fn ord(&self) -> u64 {
-            self.ord
-        }
-
-        /// Resets the writer for reuse with a new output.
-        pub fn reset(&mut self) {
-            self.off = 0;
-            self.ord = 0;
-            self.finished = false;
-        }
-
-        fn flush(&mut self, output: &mut dyn DataOutput) -> io::Result<()> {
-            assert!(self.off > 0);
-
-            let mut min = i64::MAX;
-            let mut max = i64::MIN;
-            for i in 0..self.off {
-                min = min.min(self.values[i]);
-                max = max.max(self.values[i]);
-            }
-
-            let delta = max.wrapping_sub(min);
-            let bpv = if delta == 0 {
-                0
-            } else {
-                packed_bits_required(delta)
-            };
-
-            if bpv == 64 {
-                // No need to delta-encode
-                min = 0;
-            } else if min > 0 {
-                // Shrink min so writeVLong needs fewer bytes
-                min = 0i64.max(max - packed_max_value(bpv));
-            }
-
-            let token = ((bpv << BPV_SHIFT)
-                | if min == 0 {
-                    MIN_VALUE_EQUALS_0 as u32
-                } else {
-                    0
-                }) as u8;
-            output.write_byte(token)?;
-
-            if min != 0 {
-                write_block_packed_vlong(output, zigzag_encode(min) - 1)?;
-            }
-
-            if bpv > 0 {
-                if min != 0 {
-                    for i in 0..self.off {
-                        self.values[i] -= min;
-                    }
-                }
-                // Zero-fill remainder so pack_msb doesn't read stale values
-                for i in self.off..self.block_size {
-                    self.values[i] = 0;
-                }
-
-                let packed = pack_msb(&self.values, self.off, bpv);
-                output.write_bytes(&packed)?;
-            }
-
-            self.off = 0;
-            Ok(())
-        }
-    }
 
     #[test]
     fn test_bits_required() {
@@ -445,7 +450,6 @@ mod tests {
         assert_eq!(bits_required(256), 9);
     }
 
-    // Ported from org.apache.lucene.util.packed.TestDirectWriter
     #[test]
     fn test_unsigned_bits_required() {
         // 0 → raw=1 → rounds to 1
@@ -476,7 +480,6 @@ mod tests {
         assert_eq!(unsigned_bits_required(-1), 64);
     }
 
-    // Ported from org.apache.lucene.util.packed.TestDirectWriter
     #[test]
     fn test_direct_writer_bpv8_lsb_first() {
         // bpv=8: each value is 1 byte LE
