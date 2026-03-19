@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::io;
 
+use std::sync::Arc;
+
 use crate::analysis::Analyzer;
 use crate::document::Document;
 use crate::index::index_writer::{FlushedSegment, SegmentWriteState, flush_segment_to_files};
@@ -21,14 +23,16 @@ use crate::util::string_helper;
 pub struct SegmentWorker {
     chain: IndexingChain,
     segment_name: String,
+    directory: Arc<SharedDirectory>,
 }
 
 impl SegmentWorker {
-    /// Creates a new worker with the given segment name and global field numbers.
+    /// Creates a new worker with the given segment name, global field numbers, and directory.
     pub fn new(
         segment_name: String,
         global_field_numbers: HashMap<String, u32>,
         next_field_number: u32,
+        directory: Arc<SharedDirectory>,
     ) -> Self {
         Self {
             chain: IndexingChain::with_global_field_numbers(
@@ -36,6 +40,7 @@ impl SegmentWorker {
                 next_field_number,
             ),
             segment_name,
+            directory,
         }
     }
 
@@ -54,6 +59,11 @@ impl SegmentWorker {
         self.chain.ram_bytes_used()
     }
 
+    /// Logs a per-component memory breakdown for debugging.
+    pub fn log_ram_breakdown(&self, label: &str) {
+        self.chain.log_ram_breakdown(label);
+    }
+
     /// Returns the segment name for this worker.
     pub fn segment_name(&self) -> &str {
         &self.segment_name
@@ -66,12 +76,8 @@ impl SegmentWorker {
 
     /// Consumes this worker, flushing its chain into a FlushedSegment.
     ///
-    /// Segment files are written to the given directory immediately.
-    pub(crate) fn flush(
-        mut self,
-        directory: &SharedDirectory,
-        use_compound_file: bool,
-    ) -> io::Result<FlushedSegment> {
+    /// Segment files are written to the worker's directory immediately.
+    pub(crate) fn flush(mut self, use_compound_file: bool) -> io::Result<FlushedSegment> {
         if self.chain.num_docs() == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -84,7 +90,7 @@ impl SegmentWorker {
         self.chain.finalize_pending_postings();
 
         let state = Self::build_write_state(&self.chain, &self.segment_name, use_compound_file);
-        flush_segment_to_files(&state, directory, use_compound_file)
+        flush_segment_to_files(&state, &self.directory, use_compound_file)
     }
 
     fn build_write_state<'a>(
@@ -132,6 +138,8 @@ impl SegmentWorker {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::analysis::standard::StandardAnalyzer;
     use crate::document;
@@ -144,7 +152,8 @@ mod tests {
 
     #[test]
     fn test_worker_add_and_flush() {
-        let mut worker = SegmentWorker::new("_0".to_string(), HashMap::new(), 0);
+        let dir = Arc::new(test_directory());
+        let mut worker = SegmentWorker::new("_0".to_string(), HashMap::new(), 0, Arc::clone(&dir));
         let analyzer = StandardAnalyzer::new();
 
         let mut doc = Document::new();
@@ -156,8 +165,7 @@ mod tests {
         assert_eq!(worker.num_docs(), 1);
         assert_eq!(worker.segment_name(), "_0");
 
-        let dir = test_directory();
-        let flushed = worker.flush(&dir, true).unwrap();
+        let flushed = worker.flush(true).unwrap();
         assert_eq!(flushed.segment_commit_info.info.name, "_0");
         assert_eq!(flushed.segment_commit_info.info.max_doc, 1);
         assert_not_empty!(flushed.file_names);
@@ -165,8 +173,8 @@ mod tests {
 
     #[test]
     fn test_worker_flush_empty_fails() {
-        let dir = test_directory();
-        let worker = SegmentWorker::new("_0".to_string(), HashMap::new(), 0);
-        assert!(worker.flush(&dir, true).is_err());
+        let dir = Arc::new(test_directory());
+        let worker = SegmentWorker::new("_0".to_string(), HashMap::new(), 0, Arc::clone(&dir));
+        assert!(worker.flush(true).is_err());
     }
 }

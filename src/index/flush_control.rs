@@ -99,7 +99,12 @@ mod tests {
     }
 
     fn make_worker(name: &str) -> SegmentWorker {
-        SegmentWorker::new(name.to_string(), HashMap::new(), 0)
+        use crate::store::memory::MemoryDirectory;
+        use std::sync::{Arc, Mutex};
+        let dir = Arc::new(Mutex::new(
+            Box::new(MemoryDirectory::new()) as Box<dyn crate::store::Directory>
+        ));
+        SegmentWorker::new(name.to_string(), HashMap::new(), 0, dir)
     }
 
     #[test]

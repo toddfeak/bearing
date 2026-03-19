@@ -9,7 +9,7 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::TermVectorDoc;
-use crate::store::{DataOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::compress::lz4;
 use crate::util::packed::{
     BlockPackedWriter, DirectMonotonicWriter, DirectWriter, packed_bits_required,
@@ -54,134 +54,223 @@ pub fn write(
 ) -> io::Result<Vec<String>> {
     let tvd_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, VECTORS_EXTENSION);
-    let tvx_name =
-        index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-    let tvm_name =
-        index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
 
-    debug!(
-        "term_vectors: writing {tvd_name}, {tvx_name}, {tvm_name} for segment={segment_name:?}, num_docs={num_docs}"
-    );
+    debug!("term_vectors: writing tvd/tvx/tvm for segment={segment_name:?}, num_docs={num_docs}");
 
-    let (mut tvd, mut tvx, mut tvm) = {
+    let tvd = {
         let mut dir = directory.lock().unwrap();
-        (
-            dir.create_output(&tvd_name)?,
-            dir.create_output(&tvx_name)?,
-            dir.create_output(&tvm_name)?,
-        )
+        dir.create_output(&tvd_name)?
     };
 
-    // Write headers
-    codec_util::write_index_header(&mut *tvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
-    codec_util::write_index_header(
-        &mut *tvx,
-        INDEX_CODEC_IDX,
-        VERSION,
-        segment_id,
+    let mut writer = TermVectorChunkWriter::new(tvd, segment_id, segment_suffix)?;
+    for doc in term_vector_docs {
+        writer.add_doc(doc)?;
+    }
+    writer.finish(
+        directory,
+        segment_name,
         segment_suffix,
-    )?;
-    codec_util::write_index_header(
-        &mut *tvm,
-        INDEX_CODEC_META,
-        VERSION,
         segment_id,
-        segment_suffix,
-    )?;
+        num_docs,
+    )
+}
 
-    // Write PackedInts version and chunk size to meta
-    tvm.write_vint(PACKED_INTS_VERSION)?;
-    tvm.write_vint(CHUNK_SIZE)?;
+/// Incrementally accumulates term vector documents and writes them as chunks
+/// to a `.tvd` file. Finalization writes the `.tvx` and `.tvm` index/meta files.
+pub(crate) struct TermVectorChunkWriter {
+    /// Open `.tvd` handle (header already written).
+    tvd: Box<dyn IndexOutput>,
+    /// Documents in the current (unflushed) chunk.
+    pending_docs: Vec<TermVectorDoc>,
+    /// First doc id in the current chunk.
+    doc_base: i32,
+    /// Chunk doc bases accumulated across all flushed chunks (for `.tvx`).
+    doc_bases: Vec<i64>,
+    /// Chunk start pointers accumulated across all flushed chunks (for `.tvx`).
+    start_pointers: Vec<i64>,
+    /// Total number of flushed chunks.
+    num_chunks: i64,
+    /// Number of chunks that were force-flushed (dirty).
+    num_dirty_chunks: i64,
+    /// Number of documents in dirty chunks.
+    num_dirty_docs: i64,
+}
 
-    let chunk_docs = term_vector_docs.len() as i32;
-    let mut num_chunks: i64 = 0;
-    let mut num_dirty_chunks: i64 = 0;
-    let mut num_dirty_docs: i64 = 0;
+impl TermVectorChunkWriter {
+    /// Creates a new chunk writer. Writes the `.tvd` header immediately.
+    pub(crate) fn new(
+        mut tvd: Box<dyn IndexOutput>,
+        segment_id: &[u8; 16],
+        segment_suffix: &str,
+    ) -> io::Result<Self> {
+        codec_util::write_index_header(&mut *tvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
+        Ok(Self {
+            tvd,
+            pending_docs: Vec::new(),
+            doc_base: 0,
+            doc_bases: Vec::new(),
+            start_pointers: Vec::new(),
+            num_chunks: 0,
+            num_dirty_chunks: 0,
+            num_dirty_docs: 0,
+        })
+    }
 
-    // Record chunk start pointer
-    let chunk_start_pointer = tvd.file_pointer() as i64;
+    /// Adds a document's term vector data to the current chunk.
+    pub(crate) fn add_doc(&mut self, doc: &TermVectorDoc) -> io::Result<()> {
+        self.pending_docs.push(doc.clone());
+        Ok(())
+    }
 
-    if chunk_docs > 0 {
-        num_chunks = 1;
-        num_dirty_chunks = 1; // force-flushed at end
-        num_dirty_docs = chunk_docs as i64;
+    /// Writes one chunk of pending documents to `.tvd`.
+    fn flush_chunk(&mut self, dirty: bool) -> io::Result<()> {
+        let docs = &self.pending_docs;
+        let chunk_docs = docs.len() as i32;
+        if chunk_docs == 0 {
+            return Ok(());
+        }
 
-        // Chunk header: docBase=0, (chunkDocs << 1) | 1 (dirty bit)
-        tvd.write_vint(0)?;
-        tvd.write_vint((chunk_docs << 1) | 1)?;
+        // Record chunk position for index
+        self.doc_bases.push(self.doc_base as i64);
+        self.start_pointers.push(self.tvd.file_pointer() as i64);
 
-        let total_fields = flush_num_fields(term_vector_docs, &mut *tvd)?;
+        // Chunk header: docBase, (chunkDocs << 1) | dirty_bit
+        self.tvd.write_vint(self.doc_base)?;
+        let dirty_bit = if dirty { 1 } else { 0 };
+        self.tvd.write_vint((chunk_docs << 1) | dirty_bit)?;
+
+        let total_fields = flush_num_fields(docs, &mut *self.tvd)?;
 
         if total_fields > 0 {
-            let field_nums = flush_field_nums(term_vector_docs, &mut *tvd)?;
-            flush_fields(term_vector_docs, &field_nums, &mut *tvd)?;
-            flush_flags(term_vector_docs, &field_nums, &mut *tvd)?;
-            flush_num_terms(term_vector_docs, &mut *tvd)?;
+            let field_nums = flush_field_nums(docs, &mut *self.tvd)?;
+            flush_fields(docs, &field_nums, &mut *self.tvd)?;
+            flush_flags(docs, &field_nums, &mut *self.tvd)?;
+            flush_num_terms(docs, &mut *self.tvd)?;
 
-            let term_suffixes = flush_term_lengths(term_vector_docs, &mut *tvd)?;
-            flush_term_freqs(term_vector_docs, &mut *tvd)?;
-            flush_positions(term_vector_docs, &mut *tvd)?;
-            flush_offsets(term_vector_docs, &field_nums, &mut *tvd)?;
-            flush_payload_lengths(term_vector_docs, &mut *tvd)?;
+            let term_suffixes = flush_term_lengths(docs, &mut *self.tvd)?;
+            flush_term_freqs(docs, &mut *self.tvd)?;
+            flush_positions(docs, &mut *self.tvd)?;
+            flush_offsets(docs, &field_nums, &mut *self.tvd)?;
+            flush_payload_lengths(docs, &mut *self.tvd)?;
 
             // Compress term suffixes with plain LZ4 (CompressionMode.FAST)
             let compressed = lz4::compress(&term_suffixes);
-            tvd.write_bytes(&compressed)?;
+            self.tvd.write_bytes(&compressed)?;
         }
+
+        self.num_chunks += 1;
+        if dirty {
+            self.num_dirty_chunks += 1;
+            self.num_dirty_docs += chunk_docs as i64;
+        }
+
+        self.doc_base += chunk_docs;
+        self.pending_docs.clear();
+        Ok(())
     }
 
-    let max_pointer = tvd.file_pointer() as i64;
-    let total_chunks = num_chunks as u32;
+    /// Flushes any remaining docs as a dirty chunk, then writes `.tvx` and `.tvm`
+    /// index/meta files. Consumes the writer.
+    ///
+    /// Returns the names of the three files written (`.tvd`, `.tvx`, `.tvm`).
+    pub(crate) fn finish(
+        mut self,
+        directory: &SharedDirectory,
+        segment_name: &str,
+        segment_suffix: &str,
+        segment_id: &[u8; 16],
+        num_docs: i32,
+    ) -> io::Result<Vec<String>> {
+        // Flush remaining docs as a dirty chunk
+        self.flush_chunk(true)?;
 
-    // Write FieldsIndex to .tvx and .tvm (mirrors FieldsIndexWriter.finish())
-    tvm.write_le_int(num_docs)?;
-    tvm.write_le_int(BLOCK_SHIFT as i32)?;
-    tvm.write_le_int((total_chunks + 1) as i32)?;
+        let tvd_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, VECTORS_EXTENSION);
+        let tvx_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
+        let tvm_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
 
-    // docsStartPointer
-    tvm.write_le_long(tvx.file_pointer() as i64)?;
+        let (mut tvx, mut tvm) = {
+            let mut dir = directory.lock().unwrap();
+            (dir.create_output(&tvx_name)?, dir.create_output(&tvm_name)?)
+        };
 
-    // Docs monotonic index (meta → tvm, data → tvx)
-    let mut docs_writer = DirectMonotonicWriter::new(BLOCK_SHIFT);
-    docs_writer.add(0);
-    if total_chunks > 0 {
-        docs_writer.add(num_docs as i64);
+        // Write .tvx and .tvm headers
+        codec_util::write_index_header(
+            &mut *tvx,
+            INDEX_CODEC_IDX,
+            VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+        codec_util::write_index_header(
+            &mut *tvm,
+            INDEX_CODEC_META,
+            VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        // PackedInts version and chunk size
+        tvm.write_vint(PACKED_INTS_VERSION)?;
+        tvm.write_vint(CHUNK_SIZE)?;
+
+        let max_pointer = self.tvd.file_pointer() as i64;
+        let total_chunks = self.num_chunks as u32;
+
+        // Write FieldsIndex to .tvx and .tvm (mirrors FieldsIndexWriter.finish())
+        tvm.write_le_int(num_docs)?;
+        tvm.write_le_int(BLOCK_SHIFT as i32)?;
+        tvm.write_le_int((total_chunks + 1) as i32)?;
+
+        // docsStartPointer
+        tvm.write_le_long(tvx.file_pointer() as i64)?;
+
+        // Docs monotonic index (meta → tvm, data → tvx)
+        // totalChunks + 1 values: starts at 0, ends at num_docs
+        let mut docs_writer = DirectMonotonicWriter::new(BLOCK_SHIFT);
+        docs_writer.add(0);
+        if total_chunks > 0 {
+            docs_writer.add(num_docs as i64);
+        }
+        docs_writer.finish(&mut *tvm, &mut *tvx)?;
+
+        // startPointersStartPointer
+        tvm.write_le_long(tvx.file_pointer() as i64)?;
+
+        // File pointers monotonic index (meta → tvm, data → tvx)
+        let mut fp_writer = DirectMonotonicWriter::new(BLOCK_SHIFT);
+        if total_chunks > 0 {
+            fp_writer.add(self.start_pointers[0]);
+        }
+        fp_writer.add(max_pointer);
+        fp_writer.finish(&mut *tvm, &mut *tvx)?;
+
+        // startPointersEndPointer
+        tvm.write_le_long(tvx.file_pointer() as i64)?;
+
+        // .tvx footer
+        codec_util::write_footer(&mut *tvx)?;
+
+        // maxPointer (into .tvd)
+        tvm.write_le_long(max_pointer)?;
+
+        // Trailing metadata to .tvm
+        debug!(
+            "term_vectors: num_chunks={}, num_dirty_chunks={}, num_dirty_docs={}",
+            self.num_chunks, self.num_dirty_chunks, self.num_dirty_docs
+        );
+        tvm.write_vlong(self.num_chunks)?;
+        tvm.write_vlong(self.num_dirty_chunks)?;
+        tvm.write_vlong(self.num_dirty_docs)?;
+
+        // Footers for .tvm and .tvd
+        codec_util::write_footer(&mut *tvm)?;
+        codec_util::write_footer(&mut *self.tvd)?;
+
+        Ok(vec![tvd_name, tvx_name, tvm_name])
     }
-    docs_writer.finish(&mut *tvm, &mut *tvx)?;
-
-    // startPointersStartPointer
-    tvm.write_le_long(tvx.file_pointer() as i64)?;
-
-    // File pointers monotonic index (meta → tvm, data → tvx)
-    let mut fp_writer = DirectMonotonicWriter::new(BLOCK_SHIFT);
-    if total_chunks > 0 {
-        fp_writer.add(chunk_start_pointer);
-    }
-    fp_writer.add(max_pointer);
-    fp_writer.finish(&mut *tvm, &mut *tvx)?;
-
-    // startPointersEndPointer
-    tvm.write_le_long(tvx.file_pointer() as i64)?;
-
-    // .tvx footer
-    codec_util::write_footer(&mut *tvx)?;
-
-    // maxPointer (into .tvd)
-    tvm.write_le_long(max_pointer)?;
-
-    // Trailing metadata to .tvm
-    debug!(
-        "term_vectors: num_chunks={num_chunks}, num_dirty_chunks={num_dirty_chunks}, num_dirty_docs={num_dirty_docs}"
-    );
-    tvm.write_vlong(num_chunks)?;
-    tvm.write_vlong(num_dirty_chunks)?;
-    tvm.write_vlong(num_dirty_docs)?;
-
-    // Footers for .tvm and .tvd
-    codec_util::write_footer(&mut *tvm)?;
-    codec_util::write_footer(&mut *tvd)?;
-
-    Ok(vec![tvd_name, tvx_name, tvm_name])
 }
 
 /// Writes number of fields per doc. Returns the total field count across all docs.

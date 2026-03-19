@@ -2,10 +2,11 @@
 //! Pool of per-thread segment workers for concurrent indexing.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::index::index_file_names;
 use crate::index::segment_worker::SegmentWorker;
+use crate::store::SharedDirectory;
 
 /// Thread-safe pool of SegmentWorker instances.
 ///
@@ -39,7 +40,7 @@ impl SegmentWorkerPool {
     }
 
     /// Obtains a worker from the pool, creating a new one if none are free.
-    pub fn obtain(&self) -> SegmentWorker {
+    pub fn obtain(&self, directory: &Arc<SharedDirectory>) -> SegmentWorker {
         let mut free = self.free_list.lock().unwrap();
         if let Some(worker) = free.pop_front() {
             return worker;
@@ -51,7 +52,7 @@ impl SegmentWorkerPool {
         let gfn = self.global_field_numbers.lock().unwrap().clone();
         let nfn = *self.next_field_number.lock().unwrap();
 
-        SegmentWorker::new(segment_name, gfn, nfn)
+        SegmentWorker::new(segment_name, gfn, nfn, Arc::clone(directory))
     }
 
     /// Returns a worker to the pool for reuse.
@@ -93,11 +94,17 @@ impl SegmentWorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::memory::MemoryDirectory;
+
+    fn test_directory() -> Arc<SharedDirectory> {
+        Arc::new(Mutex::new(Box::new(MemoryDirectory::new())))
+    }
 
     #[test]
     fn test_obtain_creates_new_worker() {
         let pool = SegmentWorkerPool::new();
-        let worker = pool.obtain();
+        let dir = test_directory();
+        let worker = pool.obtain(&dir);
         assert_eq!(worker.segment_name(), "_0");
         assert_eq!(worker.num_docs(), 0);
     }
@@ -105,8 +112,9 @@ mod tests {
     #[test]
     fn test_obtain_increments_segment_counter() {
         let pool = SegmentWorkerPool::new();
-        let d0 = pool.obtain();
-        let d1 = pool.obtain();
+        let dir = test_directory();
+        let d0 = pool.obtain(&dir);
+        let d1 = pool.obtain(&dir);
         assert_eq!(d0.segment_name(), "_0");
         assert_eq!(d1.segment_name(), "_1");
     }
@@ -114,19 +122,21 @@ mod tests {
     #[test]
     fn test_release_and_reuse() {
         let pool = SegmentWorkerPool::new();
-        let worker = pool.obtain();
+        let dir = test_directory();
+        let worker = pool.obtain(&dir);
         let name = worker.segment_name().to_string();
         pool.release(worker);
 
-        let reused = pool.obtain();
+        let reused = pool.obtain(&dir);
         assert_eq!(reused.segment_name(), name);
     }
 
     #[test]
     fn test_segment_counter() {
         let pool = SegmentWorkerPool::new();
+        let dir = test_directory();
         assert_eq!(pool.segment_counter(), 0);
-        let _d = pool.obtain();
+        let _d = pool.obtain(&dir);
         assert_eq!(pool.segment_counter(), 1);
     }
 }

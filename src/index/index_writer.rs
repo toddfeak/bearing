@@ -143,11 +143,14 @@ impl IndexWriter {
         self.shared.flush_control.wait_if_stalled();
 
         // Obtain a worker (creates new one or reuses free one)
-        let mut worker = self.shared.worker_pool.obtain();
+        let mut worker = self.shared.worker_pool.obtain(&self.shared.directory);
 
         // Process document (no locks held during this CPU-intensive work)
         worker.add_document(doc, self.shared.analyzer.as_ref())?;
         self.shared.total_docs.fetch_add(1, Ordering::Relaxed);
+
+        // Log per-component breakdown after each doc
+        worker.log_ram_breakdown(&format!("after_doc:{}", worker.segment_name()));
 
         // Check flush policy
         let ram_used = worker.ram_bytes_used();
@@ -184,10 +187,7 @@ impl IndexWriter {
         let segment_name = worker.segment_name().to_string();
         let num_docs = worker.num_docs();
 
-        let flushed = worker.flush(
-            &self.shared.directory,
-            self.shared.config.use_compound_file(),
-        )?;
+        let flushed = worker.flush(self.shared.config.use_compound_file())?;
 
         debug!(
             "flush: flushed segment {} with {} docs",
@@ -222,10 +222,7 @@ impl IndexWriter {
                 self.shared
                     .worker_pool
                     .update_field_numbers(worker.field_number_mappings());
-                let flushed = worker.flush(
-                    &self.shared.directory,
-                    self.shared.config.use_compound_file(),
-                )?;
+                let flushed = worker.flush(self.shared.config.use_compound_file())?;
                 self.shared.pending_segments.lock().unwrap().push(flushed);
             }
         }
@@ -236,10 +233,7 @@ impl IndexWriter {
                 self.shared
                     .worker_pool
                     .update_field_numbers(worker.field_number_mappings());
-                let flushed = worker.flush(
-                    &self.shared.directory,
-                    self.shared.config.use_compound_file(),
-                )?;
+                let flushed = worker.flush(self.shared.config.use_compound_file())?;
                 self.shared.pending_segments.lock().unwrap().push(flushed);
             }
         }
