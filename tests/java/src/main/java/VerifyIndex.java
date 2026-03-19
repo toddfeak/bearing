@@ -106,15 +106,25 @@ public class VerifyIndex {
                 ok = false;
             }
 
-            // --- 4. Term query on "contents" for "ancient" (if path field present) ---
-            // Only run this check for indexes built from the standard test docs
-            if (hasPathField) {
-                IndexSearcher searcher = new IndexSearcher(reader);
-                TopDocs hits = searcher.search(new TermQuery(new Term("contents", "ancient")), 10);
-                System.out.println("\nTermQuery 'contents:ancient' => " + hits.totalHits.value() + " hits");
-                if (hits.totalHits.value() == 0) {
-                    System.err.println("FAIL: expected at least 1 hit for 'contents:ancient'");
-                    ok = false;
+            // --- 4. Term query on "contents" (if field has terms) ---
+            for (LeafReaderContext ctx2 : reader.leaves()) {
+                Terms contentsTerms = ctx2.reader().terms("contents");
+                if (contentsTerms != null) {
+                    TermsEnum te = contentsTerms.iterator();
+                    if (te.next() != null) {
+                        String firstTerm = te.term().utf8ToString();
+                        IndexSearcher searcher = new IndexSearcher(reader);
+                        TopDocs hits = searcher.search(
+                            new TermQuery(new Term("contents", firstTerm)), 10);
+                        System.out.println("\nTermQuery 'contents:" + firstTerm
+                            + "' => " + hits.totalHits.value() + " hits");
+                        if (hits.totalHits.value() == 0) {
+                            System.err.println("FAIL: expected at least 1 hit for 'contents:"
+                                + firstTerm + "'");
+                            ok = false;
+                        }
+                    }
+                    break; // only need one leaf
                 }
             }
 

@@ -2,10 +2,16 @@
 
 ## E2E Test
 
-The end-to-end test builds the binary, indexes `testdata/docs`, verifies index files on disk, tests re-indexing, and validates with Java Lucene's VerifyIndex.
+Single unified script that builds the Rust `indexfiles` binary, indexes `testdata/impact-docs` (150 docs), and validates the output:
+
+1. Verify expected index files on disk (18 files)
+2. Re-index over existing index (idempotency)
+3. Index with `--compound` → verify `.cfs`/`.cfe` exist
+4. Java `VerifyIndex` on Rust index (stored fields, terms, points, doc values, term vectors, features, ranges)
+5. Java `VerifyImpacts` on Rust index (competitive impact data in skip blocks)
 
 ```bash
-./tests/e2e_indexfiles.sh
+./tests/e2e_all.sh
 ```
 
 ## Java Test Utilities
@@ -14,26 +20,9 @@ The end-to-end test builds the binary, indexes `testdata/docs`, verifies index f
 
 | Utility | Purpose |
 |---|---|
-| `VerifyIndex` | Validates index structure, stored fields, term counts, and queries |
+| `VerifyIndex` | Validates index structure, stored fields, term counts, queries, points, doc values, term vectors, features, and ranges |
 | `VerifyImpacts` | Checks competitive impact data in `.doc` skip blocks for proper norms |
-| `VerifyTimCompression` | Inspects `.tim` block compression codes via reflection (NO_COMPRESSION, LOWERCASE_ASCII, LZ4) |
 | `IndexAllFields` | Indexes documents with all field types (baseline for cross-validation) |
-
-## Impact Verification
-
-Verifies that Rust-generated indexes contain proper competitive impact data (norms in `.doc` skip blocks). Requires a 500-doc corpus to produce terms with docFreq >= 128.
-
-```bash
-./tests/e2e_verify_impacts.sh
-```
-
-## Tim Compression Verification
-
-Verifies that Rust-generated indexes use suffix compression (LOWERCASE_ASCII and LZ4) in `.tim` blocks, matching Java Lucene's behavior.
-
-```bash
-./tests/e2e_verify_tim_compression.sh
-```
 
 ## Performance Comparison
 
