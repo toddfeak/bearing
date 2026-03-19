@@ -620,6 +620,13 @@ impl IndexingChain {
         &self.term_vector_docs
     }
 
+    /// Takes the most recently added term vector doc, leaving `None` in its place.
+    /// Used by `SegmentWorker` to stream TV data to the chunk writer instead of
+    /// accumulating in memory.
+    pub fn take_last_tv_doc(&mut self) -> Option<TermVectorDoc> {
+        self.term_vector_docs.pop()
+    }
+
     pub fn num_docs(&self) -> i32 {
         self.num_docs
     }

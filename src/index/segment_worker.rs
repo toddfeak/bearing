@@ -10,7 +10,9 @@ use std::io;
 use std::sync::Arc;
 
 use crate::analysis::Analyzer;
+use crate::codecs::lucene90::term_vectors::TermVectorChunkWriter;
 use crate::document::Document;
+use crate::index::index_file_names;
 use crate::index::index_writer::{FlushedSegment, SegmentWriteState, flush_segment_to_files};
 use crate::index::indexing_chain::IndexingChain;
 use crate::index::{SegmentCommitInfo, SegmentInfo};
@@ -24,6 +26,10 @@ pub struct SegmentWorker {
     chain: IndexingChain,
     segment_name: String,
     directory: Arc<SharedDirectory>,
+    /// Segment ID, generated at worker creation for use by streaming codec writers.
+    segment_id: [u8; 16],
+    /// Streaming term vector writer, lazily created on first TV doc.
+    tv_writer: Option<TermVectorChunkWriter>,
 }
 
 impl SegmentWorker {
@@ -41,12 +47,36 @@ impl SegmentWorker {
             ),
             segment_name,
             directory,
+            segment_id: string_helper::random_id(),
+            tv_writer: None,
         }
     }
 
-    /// Adds a document to this worker's indexing chain.
+    /// Adds a document to this worker's indexing chain, streaming term vectors.
     pub fn add_document(&mut self, doc: Document, analyzer: &dyn Analyzer) -> io::Result<()> {
-        self.chain.process_document(doc, analyzer)
+        self.chain.process_document(doc, analyzer)?;
+
+        // Stream term vector data to chunk writer instead of accumulating
+        if let Some(tv_doc) = self.chain.take_last_tv_doc()
+            && !tv_doc.fields.is_empty()
+        {
+            let writer = self.ensure_tv_writer()?;
+            writer.add_doc(&tv_doc)?;
+        }
+        Ok(())
+    }
+
+    /// Lazily creates the term vector chunk writer on first TV doc.
+    fn ensure_tv_writer(&mut self) -> io::Result<&mut TermVectorChunkWriter> {
+        if self.tv_writer.is_none() {
+            let tvd_name = index_file_names::segment_file_name(&self.segment_name, "", "tvd");
+            let tvd = {
+                let mut dir = self.directory.lock().unwrap();
+                dir.create_output(&tvd_name)?
+            };
+            self.tv_writer = Some(TermVectorChunkWriter::new(tvd, &self.segment_id, "")?);
+        }
+        Ok(self.tv_writer.as_mut().unwrap())
     }
 
     /// Returns the number of documents buffered in this worker.
@@ -56,7 +86,9 @@ impl SegmentWorker {
 
     /// Returns the estimated RAM bytes used by this worker's buffered data.
     pub fn ram_bytes_used(&self) -> usize {
-        self.chain.ram_bytes_used()
+        let chain_bytes = self.chain.ram_bytes_used();
+        let tv_bytes = self.tv_writer.as_ref().map_or(0, |w| w.ram_bytes_used());
+        chain_bytes + tv_bytes
     }
 
     /// Logs a per-component memory breakdown for debugging.
@@ -89,16 +121,34 @@ impl SegmentWorker {
         // for every PostingList into the byte stream) before flush.
         self.chain.finalize_pending_postings();
 
-        let state = Self::build_write_state(&self.chain, &self.segment_name, use_compound_file);
-        flush_segment_to_files(&state, &self.directory, use_compound_file)
+        // Finalize streaming TV writer if present
+        let tv_file_names = if let Some(tv_writer) = self.tv_writer.take() {
+            Some(tv_writer.finish(
+                &self.directory,
+                &self.segment_name,
+                "",
+                &self.segment_id,
+                self.chain.num_docs(),
+            )?)
+        } else {
+            None
+        };
+
+        let state = Self::build_write_state(
+            &self.chain,
+            &self.segment_name,
+            self.segment_id,
+            use_compound_file,
+        );
+        flush_segment_to_files(&state, &self.directory, use_compound_file, tv_file_names)
     }
 
     fn build_write_state<'a>(
         chain: &'a IndexingChain,
         segment_name: &str,
+        segment_id: [u8; 16],
         use_compound_file: bool,
     ) -> SegmentWriteState<'a> {
-        let segment_id = string_helper::random_id();
         let field_infos = chain.build_field_infos();
 
         let mut diagnostics = HashMap::new();

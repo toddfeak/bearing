@@ -218,7 +218,7 @@ impl DataOutput for VecOutput<'_> {
 }
 
 /// Trait for index file output with checksum and position tracking.
-pub trait IndexOutput: DataOutput {
+pub trait IndexOutput: DataOutput + Send {
     /// Returns the name of this output (the file name).
     fn name(&self) -> &str;
 

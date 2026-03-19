@@ -387,6 +387,7 @@ pub(crate) fn flush_segment_to_files(
     state: &SegmentWriteState<'_>,
     directory: &SharedDirectory,
     use_compound_file: bool,
+    tv_file_names: Option<Vec<String>>,
 ) -> io::Result<FlushedSegment> {
     let si = &state.segment_commit_info.info;
     let field_infos = &state.field_infos;
@@ -472,14 +473,19 @@ pub(crate) fn flush_segment_to_files(
     all_file_names.extend(sf_names);
 
     // 7. Term vectors (.tvd, .tvx, .tvm)
-    let tv_names = lucene90::term_vectors::write(
-        directory,
-        &si.name,
-        "",
-        &si.id,
-        chain.term_vector_docs(),
-        chain.num_docs(),
-    )?;
+    let tv_names = if let Some(names) = tv_file_names {
+        // TV files already written by streaming chunk writer
+        names
+    } else {
+        lucene90::term_vectors::write(
+            directory,
+            &si.name,
+            "",
+            &si.id,
+            chain.term_vector_docs(),
+            chain.num_docs(),
+        )?
+    };
     for name in &tv_names {
         debug!("flush: wrote {}", name);
     }
