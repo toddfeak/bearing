@@ -1307,12 +1307,12 @@ mod tests {
 
         let field1 = crate::document::Field::new(
             "category".to_string(),
-            crate::document::FieldType::new(),
+            crate::document::FieldTypeBuilder::new().build(),
             crate::document::FieldValue::Text("animals".to_string()),
         );
         let field2 = crate::document::Field::new(
             "category".to_string(),
-            crate::document::FieldType::new(),
+            crate::document::FieldTypeBuilder::new().build(),
             crate::document::FieldValue::Text("plants".to_string()),
         );
 

@@ -86,23 +86,6 @@ pub struct FieldType {
 }
 
 impl FieldType {
-    pub fn new() -> Self {
-        Self {
-            stored: false,
-            tokenized: false,
-            omit_norms: false,
-            index_options: IndexOptions::None,
-            doc_values_type: DocValuesType::None,
-            store_term_vectors: false,
-            store_term_vector_offsets: false,
-            store_term_vector_positions: false,
-            store_term_vector_payloads: false,
-            point_dimension_count: 0,
-            point_index_dimension_count: 0,
-            point_num_bytes: 0,
-        }
-    }
-
     pub fn stored(&self) -> bool {
         self.stored
     }
@@ -168,7 +151,142 @@ impl FieldType {
     }
 }
 
-impl Default for FieldType {
+/// Builder for constructing immutable [`FieldType`] instances.
+///
+/// All fields default to the same values as an unconfigured field type
+/// (not stored, not tokenized, no index, no doc values, no points).
+/// Use the builder methods to configure the desired properties, then
+/// call [`build`](FieldTypeBuilder::build) to produce a `FieldType`.
+///
+/// # Example
+///
+/// ```
+/// use bearing::document::FieldTypeBuilder;
+///
+/// let ft = FieldTypeBuilder::new()
+///     .stored(true)
+///     .tokenized(true)
+///     .build();
+/// assert!(ft.stored());
+/// assert!(ft.tokenized());
+/// ```
+#[derive(Clone, Debug)]
+pub struct FieldTypeBuilder {
+    stored: bool,
+    tokenized: bool,
+    omit_norms: bool,
+    index_options: IndexOptions,
+    doc_values_type: DocValuesType,
+    store_term_vectors: bool,
+    store_term_vector_offsets: bool,
+    store_term_vector_positions: bool,
+    store_term_vector_payloads: bool,
+    point_dimension_count: u32,
+    point_index_dimension_count: u32,
+    point_num_bytes: u32,
+}
+
+impl FieldTypeBuilder {
+    /// Creates a new builder with all fields set to their defaults.
+    pub fn new() -> Self {
+        Self {
+            stored: false,
+            tokenized: false,
+            omit_norms: false,
+            index_options: IndexOptions::None,
+            doc_values_type: DocValuesType::None,
+            store_term_vectors: false,
+            store_term_vector_offsets: false,
+            store_term_vector_positions: false,
+            store_term_vector_payloads: false,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }
+    }
+
+    /// Sets whether the field value is stored.
+    pub fn stored(mut self, value: bool) -> Self {
+        self.stored = value;
+        self
+    }
+
+    /// Sets whether the field is tokenized.
+    pub fn tokenized(mut self, value: bool) -> Self {
+        self.tokenized = value;
+        self
+    }
+
+    /// Sets whether norms are omitted.
+    pub fn omit_norms(mut self, value: bool) -> Self {
+        self.omit_norms = value;
+        self
+    }
+
+    /// Sets the index options for the field.
+    pub fn index_options(mut self, value: IndexOptions) -> Self {
+        self.index_options = value;
+        self
+    }
+
+    /// Sets the doc values type for the field.
+    pub fn doc_values_type(mut self, value: DocValuesType) -> Self {
+        self.doc_values_type = value;
+        self
+    }
+
+    /// Sets whether term vectors are stored.
+    pub fn store_term_vectors(mut self, value: bool) -> Self {
+        self.store_term_vectors = value;
+        self
+    }
+
+    /// Sets whether term vector positions are stored.
+    pub fn store_term_vector_positions(mut self, value: bool) -> Self {
+        self.store_term_vector_positions = value;
+        self
+    }
+
+    /// Sets whether term vector offsets are stored.
+    pub fn store_term_vector_offsets(mut self, value: bool) -> Self {
+        self.store_term_vector_offsets = value;
+        self
+    }
+
+    /// Sets whether term vector payloads are stored.
+    pub fn store_term_vector_payloads(mut self, value: bool) -> Self {
+        self.store_term_vector_payloads = value;
+        self
+    }
+
+    /// Sets the point dimension configuration.
+    pub fn point_dimensions(mut self, count: u32, index_count: u32, num_bytes: u32) -> Self {
+        self.point_dimension_count = count;
+        self.point_index_dimension_count = index_count;
+        self.point_num_bytes = num_bytes;
+        self
+    }
+
+    /// Builds the immutable [`FieldType`].
+    pub fn build(self) -> FieldType {
+        FieldType {
+            stored: self.stored,
+            tokenized: self.tokenized,
+            omit_norms: self.omit_norms,
+            index_options: self.index_options,
+            doc_values_type: self.doc_values_type,
+            store_term_vectors: self.store_term_vectors,
+            store_term_vector_offsets: self.store_term_vector_offsets,
+            store_term_vector_positions: self.store_term_vector_positions,
+            store_term_vector_payloads: self.store_term_vector_payloads,
+            point_dimension_count: self.point_dimension_count,
+            point_index_dimension_count: self.point_index_dimension_count,
+            point_num_bytes: self.point_num_bytes,
+        }
+    }
+}
+
+impl Default for FieldTypeBuilder {
     fn default() -> Self {
         Self::new()
     }
@@ -353,12 +471,12 @@ impl Document {
 ///
 /// Indexed with `DOCS` only (no freqs/positions), norms omitted, not tokenized.
 pub fn keyword_field(name: &str, value: &str) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = true;
-    ft.index_options = IndexOptions::Docs;
-    ft.omit_norms = true;
-    ft.tokenized = false;
-    ft.doc_values_type = DocValuesType::SortedSet;
+    let ft = FieldTypeBuilder::new()
+        .stored(true)
+        .index_options(IndexOptions::Docs)
+        .omit_norms(true)
+        .doc_values_type(DocValuesType::SortedSet)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
 }
 
@@ -366,19 +484,19 @@ pub fn keyword_field(name: &str, value: &str) -> Field {
 ///
 /// Points: 1 dimension, 8 bytes. No posting list.
 pub fn long_field(name: &str, value: i64) -> Field {
-    let mut ft = FieldType::new();
-    ft.point_dimension_count = 1;
-    ft.point_index_dimension_count = 1;
-    ft.point_num_bytes = 8;
-    ft.doc_values_type = DocValuesType::SortedNumeric;
+    let ft = FieldTypeBuilder::new()
+        .point_dimensions(1, 1, 8)
+        .doc_values_type(DocValuesType::SortedNumeric)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Long(value))
 }
 
 /// Creates an unstored, tokenized text field with positions.
 pub fn text_field(name: &str, value: &str) -> Field {
-    let mut ft = FieldType::new();
-    ft.index_options = IndexOptions::DocsAndFreqsAndPositions;
-    ft.tokenized = true;
+    let ft = FieldTypeBuilder::new()
+        .index_options(IndexOptions::DocsAndFreqsAndPositions)
+        .tokenized(true)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
 }
 
@@ -388,9 +506,10 @@ pub fn text_field(name: &str, value: &str) -> Field {
 /// buffering the entire content in memory. Reader fields are indexed but
 /// cannot be stored.
 pub fn text_field_reader(name: &str, reader: impl Read + Send + 'static) -> Field {
-    let mut ft = FieldType::new();
-    ft.index_options = IndexOptions::DocsAndFreqsAndPositions;
-    ft.tokenized = true;
+    let ft = FieldTypeBuilder::new()
+        .index_options(IndexOptions::DocsAndFreqsAndPositions)
+        .tokenized(true)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Reader(Box::new(reader)))
 }
 
@@ -398,11 +517,11 @@ pub fn text_field_reader(name: &str, reader: impl Read + Send + 'static) -> Fiel
 ///
 /// Indexed with `DOCS` only, norms omitted, not tokenized.
 pub fn string_field(name: &str, value: &str, stored: bool) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = stored;
-    ft.index_options = IndexOptions::Docs;
-    ft.omit_norms = true;
-    ft.tokenized = false;
+    let ft = FieldTypeBuilder::new()
+        .stored(stored)
+        .index_options(IndexOptions::Docs)
+        .omit_norms(true)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
 }
 
@@ -410,12 +529,11 @@ pub fn string_field(name: &str, value: &str, stored: bool) -> Field {
 ///
 /// Points: 1 dimension, 4 bytes.
 pub fn int_field(name: &str, value: i32, stored: bool) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = stored;
-    ft.point_dimension_count = 1;
-    ft.point_index_dimension_count = 1;
-    ft.point_num_bytes = 4;
-    ft.doc_values_type = DocValuesType::SortedNumeric;
+    let ft = FieldTypeBuilder::new()
+        .stored(stored)
+        .point_dimensions(1, 1, 4)
+        .doc_values_type(DocValuesType::SortedNumeric)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Int(value))
 }
 
@@ -423,12 +541,11 @@ pub fn int_field(name: &str, value: i32, stored: bool) -> Field {
 ///
 /// Points: 1 dimension, 4 bytes.
 pub fn float_field(name: &str, value: f32, stored: bool) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = stored;
-    ft.point_dimension_count = 1;
-    ft.point_index_dimension_count = 1;
-    ft.point_num_bytes = 4;
-    ft.doc_values_type = DocValuesType::SortedNumeric;
+    let ft = FieldTypeBuilder::new()
+        .stored(stored)
+        .point_dimensions(1, 1, 4)
+        .doc_values_type(DocValuesType::SortedNumeric)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Float(value))
 }
 
@@ -436,12 +553,11 @@ pub fn float_field(name: &str, value: f32, stored: bool) -> Field {
 ///
 /// Points: 1 dimension, 8 bytes.
 pub fn double_field(name: &str, value: f64, stored: bool) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = stored;
-    ft.point_dimension_count = 1;
-    ft.point_index_dimension_count = 1;
-    ft.point_num_bytes = 8;
-    ft.doc_values_type = DocValuesType::SortedNumeric;
+    let ft = FieldTypeBuilder::new()
+        .stored(stored)
+        .point_dimensions(1, 1, 8)
+        .doc_values_type(DocValuesType::SortedNumeric)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Double(value))
 }
 
@@ -449,8 +565,9 @@ pub fn double_field(name: &str, value: f64, stored: bool) -> Field {
 ///
 /// Not stored, not indexed, no points.
 pub fn numeric_doc_values_field(name: &str, value: i64) -> Field {
-    let mut ft = FieldType::new();
-    ft.doc_values_type = DocValuesType::Numeric;
+    let ft = FieldTypeBuilder::new()
+        .doc_values_type(DocValuesType::Numeric)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Long(value))
 }
 
@@ -458,8 +575,9 @@ pub fn numeric_doc_values_field(name: &str, value: i64) -> Field {
 ///
 /// Not stored, not indexed, no points.
 pub fn binary_doc_values_field(name: &str, value: Vec<u8>) -> Field {
-    let mut ft = FieldType::new();
-    ft.doc_values_type = DocValuesType::Binary;
+    let ft = FieldTypeBuilder::new()
+        .doc_values_type(DocValuesType::Binary)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(value))
 }
 
@@ -467,8 +585,9 @@ pub fn binary_doc_values_field(name: &str, value: Vec<u8>) -> Field {
 ///
 /// Values are deduplicated and ordinal-encoded. Not stored, not indexed, no points.
 pub fn sorted_doc_values_field(name: &str, value: &[u8]) -> Field {
-    let mut ft = FieldType::new();
-    ft.doc_values_type = DocValuesType::Sorted;
+    let ft = FieldTypeBuilder::new()
+        .doc_values_type(DocValuesType::Sorted)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(value.to_vec()))
 }
 
@@ -476,8 +595,9 @@ pub fn sorted_doc_values_field(name: &str, value: &[u8]) -> Field {
 ///
 /// Unlike [`keyword_field`], this has no inverted index or stored value.
 pub fn sorted_set_doc_values_field(name: &str, value: &str) -> Field {
-    let mut ft = FieldType::new();
-    ft.doc_values_type = DocValuesType::SortedSet;
+    let ft = FieldTypeBuilder::new()
+        .doc_values_type(DocValuesType::SortedSet)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
 }
 
@@ -485,50 +605,45 @@ pub fn sorted_set_doc_values_field(name: &str, value: &str) -> Field {
 ///
 /// Unlike [`long_field`], this has no point index or stored value.
 pub fn sorted_numeric_doc_values_field(name: &str, value: i64) -> Field {
-    let mut ft = FieldType::new();
-    ft.doc_values_type = DocValuesType::SortedNumeric;
+    let ft = FieldTypeBuilder::new()
+        .doc_values_type(DocValuesType::SortedNumeric)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Long(value))
 }
 
 /// Creates a stored-only string field (no indexing).
 pub fn stored_string_field(name: &str, value: &str) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = true;
+    let ft = FieldTypeBuilder::new().stored(true).build();
     Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
 }
 
 /// Creates a stored-only int field (no indexing).
 pub fn stored_int_field(name: &str, value: i32) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = true;
+    let ft = FieldTypeBuilder::new().stored(true).build();
     Field::new(name.to_string(), ft, FieldValue::Int(value))
 }
 
 /// Creates a stored-only long field (no indexing).
 pub fn stored_long_field(name: &str, value: i64) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = true;
+    let ft = FieldTypeBuilder::new().stored(true).build();
     Field::new(name.to_string(), ft, FieldValue::Long(value))
 }
 
 /// Creates a stored-only float field (no indexing).
 pub fn stored_float_field(name: &str, value: f32) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = true;
+    let ft = FieldTypeBuilder::new().stored(true).build();
     Field::new(name.to_string(), ft, FieldValue::Float(value))
 }
 
 /// Creates a stored-only double field (no indexing).
 pub fn stored_double_field(name: &str, value: f64) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = true;
+    let ft = FieldTypeBuilder::new().stored(true).build();
     Field::new(name.to_string(), ft, FieldValue::Double(value))
 }
 
 /// Creates a stored-only bytes field (no indexing).
 pub fn stored_bytes_field(name: &str, value: Vec<u8>) -> Field {
-    let mut ft = FieldType::new();
-    ft.stored = true;
+    let ft = FieldTypeBuilder::new().stored(true).build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(value))
 }
 
@@ -546,10 +661,7 @@ pub fn lat_lon_point(name: &str, lat: f64, lon: f64) -> Field {
     bytes.extend_from_slice(&crate::util::numeric_utils::int_to_sortable_bytes(
         encoded_lon,
     ));
-    let mut ft = FieldType::new();
-    ft.point_dimension_count = 2;
-    ft.point_index_dimension_count = 2;
-    ft.point_num_bytes = 4;
+    let ft = FieldTypeBuilder::new().point_dimensions(2, 2, 4).build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
 }
 
@@ -559,10 +671,9 @@ pub fn lat_lon_point(name: &str, lat: f64, lon: f64) -> Field {
 pub fn int_range_field(name: &str, mins: &[i32], maxs: &[i32]) -> Field {
     let bytes = crate::util::numeric_utils::encode_int_range(mins, maxs);
     let dims = (mins.len() * 2) as u32;
-    let mut ft = FieldType::new();
-    ft.point_dimension_count = dims;
-    ft.point_index_dimension_count = dims;
-    ft.point_num_bytes = 4;
+    let ft = FieldTypeBuilder::new()
+        .point_dimensions(dims, dims, 4)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
 }
 
@@ -572,10 +683,9 @@ pub fn int_range_field(name: &str, mins: &[i32], maxs: &[i32]) -> Field {
 pub fn long_range_field(name: &str, mins: &[i64], maxs: &[i64]) -> Field {
     let bytes = crate::util::numeric_utils::encode_long_range(mins, maxs);
     let dims = (mins.len() * 2) as u32;
-    let mut ft = FieldType::new();
-    ft.point_dimension_count = dims;
-    ft.point_index_dimension_count = dims;
-    ft.point_num_bytes = 8;
+    let ft = FieldTypeBuilder::new()
+        .point_dimensions(dims, dims, 8)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
 }
 
@@ -585,10 +695,9 @@ pub fn long_range_field(name: &str, mins: &[i64], maxs: &[i64]) -> Field {
 pub fn float_range_field(name: &str, mins: &[f32], maxs: &[f32]) -> Field {
     let bytes = crate::util::numeric_utils::encode_float_range(mins, maxs);
     let dims = (mins.len() * 2) as u32;
-    let mut ft = FieldType::new();
-    ft.point_dimension_count = dims;
-    ft.point_index_dimension_count = dims;
-    ft.point_num_bytes = 4;
+    let ft = FieldTypeBuilder::new()
+        .point_dimensions(dims, dims, 4)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
 }
 
@@ -598,10 +707,9 @@ pub fn float_range_field(name: &str, mins: &[f32], maxs: &[f32]) -> Field {
 pub fn double_range_field(name: &str, mins: &[f64], maxs: &[f64]) -> Field {
     let bytes = crate::util::numeric_utils::encode_double_range(mins, maxs);
     let dims = (mins.len() * 2) as u32;
-    let mut ft = FieldType::new();
-    ft.point_dimension_count = dims;
-    ft.point_index_dimension_count = dims;
-    ft.point_num_bytes = 8;
+    let ft = FieldTypeBuilder::new()
+        .point_dimensions(dims, dims, 8)
+        .build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
 }
 
@@ -616,10 +724,10 @@ pub fn feature_field(name: &str, feature_name: &str, feature_value: f32) -> Fiel
         "feature_value must be finite and positive, got {feature_value}"
     );
     let freq = (f32::to_bits(feature_value) >> 15) as i32;
-    let mut ft = FieldType::new();
-    ft.tokenized = false;
-    ft.omit_norms = true;
-    ft.index_options = IndexOptions::DocsAndFreqs;
+    let ft = FieldTypeBuilder::new()
+        .omit_norms(true)
+        .index_options(IndexOptions::DocsAndFreqs)
+        .build();
     Field::new(
         name.to_string(),
         ft,
@@ -949,8 +1057,8 @@ mod tests {
     }
 
     #[test]
-    fn test_field_type_default() {
-        let ft = FieldType::default();
+    fn test_field_type_builder_defaults() {
+        let ft = FieldTypeBuilder::new().build();
         assert!(!ft.stored());
         assert!(!ft.tokenized());
         assert!(!ft.omit_norms());
@@ -980,10 +1088,7 @@ mod tests {
     #[test]
     fn test_point_bytes_bytes_field() {
         // A field type with points and a Bytes value
-        let mut ft = FieldType::new();
-        ft.point_dimension_count = 1;
-        ft.point_index_dimension_count = 1;
-        ft.point_num_bytes = 4;
+        let ft = FieldTypeBuilder::new().point_dimensions(1, 1, 4).build();
         let f = Field::new(
             "raw_point".to_string(),
             ft,
@@ -1170,5 +1275,56 @@ mod tests {
         let debug_str = format!("{:?}", f.value());
         assert_contains!(debug_str, "Feature");
         assert_contains!(debug_str, "pagerank");
+    }
+
+    #[test]
+    fn test_field_type_builder_each_setter() {
+        let ft = FieldTypeBuilder::new()
+            .stored(true)
+            .tokenized(true)
+            .omit_norms(true)
+            .index_options(IndexOptions::DocsAndFreqsAndPositionsAndOffsets)
+            .doc_values_type(DocValuesType::SortedNumeric)
+            .store_term_vectors(true)
+            .store_term_vector_positions(true)
+            .store_term_vector_offsets(true)
+            .store_term_vector_payloads(true)
+            .point_dimensions(3, 2, 8)
+            .build();
+        assert!(ft.stored());
+        assert!(ft.tokenized());
+        assert!(ft.omit_norms());
+        assert_eq!(
+            ft.index_options(),
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets
+        );
+        assert_eq!(ft.doc_values_type(), DocValuesType::SortedNumeric);
+        assert!(ft.store_term_vectors());
+        assert!(ft.store_term_vector_positions());
+        assert!(ft.store_term_vector_offsets());
+        assert!(ft.store_term_vector_payloads());
+        assert_eq!(ft.point_dimension_count(), 3);
+        assert_eq!(ft.point_index_dimension_count(), 2);
+        assert_eq!(ft.point_num_bytes(), 8);
+    }
+
+    #[test]
+    fn test_field_type_builder_chaining() {
+        let ft = FieldTypeBuilder::new()
+            .stored(true)
+            .stored(false)
+            .tokenized(true)
+            .build();
+        assert!(!ft.stored());
+        assert!(ft.tokenized());
+    }
+
+    #[test]
+    fn test_field_type_builder_default_trait() {
+        let ft = FieldTypeBuilder::default().build();
+        assert!(!ft.stored());
+        assert!(!ft.tokenized());
+        assert_eq!(ft.index_options(), IndexOptions::None);
+        assert_eq!(ft.doc_values_type(), DocValuesType::None);
     }
 }
