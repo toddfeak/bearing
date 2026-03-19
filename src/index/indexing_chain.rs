@@ -72,12 +72,14 @@ pub struct DecodedPosting {
 
 /// Start and end offset buffers for offset-indexed fields.
 ///
-/// Boxed and optional in `PostingList` to avoid 48 bytes of Vec overhead
-/// per term in the common case where offsets are not indexed.
+/// Boxed and optional in `PostingList` and `TermVectorTerm` to avoid
+/// 48 bytes of Vec overhead per instance when offsets are not stored.
 #[derive(Clone, Debug, MemSize)]
-struct OffsetBuffers {
-    start_offsets: Vec<i32>,
-    end_offsets: Vec<i32>,
+pub struct OffsetBuffers {
+    /// Absolute start offsets.
+    pub start_offsets: Vec<i32>,
+    /// Absolute end offsets.
+    pub end_offsets: Vec<i32>,
 }
 
 /// Per-term posting list across all documents.
@@ -398,6 +400,41 @@ pub struct StoredDoc {
     pub fields: Vec<(u32, StoredValue)>, // (field_number, value)
 }
 
+/// A single term's term vector data for one document.
+#[derive(Clone, Debug, MemSize)]
+pub struct TermVectorTerm {
+    /// The term's UTF-8 bytes.
+    pub term: String,
+    /// Term frequency in this document.
+    pub freq: i32,
+    /// Absolute positions. Empty if positions not stored.
+    pub positions: Vec<i32>,
+    /// Start and end offsets. `None` if offsets not stored.
+    pub offsets: Option<Box<OffsetBuffers>>,
+}
+
+/// Term vector data for one field in one document.
+#[derive(Clone, Debug, MemSize)]
+pub struct TermVectorField {
+    /// Field number (matches FieldInfo.number).
+    pub field_number: u32,
+    /// Whether positions are stored.
+    pub has_positions: bool,
+    /// Whether offsets are stored.
+    pub has_offsets: bool,
+    /// Whether payloads are stored (structurally supported, always false for now).
+    pub has_payloads: bool,
+    /// Terms sorted by UTF-8 byte order.
+    pub terms: Vec<TermVectorTerm>,
+}
+
+/// All term vector fields for one document.
+#[derive(Clone, Debug, MemSize)]
+pub struct TermVectorDoc {
+    /// Term vector fields, sorted by field number. Empty if no TV fields.
+    pub fields: Vec<TermVectorField>,
+}
+
 /// The indexing chain: processes documents into in-memory data structures.
 ///
 /// Simplified for single-threaded, single-segment indexing.
@@ -407,6 +444,8 @@ pub struct IndexingChain {
     per_field: HashMap<String, PerFieldData>,
     /// Stored fields per document, in doc order.
     stored_docs: Vec<StoredDoc>,
+    /// Term vector data per document, in doc order.
+    term_vector_docs: Vec<TermVectorDoc>,
     /// Field number assignment counter.
     field_number_counter: u32,
     /// FieldInfo registry: field name -> FieldInfo.
@@ -431,6 +470,7 @@ impl IndexingChain {
         Self {
             per_field: HashMap::new(),
             stored_docs: Vec::new(),
+            term_vector_docs: Vec::new(),
             field_number_counter: 0,
             field_infos: HashMap::new(),
             num_docs: 0,
@@ -451,6 +491,7 @@ impl IndexingChain {
         Self {
             per_field: HashMap::new(),
             stored_docs: Vec::new(),
+            term_vector_docs: Vec::new(),
             field_number_counter: next_field_number,
             field_infos: HashMap::new(),
             num_docs: 0,
@@ -506,6 +547,8 @@ impl IndexingChain {
         // Extract reusable buffer so we can pass &mut to process_indexed_field
         let mut lowercase_buf = std::mem::take(&mut self.lowercase_buf);
 
+        let mut tv_fields: Vec<TermVectorField> = Vec::new();
+
         for mut field in doc.fields {
             let meta = self.get_or_create_field_meta(&field);
 
@@ -519,16 +562,18 @@ impl IndexingChain {
                     .or_insert_with(PerFieldData::new)
             };
 
-            // Process indexed field (postings)
-            if meta.index_options != IndexOptions::None {
-                Self::process_indexed_field(
+            // Process indexed field (postings + optional term vectors)
+            if meta.index_options != IndexOptions::None
+                && let Some(tvf) = Self::process_indexed_field(
                     per_field,
                     &meta,
                     &mut field,
                     doc_id,
                     analyzer,
                     &mut lowercase_buf,
-                )?;
+                )?
+            {
+                tv_fields.push(tvf);
             }
 
             // Process stored field
@@ -555,6 +600,8 @@ impl IndexingChain {
         self.stored_docs.push(StoredDoc {
             fields: stored_fields,
         });
+        self.term_vector_docs
+            .push(TermVectorDoc { fields: tv_fields });
 
         self.num_docs += 1;
         Ok(())
@@ -622,6 +669,8 @@ impl IndexingChain {
     }
 
     /// Processes an indexed field: tokenize and build posting lists.
+    ///
+    /// Returns a [`TermVectorField`] if term vectors are enabled for this field.
     fn process_indexed_field(
         per_field: &mut PerFieldData,
         meta: &FieldMeta,
@@ -629,15 +678,27 @@ impl IndexingChain {
         doc_id: i32,
         analyzer: &dyn Analyzer,
         buf: &mut String,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<TermVectorField>> {
         let has_positions = meta.index_options >= IndexOptions::DocsAndFreqsAndPositions;
         let has_offsets = meta.index_options >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
         let has_freqs = meta.index_options >= IndexOptions::DocsAndFreqs;
 
+        // Term vector flags come from FieldType, not FieldMeta
+        let store_tv = field.field_type().store_term_vectors();
+        let tv_positions = field.field_type().store_term_vector_positions();
+        let tv_offsets = field.field_type().store_term_vector_offsets();
+        let tv_payloads = field.field_type().store_term_vector_payloads();
+
+        type TvTermMap = HashMap<String, (i32, Vec<i32>, Vec<i32>, Vec<i32>)>;
+
+        let mut tv_terms: Option<TvTermMap> = if store_tv { Some(HashMap::new()) } else { None };
+
         let mut position: i32 = -1;
         let mut field_length: i32 = 0;
 
-        let mut record_token = |per_field: &mut PerFieldData, token_ref: TokenRef<'_>| {
+        let mut record_token = |per_field: &mut PerFieldData,
+                                tv_terms: &mut Option<TvTermMap>,
+                                token_ref: TokenRef<'_>| {
             position += token_ref.position_increment as i32;
             field_length += 1;
 
@@ -654,6 +715,20 @@ impl IndexingChain {
                 token_ref.start_offset as i32,
                 token_ref.end_offset as i32,
             );
+
+            if let Some(map) = tv_terms {
+                let entry = map
+                    .entry(token_ref.text.to_string())
+                    .or_insert_with(|| (0, Vec::new(), Vec::new(), Vec::new()));
+                entry.0 += 1;
+                if tv_positions {
+                    entry.1.push(position);
+                }
+                if tv_offsets {
+                    entry.2.push(token_ref.start_offset as i32);
+                    entry.3.push(token_ref.end_offset as i32);
+                }
+            }
         };
 
         // Feature fields: single term with explicit frequency, no positions/norms
@@ -661,13 +736,15 @@ impl IndexingChain {
             let posting_list = per_field.get_or_insert_posting_list(term, has_freqs, false, false);
             posting_list.start_doc(doc_id);
             posting_list.set_freq(*freq);
-            return Ok(());
+            return Ok(None);
         }
 
         if field.field_type().tokenized() {
             match field.value() {
                 FieldValue::Text(text) => {
-                    analyzer.analyze_to(text, buf, &mut |tr| record_token(per_field, tr));
+                    analyzer.analyze_to(text, buf, &mut |tr| {
+                        record_token(per_field, &mut tv_terms, tr);
+                    });
                 }
                 FieldValue::Reader(_) => {
                     let FieldValue::Reader(mut reader) =
@@ -676,15 +753,15 @@ impl IndexingChain {
                         unreachable!()
                     };
                     analyzer.analyze_reader(&mut *reader, buf, &mut |tr| {
-                        record_token(per_field, tr);
+                        record_token(per_field, &mut tv_terms, tr);
                     })?;
                 }
-                _ => return Ok(()),
+                _ => return Ok(None),
             }
         } else {
             let text = match field.value() {
                 FieldValue::Text(text) => text,
-                _ => return Ok(()),
+                _ => return Ok(None),
             };
 
             // Keyword field: single token with the exact value, no allocation needed
@@ -695,6 +772,17 @@ impl IndexingChain {
                 per_field.get_or_insert_posting_list(text, has_freqs, has_positions, has_offsets);
 
             posting_list.record_occurrence(doc_id, position, 0, text.len() as i32);
+
+            if let Some(ref mut map) = tv_terms {
+                let pos = if tv_positions { vec![position] } else { vec![] };
+                let starts = if tv_offsets { vec![0] } else { vec![] };
+                let ends = if tv_offsets {
+                    vec![text.len() as i32]
+                } else {
+                    vec![]
+                };
+                map.insert(text.to_string(), (1, pos, starts, ends));
+            }
         }
 
         // Compute and store norms if this field has norms
@@ -705,7 +793,38 @@ impl IndexingChain {
             per_field.norms_docs.push(doc_id);
         }
 
-        Ok(())
+        if let Some(tv_map) = tv_terms
+            && !tv_map.is_empty()
+        {
+            let mut terms: Vec<TermVectorTerm> = tv_map
+                .into_iter()
+                .map(|(text, (freq, positions, start_offsets, end_offsets))| {
+                    let offsets = if start_offsets.is_empty() {
+                        None
+                    } else {
+                        Some(Box::new(OffsetBuffers {
+                            start_offsets,
+                            end_offsets,
+                        }))
+                    };
+                    TermVectorTerm {
+                        term: text,
+                        freq,
+                        positions,
+                        offsets,
+                    }
+                })
+                .collect();
+            terms.sort_by(|a, b| a.term.as_bytes().cmp(b.term.as_bytes()));
+            return Ok(Some(TermVectorField {
+                field_number: meta.number,
+                has_positions: tv_positions,
+                has_offsets: tv_offsets,
+                has_payloads: tv_payloads,
+                terms,
+            }));
+        }
+        Ok(None)
     }
 
     /// Processes doc values for a field.
@@ -794,6 +913,14 @@ impl IndexingChain {
         let mut fields: Vec<FieldInfo> = self.field_infos.values().cloned().collect();
         fields.sort_by_key(|fi| fi.number());
         FieldInfos::new(fields)
+    }
+}
+
+#[cfg(test)]
+impl IndexingChain {
+    /// Returns the term vector data for all documents, in doc order.
+    pub fn term_vector_docs(&self) -> &[TermVectorDoc] {
+        &self.term_vector_docs
     }
 }
 
@@ -1698,5 +1825,224 @@ mod tests {
         }
 
         assert_eq!(pf_text.norms, pf_reader.norms);
+    }
+
+    #[test]
+    fn test_term_vectors_basic() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::text_field_with_term_vectors(
+            "contents",
+            "hello world",
+        ));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let tv_docs = chain.term_vector_docs();
+        assert_eq!(tv_docs.len(), 1);
+        let tv_doc = &tv_docs[0];
+        assert_eq!(tv_doc.fields.len(), 1);
+
+        let tv_field = &tv_doc.fields[0];
+        assert!(tv_field.has_positions);
+        assert!(tv_field.has_offsets);
+        assert!(!tv_field.has_payloads);
+        assert_eq!(tv_field.terms.len(), 2);
+
+        let hello = &tv_field.terms[0];
+        assert_eq!(hello.term, "hello");
+        assert_eq!(hello.freq, 1);
+        assert_eq!(hello.positions, vec![0]);
+        let hello_offsets = hello.offsets.as_ref().unwrap();
+        assert_eq!(hello_offsets.start_offsets, vec![0]);
+        assert_eq!(hello_offsets.end_offsets, vec![5]);
+
+        let world = &tv_field.terms[1];
+        assert_eq!(world.term, "world");
+        assert_eq!(world.freq, 1);
+        assert_eq!(world.positions, vec![1]);
+        let world_offsets = world.offsets.as_ref().unwrap();
+        assert_eq!(world_offsets.start_offsets, vec![6]);
+        assert_eq!(world_offsets.end_offsets, vec![11]);
+    }
+
+    #[test]
+    fn test_term_vectors_sorted_by_utf8_bytes() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::text_field_with_term_vectors(
+            "contents",
+            "banana apple cherry",
+        ));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let terms = &chain.term_vector_docs()[0].fields[0].terms;
+        let term_texts: Vec<&str> = terms.iter().map(|t| t.term.as_str()).collect();
+        assert_eq!(term_texts, vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn test_term_vectors_repeated_term() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::text_field_with_term_vectors(
+            "contents",
+            "hello world hello",
+        ));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let terms = &chain.term_vector_docs()[0].fields[0].terms;
+        let hello = terms.iter().find(|t| t.term == "hello").unwrap();
+        assert_eq!(hello.freq, 2);
+        assert_eq!(hello.positions, vec![0, 2]);
+        let hello_offsets = hello.offsets.as_ref().unwrap();
+        assert_eq!(hello_offsets.start_offsets, vec![0, 12]);
+        assert_eq!(hello_offsets.end_offsets, vec![5, 17]);
+    }
+
+    #[test]
+    fn test_term_vectors_no_tv_fields_empty_doc() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::text_field("contents", "hello world"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let tv_docs = chain.term_vector_docs();
+        assert_eq!(tv_docs.len(), 1);
+        assert_is_empty!(tv_docs[0].fields);
+    }
+
+    #[test]
+    fn test_term_vectors_multi_doc_alignment() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        // Doc 0: has TV
+        let mut doc = Document::new();
+        doc.add(document::text_field_with_term_vectors("contents", "hello"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        // Doc 1: no TV
+        let mut doc = Document::new();
+        doc.add(document::text_field("contents", "world"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        // Doc 2: has TV
+        let mut doc = Document::new();
+        doc.add(document::text_field_with_term_vectors("contents", "rust"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let tv_docs = chain.term_vector_docs();
+        assert_eq!(tv_docs.len(), 3);
+        assert_eq!(tv_docs[0].fields.len(), 1);
+        assert_is_empty!(tv_docs[1].fields);
+        assert_eq!(tv_docs[2].fields.len(), 1);
+    }
+
+    #[test]
+    fn test_term_vectors_feature_field_excluded() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::feature_field("features", "pagerank", 1.0));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let tv_docs = chain.term_vector_docs();
+        assert_eq!(tv_docs.len(), 1);
+        assert_is_empty!(tv_docs[0].fields);
+    }
+
+    #[test]
+    fn test_term_vectors_positions_only() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        // Build a field type with TV + positions but no offsets
+        let ft = crate::document::FieldTypeBuilder::new()
+            .index_options(IndexOptions::DocsAndFreqsAndPositions)
+            .tokenized(true)
+            .store_term_vectors(true)
+            .store_term_vector_positions(true)
+            .build();
+        let field = crate::document::Field::new(
+            "contents".to_string(),
+            ft,
+            crate::document::FieldValue::Text("hello world".to_string()),
+        );
+
+        let mut doc = Document::new();
+        doc.add(field);
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let tv_field = &chain.term_vector_docs()[0].fields[0];
+        assert!(tv_field.has_positions);
+        assert!(!tv_field.has_offsets);
+
+        let hello = &tv_field.terms[0];
+        assert_eq!(hello.term, "hello");
+        assert_eq!(hello.positions, vec![0]);
+        assert_none!(hello.offsets);
+    }
+
+    #[test]
+    fn test_term_vectors_keyword_with_tv() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        // Build a keyword-like field type with TV enabled
+        let ft = crate::document::FieldTypeBuilder::new()
+            .index_options(IndexOptions::DocsAndFreqs)
+            .tokenized(false)
+            .omit_norms(true)
+            .store_term_vectors(true)
+            .store_term_vector_positions(true)
+            .store_term_vector_offsets(true)
+            .build();
+        let field = crate::document::Field::new(
+            "tag".to_string(),
+            ft,
+            crate::document::FieldValue::Text("/foo/bar.txt".to_string()),
+        );
+
+        let mut doc = Document::new();
+        doc.add(field);
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let tv_field = &chain.term_vector_docs()[0].fields[0];
+        assert_eq!(tv_field.terms.len(), 1);
+
+        let term = &tv_field.terms[0];
+        assert_eq!(term.term, "/foo/bar.txt");
+        assert_eq!(term.freq, 1);
+        assert_eq!(term.positions, vec![0]);
+        let term_offsets = term.offsets.as_ref().unwrap();
+        assert_eq!(term_offsets.start_offsets, vec![0]);
+        assert_eq!(term_offsets.end_offsets, vec![12]);
+    }
+
+    #[test]
+    fn test_term_vectors_mixed_fields() {
+        let mut chain = IndexingChain::new();
+        let analyzer = make_analyzer();
+
+        let mut doc = Document::new();
+        doc.add(document::text_field_with_term_vectors("body", "hello"));
+        doc.add(document::text_field("title", "world"));
+        chain.process_document(doc, &analyzer).unwrap();
+
+        let tv_doc = &chain.term_vector_docs()[0];
+        assert_eq!(tv_doc.fields.len(), 1);
+        // Only "body" has TV — verify by field number
+        let body_fi = chain.build_field_infos();
+        let body_number = body_fi.field_info_by_name("body").unwrap().number();
+        assert_eq!(tv_doc.fields[0].field_number, body_number);
     }
 }

@@ -8,7 +8,9 @@
 //! fields ([`lat_lon_point`], [`int_range_field`], [`long_range_field`],
 //! [`float_range_field`], [`double_range_field`]) encode multi-dimensional
 //! data for BKD tree indexing. [`feature_field`] stores feature name/value
-//! pairs as term frequencies for static scoring. Doc-values-only factories
+//! pairs as term frequencies for static scoring. [`text_field_with_term_vectors`]
+//! creates a text field that also stores term vectors with positions and offsets.
+//! Doc-values-only factories
 //! ([`numeric_doc_values_field`], [`binary_doc_values_field`],
 //! [`sorted_doc_values_field`], [`sorted_set_doc_values_field`],
 //! [`sorted_numeric_doc_values_field`]) create fields for sorting and faceting
@@ -511,6 +513,21 @@ pub fn text_field_reader(name: &str, reader: impl Read + Send + 'static) -> Fiel
         .tokenized(true)
         .build();
     Field::new(name.to_string(), ft, FieldValue::Reader(Box::new(reader)))
+}
+
+/// Creates a tokenized text field with term vectors, positions, and offsets.
+///
+/// Same as [`text_field`] but additionally stores term vectors with position
+/// and offset information for hit highlighting and document similarity.
+pub fn text_field_with_term_vectors(name: &str, value: &str) -> Field {
+    let ft = FieldTypeBuilder::new()
+        .index_options(IndexOptions::DocsAndFreqsAndPositions)
+        .tokenized(true)
+        .store_term_vectors(true)
+        .store_term_vector_positions(true)
+        .store_term_vector_offsets(true)
+        .build();
+    Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
 }
 
 /// Creates an inverted-only string field (no doc values).
@@ -1326,5 +1343,23 @@ mod tests {
         assert!(!ft.tokenized());
         assert_eq!(ft.index_options(), IndexOptions::None);
         assert_eq!(ft.doc_values_type(), DocValuesType::None);
+    }
+
+    #[test]
+    fn test_text_field_with_term_vectors() {
+        let f = text_field_with_term_vectors("contents", "hello world");
+        assert_eq!(f.name(), "contents");
+        assert_eq!(
+            f.field_type().index_options(),
+            IndexOptions::DocsAndFreqsAndPositions
+        );
+        assert!(f.field_type().tokenized());
+        assert!(!f.field_type().stored());
+        assert!(f.field_type().store_term_vectors());
+        assert!(f.field_type().store_term_vector_positions());
+        assert!(f.field_type().store_term_vector_offsets());
+        assert!(!f.field_type().store_term_vector_payloads());
+        assert!(f.field_type().has_norms());
+        assert_eq!(f.string_value(), Some("hello world"));
     }
 }
