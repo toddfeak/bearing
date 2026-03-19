@@ -7,10 +7,10 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::codecs::lucene90::stored_fields::compress_lz4_preset_dict;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::TermVectorDoc;
 use crate::store::{DataOutput, SharedDirectory, VecOutput};
+use crate::util::compress::lz4;
 use crate::util::packed::{
     BlockPackedWriter, DirectMonotonicWriter, DirectWriter, packed_bits_required,
     packed_ints_write, unsigned_bits_required,
@@ -124,8 +124,9 @@ pub fn write(
             flush_offsets(term_vector_docs, &field_nums, &mut *tvd)?;
             flush_payload_lengths(term_vector_docs, &mut *tvd)?;
 
-            // Compress term suffixes and write to output
-            compress_lz4_preset_dict(&term_suffixes, &mut *tvd)?;
+            // Compress term suffixes with plain LZ4 (CompressionMode.FAST)
+            let compressed = lz4::compress(&term_suffixes);
+            tvd.write_bytes(&compressed)?;
         }
     }
 
@@ -806,5 +807,42 @@ mod tests {
         }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
         assert_eq!(files.len(), 3);
+    }
+
+    /// Writes term vectors with positions and offsets matching the
+    /// text_field_with_term_vectors configuration. Exercises the LZ4
+    /// compression path with enough terms to produce meaningful compressed
+    /// output. Uses plain LZ4 (CompressionMode.FAST), not the preset-dict
+    /// format used by stored fields.
+    #[test]
+    fn test_positions_and_offsets_with_many_terms() {
+        let dir = make_directory();
+        let terms: Vec<TermVectorTerm> = (0..20)
+            .map(|i| TermVectorTerm {
+                term: format!("term_{i:04}"),
+                freq: 1,
+                positions: vec![i as i32],
+                offsets: Some(Box::new(OffsetBuffers {
+                    start_offsets: vec![i as i32 * 10],
+                    end_offsets: vec![i as i32 * 10 + 9],
+                })),
+            })
+            .collect();
+        let docs = vec![TermVectorDoc {
+            fields: vec![TermVectorField {
+                field_number: 0,
+                has_positions: true,
+                has_offsets: true,
+                has_payloads: false,
+                terms,
+            }],
+        }];
+
+        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
+        assert_eq!(files.len(), 3);
+
+        let dir_guard = dir.lock().unwrap();
+        let tvd_len = dir_guard.file_length(&files[0]).unwrap();
+        assert_gt!(tvd_len, 40, "tvd should have substantial content");
     }
 }

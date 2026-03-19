@@ -67,7 +67,6 @@ impl FastHashTable {
 
 /// LZ4 compress a block of data.
 /// Returns the compressed bytes.
-#[cfg(test)]
 pub fn compress(input: &[u8]) -> Vec<u8> {
     let mut ht = FastHashTable::new();
     compress_reuse(input, &mut ht)
