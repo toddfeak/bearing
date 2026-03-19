@@ -5,7 +5,7 @@ use crate::index::index_writer_config::IndexWriterConfig;
 
 /// Determines when an in-memory segment should be flushed to disk.
 pub trait FlushPolicy: Send + Sync {
-    /// Returns true if the current DWPT should be flushed.
+    /// Returns true if the current worker should be flushed.
     fn should_flush(
         &self,
         num_docs: i32,
@@ -17,8 +17,8 @@ pub trait FlushPolicy: Send + Sync {
 /// Flushes when RAM usage exceeds `ram_buffer_size_mb` OR doc count exceeds
 /// `max_buffered_docs`. Matches Java's `FlushByRamOrCountsPolicy`.
 ///
-/// Note: Java's version checks **global** active bytes across all DWPTs, then
-/// flushes the largest DWPT. Our simplified version checks per-DWPT RAM, which
+/// Note: Java's version checks **global** active bytes across all workers, then
+/// flushes the largest worker. Our simplified version checks per-worker RAM, which
 /// is sufficient for single-threaded indexing and a reasonable approximation
 /// for multi-threaded use.
 pub struct FlushByRamOrCountsPolicy;

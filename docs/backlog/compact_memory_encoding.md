@@ -74,9 +74,9 @@ For segment-level data (doc values, norms), compact encoding reduces the per-val
 
 Lucene's ByteBlockPool / ByteSlicePool is essentially an arena allocator — pre-allocate large 32KB blocks, bump-allocate variable-length slices from them, free everything at once when the owning context resets. This reduces allocation overhead, improves cache locality, and enables buffer recycling across segments in multi-threaded indexing. ByteSlicePool adds forwarding-address chains between slices so a single term's data can grow across multiple non-contiguous slices within the pool.
 
-Bearing's per-term `Vec<u8>` approach is simpler and correct, but creates many small heap allocations (one per unique term per field). For multi-threaded indexing with DWPT pools, an arena approach would reduce allocator pressure. Rust crates like `bumpalo` provide arena allocators that fit this pattern.
+Bearing's per-term `Vec<u8>` approach is simpler and correct, but creates many small heap allocations (one per unique term per field). For multi-threaded indexing with SegmentWorker pools, an arena approach would reduce allocator pressure. Rust crates like `bumpalo` provide arena allocators that fit this pattern.
 
-A critical design consideration: arenas must align with data lifecycles (see `streaming_index_writes.md`). Different index data types flush at different times, and an arena can only bulk-free when *all* data in it is ready to be released. Mixing lifecycles in a single arena prevents incremental freeing. This means multiple arenas per DWPT, at minimum:
+A critical design consideration: arenas must align with data lifecycles (see `streaming_index_writes.md`). Different index data types flush at different times, and an arena can only bulk-free when *all* data in it is ready to be released. Mixing lifecycles in a single arena prevents incremental freeing. This means multiple arenas per SegmentWorker, at minimum:
 
 - **Stored fields chunk arena** — freed each time a stored fields chunk flushes to `.fdt` (~16KB or 128 docs)
 - **Term vectors chunk arena** — freed each time a term vectors chunk flushes to `.tvd` (~4KB or 128 docs)

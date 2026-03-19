@@ -20,7 +20,7 @@ The Java implementation of **Apache Lucene 10.3.2** is the canonical source. All
 ## Current State
 
 - Target codec: **Lucene103**
-- Multi-threaded `IndexWriter` with DWPT pool (no merging, no deletes)
+- Multi-threaded `IndexWriter` with SegmentWorker pool (no merging, no deletes)
 - Fourteen field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`, `LatLonPoint`, `FeatureField`, `IntRange`, `LongRange`, `FloatRange`, `DoubleRange`
 
 ## Build & Test

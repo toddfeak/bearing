@@ -15,7 +15,7 @@ Rust single-threaded indexing is 2x faster than Java. With 12 threads, it scales
 
 ## Current State (MVP Complete)
 
-- Multi-segment, multi-threaded indexing with DWPT pool
+- Multi-segment, multi-threaded indexing with SegmentWorker pool
 - Comprehensive test suite, validated by Java Lucene VerifyIndex
 - Eight field types: `KeywordField`, `LongField`, `TextField`, `StringField`, `IntField`, `FloatField`, `DoubleField`, `StoredField`
 - Lucene103 codec with all required file formats

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Per-thread document writer that buffers documents in memory before flushing.
+//! Per-thread segment worker that buffers documents in memory before flushing.
 
-// Each DWPT wraps an IndexingChain and a segment name. It is exclusively
+// Each SegmentWorker wraps an IndexingChain and a segment name. It is exclusively
 // owned by one thread at a time, and consumed on flush.
 
 use std::collections::HashMap;
@@ -15,16 +15,16 @@ use crate::index::{SegmentCommitInfo, SegmentInfo};
 use crate::store::SharedDirectory;
 use crate::util::string_helper;
 
-/// A per-thread document writer that accumulates documents into an IndexingChain.
+/// A per-thread segment worker that accumulates documents into an IndexingChain.
 ///
-/// Created by the DwptPool, exclusively owned by one thread, consumed on flush.
-pub struct DocumentsWriterPerThread {
+/// Created by the SegmentWorkerPool, exclusively owned by one thread, consumed on flush.
+pub struct SegmentWorker {
     chain: IndexingChain,
     segment_name: String,
 }
 
-impl DocumentsWriterPerThread {
-    /// Creates a new DWPT with the given segment name and global field numbers.
+impl SegmentWorker {
+    /// Creates a new worker with the given segment name and global field numbers.
     pub fn new(
         segment_name: String,
         global_field_numbers: HashMap<String, u32>,
@@ -39,22 +39,22 @@ impl DocumentsWriterPerThread {
         }
     }
 
-    /// Adds a document to this DWPT's indexing chain.
+    /// Adds a document to this worker's indexing chain.
     pub fn add_document(&mut self, doc: Document, analyzer: &dyn Analyzer) -> io::Result<()> {
         self.chain.process_document(doc, analyzer)
     }
 
-    /// Returns the number of documents buffered in this DWPT.
+    /// Returns the number of documents buffered in this worker.
     pub fn num_docs(&self) -> i32 {
         self.chain.num_docs()
     }
 
-    /// Returns the estimated RAM bytes used by this DWPT's buffered data.
+    /// Returns the estimated RAM bytes used by this worker's buffered data.
     pub fn ram_bytes_used(&self) -> usize {
         self.chain.ram_bytes_used()
     }
 
-    /// Returns the segment name for this DWPT.
+    /// Returns the segment name for this worker.
     pub fn segment_name(&self) -> &str {
         &self.segment_name
     }
@@ -64,7 +64,7 @@ impl DocumentsWriterPerThread {
         self.chain.field_number_mappings()
     }
 
-    /// Consumes this DWPT, flushing its chain into a FlushedSegment.
+    /// Consumes this worker, flushing its chain into a FlushedSegment.
     ///
     /// Segment files are written to the given directory immediately.
     pub(crate) fn flush(
@@ -75,7 +75,7 @@ impl DocumentsWriterPerThread {
         if self.chain.num_docs() == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "cannot flush empty DWPT",
+                "cannot flush empty segment worker",
             ));
         }
 
@@ -143,30 +143,30 @@ mod tests {
     }
 
     #[test]
-    fn test_dwpt_add_and_flush() {
-        let mut dwpt = DocumentsWriterPerThread::new("_0".to_string(), HashMap::new(), 0);
+    fn test_worker_add_and_flush() {
+        let mut worker = SegmentWorker::new("_0".to_string(), HashMap::new(), 0);
         let analyzer = StandardAnalyzer::new();
 
         let mut doc = Document::new();
         doc.add(document::keyword_field("path", "/test.txt"));
         doc.add(document::long_field("modified", 1000));
         doc.add(document::text_field("contents", "hello world"));
-        dwpt.add_document(doc, &analyzer).unwrap();
+        worker.add_document(doc, &analyzer).unwrap();
 
-        assert_eq!(dwpt.num_docs(), 1);
-        assert_eq!(dwpt.segment_name(), "_0");
+        assert_eq!(worker.num_docs(), 1);
+        assert_eq!(worker.segment_name(), "_0");
 
         let dir = test_directory();
-        let flushed = dwpt.flush(&dir, true).unwrap();
+        let flushed = worker.flush(&dir, true).unwrap();
         assert_eq!(flushed.segment_commit_info.info.name, "_0");
         assert_eq!(flushed.segment_commit_info.info.max_doc, 1);
         assert_not_empty!(flushed.file_names);
     }
 
     #[test]
-    fn test_dwpt_flush_empty_fails() {
+    fn test_worker_flush_empty_fails() {
         let dir = test_directory();
-        let dwpt = DocumentsWriterPerThread::new("_0".to_string(), HashMap::new(), 0);
-        assert!(dwpt.flush(&dir, true).is_err());
+        let worker = SegmentWorker::new("_0".to_string(), HashMap::new(), 0);
+        assert!(worker.flush(&dir, true).is_err());
     }
 }

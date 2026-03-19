@@ -7,12 +7,12 @@
 /// Controls flush behavior (when in-memory segments are written to disk).
 /// Matches Java's IndexWriterConfig defaults:
 /// - `max_buffered_docs = -1` (disabled)
-/// - `ram_buffer_size_mb = 16.0` (flush when a DWPT exceeds 16 MB)
+/// - `ram_buffer_size_mb = 16.0` (flush when a worker exceeds 16 MB)
 pub struct IndexWriterConfig {
     /// Maximum number of documents buffered in memory before a flush is triggered.
     /// -1 means doc-count flushing is disabled.
     max_buffered_docs: i32,
-    /// RAM buffer size in megabytes. When a DWPT's estimated RAM usage
+    /// RAM buffer size in megabytes. When a worker's estimated RAM usage
     /// exceeds this threshold, it is flushed to disk. 0.0 or negative disables
     /// RAM-based flushing. Default: 16.0 (matches Java Lucene).
     ram_buffer_size_mb: f64,

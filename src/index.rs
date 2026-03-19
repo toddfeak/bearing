@@ -7,13 +7,13 @@
 //! ([`FieldInfo`], [`FieldInfos`], [`SegmentInfo`], [`SegmentCommitInfo`])
 //! represent segment-level metadata.
 
-pub(crate) mod documents_writer_per_thread;
-pub(crate) mod dwpt_pool;
 pub(crate) mod flush_control;
 pub(crate) mod flush_policy;
 pub(crate) mod index_file_names;
 pub(crate) mod index_writer;
 pub(crate) mod index_writer_config;
+pub(crate) mod segment_worker;
+pub(crate) mod segment_worker_pool;
 
 pub use index_writer::{CommitResult, IndexWriter};
 pub use index_writer_config::IndexWriterConfig;

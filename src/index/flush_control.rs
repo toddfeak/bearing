@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Flush control that tracks active and pending-flush document writers.
+//! Flush control that tracks active and pending-flush segment workers.
 
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 
-use crate::index::documents_writer_per_thread::DocumentsWriterPerThread;
+use crate::index::segment_worker::SegmentWorker;
 
-/// Maximum number of DWPTs that can be flushing concurrently before
+/// Maximum number of workers that can be flushing concurrently before
 /// stalling new indexing threads.
 const MAX_CONCURRENT_FLUSHES: usize = 4;
 
-/// Coordinates which DWPTs flush and when.
+/// Coordinates which workers flush and when.
 ///
-/// Uses Mutex + Condvar for stall control: if too many DWPTs are flushing
+/// Uses Mutex + Condvar for stall control: if too many workers are flushing
 /// concurrently, indexing threads block until a flush completes.
 pub struct FlushControl {
     inner: Mutex<FlushControlInner>,
@@ -20,9 +20,9 @@ pub struct FlushControl {
 }
 
 struct FlushControlInner {
-    /// DWPTs waiting to be flushed.
-    flush_queue: VecDeque<DocumentsWriterPerThread>,
-    /// Number of DWPTs currently being flushed.
+    /// Workers waiting to be flushed.
+    flush_queue: VecDeque<SegmentWorker>,
+    /// Number of workers currently being flushed.
     flushing_count: usize,
 }
 
@@ -59,8 +59,8 @@ impl FlushControl {
         }
     }
 
-    /// Drains all pending DWPTs from the flush queue.
-    pub fn drain_pending(&self) -> Vec<DocumentsWriterPerThread> {
+    /// Drains all pending workers from the flush queue.
+    pub fn drain_pending(&self) -> Vec<SegmentWorker> {
         self.inner.lock().unwrap().flush_queue.drain(..).collect()
     }
 }
@@ -71,35 +71,35 @@ mod tests {
     use std::collections::HashMap;
 
     impl FlushControl {
-        /// Adds a DWPT to the flush queue.
-        fn enqueue_for_flush(&self, dwpt: DocumentsWriterPerThread) {
-            self.inner.lock().unwrap().flush_queue.push_back(dwpt);
+        /// Adds a worker to the flush queue.
+        fn enqueue_for_flush(&self, worker: SegmentWorker) {
+            self.inner.lock().unwrap().flush_queue.push_back(worker);
         }
 
-        /// Takes the next DWPT from the flush queue, if any.
-        fn next_pending_flush(&self) -> Option<DocumentsWriterPerThread> {
+        /// Takes the next worker from the flush queue, if any.
+        fn next_pending_flush(&self) -> Option<SegmentWorker> {
             let mut inner = self.inner.lock().unwrap();
-            if let Some(dwpt) = inner.flush_queue.pop_front() {
+            if let Some(worker) = inner.flush_queue.pop_front() {
                 inner.flushing_count += 1;
-                Some(dwpt)
+                Some(worker)
             } else {
                 None
             }
         }
 
-        /// Returns the number of DWPTs waiting in the flush queue.
+        /// Returns the number of workers waiting in the flush queue.
         fn pending_count(&self) -> usize {
             self.inner.lock().unwrap().flush_queue.len()
         }
 
-        /// Returns the number of DWPTs currently being flushed.
+        /// Returns the number of workers currently being flushed.
         fn flushing_count(&self) -> usize {
             self.inner.lock().unwrap().flushing_count
         }
     }
 
-    fn make_dwpt(name: &str) -> DocumentsWriterPerThread {
-        DocumentsWriterPerThread::new(name.to_string(), HashMap::new(), 0)
+    fn make_worker(name: &str) -> SegmentWorker {
+        SegmentWorker::new(name.to_string(), HashMap::new(), 0)
     }
 
     #[test]
@@ -112,8 +112,8 @@ mod tests {
     #[test]
     fn test_enqueue_and_dequeue() {
         let fc = FlushControl::new();
-        fc.enqueue_for_flush(make_dwpt("_0"));
-        fc.enqueue_for_flush(make_dwpt("_1"));
+        fc.enqueue_for_flush(make_worker("_0"));
+        fc.enqueue_for_flush(make_worker("_1"));
 
         assert_eq!(fc.pending_count(), 2);
 
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn test_flush_completed_decrements() {
         let fc = FlushControl::new();
-        fc.enqueue_for_flush(make_dwpt("_0"));
+        fc.enqueue_for_flush(make_worker("_0"));
         let _d = fc.next_pending_flush();
         assert_eq!(fc.flushing_count(), 1);
 
@@ -142,8 +142,8 @@ mod tests {
     #[test]
     fn test_drain_pending() {
         let fc = FlushControl::new();
-        fc.enqueue_for_flush(make_dwpt("_0"));
-        fc.enqueue_for_flush(make_dwpt("_1"));
+        fc.enqueue_for_flush(make_worker("_0"));
+        fc.enqueue_for_flush(make_worker("_1"));
 
         let drained = fc.drain_pending();
         assert_eq!(drained.len(), 2);

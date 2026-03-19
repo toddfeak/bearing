@@ -18,12 +18,12 @@ use crate::codecs::lucene94;
 use crate::codecs::lucene99;
 use crate::codecs::lucene103;
 use crate::document::Document;
-use crate::index::documents_writer_per_thread::DocumentsWriterPerThread;
-use crate::index::dwpt_pool::DwptPool;
 use crate::index::flush_control::FlushControl;
 use crate::index::flush_policy::{FlushByRamOrCountsPolicy, FlushPolicy};
 use crate::index::index_writer_config::IndexWriterConfig;
 use crate::index::indexing_chain::IndexingChain;
+use crate::index::segment_worker::SegmentWorker;
+use crate::index::segment_worker_pool::SegmentWorkerPool;
 use crate::index::{SegmentCommitInfo, index_file_names, segment_infos};
 use crate::store::{Directory, SegmentFile, SharedDirectory};
 
@@ -32,13 +32,13 @@ use crate::store::{Directory, SegmentFile, SharedDirectory};
 ///
 /// `IndexWriter` is cheaply cloneable (wraps `Arc<SharedState>`). Multiple
 /// threads can call `add_document` concurrently — each thread obtains its
-/// own `DocumentsWriterPerThread` (DWPT) from a pool. When the flush policy
-/// triggers, the DWPT is flushed to a segment. On `commit()`, all remaining
-/// DWPTs are flushed and a `segments_N` commit point is written.
+/// own `SegmentWorker` from a pool. When the flush policy triggers, the
+/// worker is flushed to a segment. On `commit()`, all remaining workers
+/// are flushed and a `segments_N` commit point is written.
 ///
 /// Segment files are written to the writer's [`Directory`] at flush time,
 /// not buffered until commit. This keeps memory usage bounded to the active
-/// DWPT buffers plus one segment's worth of codec output at a time.
+/// worker buffers plus one segment's worth of codec output at a time.
 ///
 /// Usage (single-threaded, in-memory):
 /// ```ignore
@@ -70,7 +70,7 @@ pub struct IndexWriter {
 }
 
 struct SharedState {
-    dwpt_pool: DwptPool,
+    worker_pool: SegmentWorkerPool,
     flush_control: FlushControl,
     analyzer: Arc<dyn Analyzer>,
     config: IndexWriterConfig,
@@ -81,7 +81,7 @@ struct SharedState {
     pending_segments: Mutex<Vec<FlushedSegment>>,
     /// Commit generation (incremented on each commit).
     generation: Mutex<i64>,
-    /// Total number of documents added across all DWPTs.
+    /// Total number of documents added across all workers.
     total_docs: AtomicI32,
 }
 
@@ -119,7 +119,7 @@ impl IndexWriter {
     pub fn with_config_and_directory(config: IndexWriterConfig, dir: Box<dyn Directory>) -> Self {
         Self {
             shared: Arc::new(SharedState {
-                dwpt_pool: DwptPool::new(),
+                worker_pool: SegmentWorkerPool::new(),
                 flush_control: FlushControl::new(),
                 analyzer: Arc::new(StandardAnalyzer::new()),
                 config,
@@ -134,57 +134,57 @@ impl IndexWriter {
 
     /// Adds a document to the index, consuming it.
     ///
-    /// Obtains a DWPT from the pool, processes the document, checks the
-    /// flush policy, and either returns the DWPT to the pool or flushes it.
+    /// Obtains a worker from the pool, processes the document, checks the
+    /// flush policy, and either returns the worker to the pool or flushes it.
     ///
     /// Thread-safe: multiple threads can call this concurrently.
     pub fn add_document(&self, doc: Document) -> io::Result<()> {
         // Wait if too many concurrent flushes
         self.shared.flush_control.wait_if_stalled();
 
-        // Obtain a DWPT (creates new one or reuses free one)
-        let mut dwpt = self.shared.dwpt_pool.obtain();
+        // Obtain a worker (creates new one or reuses free one)
+        let mut worker = self.shared.worker_pool.obtain();
 
         // Process document (no locks held during this CPU-intensive work)
-        dwpt.add_document(doc, self.shared.analyzer.as_ref())?;
+        worker.add_document(doc, self.shared.analyzer.as_ref())?;
         self.shared.total_docs.fetch_add(1, Ordering::Relaxed);
 
         // Check flush policy
-        let ram_used = dwpt.ram_bytes_used();
+        let ram_used = worker.ram_bytes_used();
         if self
             .shared
             .flush_policy
-            .should_flush(dwpt.num_docs(), ram_used, &self.shared.config)
+            .should_flush(worker.num_docs(), ram_used, &self.shared.config)
         {
             debug!(
                 "flush trigger: segment {} with {} docs, RAM {} bytes ({:.2} MB)",
-                dwpt.segment_name(),
-                dwpt.num_docs(),
+                worker.segment_name(),
+                worker.num_docs(),
                 ram_used,
                 ram_used as f64 / 1024.0 / 1024.0,
             );
             // Update global field numbers before flushing
             self.shared
-                .dwpt_pool
-                .update_field_numbers(dwpt.field_number_mappings());
+                .worker_pool
+                .update_field_numbers(worker.field_number_mappings());
 
-            // Flush this DWPT
-            self.flush_dwpt(dwpt)?;
+            // Flush this worker
+            self.flush_worker(worker)?;
         } else {
-            // Return DWPT to pool for reuse
-            self.shared.dwpt_pool.release(dwpt);
+            // Return worker to pool for reuse
+            self.shared.worker_pool.release(worker);
         }
 
         Ok(())
     }
 
-    /// Flushes a DWPT, writing segment files to the directory and adding
+    /// Flushes a worker, writing segment files to the directory and adding
     /// metadata to pending.
-    fn flush_dwpt(&self, dwpt: DocumentsWriterPerThread) -> io::Result<()> {
-        let segment_name = dwpt.segment_name().to_string();
-        let num_docs = dwpt.num_docs();
+    fn flush_worker(&self, worker: SegmentWorker) -> io::Result<()> {
+        let segment_name = worker.segment_name().to_string();
+        let num_docs = worker.num_docs();
 
-        let flushed = dwpt.flush(
+        let flushed = worker.flush(
             &self.shared.directory,
             self.shared.config.use_compound_file(),
         )?;
@@ -207,7 +207,7 @@ impl IndexWriter {
 
     /// Commits the index, producing a [`CommitResult`].
     ///
-    /// Drains remaining DWPTs from the pool, flushes any with documents,
+    /// Drains remaining workers from the pool, flushes any with documents,
     /// then writes a `segments_N` commit point listing all segments.
     ///
     /// Must not be called concurrently with `add_document`.
@@ -216,13 +216,13 @@ impl IndexWriter {
     /// (requires [`MemoryDirectory`](crate::store::MemoryDirectory)),
     /// or [`CommitResult::file_names`] to get the list of written file names.
     pub fn commit(&self) -> io::Result<CommitResult> {
-        // Drain any pending DWPTs from flush control
-        for dwpt in self.shared.flush_control.drain_pending() {
-            if dwpt.num_docs() > 0 {
+        // Drain any pending workers from flush control
+        for worker in self.shared.flush_control.drain_pending() {
+            if worker.num_docs() > 0 {
                 self.shared
-                    .dwpt_pool
-                    .update_field_numbers(dwpt.field_number_mappings());
-                let flushed = dwpt.flush(
+                    .worker_pool
+                    .update_field_numbers(worker.field_number_mappings());
+                let flushed = worker.flush(
                     &self.shared.directory,
                     self.shared.config.use_compound_file(),
                 )?;
@@ -230,13 +230,13 @@ impl IndexWriter {
             }
         }
 
-        // Drain free DWPTs from pool and flush any with documents
-        for dwpt in self.shared.dwpt_pool.drain_free() {
-            if dwpt.num_docs() > 0 {
+        // Drain free workers from pool and flush any with documents
+        for worker in self.shared.worker_pool.drain_free() {
+            if worker.num_docs() > 0 {
                 self.shared
-                    .dwpt_pool
-                    .update_field_numbers(dwpt.field_number_mappings());
-                let flushed = dwpt.flush(
+                    .worker_pool
+                    .update_field_numbers(worker.field_number_mappings());
+                let flushed = worker.flush(
                     &self.shared.directory,
                     self.shared.config.use_compound_file(),
                 )?;
@@ -260,7 +260,7 @@ impl IndexWriter {
                 &[],
                 *generation,
                 *generation,
-                self.shared.dwpt_pool.segment_counter() as i64,
+                self.shared.worker_pool.segment_counter() as i64,
                 &user_data,
             )?;
             debug!("commit: wrote {} (empty)", seg_file.name);
@@ -283,7 +283,7 @@ impl IndexWriter {
             &sci_refs,
             *generation,
             *generation,
-            self.shared.dwpt_pool.segment_counter() as i64,
+            self.shared.worker_pool.segment_counter() as i64,
             &user_data,
         )?;
         debug!("commit: wrote {}", seg_file.name);
