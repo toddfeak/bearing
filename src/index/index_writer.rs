@@ -149,9 +149,6 @@ impl IndexWriter {
         worker.add_document(doc, self.shared.analyzer.as_ref())?;
         self.shared.total_docs.fetch_add(1, Ordering::Relaxed);
 
-        // Log per-component breakdown after each doc
-        worker.log_ram_breakdown(&format!("after_doc:{}", worker.segment_name()));
-
         // Check flush policy
         let ram_used = worker.ram_bytes_used();
         if self
