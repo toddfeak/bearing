@@ -91,6 +91,11 @@ impl SegmentWorker {
         chain_bytes + tv_bytes
     }
 
+    /// Logs a per-component memory breakdown for debugging.
+    pub fn log_ram_breakdown(&self, label: &str) {
+        self.chain.log_ram_breakdown(label);
+    }
+
     /// Returns the segment name for this worker.
     pub fn segment_name(&self) -> &str {
         &self.segment_name

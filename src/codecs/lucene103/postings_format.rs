@@ -112,7 +112,7 @@ pub fn write(
             } else {
                 NormsLookup::new(&pfd.norms, &pfd.norms_docs)
             };
-            btw.write_field(fi, &sorted, &norms)?;
+            btw.write_field(fi, &sorted, &pfd.postings, &norms)?;
         }
     }
 

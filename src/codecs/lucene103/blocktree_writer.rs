@@ -10,7 +10,7 @@ use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::document::IndexOptions;
 use crate::index::index_file_names::segment_file_name;
-use crate::index::indexing_chain::PostingList;
+use crate::index::indexing_chain::{PostingsArray, PostingsBuffer};
 use crate::index::{FieldInfo, FieldInfos};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
@@ -131,7 +131,8 @@ impl BlockTreeTermsWriter {
     pub fn write_field(
         &mut self,
         field_info: &FieldInfo,
-        sorted_terms: &[(&str, &PostingList)],
+        sorted_terms: &[(&str, usize)],
+        postings: &PostingsArray,
         norms: &NormsLookup,
     ) -> io::Result<()> {
         if sorted_terms.is_empty() {
@@ -155,21 +156,18 @@ impl BlockTreeTermsWriter {
             self.max_items_in_block,
         );
 
-        // Compute doc_count and process terms in a single pass (no double decode)
         let mut docs_seen = HashSet::new();
+        let mut buf = PostingsBuffer::new();
 
-        for (term_str, posting_list) in sorted_terms {
-            let decoded = posting_list.decode();
+        for &(term_str, term_id) in sorted_terms {
+            postings.decode_into(term_id, &mut buf);
 
             // Accumulate unique doc IDs for doc_count
-            for p in &decoded {
-                docs_seen.insert(p.doc_id);
+            for &doc_id in &buf.doc_ids {
+                docs_seen.insert(doc_id);
             }
 
-            let postings_data: Vec<(i32, i32, &[i32])> = decoded
-                .iter()
-                .map(|p| (p.doc_id, p.freq, p.positions.as_slice()))
-                .collect();
+            let postings_data = buf.as_postings_data();
 
             let state = self.postings_writer.write_term(
                 &postings_data,
@@ -1281,19 +1279,52 @@ mod tests {
     use super::*;
     use crate::document::DocValuesType;
     use crate::index::PointDimensionConfig;
-    use crate::index::indexing_chain::PostingList;
     use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
-    use std::collections::HashMap;
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    /// Sorts a HashMap of terms into the slice format expected by write_field.
-    fn sort_terms(terms: &HashMap<String, PostingList>) -> Vec<(&str, &PostingList)> {
-        let mut sorted: Vec<_> = terms.iter().map(|(k, v)| (k.as_str(), v)).collect();
-        sorted.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
-        sorted
+    /// Test helper: a collection of terms and their PostingsArray.
+    struct TestTerms {
+        term_ids: Vec<(String, usize)>,
+        postings: PostingsArray,
+    }
+
+    impl TestTerms {
+        fn new(has_positions: bool) -> Self {
+            let has_freqs = true;
+            Self {
+                term_ids: Vec::new(),
+                postings: PostingsArray::new(has_freqs, has_positions, false, false, false),
+            }
+        }
+
+        /// Adds a term with the given postings data.
+        fn insert(&mut self, term: &str, data: &[(i32, i32, &[i32])]) {
+            let tid = self.postings.add_term();
+            for &(doc_id, freq, positions) in data {
+                self.postings.start_doc_explicit(tid, doc_id);
+                // freq starts at 1 from start_doc, so set explicitly
+                self.postings.set_freq(tid, freq);
+                for &pos in positions {
+                    self.postings.current_positions[tid].push(pos);
+                }
+            }
+            self.postings.finalize_current_doc(tid);
+            self.term_ids.push((term.to_string(), tid));
+        }
+
+        /// Returns sorted terms for write_field.
+        fn sorted(&self) -> Vec<(&str, usize)> {
+            let mut pairs: Vec<(&str, usize)> = self
+                .term_ids
+                .iter()
+                .map(|(term, id)| (term.as_str(), *id))
+                .collect();
+            pairs.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+            pairs
+        }
     }
 
     fn make_field_info(name: &str, number: u32, index_options: IndexOptions) -> FieldInfo {
@@ -1306,26 +1337,6 @@ mod tests {
             DocValuesType::None,
             PointDimensionConfig::default(),
         )
-    }
-
-    /// Builds a PostingList from a slice of (doc_id, freq, positions) tuples.
-    /// Uses the PostingList's streaming API to simulate how IndexingChain
-    /// would build postings during document processing.
-    fn make_posting_list(postings: &[(i32, i32, &[i32])], has_positions: bool) -> PostingList {
-        let has_freqs = true; // all test cases use freqs
-        let mut pl = PostingList::new(has_freqs, has_positions, false, false, false);
-        for &(doc_id, freq, positions) in postings {
-            pl.start_doc(doc_id);
-            // freq starts at 1 from start_doc, so increment (freq-1) times
-            for _ in 1..freq {
-                pl.increment_freq();
-            }
-            for &pos in positions {
-                pl.add_position(pos);
-            }
-        }
-        pl.finalize_current_doc();
-        pl
     }
 
     #[test]
@@ -1512,32 +1523,21 @@ mod tests {
 
     #[test]
     fn test_write_field_simple() {
-        // Create a field with 3 terms
         let fi = make_field_info("test", 0, IndexOptions::DocsAndFreqs);
         let field_infos = FieldInfos::new(vec![fi.clone()]);
 
-        let mut terms = HashMap::new();
-        terms.insert(
-            "apple".to_string(),
-            make_posting_list(&[(0, 2, &[])], false),
-        );
-        terms.insert(
-            "banana".to_string(),
-            make_posting_list(&[(0, 1, &[]), (1, 3, &[])], false),
-        );
-        terms.insert(
-            "cherry".to_string(),
-            make_posting_list(&[(2, 1, &[])], false),
-        );
+        let mut tt = TestTerms::new(false);
+        tt.insert("apple", &[(0, 2, &[])]);
+        tt.insert("banana", &[(0, 1, &[]), (1, 3, &[])]);
+        tt.insert("cherry", &[(2, 1, &[])]);
 
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
 
-        // Should produce .tim, .tip, .tmd, .doc, .psm files (no .pos since no positions)
         assert_ge!(
             names.len(),
             4,
@@ -1545,33 +1545,13 @@ mod tests {
             names.len()
         );
 
-        assert!(
-            names.iter().any(|n| n.ends_with(".tim")),
-            "missing .tim: {:?}",
-            names
-        );
-        assert!(
-            names.iter().any(|n| n.ends_with(".tip")),
-            "missing .tip: {:?}",
-            names
-        );
-        assert!(
-            names.iter().any(|n| n.ends_with(".tmd")),
-            "missing .tmd: {:?}",
-            names
-        );
-        assert!(
-            names.iter().any(|n| n.ends_with(".doc")),
-            "missing .doc: {:?}",
-            names
-        );
-        assert!(
-            names.iter().any(|n| n.ends_with(".psm")),
-            "missing .psm: {:?}",
-            names
-        );
+        for ext in &[".tim", ".tip", ".tmd", ".doc", ".psm"] {
+            assert!(
+                names.iter().any(|n| n.ends_with(ext)),
+                "missing {ext}: {names:?}"
+            );
+        }
 
-        // Verify all files have content
         for name in &names {
             let data = dir.lock().unwrap().read_file(name).unwrap();
             assert_not_empty!(data, "file {name} is empty");
@@ -1583,112 +1563,73 @@ mod tests {
         let fi = make_field_info("contents", 0, IndexOptions::DocsAndFreqsAndPositions);
         let field_infos = FieldInfos::new(vec![fi.clone()]);
 
-        let mut terms = HashMap::new();
-        terms.insert(
-            "hello".to_string(),
-            make_posting_list(&[(0, 2, &[0, 5]), (1, 1, &[3])], true),
-        );
-        terms.insert(
-            "world".to_string(),
-            make_posting_list(&[(0, 1, &[1])], true),
-        );
+        let mut tt = TestTerms::new(true);
+        tt.insert("hello", &[(0, 2, &[0, 5]), (1, 1, &[3])]);
+        tt.insert("world", &[(0, 1, &[1])]);
 
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
 
-        // Should produce .tim, .tip, .tmd, .doc, .pos, .psm files
         assert!(
             names.iter().any(|n| n.ends_with(".pos")),
-            "missing .pos: {:?}",
-            names
+            "missing .pos: {names:?}"
         );
     }
 
     /// Regression test for usize overflow in push_term when processing many terms
-    /// with shared prefixes. In Java, `prefixStarts` is `int[]` (signed), so
-    /// `pending.size() - prefixStarts[i]` can go negative without error. In Rust
-    /// with `usize`, this caused a panic: "attempt to subtract with overflow".
-    ///
-    /// The bug triggers when write_blocks() collapses entries in pending,
-    /// making prefix_starts[i] stale (larger than pending.len()) for subsequent
-    /// loop iterations.
+    /// with shared prefixes.
     #[test]
     fn test_push_term_many_terms_no_overflow() {
         let fi = make_field_info("contents", 0, IndexOptions::DocsAndFreqsAndPositions);
         let field_infos = FieldInfos::new(vec![fi.clone()]);
 
-        // Generate enough terms with shared prefixes to trigger block writing.
-        // min_items_in_block = 25, so we need > 25 terms sharing a prefix,
-        // then switch to a different prefix to trigger the suffix-closing
-        // loop where the overflow occurred.
-        let mut terms = HashMap::new();
-
-        // 30 terms starting with "aaa" (sorted: aaa_00..aaa_29)
+        let mut tt = TestTerms::new(true);
         for i in 0..30 {
-            let term = format!("aaa_{:02}", i);
-            terms.insert(term, make_posting_list(&[(0, 1, &[i])], true));
+            tt.insert(&format!("aaa_{i:02}"), &[(0, 1, &[i])]);
         }
-
-        // 30 terms starting with "bbb" — forces closing of "aaa" prefix group
         for i in 0..30 {
-            let term = format!("bbb_{:02}", i);
-            terms.insert(term, make_posting_list(&[(0, 1, &[30 + i])], true));
+            tt.insert(&format!("bbb_{i:02}"), &[(0, 1, &[30 + i])]);
         }
-
-        // 30 terms starting with "ccc" — forces closing of "bbb" prefix group
         for i in 0..30 {
-            let term = format!("ccc_{:02}", i);
-            terms.insert(term, make_posting_list(&[(0, 1, &[60 + i])], true));
+            tt.insert(&format!("ccc_{i:02}"), &[(0, 1, &[60 + i])]);
         }
 
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        // This panicked before the fix with "attempt to subtract with overflow"
-        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
 
         assert!(
             names.iter().any(|n| n.ends_with(".tim")),
-            "missing .tim: {:?}",
-            names
+            "missing .tim: {names:?}"
         );
     }
 
     #[test]
     fn test_doc_count_computed_correctly() {
-        // 3 terms spanning 3 unique docs: doc_count should be 3
         let fi = make_field_info("test", 0, IndexOptions::DocsAndFreqs);
         let field_infos = FieldInfos::new(vec![fi.clone()]);
 
-        let mut terms = HashMap::new();
-        terms.insert(
-            "alpha".to_string(),
-            make_posting_list(&[(0, 1, &[]), (1, 1, &[])], false),
-        );
-        terms.insert(
-            "beta".to_string(),
-            make_posting_list(&[(1, 1, &[]), (2, 1, &[])], false),
-        );
+        let mut tt = TestTerms::new(false);
+        tt.insert("alpha", &[(0, 1, &[]), (1, 1, &[])]);
+        tt.insert("beta", &[(1, 1, &[]), (2, 1, &[])]);
 
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
 
-        // Find .tmd and parse the field metadata to check doc_count
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
         let tmd_bytes = dir.lock().unwrap().read_file(tmd_name).unwrap();
 
-        // After the BlockTreeTermsMeta header, the postingsWriter.init writes
-        // a TERMS_CODEC header + BLOCK_SIZE(VInt), then numFields(VInt), then per-field metadata.
         let meta_hdr_len = codec_util::index_header_length(
             crate::codecs::lucene103::postings_format::TERMS_META_CODEC_NAME,
             "",
@@ -1698,36 +1639,23 @@ mod tests {
             "",
         );
         let mut pos = meta_hdr_len + terms_hdr_len;
-        // Skip BLOCK_SIZE VInt (128 = 1 byte)
         let (_, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
-
-        // numFields
         let (num_fields, n) = read_vint(&tmd_bytes[pos..]);
         assert_eq!(num_fields, 1);
         pos += n;
-
-        // field_number
         let (field_num, n) = read_vint(&tmd_bytes[pos..]);
         assert_eq!(field_num, 0);
         pos += n;
-
-        // num_terms (VLong)
         let (num_terms, n) = read_vlong(&tmd_bytes[pos..]);
         assert_eq!(num_terms, 2);
         pos += n;
-
-        // sum_total_term_freq (VLong) — only for non-DOCS-only
         let (sttf, n) = read_vlong(&tmd_bytes[pos..]);
-        assert_eq!(sttf, 4); // 2+2
+        assert_eq!(sttf, 4);
         pos += n;
-
-        // sum_doc_freq (VLong)
         let (sdf, n) = read_vlong(&tmd_bytes[pos..]);
-        assert_eq!(sdf, 4); // 2+2
+        assert_eq!(sdf, 4);
         pos += n;
-
-        // doc_count (VInt) — this is what we're testing
         let (doc_count, _) = read_vint(&tmd_bytes[pos..]);
         assert_eq!(doc_count, 3, "doc_count should be 3 (unique docs: 0, 1, 2)");
     }
@@ -1739,31 +1667,21 @@ mod tests {
         let fi = make_field_info("test", 0, IndexOptions::DocsAndFreqs);
         let field_infos = FieldInfos::new(vec![fi.clone()]);
 
-        let mut terms = HashMap::new();
-        terms.insert(
-            "apple".to_string(),
-            make_posting_list(&[(0, 2, &[])], false),
-        );
-        terms.insert(
-            "banana".to_string(),
-            make_posting_list(&[(0, 1, &[]), (1, 3, &[])], false),
-        );
-        terms.insert(
-            "cherry".to_string(),
-            make_posting_list(&[(2, 1, &[])], false),
-        );
+        let mut tt = TestTerms::new(false);
+        tt.insert("apple", &[(0, 2, &[])]);
+        tt.insert("banana", &[(0, 1, &[]), (1, 3, &[])]);
+        tt.insert("cherry", &[(2, 1, &[])]);
 
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
 
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
         let tmd_bytes = dir.lock().unwrap().read_file(tmd_name).unwrap();
 
-        // Skip headers: BlockTreeTermsMeta + Lucene103PostingsWriterTerms + BLOCK_SIZE VInt
         let meta_hdr_len = codec_util::index_header_length(
             crate::codecs::lucene103::postings_format::TERMS_META_CODEC_NAME,
             "",
@@ -1773,53 +1691,33 @@ mod tests {
             "",
         );
         let mut pos = meta_hdr_len + terms_hdr_len;
-        let (_, n) = read_vint(&tmd_bytes[pos..]); // BLOCK_SIZE
+        let (_, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
-
         let (num_fields, n) = read_vint(&tmd_bytes[pos..]);
         assert_eq!(num_fields, 1);
         pos += n;
-
-        // field_number
         let (_, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
-        // num_terms
         let (_, n) = read_vlong(&tmd_bytes[pos..]);
         pos += n;
-        // sum_total_term_freq (non-DOCS field)
         let (_, n) = read_vlong(&tmd_bytes[pos..]);
         pos += n;
-        // sum_doc_freq
         let (_, n) = read_vlong(&tmd_bytes[pos..]);
         pos += n;
-        // doc_count
         let (_, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
-
-        // min term: VInt length + bytes
         let (min_len, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
         let min_term = &tmd_bytes[pos..pos + min_len as usize];
         pos += min_len as usize;
-
-        // max term: VInt length + bytes
         let (max_len, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
         let max_term = &tmd_bytes[pos..pos + max_len as usize];
 
-        assert_eq!(
-            std::str::from_utf8(min_term).unwrap(),
-            "apple",
-            "min term should be the first term in sorted order"
-        );
-        assert_eq!(
-            std::str::from_utf8(max_term).unwrap(),
-            "cherry",
-            "max term should be the last term in sorted order"
-        );
+        assert_eq!(std::str::from_utf8(min_term).unwrap(), "apple");
+        assert_eq!(std::str::from_utf8(max_term).unwrap(), "cherry");
     }
 
-    /// Helper to read a VInt from a byte slice. Returns (value, bytes_consumed).
     fn read_vint(bytes: &[u8]) -> (i32, usize) {
         let mut result = 0i32;
         let mut shift = 0;
@@ -1836,7 +1734,6 @@ mod tests {
         (result, pos)
     }
 
-    /// Helper to read a VLong from a byte slice. Returns (value, bytes_consumed).
     fn read_vlong(bytes: &[u8]) -> (i64, usize) {
         let mut result = 0i64;
         let mut shift = 0;
@@ -1854,53 +1751,34 @@ mod tests {
     }
 
     /// Regression test: write_blocks must not corrupt PendingBlock prefix data.
-    /// When blocks are created by an inner write_blocks call, their prefix is used
-    /// later when a parent write_blocks processes them as sub-blocks. Taking ownership
-    /// of the prefix (e.g., via std::mem::take) leaves an empty Vec, causing a panic
-    /// when the parent block tries to compute suffix_len = block.prefix.len() - prefix_length.
-    ///
-    /// To trigger the bug, we need 25+ sub-groups under a shared prefix so that
-    /// write_blocks is called at the parent prefix level with PendingBlocks in its range.
     #[test]
     fn test_pending_block_prefix_preserved_after_write_blocks() {
         let fi = make_field_info("contents", 0, IndexOptions::DocsAndFreqsAndPositions);
         let field_infos = FieldInfos::new(vec![fi.clone()]);
 
-        let mut terms = HashMap::new();
-        let mut pos = 0i32;
+        let mut tt = TestTerms::new(true);
+        let mut p = 0i32;
 
-        // Create 26 sub-prefix groups under "a" (aa..az), each with 30 terms.
-        // Each group of 30 triggers write_blocks(prefix_length=2), producing a
-        // PendingBlock. After all groups, there are 26 PendingBlocks under prefix "a".
-        // When terms starting with "b" arrive, the suffix-closing loop in push_term
-        // calls write_blocks(prefix_length=1, count=26), which processes those blocks
-        // as sub-blocks and accesses block.prefix[1]. If the prefix was emptied by
-        // std::mem::take, this panics with a usize underflow.
         for group in b'a'..=b'z' {
             for i in 0..30 {
-                let term = format!("a{}{:02}", group as char, i);
-                terms.insert(term, make_posting_list(&[(0, 1, &[pos])], true));
-                pos += 1;
+                tt.insert(&format!("a{}{i:02}", group as char), &[(0, 1, &[p])]);
+                p += 1;
             }
         }
-
-        // Terms starting with "b" to force closing of the "a*" prefix group
         for i in 0..30 {
-            let term = format!("b_{:02}", i);
-            terms.insert(term, make_posting_list(&[(0, 1, &[pos + i])], true));
+            tt.insert(&format!("b_{i:02}"), &[(0, 1, &[p + i])]);
         }
 
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &sort_terms(&terms), &NormsLookup::no_norms())
+        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
 
         assert!(
             names.iter().any(|n| n.ends_with(".tim")),
-            "missing .tim: {:?}",
-            names
+            "missing .tim: {names:?}"
         );
     }
 

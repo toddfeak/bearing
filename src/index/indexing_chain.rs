@@ -62,17 +62,9 @@ fn read_vint(data: &[u8], offset: &mut usize) -> i32 {
     result
 }
 
-/// A decoded posting, produced by `PostingList::decode()` at flush time.
-#[derive(Clone, Debug)]
-pub struct DecodedPosting {
-    pub doc_id: i32,
-    pub freq: i32,
-    pub positions: Vec<i32>,
-}
-
 /// Start and end offset buffers for offset-indexed fields.
 ///
-/// Boxed and optional in `PostingList` and `TermVectorTerm` to avoid
+/// Boxed and optional in `TermVectorTerm` to avoid
 /// 48 bytes of Vec overhead per instance when offsets are not stored.
 #[derive(Clone, Debug, MemSize)]
 pub struct OffsetBuffers {
@@ -82,41 +74,43 @@ pub struct OffsetBuffers {
     pub end_offsets: Vec<i32>,
 }
 
-/// Per-term posting list across all documents.
+/// Compact struct-of-arrays storage for all terms' posting data in a field.
 ///
-/// Stores finalized document postings as a compact vInt-encoded byte stream,
-/// using ~3-5 bytes per posting instead of ~80 bytes with the old Vec<Posting>
-/// approach. Only the current in-progress document uses temporary Vecs.
-///
-/// When term vectors are enabled for the field, TV accumulators are stored
-/// directly on the posting list, eliminating a redundant HashMap lookup.
+/// Instead of one `PostingList` struct (~143 bytes) per term, stores per-term
+/// data in parallel Vecs indexed by term_id. This eliminates struct padding
+/// and per-Vec overhead, reducing per-term cost from ~193 bytes to ~33 bytes.
 #[derive(Clone, Debug, MemSize)]
-pub struct PostingList {
-    /// Compact storage: all finalized docs encoded as vInt byte stream.
-    byte_stream: Vec<u8>,
-    total_term_freq: i64,
-    doc_freq: i32,
-    /// Last doc_id written to byte_stream (for delta encoding).
-    last_doc_id: i32,
-    /// Current in-progress document's doc_id (-1 if none pending).
-    current_doc_id: i32,
-    current_freq: i32,
-    current_positions: Vec<i32>,
-    current_offsets: Option<Box<OffsetBuffers>>,
-    /// Field's index options (needed for encoding decisions).
+pub struct PostingsArray {
+    // Per-term encoded data (finalized docs as vInt byte streams)
+    pub(crate) byte_streams: Vec<Vec<u8>>,
+    total_term_freqs: Vec<i64>,
+    doc_freqs: Vec<i32>,
+    last_doc_ids: Vec<i32>,
+
+    // Current in-progress document state (per-term)
+    current_doc_ids: Vec<i32>,
+    current_freqs: Vec<i32>,
+    /// Per-term position buffers for current in-progress document.
+    pub(crate) current_positions: Vec<Vec<i32>>,
+
+    // Offset state (only allocated when has_offsets)
+    current_start_offsets: Option<Vec<Vec<i32>>>,
+    current_end_offsets: Option<Vec<Vec<i32>>>,
+
+    // TV state (only allocated when tv enabled)
+    tv_freqs: Option<Vec<i32>>,
+    tv_positions: Option<Vec<Vec<i32>>>,
+    tv_start_offsets: Option<Vec<Vec<i32>>>,
+    tv_end_offsets: Option<Vec<Vec<i32>>>,
+
+    // Field-level config
     has_freqs: bool,
     has_positions: bool,
     has_offsets: bool,
-    /// Term vector frequency for the current document. Zero when no TV data recorded.
-    tv_freq: i32,
-    /// Term vector positions for the current document. `None` when TV positions not configured.
-    tv_positions: Option<Vec<i32>>,
-    /// Term vector offsets for the current document. `None` when TV offsets not configured.
-    tv_offsets: Option<Box<OffsetBuffers>>,
 }
 
-impl PostingList {
-    /// Creates a new empty posting list with the given index options.
+impl PostingsArray {
+    /// Creates a new empty postings array with the given field configuration.
     pub fn new(
         has_freqs: bool,
         has_positions: bool,
@@ -125,226 +119,322 @@ impl PostingList {
         tv_offsets: bool,
     ) -> Self {
         Self {
-            byte_stream: Vec::new(),
-            total_term_freq: 0,
-            doc_freq: 0,
-            last_doc_id: 0,
-            current_doc_id: -1,
-            current_freq: 0,
+            byte_streams: Vec::new(),
+            total_term_freqs: Vec::new(),
+            doc_freqs: Vec::new(),
+            last_doc_ids: Vec::new(),
+            current_doc_ids: Vec::new(),
+            current_freqs: Vec::new(),
             current_positions: Vec::new(),
-            current_offsets: if has_offsets {
-                Some(Box::new(OffsetBuffers {
-                    start_offsets: Vec::new(),
-                    end_offsets: Vec::new(),
-                }))
+            current_start_offsets: if has_offsets { Some(Vec::new()) } else { None },
+            current_end_offsets: if has_offsets { Some(Vec::new()) } else { None },
+            tv_freqs: if tv_positions || tv_offsets {
+                Some(Vec::new())
             } else {
                 None
             },
+            tv_positions: if tv_positions { Some(Vec::new()) } else { None },
+            tv_start_offsets: if tv_offsets { Some(Vec::new()) } else { None },
+            tv_end_offsets: if tv_offsets { Some(Vec::new()) } else { None },
             has_freqs,
             has_positions,
             has_offsets,
-            tv_freq: 0,
-            tv_positions: if tv_positions { Some(Vec::new()) } else { None },
-            tv_offsets: if tv_offsets {
-                Some(Box::new(OffsetBuffers {
-                    start_offsets: Vec::new(),
-                    end_offsets: Vec::new(),
-                }))
-            } else {
-                None
-            },
         }
     }
 
-    /// Finalizes the previous pending document (if any) and starts a new one.
-    pub fn start_doc(&mut self, doc_id: i32) {
-        if self.current_doc_id >= 0 {
-            self.finalize_current_doc();
+    /// Allocates a new slot for a term, returning its term_id.
+    pub fn add_term(&mut self) -> usize {
+        let tid = self.byte_streams.len();
+        self.byte_streams.push(Vec::new());
+        self.total_term_freqs.push(0);
+        self.doc_freqs.push(0);
+        self.last_doc_ids.push(0);
+        self.current_doc_ids.push(-1);
+        self.current_freqs.push(0);
+        self.current_positions.push(Vec::new());
+        if let Some(ref mut v) = self.current_start_offsets {
+            v.push(Vec::new());
         }
-        self.current_doc_id = doc_id;
-        self.current_freq = 1;
-        self.doc_freq += 1;
+        if let Some(ref mut v) = self.current_end_offsets {
+            v.push(Vec::new());
+        }
+        if let Some(ref mut v) = self.tv_freqs {
+            v.push(0);
+        }
+        if let Some(ref mut v) = self.tv_positions {
+            v.push(Vec::new());
+        }
+        if let Some(ref mut v) = self.tv_start_offsets {
+            v.push(Vec::new());
+        }
+        if let Some(ref mut v) = self.tv_end_offsets {
+            v.push(Vec::new());
+        }
+        tid
     }
 
-    /// Increments the frequency for the current in-progress document.
-    pub fn increment_freq(&mut self) {
-        self.current_freq += 1;
-    }
-
-    /// Sets the frequency for the current in-progress document to an explicit value.
-    ///
-    /// Used by FeatureField to encode the feature value as a term frequency.
-    /// Must be called after `start_doc` and before `finalize_current_doc`.
-    pub fn set_freq(&mut self, freq: i32) {
-        self.current_freq = freq;
-    }
-
-    /// Records a position for the current document.
-    pub fn add_position(&mut self, position: i32) {
-        self.current_positions.push(position);
-    }
-
-    /// Records an offset pair for the current document.
-    pub fn add_offset(&mut self, start: i32, end: i32) {
-        let offsets = self
-            .current_offsets
-            .as_mut()
-            .expect("add_offset called on non-offset field");
-        offsets.start_offsets.push(start);
-        offsets.end_offsets.push(end);
-    }
-
-    /// Records a token occurrence for the given document: starts a new doc
-    /// or increments frequency, and records position/offset data as configured.
+    /// Records a token occurrence for the given term and document.
     #[inline]
     pub fn record_occurrence(
         &mut self,
+        tid: usize,
         doc_id: i32,
         position: i32,
         start_offset: i32,
         end_offset: i32,
     ) {
-        if self.current_doc_id == doc_id {
+        if self.current_doc_ids[tid] == doc_id {
             if self.has_freqs {
-                self.increment_freq();
+                self.current_freqs[tid] += 1;
             }
             if self.has_positions {
-                self.add_position(position);
+                self.current_positions[tid].push(position);
             }
             if self.has_offsets {
-                self.add_offset(start_offset, end_offset);
+                self.current_start_offsets.as_mut().unwrap()[tid].push(start_offset);
+                self.current_end_offsets.as_mut().unwrap()[tid].push(end_offset);
             }
         } else {
-            self.start_doc(doc_id);
+            self.start_doc(tid, doc_id);
             if self.has_positions {
-                self.add_position(position);
+                self.current_positions[tid].push(position);
             }
             if self.has_offsets {
-                self.add_offset(start_offset, end_offset);
+                self.current_start_offsets.as_mut().unwrap()[tid].push(start_offset);
+                self.current_end_offsets.as_mut().unwrap()[tid].push(end_offset);
             }
         }
     }
 
-    /// Records a term vector occurrence: increments TV freq and pushes
-    /// position/offset data if configured.
-    #[inline]
-    pub fn record_tv_occurrence(&mut self, position: i32, start_offset: i32, end_offset: i32) {
-        self.tv_freq += 1;
-        if let Some(ref mut positions) = self.tv_positions {
-            positions.push(position);
+    /// Starts a new document for the given term, finalizing any pending doc first.
+    fn start_doc(&mut self, tid: usize, doc_id: i32) {
+        if self.current_doc_ids[tid] >= 0 {
+            self.finalize_current_doc(tid);
         }
-        if let Some(ref mut offsets) = self.tv_offsets {
-            offsets.start_offsets.push(start_offset);
-            offsets.end_offsets.push(end_offset);
+        self.current_doc_ids[tid] = doc_id;
+        self.current_freqs[tid] = 1;
+        self.doc_freqs[tid] += 1;
+    }
+
+    /// Starts a new document for the given term (explicit API for FeatureField).
+    pub fn start_doc_explicit(&mut self, tid: usize, doc_id: i32) {
+        self.start_doc(tid, doc_id);
+    }
+
+    /// Sets the frequency for the given term's current document.
+    pub fn set_freq(&mut self, tid: usize, freq: i32) {
+        self.current_freqs[tid] = freq;
+    }
+
+    /// Records a term vector occurrence for the given term.
+    #[inline]
+    pub fn record_tv_occurrence(
+        &mut self,
+        tid: usize,
+        position: i32,
+        start_offset: i32,
+        end_offset: i32,
+    ) {
+        self.tv_freqs.as_mut().unwrap()[tid] += 1;
+        if let Some(ref mut positions) = self.tv_positions {
+            positions[tid].push(position);
+        }
+        if let Some(ref mut start_offsets) = self.tv_start_offsets {
+            start_offsets[tid].push(start_offset);
+        }
+        if let Some(ref mut end_offsets) = self.tv_end_offsets {
+            end_offsets[tid].push(end_offset);
         }
     }
 
-    /// Encodes the current pending document into the byte_stream and clears
-    /// the temporary state. Reuses the temp Vec capacity across documents.
-    pub fn finalize_current_doc(&mut self) {
-        if self.current_doc_id < 0 {
+    /// Encodes the current pending document for one term into its byte_stream.
+    pub fn finalize_current_doc(&mut self, tid: usize) {
+        if self.current_doc_ids[tid] < 0 {
             return;
         }
 
-        self.total_term_freq += self.current_freq as i64;
+        self.total_term_freqs[tid] += self.current_freqs[tid] as i64;
 
         // doc_id delta
-        let delta = self.current_doc_id - self.last_doc_id;
-        write_vint(&mut self.byte_stream, delta);
+        let delta = self.current_doc_ids[tid] - self.last_doc_ids[tid];
+        write_vint(&mut self.byte_streams[tid], delta);
 
         // freq (if field has freqs)
         if self.has_freqs {
-            write_vint(&mut self.byte_stream, self.current_freq);
+            write_vint(&mut self.byte_streams[tid], self.current_freqs[tid]);
         }
 
         // positions + optional offsets
         if self.has_positions {
-            let offsets = self.current_offsets.as_ref();
             let mut last_pos = 0;
-            for (i, &pos) in self.current_positions.iter().enumerate() {
+            let positions_len = self.current_positions[tid].len();
+            for i in 0..positions_len {
+                let pos = self.current_positions[tid][i];
                 let pos_delta = pos - last_pos;
-                write_vint(&mut self.byte_stream, pos_delta);
+                write_vint(&mut self.byte_streams[tid], pos_delta);
                 last_pos = pos;
 
-                if let Some(ob) = offsets {
-                    write_vint(&mut self.byte_stream, ob.start_offsets[i]);
-                    write_vint(&mut self.byte_stream, ob.end_offsets[i]);
+                if self.has_offsets {
+                    write_vint(
+                        &mut self.byte_streams[tid],
+                        self.current_start_offsets.as_ref().unwrap()[tid][i],
+                    );
+                    write_vint(
+                        &mut self.byte_streams[tid],
+                        self.current_end_offsets.as_ref().unwrap()[tid][i],
+                    );
                 }
             }
         }
 
-        self.last_doc_id = self.current_doc_id;
-        self.current_doc_id = -1;
-        self.current_freq = 0;
-        self.current_positions.clear();
-        if let Some(ob) = self.current_offsets.as_mut() {
-            ob.start_offsets.clear();
-            ob.end_offsets.clear();
+        self.last_doc_ids[tid] = self.current_doc_ids[tid];
+        self.current_doc_ids[tid] = -1;
+        self.current_freqs[tid] = 0;
+        self.current_positions[tid].clear();
+        if let Some(ref mut start_offsets) = self.current_start_offsets {
+            start_offsets[tid].clear();
+        }
+        if let Some(ref mut end_offsets) = self.current_end_offsets {
+            end_offsets[tid].clear();
         }
     }
 
-    /// Decodes the entire byte stream into a Vec of DecodedPosting.
-    /// Used at flush time when the codec writers need structured access.
-    pub fn decode(&self) -> Vec<DecodedPosting> {
-        let mut result = Vec::with_capacity(self.doc_freq as usize);
+    /// Finalizes all terms with pending documents.
+    pub fn finalize_all(&mut self) {
+        for tid in 0..self.current_doc_ids.len() {
+            self.finalize_current_doc(tid);
+        }
+    }
+
+    /// Decodes one term's byte stream into a reusable `PostingsBuffer`.
+    pub fn decode_into(&self, tid: usize, buf: &mut PostingsBuffer) {
+        buf.clear();
+        let data = &self.byte_streams[tid];
         let mut offset = 0;
         let mut last_doc_id = 0;
 
-        while offset < self.byte_stream.len() {
-            let doc_delta = read_vint(&self.byte_stream, &mut offset);
+        while offset < data.len() {
+            let doc_delta = read_vint(data, &mut offset);
             let doc_id = last_doc_id + doc_delta;
             last_doc_id = doc_id;
 
             let freq = if self.has_freqs {
-                read_vint(&self.byte_stream, &mut offset)
+                read_vint(data, &mut offset)
             } else {
                 1
             };
 
-            let mut positions = if self.has_positions {
-                Vec::with_capacity(freq as usize)
-            } else {
-                Vec::new()
-            };
+            buf.doc_ids.push(doc_id);
+            buf.freqs.push(freq);
+
             if self.has_positions {
+                let start = buf.positions.len();
                 let mut last_pos = 0;
                 for _ in 0..freq {
-                    let pos_delta = read_vint(&self.byte_stream, &mut offset);
+                    let pos_delta = read_vint(data, &mut offset);
                     let pos = last_pos + pos_delta;
-                    positions.push(pos);
+                    buf.positions.push(pos);
                     last_pos = pos;
 
                     if self.has_offsets {
-                        // Consume offset data from the byte stream (not exposed in DecodedPosting)
-                        read_vint(&self.byte_stream, &mut offset);
-                        read_vint(&self.byte_stream, &mut offset);
+                        // Consume offset data (not exposed)
+                        read_vint(data, &mut offset);
+                        read_vint(data, &mut offset);
                     }
                 }
+                buf.position_starts.push(start);
             }
-
-            result.push(DecodedPosting {
-                doc_id,
-                freq,
-                positions,
-            });
         }
 
-        result
+        buf.doc_freq = self.doc_freqs[tid];
+        buf.total_term_freq = self.total_term_freqs[tid];
+    }
+
+    /// Returns the number of terms in this array.
+    pub fn len(&self) -> usize {
+        self.byte_streams.len()
+    }
+}
+
+/// Reusable buffer for decoded posting data, used at flush time.
+///
+/// Instead of allocating a `Vec<DecodedPosting>` per term, a single
+/// `PostingsBuffer` is reused across all terms in a field.
+#[derive(Debug)]
+pub struct PostingsBuffer {
+    /// Decoded doc IDs in order.
+    pub doc_ids: Vec<i32>,
+    /// Decoded frequencies (parallel with doc_ids).
+    pub freqs: Vec<i32>,
+    /// All positions concatenated across all docs.
+    pub positions: Vec<i32>,
+    /// Start index into `positions` for each doc (parallel with doc_ids).
+    pub position_starts: Vec<usize>,
+    /// Total term freq (sum of freqs).
+    pub total_term_freq: i64,
+    /// Number of documents containing this term.
+    pub doc_freq: i32,
+}
+
+impl PostingsBuffer {
+    /// Creates a new empty buffer.
+    pub fn new() -> Self {
+        Self {
+            doc_ids: Vec::new(),
+            freqs: Vec::new(),
+            positions: Vec::new(),
+            position_starts: Vec::new(),
+            total_term_freq: 0,
+            doc_freq: 0,
+        }
+    }
+
+    /// Clears the buffer for reuse.
+    pub fn clear(&mut self) {
+        self.doc_ids.clear();
+        self.freqs.clear();
+        self.positions.clear();
+        self.position_starts.clear();
+        self.total_term_freq = 0;
+        self.doc_freq = 0;
+    }
+
+    /// Returns postings data in the format expected by `PostingsWriter::write_term`.
+    pub fn as_postings_data(&self) -> Vec<(i32, i32, &[i32])> {
+        self.doc_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &doc_id)| {
+                let freq = self.freqs[i];
+                let positions = if self.position_starts.is_empty() {
+                    &[] as &[i32]
+                } else {
+                    let start = self.position_starts[i];
+                    let end = if i + 1 < self.position_starts.len() {
+                        self.position_starts[i + 1]
+                    } else {
+                        self.positions.len()
+                    };
+                    &self.positions[start..end]
+                };
+                (doc_id, freq, positions)
+            })
+            .collect()
     }
 }
 
 /// Per-field accumulated data from all documents.
 ///
 /// Postings are stored as a separate term-id lookup (`term_ids`) and a
-/// contiguous `Vec<PostingList>` indexed by term id. During HashMap rehash
-/// only the lightweight `(String, u32)` entries are copied (~29 bytes each)
-/// instead of the full `(String, PostingList)` entries (~145+ bytes each).
+/// compact struct-of-arrays `PostingsArray` indexed by term id. During
+/// HashMap rehash only the lightweight `(String, u32)` entries are copied
+/// (~29 bytes each).
 #[derive(Clone, Debug, MemSize)]
 pub struct PerFieldData {
-    /// Term string -> index into `posting_lists`.
+    /// Term string -> index into `postings`.
     term_ids: HashMap<String, u32>,
-    /// PostingLists indexed by term id.
-    posting_lists: Vec<PostingList>,
+    /// Struct-of-arrays postings storage.
+    pub postings: PostingsArray,
     /// Doc values accumulated per document.
     pub doc_values: DocValuesAccumulator,
     /// Norm values per document (only for fields with norms).
@@ -360,7 +450,7 @@ impl PerFieldData {
     pub fn new() -> Self {
         Self {
             term_ids: HashMap::new(),
-            posting_lists: Vec::new(),
+            postings: PostingsArray::new(false, false, false, false, false),
             doc_values: DocValuesAccumulator::None,
             norms: Vec::new(),
             norms_docs: Vec::new(),
@@ -368,8 +458,11 @@ impl PerFieldData {
         }
     }
 
-    /// Looks up or inserts a term, returning `&mut PostingList`.
-    fn get_or_insert_posting_list(
+    /// Looks up or inserts a term, returning its term_id.
+    ///
+    /// On first call for this field, initializes the `PostingsArray` with the
+    /// given field configuration. Subsequent calls must use the same config.
+    fn get_or_insert_term(
         &mut self,
         term: &str,
         has_freqs: bool,
@@ -377,28 +470,31 @@ impl PerFieldData {
         has_offsets: bool,
         tv_positions: bool,
         tv_offsets: bool,
-    ) -> &mut PostingList {
+    ) -> usize {
         if let Some(&id) = self.term_ids.get(term) {
-            return &mut self.posting_lists[id as usize];
+            return id as usize;
         }
-        let id = self.posting_lists.len() as u32;
-        self.posting_lists.push(PostingList::new(
-            has_freqs,
-            has_positions,
-            has_offsets,
-            tv_positions,
-            tv_offsets,
-        ));
-        self.term_ids.insert(term.to_string(), id);
-        &mut self.posting_lists[id as usize]
+        // Initialize PostingsArray config on first term
+        if self.postings.len() == 0 {
+            self.postings = PostingsArray::new(
+                has_freqs,
+                has_positions,
+                has_offsets,
+                tv_positions,
+                tv_offsets,
+            );
+        }
+        let tid = self.postings.add_term();
+        self.term_ids.insert(term.to_string(), tid as u32);
+        tid
     }
 
-    /// Returns terms and posting lists in byte-sorted order for codec writing.
-    pub fn sorted_postings(&self) -> Vec<(&str, &PostingList)> {
-        let mut pairs: Vec<(&str, &PostingList)> = self
+    /// Returns terms and term_ids in byte-sorted order for codec writing.
+    pub fn sorted_postings(&self) -> Vec<(&str, usize)> {
+        let mut pairs: Vec<(&str, usize)> = self
             .term_ids
             .iter()
-            .map(|(term, &id)| (term.as_str(), &self.posting_lists[id as usize]))
+            .map(|(term, &id)| (term.as_str(), id as usize))
             .collect();
         pairs.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
         pairs
@@ -409,11 +505,11 @@ impl PerFieldData {
         !self.term_ids.is_empty()
     }
 
-    /// Extracts term vector data from posting lists and returns a `TermVectorField`.
+    /// Extracts term vector data from the postings array and returns a `TermVectorField`.
     ///
     /// Iterates all terms, collecting those with `tv_freq > 0`, drains their TV
     /// accumulators (preserving Vec capacity), and returns a sorted `TermVectorField`.
-    /// Returns `None` if no posting list has TV data for the current document.
+    /// Returns `None` if no term has TV data for the current document.
     fn take_term_vector_data(
         &mut self,
         field_number: u32,
@@ -423,27 +519,35 @@ impl PerFieldData {
     ) -> Option<TermVectorField> {
         let mut terms: Vec<TermVectorTerm> = Vec::new();
 
+        let tv_freqs = self.postings.tv_freqs.as_mut()?;
+
         for (term_text, &id) in &self.term_ids {
-            let pl = &mut self.posting_lists[id as usize];
-            if pl.tv_freq > 0 {
-                let positions = pl
+            let tid = id as usize;
+            if tv_freqs[tid] > 0 {
+                let positions = self
+                    .postings
                     .tv_positions
                     .as_mut()
-                    .map(std::mem::take)
+                    .map(|v| std::mem::take(&mut v[tid]))
                     .unwrap_or_default();
-                let offsets = pl.tv_offsets.as_mut().map(|ob| {
-                    Box::new(OffsetBuffers {
-                        start_offsets: std::mem::take(&mut ob.start_offsets),
-                        end_offsets: std::mem::take(&mut ob.end_offsets),
-                    })
-                });
+                let offsets = if let (Some(ref mut starts), Some(ref mut ends)) = (
+                    self.postings.tv_start_offsets.as_mut(),
+                    self.postings.tv_end_offsets.as_mut(),
+                ) {
+                    Some(Box::new(OffsetBuffers {
+                        start_offsets: std::mem::take(&mut starts[tid]),
+                        end_offsets: std::mem::take(&mut ends[tid]),
+                    }))
+                } else {
+                    None
+                };
                 terms.push(TermVectorTerm {
                     term: term_text.clone(),
-                    freq: pl.tv_freq,
+                    freq: tv_freqs[tid],
                     positions,
                     offsets,
                 });
-                pl.tv_freq = 0;
+                tv_freqs[tid] = 0;
             }
         }
 
@@ -469,11 +573,9 @@ impl PerFieldData {
         self.term_ids.len()
     }
 
-    /// Looks up a posting list by term.
-    pub fn posting_list(&self, term: &str) -> Option<&PostingList> {
-        self.term_ids
-            .get(term)
-            .map(|&id| &self.posting_lists[id as usize])
+    /// Looks up a term_id by term text.
+    pub fn term_id(&self, term: &str) -> Option<usize> {
+        self.term_ids.get(term).map(|&id| id as usize)
     }
 }
 
@@ -636,9 +738,7 @@ impl IndexingChain {
     /// is encoded into the byte stream.
     pub fn finalize_pending_postings(&mut self) {
         for pf in self.per_field.values_mut() {
-            for pl in &mut pf.posting_lists {
-                pl.finalize_current_doc();
-            }
+            pf.postings.finalize_all();
         }
     }
 
@@ -649,6 +749,45 @@ impl IndexingChain {
     /// flush policy sees the true memory footprint, not just the used portion.
     pub fn ram_bytes_used(&self) -> usize {
         self.mem_size(mem_dbg::SizeFlags::CAPACITY)
+    }
+
+    /// Logs a per-component memory breakdown for debugging.
+    pub fn log_ram_breakdown(&self, label: &str) {
+        let flags = mem_dbg::SizeFlags::CAPACITY;
+        let total = self.mem_size(flags);
+
+        // Per-field breakdown
+        let mut postings_bytes = 0usize;
+        let mut term_ids_bytes = 0usize;
+        let mut dv_bytes = 0usize;
+        let mut norms_bytes = 0usize;
+        let mut points_bytes = 0usize;
+        for pfd in self.per_field.values() {
+            term_ids_bytes += pfd.term_ids.mem_size(flags);
+            postings_bytes += pfd.postings.mem_size(flags);
+            dv_bytes += pfd.doc_values.mem_size(flags);
+            norms_bytes += pfd.norms.mem_size(flags) + pfd.norms_docs.mem_size(flags);
+            points_bytes += pfd.points.mem_size(flags);
+        }
+
+        let stored_bytes = self.stored_docs.mem_size(flags);
+        let tv_bytes = self.term_vector_docs.mem_size(flags);
+        let field_infos_bytes = self.field_infos.mem_size(flags);
+
+        log::info!(
+            "RAM[{}] total={} | postings={} term_ids={} stored={} tv={} dv={} norms={} points={} field_infos={} | docs={}",
+            label,
+            fmt_bytes(total),
+            fmt_bytes(postings_bytes),
+            fmt_bytes(term_ids_bytes),
+            fmt_bytes(stored_bytes),
+            fmt_bytes(tv_bytes),
+            fmt_bytes(dv_bytes),
+            fmt_bytes(norms_bytes),
+            fmt_bytes(points_bytes),
+            fmt_bytes(field_infos_bytes),
+            self.num_docs,
+        );
     }
 
     /// Processes a single document, extracting all field data.
@@ -807,7 +946,7 @@ impl IndexingChain {
             position += token_ref.position_increment as i32;
             field_length += 1;
 
-            let posting_list = per_field.get_or_insert_posting_list(
+            let tid = per_field.get_or_insert_term(
                 token_ref.text,
                 has_freqs,
                 has_positions,
@@ -816,7 +955,8 @@ impl IndexingChain {
                 tv_offsets,
             );
 
-            posting_list.record_occurrence(
+            per_field.postings.record_occurrence(
+                tid,
                 doc_id,
                 position,
                 token_ref.start_offset as i32,
@@ -824,7 +964,8 @@ impl IndexingChain {
             );
 
             if store_tv {
-                posting_list.record_tv_occurrence(
+                per_field.postings.record_tv_occurrence(
+                    tid,
                     position,
                     token_ref.start_offset as i32,
                     token_ref.end_offset as i32,
@@ -834,10 +975,9 @@ impl IndexingChain {
 
         // Feature fields: single term with explicit frequency, no positions/norms
         if let FieldValue::Feature { term, freq } = field.value() {
-            let posting_list =
-                per_field.get_or_insert_posting_list(term, has_freqs, false, false, false, false);
-            posting_list.start_doc(doc_id);
-            posting_list.set_freq(*freq);
+            let tid = per_field.get_or_insert_term(term, has_freqs, false, false, false, false);
+            per_field.postings.start_doc_explicit(tid, doc_id);
+            per_field.postings.set_freq(tid, *freq);
             return Ok(None);
         }
 
@@ -870,7 +1010,7 @@ impl IndexingChain {
             position += 1;
             field_length = 1;
 
-            let posting_list = per_field.get_or_insert_posting_list(
+            let tid = per_field.get_or_insert_term(
                 text,
                 has_freqs,
                 has_positions,
@@ -879,10 +1019,14 @@ impl IndexingChain {
                 tv_offsets,
             );
 
-            posting_list.record_occurrence(doc_id, position, 0, text.len() as i32);
+            per_field
+                .postings
+                .record_occurrence(tid, doc_id, position, 0, text.len() as i32);
 
             if store_tv {
-                posting_list.record_tv_occurrence(position, 0, text.len() as i32);
+                per_field
+                    .postings
+                    .record_tv_occurrence(tid, position, 0, text.len() as i32);
             }
         }
 
@@ -994,6 +1138,16 @@ impl IndexingChain {
     }
 }
 
+fn fmt_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.2}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 /// Computes the BM25 norm value for a field.
 ///
 /// The norm encodes the field length as a single byte using a
@@ -1066,16 +1220,20 @@ fn int_to_byte4(i: i32) -> u8 {
 mod tests {
     use super::*;
     use crate::analysis::standard::StandardAnalyzer;
-
-    impl PostingList {
-        fn doc_freq(&self) -> i32 {
-            self.doc_freq
-        }
-    }
     use crate::document;
 
     fn make_analyzer() -> StandardAnalyzer {
         StandardAnalyzer::new()
+    }
+
+    /// Decode a single term from PerFieldData into a PostingsBuffer.
+    fn decode_term(pfd: &PerFieldData, term: &str) -> PostingsBuffer {
+        let tid = pfd
+            .term_id(term)
+            .unwrap_or_else(|| panic!("term not found: {term}"));
+        let mut buf = PostingsBuffer::new();
+        pfd.postings.decode_into(tid, &mut buf);
+        buf
     }
 
     #[test]
@@ -1098,17 +1256,16 @@ mod tests {
 
         // Check "path" field postings (keyword, single token)
         let path_data = chain.per_field().get("path").unwrap();
-        assert_eq!(path_data.num_terms(), 1); // one unique term
-        let posting_list = path_data.posting_list("/foo/bar.txt").unwrap();
-        assert_eq!(posting_list.doc_freq(), 1);
-        let decoded = posting_list.decode();
-        assert_eq!(decoded[0].doc_id, 0);
+        assert_eq!(path_data.num_terms(), 1);
+        let buf = decode_term(path_data, "/foo/bar.txt");
+        assert_eq!(buf.doc_freq, 1);
+        assert_eq!(buf.doc_ids[0], 0);
 
         // Check "contents" field postings (tokenized)
         let contents_data = chain.per_field().get("contents").unwrap();
-        assert_eq!(contents_data.num_terms(), 2); // "hello", "world"
-        assert_some!(contents_data.posting_list("hello"));
-        assert_some!(contents_data.posting_list("world"));
+        assert_eq!(contents_data.num_terms(), 2);
+        assert_some!(contents_data.term_id("hello"));
+        assert_some!(contents_data.term_id("world"));
 
         // Check norms exist for "contents" (has norms)
         assert_eq!(contents_data.norms.len(), 1);
@@ -1120,10 +1277,10 @@ mod tests {
         // Check "modified" points
         let modified_data = chain.per_field().get("modified").unwrap();
         assert_eq!(modified_data.points.len(), 1);
-        assert_eq!(modified_data.points[0].0, 0); // doc_id
+        assert_eq!(modified_data.points[0].0, 0);
 
         // Check stored fields
-        assert_eq!(chain.stored_docs()[0].fields.len(), 1); // only "path" is stored
+        assert_eq!(chain.stored_docs()[0].fields.len(), 1);
     }
 
     #[test]
@@ -1147,21 +1304,20 @@ mod tests {
 
         // "hello" appears in both docs
         let contents_data = chain.per_field().get("contents").unwrap();
-        let hello_list = contents_data.posting_list("hello").unwrap();
-        assert_eq!(hello_list.doc_freq(), 2);
-        let hello_decoded = hello_list.decode();
-        assert_eq!(hello_decoded[0].doc_id, 0);
-        assert_eq!(hello_decoded[1].doc_id, 1);
+        let hello = decode_term(contents_data, "hello");
+        assert_eq!(hello.doc_freq, 2);
+        assert_eq!(hello.doc_ids[0], 0);
+        assert_eq!(hello.doc_ids[1], 1);
 
         // "world" only in doc 0
-        let world_list = contents_data.posting_list("world").unwrap();
-        assert_eq!(world_list.doc_freq(), 1);
-        assert_eq!(world_list.decode()[0].doc_id, 0);
+        let world = decode_term(contents_data, "world");
+        assert_eq!(world.doc_freq, 1);
+        assert_eq!(world.doc_ids[0], 0);
 
         // "rust" only in doc 1
-        let rust_list = contents_data.posting_list("rust").unwrap();
-        assert_eq!(rust_list.doc_freq(), 1);
-        assert_eq!(rust_list.decode()[0].doc_id, 1);
+        let rust_buf = decode_term(contents_data, "rust");
+        assert_eq!(rust_buf.doc_freq, 1);
+        assert_eq!(rust_buf.doc_ids[0], 1);
     }
 
     #[test]
@@ -1176,12 +1332,11 @@ mod tests {
         chain.finalize_pending_postings();
 
         let contents = chain.per_field().get("contents").unwrap();
-        let hello_list = contents.posting_list("hello").unwrap();
-        let decoded = hello_list.decode();
-        assert_eq!(decoded[0].freq, 2);
-        assert_eq!(decoded[0].positions.len(), 2);
-        assert_eq!(decoded[0].positions[0], 0);
-        assert_eq!(decoded[0].positions[1], 2);
+        let hello = decode_term(contents, "hello");
+        assert_eq!(hello.freqs[0], 2);
+        assert_len_eq_x!(&hello.positions, 2);
+        assert_eq!(hello.positions[0], 0);
+        assert_eq!(hello.positions[1], 2);
     }
 
     #[test]
@@ -1319,37 +1474,37 @@ mod tests {
     }
 
     #[test]
-    fn test_posting_list_with_offsets_roundtrip() {
-        // Exercises offset recording in record_occurrence AND offset
-        // consumption in decode()
-        let mut pl = PostingList::new(true, true, true, false, false);
+    fn test_postings_array_with_offsets_roundtrip() {
+        let mut pa = PostingsArray::new(true, true, true, false, false);
+        let tid = pa.add_term();
 
         // Doc 0: two occurrences
-        pl.record_occurrence(0, 0, 0, 5);
-        pl.record_occurrence(0, 1, 6, 11);
+        pa.record_occurrence(tid, 0, 0, 0, 5);
+        pa.record_occurrence(tid, 0, 1, 6, 11);
 
         // Doc 1: one occurrence
-        pl.record_occurrence(1, 0, 0, 3);
+        pa.record_occurrence(tid, 1, 0, 0, 3);
 
-        pl.finalize_current_doc();
+        pa.finalize_current_doc(tid);
 
-        let decoded = pl.decode();
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].doc_id, 0);
-        assert_eq!(decoded[0].freq, 2);
-        assert_eq!(decoded[0].positions, vec![0, 1]);
-        assert_eq!(decoded[1].doc_id, 1);
-        assert_eq!(decoded[1].freq, 1);
-        assert_eq!(decoded[1].positions, vec![0]);
+        let mut buf = PostingsBuffer::new();
+        pa.decode_into(tid, &mut buf);
+        assert_len_eq_x!(&buf.doc_ids, 2);
+        assert_eq!(buf.doc_ids[0], 0);
+        assert_eq!(buf.freqs[0], 2);
+        assert_eq!(buf.positions, vec![0, 1, 0]);
+        assert_eq!(buf.doc_ids[1], 1);
+        assert_eq!(buf.freqs[1], 1);
 
         // Verify offset data was encoded (byte_stream is larger than without offsets)
-        let mut pl_no_offsets = PostingList::new(true, true, false, false, false);
-        pl_no_offsets.record_occurrence(0, 0, 0, 5);
-        pl_no_offsets.record_occurrence(0, 1, 6, 11);
-        pl_no_offsets.record_occurrence(1, 0, 0, 3);
-        pl_no_offsets.finalize_current_doc();
+        let mut pa_no_offsets = PostingsArray::new(true, true, false, false, false);
+        let tid2 = pa_no_offsets.add_term();
+        pa_no_offsets.record_occurrence(tid2, 0, 0, 0, 5);
+        pa_no_offsets.record_occurrence(tid2, 0, 1, 6, 11);
+        pa_no_offsets.record_occurrence(tid2, 1, 0, 0, 3);
+        pa_no_offsets.finalize_current_doc(tid2);
         assert!(
-            pl.byte_stream.len() > pl_no_offsets.byte_stream.len(),
+            pa.byte_streams[tid].len() > pa_no_offsets.byte_streams[tid2].len(),
             "offset posting should be larger"
         );
     }
@@ -1653,35 +1808,29 @@ mod tests {
     }
 
     #[test]
-    fn test_posting_list_byte_stream_compact() {
-        // Build a PostingList with 10 docs via the API, then verify the
-        // byte_stream is much smaller than old Posting-based storage would be.
-        let mut pl = PostingList::new(true, true, false, false, false);
+    fn test_postings_array_byte_stream_compact() {
+        let mut pa = PostingsArray::new(true, true, false, false, false);
+        let tid = pa.add_term();
         for doc_id in 0..10 {
-            pl.start_doc(doc_id);
-            pl.add_position(0);
-            pl.add_position(5);
-            pl.increment_freq();
+            pa.start_doc_explicit(tid, doc_id);
+            pa.set_freq(tid, 2);
+            pa.current_positions[tid].push(0);
+            pa.current_positions[tid].push(5);
         }
-        pl.finalize_current_doc();
+        pa.finalize_current_doc(tid);
 
-        // Decode and verify correctness
-        let decoded = pl.decode();
-        assert_eq!(decoded.len(), 10);
-        for (i, dp) in decoded.iter().enumerate() {
-            assert_eq!(dp.doc_id, i as i32);
-            assert_eq!(dp.freq, 2);
-            assert_eq!(dp.positions, vec![0, 5]);
+        let mut buf = PostingsBuffer::new();
+        pa.decode_into(tid, &mut buf);
+        assert_len_eq_x!(&buf.doc_ids, 10);
+        for (i, &doc_id) in buf.doc_ids.iter().enumerate() {
+            assert_eq!(doc_id, i as i32);
+            assert_eq!(buf.freqs[i], 2);
         }
 
-        // Byte stream should be very compact: per doc ~4 bytes
-        // (1 byte doc_delta + 1 byte freq + 1 byte pos0 + 1 byte pos1)
-        // = ~40 bytes for 10 docs.
-        // Old approach: 10 * 80 bytes (Posting struct) + heap = 800+ bytes
         assert!(
-            pl.byte_stream.len() < 100,
+            pa.byte_streams[tid].len() < 100,
             "byte stream should be compact, got {} bytes",
-            pl.byte_stream.len()
+            pa.byte_streams[tid].len()
         );
     }
 
@@ -1766,7 +1915,7 @@ mod tests {
         let title_data = chain.per_field().get("title").unwrap();
         // StringField is not tokenized, so the whole value is one term
         assert_eq!(title_data.num_terms(), 1);
-        assert_some!(title_data.posting_list("hello world"));
+        assert_some!(title_data.term_id("hello world"));
         // No doc values
         assert_matches!(title_data.doc_values, DocValuesAccumulator::None);
         // Stored
@@ -1822,25 +1971,33 @@ mod tests {
 
         assert_eq!(pf_text.num_terms(), pf_reader.num_terms());
 
-        for (term, pl_text) in pf_text.sorted_postings() {
-            let pl_reader = pf_reader.posting_list(term).unwrap_or_else(|| {
+        let mut buf_text = PostingsBuffer::new();
+        let mut buf_reader = PostingsBuffer::new();
+        for (term, tid_text) in pf_text.sorted_postings() {
+            let tid_reader = pf_reader.term_id(term).unwrap_or_else(|| {
                 panic!("reader chain missing term: {term}");
             });
-            let decoded_text = pl_text.decode();
-            let decoded_reader = pl_reader.decode();
-            assert_eq!(
-                decoded_text.len(),
-                decoded_reader.len(),
+            pf_text.postings.decode_into(tid_text, &mut buf_text);
+            pf_reader.postings.decode_into(tid_reader, &mut buf_reader);
+            assert_len_eq!(
+                &buf_text.doc_ids,
+                &buf_reader.doc_ids,
                 "doc count mismatch for term: {term}"
             );
-            for (dt, dr) in decoded_text.iter().zip(&decoded_reader) {
-                assert_eq!(dt.doc_id, dr.doc_id, "doc_id mismatch for term: {term}");
-                assert_eq!(dt.freq, dr.freq, "freq mismatch for term: {term}");
+            for i in 0..buf_text.doc_ids.len() {
                 assert_eq!(
-                    dt.positions, dr.positions,
-                    "positions mismatch for term: {term}"
+                    buf_text.doc_ids[i], buf_reader.doc_ids[i],
+                    "doc_id mismatch for term: {term}"
+                );
+                assert_eq!(
+                    buf_text.freqs[i], buf_reader.freqs[i],
+                    "freq mismatch for term: {term}"
                 );
             }
+            assert_eq!(
+                buf_text.positions, buf_reader.positions,
+                "positions mismatch for term: {term}"
+            );
         }
 
         assert_eq!(pf_text.norms, pf_reader.norms);
@@ -1873,25 +2030,33 @@ mod tests {
 
         assert_eq!(pf_text.num_terms(), pf_reader.num_terms());
 
-        for (term, pl_text) in pf_text.sorted_postings() {
-            let pl_reader = pf_reader.posting_list(term).unwrap_or_else(|| {
+        let mut buf_text = PostingsBuffer::new();
+        let mut buf_reader = PostingsBuffer::new();
+        for (term, tid_text) in pf_text.sorted_postings() {
+            let tid_reader = pf_reader.term_id(term).unwrap_or_else(|| {
                 panic!("reader chain missing term: {term}");
             });
-            let decoded_text = pl_text.decode();
-            let decoded_reader = pl_reader.decode();
-            assert_eq!(
-                decoded_text.len(),
-                decoded_reader.len(),
+            pf_text.postings.decode_into(tid_text, &mut buf_text);
+            pf_reader.postings.decode_into(tid_reader, &mut buf_reader);
+            assert_len_eq!(
+                &buf_text.doc_ids,
+                &buf_reader.doc_ids,
                 "doc count mismatch for term: {term}"
             );
-            for (dt, dr) in decoded_text.iter().zip(&decoded_reader) {
-                assert_eq!(dt.doc_id, dr.doc_id, "doc_id mismatch for term: {term}");
-                assert_eq!(dt.freq, dr.freq, "freq mismatch for term: {term}");
+            for i in 0..buf_text.doc_ids.len() {
                 assert_eq!(
-                    dt.positions, dr.positions,
-                    "positions mismatch for term: {term}"
+                    buf_text.doc_ids[i], buf_reader.doc_ids[i],
+                    "doc_id mismatch for term: {term}"
+                );
+                assert_eq!(
+                    buf_text.freqs[i], buf_reader.freqs[i],
+                    "freq mismatch for term: {term}"
                 );
             }
+            assert_eq!(
+                buf_text.positions, buf_reader.positions,
+                "positions mismatch for term: {term}"
+            );
         }
 
         assert_eq!(pf_text.norms, pf_reader.norms);
