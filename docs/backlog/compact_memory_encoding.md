@@ -12,11 +12,9 @@ Even after implementing incremental writes from `streaming_index_writes.md`, seg
 
 ## Component Comparison
 
-### Postings — Already Compact
+### Postings — Addressed
 
-Bearing's `PostingList.byte_stream` encodes finalized documents as vInt deltas (doc ID deltas, frequencies, position deltas, offsets). This matches Lucene's approach and is already ~3-5 bytes per posting. The in-progress document uses temporary `Vec<i32>` for positions/offsets, but these are cleared after each document and reuse capacity.
-
-No action needed here.
+Replaced per-term `PostingList` structs (~193 bytes each) with a struct-of-arrays `PostingsArray` (~33 bytes per term). Position and offset deltas are now written immediately as vInts to per-term `prox_streams` during tokenization, eliminating the `Vec<i32>` position buffers entirely. For a 33MB document with ~50K unique terms, postings memory dropped from 106.4MB to 87.8MB (−17.5%).
 
 ### Stored Fields — Structured Enums vs Pre-Encoded Bytes
 

@@ -746,45 +746,6 @@ impl IndexingChain {
         self.mem_size(mem_dbg::SizeFlags::CAPACITY)
     }
 
-    /// Logs a per-component memory breakdown for debugging.
-    pub fn log_ram_breakdown(&self, label: &str) {
-        let flags = mem_dbg::SizeFlags::CAPACITY;
-        let total = self.mem_size(flags);
-
-        // Per-field breakdown
-        let mut postings_bytes = 0usize;
-        let mut term_ids_bytes = 0usize;
-        let mut dv_bytes = 0usize;
-        let mut norms_bytes = 0usize;
-        let mut points_bytes = 0usize;
-        for pfd in self.per_field.values() {
-            term_ids_bytes += pfd.term_ids.mem_size(flags);
-            postings_bytes += pfd.postings.mem_size(flags);
-            dv_bytes += pfd.doc_values.mem_size(flags);
-            norms_bytes += pfd.norms.mem_size(flags) + pfd.norms_docs.mem_size(flags);
-            points_bytes += pfd.points.mem_size(flags);
-        }
-
-        let stored_bytes = self.stored_docs.mem_size(flags);
-        let tv_bytes = self.term_vector_docs.mem_size(flags);
-        let field_infos_bytes = self.field_infos.mem_size(flags);
-
-        log::info!(
-            "RAM[{}] total={} | postings={} term_ids={} stored={} tv={} dv={} norms={} points={} field_infos={} | docs={}",
-            label,
-            fmt_bytes(total),
-            fmt_bytes(postings_bytes),
-            fmt_bytes(term_ids_bytes),
-            fmt_bytes(stored_bytes),
-            fmt_bytes(tv_bytes),
-            fmt_bytes(dv_bytes),
-            fmt_bytes(norms_bytes),
-            fmt_bytes(points_bytes),
-            fmt_bytes(field_infos_bytes),
-            self.num_docs,
-        );
-    }
-
     /// Processes a single document, extracting all field data.
     pub fn process_document(&mut self, doc: Document, analyzer: &dyn Analyzer) -> io::Result<()> {
         let doc_id = self.num_docs;
@@ -1130,16 +1091,6 @@ impl IndexingChain {
         let mut fields: Vec<FieldInfo> = self.field_infos.values().cloned().collect();
         fields.sort_by_key(|fi| fi.number());
         FieldInfos::new(fields)
-    }
-}
-
-fn fmt_bytes(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.2}MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
