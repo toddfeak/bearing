@@ -93,7 +93,7 @@ pub struct PostingsArray {
 
     // Per-term position/offset stream: position deltas + optional offset deltas
     // written immediately during tokenization (only allocated when has_positions)
-    prox_streams: Option<Vec<Vec<u8>>>,
+    position_streams: Option<Vec<Vec<u8>>>,
     /// Last position written per term (for delta encoding).
     last_positions: Vec<i32>,
     /// Last end offset written per term (for offset delta encoding).
@@ -127,7 +127,7 @@ impl PostingsArray {
             last_doc_ids: Vec::new(),
             current_doc_ids: Vec::new(),
             current_freqs: Vec::new(),
-            prox_streams: if has_positions {
+            position_streams: if has_positions {
                 Some(Vec::new())
             } else {
                 None
@@ -157,7 +157,7 @@ impl PostingsArray {
         self.last_doc_ids.push(0);
         self.current_doc_ids.push(-1);
         self.current_freqs.push(0);
-        if let Some(ref mut v) = self.prox_streams {
+        if let Some(ref mut v) = self.position_streams {
             v.push(Vec::new());
         }
         if self.has_positions {
@@ -184,7 +184,7 @@ impl PostingsArray {
     /// Records a token occurrence for the given term and document.
     ///
     /// When positions are enabled, position deltas (and optional offset deltas)
-    /// are written immediately to `prox_streams` as vInts, avoiding the need to
+    /// are written immediately to `position_streams` as vInts, avoiding the need to
     /// buffer positions in a `Vec<i32>` per term.
     #[inline]
     pub fn record_occurrence(
@@ -203,13 +203,13 @@ impl PostingsArray {
 
         if self.has_positions {
             let pos_delta = position - self.last_positions[tid];
-            let prox = &mut self.prox_streams.as_mut().unwrap()[tid];
-            write_vint(prox, pos_delta);
+            let pos_stream = &mut self.position_streams.as_mut().unwrap()[tid];
+            write_vint(pos_stream, pos_delta);
             self.last_positions[tid] = position;
 
             if self.has_offsets {
-                write_vint(prox, start_offset - self.last_end_offsets[tid]);
-                write_vint(prox, end_offset - start_offset);
+                write_vint(pos_stream, start_offset - self.last_end_offsets[tid]);
+                write_vint(pos_stream, end_offset - start_offset);
                 self.last_end_offsets[tid] = end_offset;
             }
         }
@@ -265,7 +265,7 @@ impl PostingsArray {
     /// Encodes the current pending document for one term into its byte_stream.
     ///
     /// Only writes doc_delta and freq — position/offset data was already written
-    /// directly to `prox_streams` during `record_occurrence`.
+    /// directly to `position_streams` during `record_occurrence`.
     pub fn finalize_current_doc(&mut self, tid: usize) {
         if self.current_doc_ids[tid] < 0 {
             return;
@@ -297,16 +297,16 @@ impl PostingsArray {
     /// Decodes one term's data into a reusable `PostingsBuffer`.
     ///
     /// Reads doc_delta + freq from `byte_streams` and position/offset deltas
-    /// from `prox_streams` in parallel.
+    /// from `position_streams` in parallel.
     pub fn decode_into(&self, tid: usize, buf: &mut PostingsBuffer) {
         buf.clear();
         let data = &self.byte_streams[tid];
         let mut doc_offset = 0;
         let mut last_doc_id = 0;
 
-        // Prox stream state (only when has_positions)
-        let prox_data = self.prox_streams.as_ref().map(|v| v[tid].as_slice());
-        let mut prox_offset = 0;
+        // Position stream state (only when has_positions)
+        let pos_data = self.position_streams.as_ref().map(|v| v[tid].as_slice());
+        let mut pos_offset = 0;
 
         while doc_offset < data.len() {
             let doc_delta = read_vint(data, &mut doc_offset);
@@ -322,19 +322,19 @@ impl PostingsArray {
             buf.doc_ids.push(doc_id);
             buf.freqs.push(freq);
 
-            if let Some(prox) = prox_data {
+            if let Some(positions) = pos_data {
                 let start = buf.positions.len();
                 let mut last_pos = 0;
                 for _ in 0..freq {
-                    let pos_delta = read_vint(prox, &mut prox_offset);
+                    let pos_delta = read_vint(positions, &mut pos_offset);
                     let pos = last_pos + pos_delta;
                     buf.positions.push(pos);
                     last_pos = pos;
 
                     if self.has_offsets {
                         // Consume offset data (not exposed in PostingsBuffer)
-                        read_vint(prox, &mut prox_offset);
-                        read_vint(prox, &mut prox_offset);
+                        read_vint(positions, &mut pos_offset);
+                        read_vint(positions, &mut pos_offset);
                     }
                 }
                 buf.position_starts.push(start);
@@ -746,6 +746,51 @@ impl IndexingChain {
         self.mem_size(mem_dbg::SizeFlags::CAPACITY)
     }
 
+    /// Logs a per-component memory breakdown for debugging.
+    pub fn log_ram_breakdown(&self, label: &str) {
+        let flags = mem_dbg::SizeFlags::CAPACITY;
+        let total = self.mem_size(flags);
+
+        // Per-field breakdown
+        let mut postings_bytes = 0usize;
+        let mut byte_streams_bytes = 0usize;
+        let mut position_streams_bytes = 0usize;
+        let mut term_ids_bytes = 0usize;
+        let mut dv_bytes = 0usize;
+        let mut norms_bytes = 0usize;
+        let mut points_bytes = 0usize;
+        for pfd in self.per_field.values() {
+            term_ids_bytes += pfd.term_ids.mem_size(flags);
+            postings_bytes += pfd.postings.mem_size(flags);
+            byte_streams_bytes += pfd.postings.byte_streams.mem_size(flags);
+            position_streams_bytes += pfd.postings.position_streams.mem_size(flags);
+            dv_bytes += pfd.doc_values.mem_size(flags);
+            norms_bytes += pfd.norms.mem_size(flags) + pfd.norms_docs.mem_size(flags);
+            points_bytes += pfd.points.mem_size(flags);
+        }
+
+        let stored_bytes = self.stored_docs.mem_size(flags);
+        let tv_bytes = self.term_vector_docs.mem_size(flags);
+        let field_infos_bytes = self.field_infos.mem_size(flags);
+
+        log::info!(
+            "RAM[{}] total={} | postings={} (byte_streams={} position_streams={}) term_ids={} stored={} tv={} dv={} norms={} points={} field_infos={} | docs={}",
+            label,
+            fmt_bytes(total),
+            fmt_bytes(postings_bytes),
+            fmt_bytes(byte_streams_bytes),
+            fmt_bytes(position_streams_bytes),
+            fmt_bytes(term_ids_bytes),
+            fmt_bytes(stored_bytes),
+            fmt_bytes(tv_bytes),
+            fmt_bytes(dv_bytes),
+            fmt_bytes(norms_bytes),
+            fmt_bytes(points_bytes),
+            fmt_bytes(field_infos_bytes),
+            self.num_docs,
+        );
+    }
+
     /// Processes a single document, extracting all field data.
     pub fn process_document(&mut self, doc: Document, analyzer: &dyn Analyzer) -> io::Result<()> {
         let doc_id = self.num_docs;
@@ -1091,6 +1136,16 @@ impl IndexingChain {
         let mut fields: Vec<FieldInfo> = self.field_infos.values().cloned().collect();
         fields.sort_by_key(|fi| fi.number());
         FieldInfos::new(fields)
+    }
+}
+
+fn fmt_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.2}MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
@@ -1442,19 +1497,19 @@ mod tests {
         assert_eq!(buf.doc_ids[1], 1);
         assert_eq!(buf.freqs[1], 1);
 
-        // Verify offset data was encoded (prox_stream is larger with offsets)
+        // Verify offset data was encoded (position_stream is larger with offsets)
         let mut pa_no_offsets = PostingsArray::new(true, true, false, false, false);
         let tid2 = pa_no_offsets.add_term();
         pa_no_offsets.record_occurrence(tid2, 0, 0, 0, 5);
         pa_no_offsets.record_occurrence(tid2, 0, 1, 6, 11);
         pa_no_offsets.record_occurrence(tid2, 1, 0, 0, 3);
         pa_no_offsets.finalize_current_doc(tid2);
-        let prox_with = pa.prox_streams.as_ref().unwrap()[tid].len();
-        let prox_without = pa_no_offsets.prox_streams.as_ref().unwrap()[tid2].len();
+        let pos_with = pa.position_streams.as_ref().unwrap()[tid].len();
+        let pos_without = pa_no_offsets.position_streams.as_ref().unwrap()[tid2].len();
         assert_gt!(
-            prox_with,
-            prox_without,
-            "prox stream with offsets should be larger"
+            pos_with,
+            pos_without,
+            "position stream with offsets should be larger"
         );
     }
 
@@ -1775,8 +1830,9 @@ mod tests {
         }
 
         // byte_streams now only has doc_delta + freq (~20 bytes for 10 docs)
-        // prox_streams has position deltas (~20 bytes for 10 docs × 2 positions)
-        let total_bytes = pa.byte_streams[tid].len() + pa.prox_streams.as_ref().unwrap()[tid].len();
+        // position_streams has position deltas (~20 bytes for 10 docs × 2 positions)
+        let total_bytes =
+            pa.byte_streams[tid].len() + pa.position_streams.as_ref().unwrap()[tid].len();
         assert!(
             total_bytes < 100,
             "combined streams should be compact, got {total_bytes} bytes",
