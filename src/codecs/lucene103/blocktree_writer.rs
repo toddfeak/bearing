@@ -1304,11 +1304,25 @@ mod tests {
         fn insert(&mut self, term: &str, data: &[(i32, i32, &[i32])]) {
             let tid = self.postings.add_term();
             for &(doc_id, freq, positions) in data {
-                self.postings.start_doc_explicit(tid, doc_id);
-                // freq starts at 1 from start_doc, so set explicitly
-                self.postings.set_freq(tid, freq);
-                for &pos in positions {
-                    self.postings.current_positions[tid].push(pos);
+                // Use record_occurrence for the first position to start the doc,
+                // then for subsequent positions to increment freq.
+                if positions.is_empty() {
+                    self.postings.start_doc_explicit(tid, doc_id);
+                    self.postings.set_freq(tid, freq);
+                } else {
+                    for (i, &pos) in positions.iter().enumerate() {
+                        if i == 0 {
+                            // First occurrence starts the doc (freq=1)
+                            self.postings.record_occurrence(tid, doc_id, pos, 0, 0);
+                            // If freq > positions.len(), set it explicitly after
+                        } else {
+                            self.postings.record_occurrence(tid, doc_id, pos, 0, 0);
+                        }
+                    }
+                    // If freq doesn't match positions count, override it
+                    if freq != positions.len() as i32 {
+                        self.postings.set_freq(tid, freq);
+                    }
                 }
             }
             self.postings.finalize_current_doc(tid);
