@@ -50,7 +50,15 @@ Remaining field types (KNN vectors, shape fields) are deferred — see below.
 
 **Priority:** Low — payloads are a niche feature used in specialized scoring applications.
 
-## 6. Index-Time Sorting
+## 6. Posting Offsets
+
+**Java feature:** Fields indexed with `IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS` store character start/end offsets per position in the postings (`.pos` file). Used for highlighting to map positions back to character ranges without re-analyzing the text.
+
+**Rust status:** Not implemented. The `IndexOptions::DocsAndFreqsAndPositionsAndOffsets` enum variant exists but no built-in field type uses it, and the `PostingsArray` offset encoding path is gated by a `todo!()`. Per-term `last_end_offsets` tracking was removed to save memory; re-adding offset support would require an `Option<Vec<i32>>` or similar sparse storage.
+
+**Priority:** Low — no current field types produce offset postings. Needed eventually for highlighter support.
+
+## 7. Index-Time Sorting
 
 **Java feature:** `IndexWriterConfig.setIndexSort(Sort)` pre-sorts segments at flush time so that queries can exploit sorted order for early termination.
 
@@ -58,7 +66,7 @@ Remaining field types (KNN vectors, shape fields) are deferred — see below.
 
 **Priority:** Low — an optimization, not a correctness requirement.
 
-## 7. Analysis
+## 8. Analysis
 
 **Java feature:** Rich analysis pipeline including stop word filters, synonym filters, `CharFilter` chains, per-field `AnalyzerWrapper`, and dozens of language-specific analyzers.
 
@@ -66,7 +74,7 @@ Remaining field types (KNN vectors, shape fields) are deferred — see below.
 
 **Priority:** Medium — stop words are the most impactful gap. Per-field analyzers and synonym support matter for advanced use cases.
 
-## 8. Configuration
+## 9. Configuration
 
 **Java feature:** `IndexWriterConfig` exposes many options:
 
@@ -84,7 +92,7 @@ Remaining field types (KNN vectors, shape fields) are deferred — see below.
 
 **Priority:** Medium — `APPEND` and `CREATE_OR_APPEND` modes are important for incremental indexing.
 
-## 9. Codec Features
+## 10. Codec Features
 
 **Java feature:** Lucene's `PerFieldPostingsFormat` and `PerFieldDocValuesFormat` allow different fields to use different codec implementations. The `Codec` class aggregates format implementations for all file types (postings, doc values, stored fields, norms, term vectors, live docs, etc.).
 
