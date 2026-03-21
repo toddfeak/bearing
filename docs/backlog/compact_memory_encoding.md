@@ -1,7 +1,7 @@
 # Compact In-Memory Encoding
 
 ## Related
-- [memory_and_segments.md](memory_and_segments.md) — broader memory and flushing problems
+- [flush_control.md](flush_control.md) — flush control
 - [streaming_index_writes.md](streaming_index_writes.md) — lifecycle-based incremental writes to reduce buffered data
 
 ## Problem
@@ -12,9 +12,9 @@ Even after implementing incremental writes from `streaming_index_writes.md`, seg
 
 ## Component Comparison
 
-### Postings — Addressed
+### Postings — Complete
 
-Replaced per-term `PostingList` structs (~193 bytes each) with a struct-of-arrays `PostingsArray` (~33 bytes per term). Position and offset deltas are now written immediately as vInts to per-term `prox_streams` during tokenization, eliminating the `Vec<i32>` position buffers entirely. For a 33MB document with ~50K unique terms, postings memory dropped from 106.4MB to 87.8MB (−17.5%).
+Replaced per-term `PostingList` structs (~193 bytes each) with a struct-of-arrays `PostingsArray` (~33 bytes per term). Position and offset deltas are now written immediately as vInts to per-term `prox_streams` during tokenization, eliminating the `Vec<i32>` position buffers entirely. For a 33MB document with ~50K unique terms, postings memory dropped from 106.4MB to 87.8MB (~18%). Position and byte streams further migrated to `ByteBlockPool` arena (~39% additional reduction).
 
 ### Stored Fields — Structured Enums vs Pre-Encoded Bytes
 

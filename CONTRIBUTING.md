@@ -2,7 +2,7 @@
 
 ## Project Status
 
-Bearing is a personal project — a Rust port of Apache Lucene's indexing functionality. Pull requests are **not currently accepted**. You're welcome to fork and make it your own.
+Bearing is a personal project — a Rust port of Apache Lucene. Pull requests are **not currently accepted**. You're welcome to fork and make it your own.
 
 ## Building & Testing
 

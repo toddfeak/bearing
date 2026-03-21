@@ -96,7 +96,7 @@ Remaining field types (KNN vectors, shape fields) are deferred — see below.
 
 **Java feature:** Lucene's `PerFieldPostingsFormat` and `PerFieldDocValuesFormat` allow different fields to use different codec implementations. The `Codec` class aggregates format implementations for all file types (postings, doc values, stored fields, norms, term vectors, live docs, etc.).
 
-**Rust status:** Partial — the Rust port uses fixed Lucene103 codec implementations for all fields. Per-field format overrides are not supported. Term vector and live docs formats are not implemented.
+**Rust status:** Partial — the Rust port uses fixed Lucene103 codec implementations for all fields. Per-field format overrides are not supported. Live docs format is not implemented.
 
 **Priority:** Low — per-field format overrides are rarely needed in practice.
 

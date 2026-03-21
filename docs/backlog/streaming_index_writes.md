@@ -1,7 +1,7 @@
 # Streaming Index Writes
 
 ## Related
-- [memory_and_segments.md](memory_and_segments.md) — broader memory and flushing problems
+- [flush_control.md](flush_control.md) — flush control
 - [compact_memory_encoding.md](compact_memory_encoding.md) — compact in-memory encoding and arena architecture
 
 ## Problem

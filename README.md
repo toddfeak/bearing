@@ -17,8 +17,8 @@ The name is a play on words. A bearing gives direction — fitting for a search 
 ## Status
 
 - Target: Apache Lucene 10.3.2, Lucene103 codec
-- Working: write path with multi-threaded `IndexWriter`
-- Fourteen field types: KeywordField, LongField, TextField, StringField, IntField, FloatField, DoubleField, StoredField, LatLonPoint, FeatureField, IntRange, LongRange, FloatRange, DoubleRange
+- Indexing: multi-threaded `IndexWriter` with fourteen field types, five doc values types, term vectors, sparse fields
+- Next phase: read path and querying (also unblocks merging, deletes, and round trip testing)
 - Java Lucene VerifyIndex validates output
 
 ## Performance
