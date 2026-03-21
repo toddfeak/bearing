@@ -34,6 +34,12 @@ pub struct FastHashTable {
     hash_log: usize,
 }
 
+impl Default for FastHashTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FastHashTable {
     /// Create a new empty hash table.
     pub fn new() -> Self {
@@ -283,6 +289,12 @@ pub struct HighCompressionHashTable {
     base: usize,
     next: usize,
     end: usize,
+}
+
+impl Default for HighCompressionHashTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HighCompressionHashTable {

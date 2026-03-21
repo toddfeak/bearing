@@ -10,6 +10,8 @@
 //! keeping them independent of any project-specific I/O traits.
 
 pub mod group_vint;
+pub mod lowercase_ascii;
+pub mod lz4;
 pub mod string;
 pub mod varint;
 pub mod zigzag;

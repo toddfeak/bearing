@@ -9,12 +9,12 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::document::IndexOptions;
+use crate::encoding::{lowercase_ascii, lz4};
 use crate::index::index_file_names::segment_file_name;
 use crate::index::indexing_chain::{PostingsArray, PostingsBuffer};
 use crate::index::{FieldInfo, FieldInfos};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
-use crate::util::compress::{lowercase_ascii, lz4};
 
 use super::postings_format::{
     self, BLOCKTREE_VERSION_CURRENT, DEFAULT_MAX_BLOCK_SIZE, DEFAULT_MIN_BLOCK_SIZE,

@@ -7,11 +7,11 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::document::StoredValue;
+use crate::encoding::lz4;
 use crate::encoding::zigzag;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::StoredDoc;
 use crate::store::{DataOutput, SharedDirectory, VecOutput};
-use crate::util::compress::lz4;
 use crate::util::packed::DirectMonotonicWriter;
 
 // File extensions

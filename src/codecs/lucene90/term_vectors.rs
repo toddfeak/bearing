@@ -9,10 +9,10 @@ use mem_dbg::MemSize;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::encoding::lz4;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::TermVectorDoc;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
-use crate::util::compress::lz4;
 use crate::util::packed::{
     BlockPackedWriter, DirectMonotonicWriter, DirectWriter, packed_bits_required,
     packed_ints_write, unsigned_bits_required,

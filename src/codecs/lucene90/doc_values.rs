@@ -8,13 +8,13 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::indexed_disi;
+use crate::encoding::lz4::{self, FastHashTable};
 use crate::index::FieldInfos;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
 use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
-use crate::util::compress::lz4::{self, FastHashTable};
 use crate::util::packed::{DirectMonotonicWriter, DirectWriter, unsigned_bits_required};
 use crate::util::string_helper;
 

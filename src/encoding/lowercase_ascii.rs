@@ -73,7 +73,7 @@ pub fn compress(input: &[u8], len: usize) -> Option<Vec<u8>> {
     out.extend_from_slice(&tmp[..compressed_len]);
 
     // Write exception count as VInt
-    write_vint(&mut out, num_exceptions as i32);
+    crate::encoding::varint::write_vint(&mut out, num_exceptions as i32).unwrap();
 
     if num_exceptions > 0 {
         previous_exception_index = 0;
@@ -125,8 +125,9 @@ fn decompress(compressed: &[u8], len: usize) -> Vec<u8> {
 
     // 4. Restore exceptions
     let mut pos = compressed_len;
-    let (num_exceptions, vint_len) = read_vint(&compressed[pos..]);
-    pos += vint_len;
+    let mut cursor = &compressed[pos..];
+    let num_exceptions = crate::encoding::varint::read_vint(&mut cursor).unwrap();
+    pos += (compressed.len() - pos) - cursor.len();
 
     let mut i: usize = 0;
     for _ in 0..num_exceptions {
@@ -137,34 +138,6 @@ fn decompress(compressed: &[u8], len: usize) -> Vec<u8> {
     }
 
     out
-}
-
-/// Write a VInt (variable-length integer) to a byte vec.
-fn write_vint(out: &mut Vec<u8>, value: i32) {
-    let mut v = value as u32;
-    while v > 0x7F {
-        out.push((v & 0x7F | 0x80) as u8);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-/// Read a VInt from a byte slice. Returns (value, bytes_consumed).
-#[cfg(test)]
-fn read_vint(data: &[u8]) -> (i32, usize) {
-    let mut result: i32 = 0;
-    let mut shift = 0;
-    let mut pos = 0;
-    loop {
-        let b = data[pos] as i32;
-        pos += 1;
-        result |= (b & 0x7F) << shift;
-        if b & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    (result, pos)
 }
 
 #[cfg(test)]
