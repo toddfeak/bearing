@@ -107,51 +107,7 @@ pub fn write(
     // Write chunkSize to meta
     fdm.write_vint(CHUNK_SIZE)?;
 
-    // Buffer all stored field data
-    let mut buffered_docs: Vec<u8> = Vec::new();
-    let mut num_stored_fields: Vec<i32> = Vec::with_capacity(stored_docs.len());
-    let mut end_offsets: Vec<i32> = Vec::with_capacity(stored_docs.len());
-
-    for doc in stored_docs {
-        let mut field_count = 0i32;
-        for &(field_number, ref value) in &doc.fields {
-            field_count += 1;
-            let type_code = match value {
-                StoredValue::String(_) => TYPE_STRING,
-                StoredValue::Int(_) => TYPE_NUMERIC_INT,
-                StoredValue::Long(_) => TYPE_NUMERIC_LONG,
-                StoredValue::Float(_) => TYPE_NUMERIC_FLOAT,
-                StoredValue::Double(_) => TYPE_NUMERIC_DOUBLE,
-                StoredValue::Bytes(_) => TYPE_BYTE_ARR,
-            };
-            let info_and_bits = ((field_number as u64) << TYPE_BITS) | type_code;
-            VecOutput(&mut buffered_docs).write_vlong(info_and_bits as i64)?;
-
-            match value {
-                StoredValue::String(s) => {
-                    VecOutput(&mut buffered_docs).write_string(s)?;
-                }
-                StoredValue::Int(i) => {
-                    VecOutput(&mut buffered_docs).write_zint(*i)?;
-                }
-                StoredValue::Long(l) => {
-                    write_tlong(&mut VecOutput(&mut buffered_docs), *l)?;
-                }
-                StoredValue::Float(f) => {
-                    write_zfloat(&mut VecOutput(&mut buffered_docs), *f)?;
-                }
-                StoredValue::Double(d) => {
-                    write_zdouble(&mut VecOutput(&mut buffered_docs), *d)?;
-                }
-                StoredValue::Bytes(b) => {
-                    VecOutput(&mut buffered_docs).write_vint(b.len() as i32)?;
-                    VecOutput(&mut buffered_docs).write_bytes(b)?;
-                }
-            }
-        }
-        num_stored_fields.push(field_count);
-        end_offsets.push(buffered_docs.len() as i32);
-    }
+    let (buffered_docs, num_stored_fields, end_offsets) = buffer_stored_fields(stored_docs)?;
 
     let num_buffered_docs = stored_docs.len();
     let mut num_chunks = 0i64;
@@ -259,6 +215,56 @@ pub fn write(
     codec_util::write_footer(&mut *fdt)?;
 
     Ok(vec![fdt_name, fdx_name, fdm_name])
+}
+
+/// Serializes stored field values into a byte buffer with per-doc field counts and offsets.
+fn buffer_stored_fields(stored_docs: &[StoredDoc]) -> io::Result<(Vec<u8>, Vec<i32>, Vec<i32>)> {
+    let mut buffered_docs: Vec<u8> = Vec::new();
+    let mut num_stored_fields: Vec<i32> = Vec::with_capacity(stored_docs.len());
+    let mut end_offsets: Vec<i32> = Vec::with_capacity(stored_docs.len());
+
+    for doc in stored_docs {
+        let mut field_count = 0i32;
+        for &(field_number, ref value) in &doc.fields {
+            field_count += 1;
+            let type_code = match value {
+                StoredValue::String(_) => TYPE_STRING,
+                StoredValue::Int(_) => TYPE_NUMERIC_INT,
+                StoredValue::Long(_) => TYPE_NUMERIC_LONG,
+                StoredValue::Float(_) => TYPE_NUMERIC_FLOAT,
+                StoredValue::Double(_) => TYPE_NUMERIC_DOUBLE,
+                StoredValue::Bytes(_) => TYPE_BYTE_ARR,
+            };
+            let info_and_bits = ((field_number as u64) << TYPE_BITS) | type_code;
+            VecOutput(&mut buffered_docs).write_vlong(info_and_bits as i64)?;
+
+            match value {
+                StoredValue::String(s) => {
+                    VecOutput(&mut buffered_docs).write_string(s)?;
+                }
+                StoredValue::Int(i) => {
+                    VecOutput(&mut buffered_docs).write_zint(*i)?;
+                }
+                StoredValue::Long(l) => {
+                    write_tlong(&mut VecOutput(&mut buffered_docs), *l)?;
+                }
+                StoredValue::Float(f) => {
+                    write_zfloat(&mut VecOutput(&mut buffered_docs), *f)?;
+                }
+                StoredValue::Double(d) => {
+                    write_zdouble(&mut VecOutput(&mut buffered_docs), *d)?;
+                }
+                StoredValue::Bytes(b) => {
+                    VecOutput(&mut buffered_docs).write_vint(b.len() as i32)?;
+                    VecOutput(&mut buffered_docs).write_bytes(b)?;
+                }
+            }
+        }
+        num_stored_fields.push(field_count);
+        end_offsets.push(buffered_docs.len() as i32);
+    }
+
+    Ok((buffered_docs, num_stored_fields, end_offsets))
 }
 
 // ============================================================

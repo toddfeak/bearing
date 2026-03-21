@@ -100,56 +100,51 @@ pub fn decode_longitude(encoded: i32) -> f64 {
 // --- Range encoding utilities ---
 // Ported from org.apache.lucene.document.{IntRange,LongRange,FloatRange,DoubleRange}
 
+/// Encodes a range as sortable bytes: `[min1..minN, max1..maxN]`.
+///
+/// Each min/max value is converted to sortable bytes via `encode_fn`, then
+/// packed into a single byte array with mins first, then maxs.
+fn encode_range<T: PartialOrd + std::fmt::Display + Copy>(
+    mins: &[T],
+    maxs: &[T],
+    elem_size: usize,
+    encode_fn: fn(T) -> Vec<u8>,
+) -> Vec<u8> {
+    validate_range_dims(mins.len(), maxs.len());
+    for i in 0..mins.len() {
+        assert!(
+            mins[i] <= maxs[i],
+            "min[{i}] ({}) > max[{i}] ({})",
+            mins[i],
+            maxs[i]
+        );
+    }
+    let dims = mins.len();
+    let mut bytes = vec![0u8; dims * 2 * elem_size];
+    for (i, &min) in mins.iter().enumerate() {
+        bytes[i * elem_size..(i + 1) * elem_size].copy_from_slice(&encode_fn(min));
+    }
+    for (i, &max) in maxs.iter().enumerate() {
+        let offset = (dims + i) * elem_size;
+        bytes[offset..offset + elem_size].copy_from_slice(&encode_fn(max));
+    }
+    bytes
+}
+
 /// Encodes an integer range as sortable bytes: `[min1..minN, max1..maxN]`.
 ///
 /// Each dimension's min and max are encoded as 4-byte sortable values.
 /// Panics if `mins` and `maxs` differ in length, exceed 4 dimensions,
 /// or any `min[i] > max[i]`.
 pub fn encode_int_range(mins: &[i32], maxs: &[i32]) -> Vec<u8> {
-    validate_range_dims(mins.len(), maxs.len());
-    for i in 0..mins.len() {
-        assert!(
-            mins[i] <= maxs[i],
-            "min[{i}] ({}) > max[{i}] ({})",
-            mins[i],
-            maxs[i]
-        );
-    }
-    let dims = mins.len();
-    let mut bytes = vec![0u8; dims * 2 * 4];
-    for (i, &min) in mins.iter().enumerate() {
-        bytes[i * 4..(i + 1) * 4].copy_from_slice(&int_to_sortable_bytes(min));
-    }
-    for (i, &max) in maxs.iter().enumerate() {
-        let offset = (dims + i) * 4;
-        bytes[offset..offset + 4].copy_from_slice(&int_to_sortable_bytes(max));
-    }
-    bytes
+    encode_range(mins, maxs, 4, |v| int_to_sortable_bytes(v).to_vec())
 }
 
 /// Encodes a long range as sortable bytes: `[min1..minN, max1..maxN]`.
 ///
 /// Each dimension's min and max are encoded as 8-byte sortable values.
 pub fn encode_long_range(mins: &[i64], maxs: &[i64]) -> Vec<u8> {
-    validate_range_dims(mins.len(), maxs.len());
-    for i in 0..mins.len() {
-        assert!(
-            mins[i] <= maxs[i],
-            "min[{i}] ({}) > max[{i}] ({})",
-            mins[i],
-            maxs[i]
-        );
-    }
-    let dims = mins.len();
-    let mut bytes = vec![0u8; dims * 2 * 8];
-    for (i, &min) in mins.iter().enumerate() {
-        bytes[i * 8..(i + 1) * 8].copy_from_slice(&long_to_sortable_bytes(min));
-    }
-    for (i, &max) in maxs.iter().enumerate() {
-        let offset = (dims + i) * 8;
-        bytes[offset..offset + 8].copy_from_slice(&long_to_sortable_bytes(max));
-    }
-    bytes
+    encode_range(mins, maxs, 8, |v| long_to_sortable_bytes(v).to_vec())
 }
 
 /// Encodes a float range as sortable bytes: `[min1..minN, max1..maxN]`.
@@ -157,25 +152,7 @@ pub fn encode_long_range(mins: &[i64], maxs: &[i64]) -> Vec<u8> {
 /// Each dimension's min and max are converted to sortable ints, then encoded
 /// as 4-byte sortable values.
 pub fn encode_float_range(mins: &[f32], maxs: &[f32]) -> Vec<u8> {
-    validate_range_dims(mins.len(), maxs.len());
-    for i in 0..mins.len() {
-        assert!(
-            mins[i] <= maxs[i],
-            "min[{i}] ({}) > max[{i}] ({})",
-            mins[i],
-            maxs[i]
-        );
-    }
-    let dims = mins.len();
-    let mut bytes = vec![0u8; dims * 2 * 4];
-    for (i, &min) in mins.iter().enumerate() {
-        bytes[i * 4..(i + 1) * 4].copy_from_slice(&float_to_sortable_bytes(min));
-    }
-    for (i, &max) in maxs.iter().enumerate() {
-        let offset = (dims + i) * 4;
-        bytes[offset..offset + 4].copy_from_slice(&float_to_sortable_bytes(max));
-    }
-    bytes
+    encode_range(mins, maxs, 4, |v| float_to_sortable_bytes(v).to_vec())
 }
 
 /// Encodes a double range as sortable bytes: `[min1..minN, max1..maxN]`.
@@ -183,25 +160,7 @@ pub fn encode_float_range(mins: &[f32], maxs: &[f32]) -> Vec<u8> {
 /// Each dimension's min and max are converted to sortable longs, then encoded
 /// as 8-byte sortable values.
 pub fn encode_double_range(mins: &[f64], maxs: &[f64]) -> Vec<u8> {
-    validate_range_dims(mins.len(), maxs.len());
-    for i in 0..mins.len() {
-        assert!(
-            mins[i] <= maxs[i],
-            "min[{i}] ({}) > max[{i}] ({})",
-            mins[i],
-            maxs[i]
-        );
-    }
-    let dims = mins.len();
-    let mut bytes = vec![0u8; dims * 2 * 8];
-    for (i, &min) in mins.iter().enumerate() {
-        bytes[i * 8..(i + 1) * 8].copy_from_slice(&double_to_sortable_bytes(min));
-    }
-    for (i, &max) in maxs.iter().enumerate() {
-        let offset = (dims + i) * 8;
-        bytes[offset..offset + 8].copy_from_slice(&double_to_sortable_bytes(max));
-    }
-    bytes
+    encode_range(mins, maxs, 8, |v| double_to_sortable_bytes(v).to_vec())
 }
 
 fn validate_range_dims(min_len: usize, max_len: usize) {

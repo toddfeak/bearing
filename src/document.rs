@@ -493,13 +493,27 @@ pub fn long_field(name: &str, value: i64) -> Field {
     Field::new(name.to_string(), ft, FieldValue::Long(value))
 }
 
+/// Builds a tokenized text field type, optionally with term vectors.
+fn text_field_type(term_vectors: bool) -> FieldType {
+    let mut b = FieldTypeBuilder::new()
+        .index_options(IndexOptions::DocsAndFreqsAndPositions)
+        .tokenized(true);
+    if term_vectors {
+        b = b
+            .store_term_vectors(true)
+            .store_term_vector_positions(true)
+            .store_term_vector_offsets(true);
+    }
+    b.build()
+}
+
 /// Creates an unstored, tokenized text field with positions.
 pub fn text_field(name: &str, value: &str) -> Field {
-    let ft = FieldTypeBuilder::new()
-        .index_options(IndexOptions::DocsAndFreqsAndPositions)
-        .tokenized(true)
-        .build();
-    Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
+    Field::new(
+        name.to_string(),
+        text_field_type(false),
+        FieldValue::Text(value.to_string()),
+    )
 }
 
 /// Creates a tokenized text field backed by a [`Read`] source.
@@ -508,11 +522,11 @@ pub fn text_field(name: &str, value: &str) -> Field {
 /// buffering the entire content in memory. Reader fields are indexed but
 /// cannot be stored.
 pub fn text_field_reader(name: &str, reader: impl Read + Send + 'static) -> Field {
-    let ft = FieldTypeBuilder::new()
-        .index_options(IndexOptions::DocsAndFreqsAndPositions)
-        .tokenized(true)
-        .build();
-    Field::new(name.to_string(), ft, FieldValue::Reader(Box::new(reader)))
+    Field::new(
+        name.to_string(),
+        text_field_type(false),
+        FieldValue::Reader(Box::new(reader)),
+    )
 }
 
 /// Creates a tokenized text field backed by a [`Read`] source with term vectors.
@@ -523,14 +537,11 @@ pub fn text_field_reader_with_term_vectors(
     name: &str,
     reader: impl Read + Send + 'static,
 ) -> Field {
-    let ft = FieldTypeBuilder::new()
-        .index_options(IndexOptions::DocsAndFreqsAndPositions)
-        .tokenized(true)
-        .store_term_vectors(true)
-        .store_term_vector_positions(true)
-        .store_term_vector_offsets(true)
-        .build();
-    Field::new(name.to_string(), ft, FieldValue::Reader(Box::new(reader)))
+    Field::new(
+        name.to_string(),
+        text_field_type(true),
+        FieldValue::Reader(Box::new(reader)),
+    )
 }
 
 /// Creates a tokenized text field with term vectors, positions, and offsets.
@@ -538,14 +549,11 @@ pub fn text_field_reader_with_term_vectors(
 /// Same as [`text_field`] but additionally stores term vectors with position
 /// and offset information for hit highlighting and document similarity.
 pub fn text_field_with_term_vectors(name: &str, value: &str) -> Field {
-    let ft = FieldTypeBuilder::new()
-        .index_options(IndexOptions::DocsAndFreqsAndPositions)
-        .tokenized(true)
-        .store_term_vectors(true)
-        .store_term_vector_positions(true)
-        .store_term_vector_offsets(true)
-        .build();
-    Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
+    Field::new(
+        name.to_string(),
+        text_field_type(true),
+        FieldValue::Text(value.to_string()),
+    )
 }
 
 /// Creates an inverted-only string field (no doc values).
@@ -646,40 +654,40 @@ pub fn sorted_numeric_doc_values_field(name: &str, value: i64) -> Field {
     Field::new(name.to_string(), ft, FieldValue::Long(value))
 }
 
+/// Creates a stored-only field with no indexing.
+fn stored_field(name: &str, value: FieldValue) -> Field {
+    let ft = FieldTypeBuilder::new().stored(true).build();
+    Field::new(name.to_string(), ft, value)
+}
+
 /// Creates a stored-only string field (no indexing).
 pub fn stored_string_field(name: &str, value: &str) -> Field {
-    let ft = FieldTypeBuilder::new().stored(true).build();
-    Field::new(name.to_string(), ft, FieldValue::Text(value.to_string()))
+    stored_field(name, FieldValue::Text(value.to_string()))
 }
 
 /// Creates a stored-only int field (no indexing).
 pub fn stored_int_field(name: &str, value: i32) -> Field {
-    let ft = FieldTypeBuilder::new().stored(true).build();
-    Field::new(name.to_string(), ft, FieldValue::Int(value))
+    stored_field(name, FieldValue::Int(value))
 }
 
 /// Creates a stored-only long field (no indexing).
 pub fn stored_long_field(name: &str, value: i64) -> Field {
-    let ft = FieldTypeBuilder::new().stored(true).build();
-    Field::new(name.to_string(), ft, FieldValue::Long(value))
+    stored_field(name, FieldValue::Long(value))
 }
 
 /// Creates a stored-only float field (no indexing).
 pub fn stored_float_field(name: &str, value: f32) -> Field {
-    let ft = FieldTypeBuilder::new().stored(true).build();
-    Field::new(name.to_string(), ft, FieldValue::Float(value))
+    stored_field(name, FieldValue::Float(value))
 }
 
 /// Creates a stored-only double field (no indexing).
 pub fn stored_double_field(name: &str, value: f64) -> Field {
-    let ft = FieldTypeBuilder::new().stored(true).build();
-    Field::new(name.to_string(), ft, FieldValue::Double(value))
+    stored_field(name, FieldValue::Double(value))
 }
 
 /// Creates a stored-only bytes field (no indexing).
 pub fn stored_bytes_field(name: &str, value: Vec<u8>) -> Field {
-    let ft = FieldTypeBuilder::new().stored(true).build();
-    Field::new(name.to_string(), ft, FieldValue::Bytes(value))
+    stored_field(name, FieldValue::Bytes(value))
 }
 
 /// Creates an indexed lat/lon point field.

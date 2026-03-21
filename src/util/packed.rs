@@ -21,7 +21,7 @@ pub fn unsigned_bits_required(max_value: i64) -> u32 {
     *SUPPORTED_BITS_PER_VALUE
         .iter()
         .find(|&&s| s >= raw)
-        .unwrap()
+        .expect("raw bits exceeds max supported BPV")
 }
 
 /// Writes bit-packed integers.

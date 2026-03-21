@@ -12,13 +12,17 @@ use std::io;
 /// Writes a string as VInt-encoded byte length followed by UTF-8 bytes.
 pub fn write_string(out: &mut impl io::Write, s: &str) -> io::Result<()> {
     let bytes = s.as_bytes();
-    varint::write_vint(out, bytes.len() as i32)?;
+    let len = i32::try_from(bytes.len())
+        .map_err(|_| io::Error::other("string length exceeds i32::MAX"))?;
+    varint::write_vint(out, len)?;
     out.write_all(bytes)
 }
 
 /// Writes a set of strings: VInt count followed by each string.
 pub fn write_set_of_strings(out: &mut impl io::Write, set: &[String]) -> io::Result<()> {
-    varint::write_vint(out, set.len() as i32)?;
+    let count =
+        i32::try_from(set.len()).map_err(|_| io::Error::other("set size exceeds i32::MAX"))?;
+    varint::write_vint(out, count)?;
     for s in set {
         write_string(out, s)?;
     }
@@ -30,7 +34,9 @@ pub fn write_map_of_strings(
     out: &mut impl io::Write,
     map: &HashMap<String, String>,
 ) -> io::Result<()> {
-    varint::write_vint(out, map.len() as i32)?;
+    let count =
+        i32::try_from(map.len()).map_err(|_| io::Error::other("map size exceeds i32::MAX"))?;
+    varint::write_vint(out, count)?;
     for (k, v) in map {
         write_string(out, k)?;
         write_string(out, v)?;
