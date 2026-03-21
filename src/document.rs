@@ -23,6 +23,8 @@ use std::io::Read;
 
 use mem_dbg::MemSize;
 
+use crate::encoding::{geo, range, sortable_bytes};
+
 /// Specifies what information is stored in the index for a field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, MemSize)]
 #[mem_size_flat]
@@ -394,10 +396,8 @@ impl Field {
         match &self.value {
             FieldValue::Int(v) => Some(*v as i64),
             FieldValue::Long(v) => Some(*v),
-            FieldValue::Float(v) => {
-                Some(crate::util::numeric_utils::float_to_sortable_int(*v) as i64)
-            }
-            FieldValue::Double(v) => Some(crate::util::numeric_utils::double_to_sortable_long(*v)),
+            FieldValue::Float(v) => Some(sortable_bytes::float_to_int(*v) as i64),
+            FieldValue::Double(v) => Some(sortable_bytes::double_to_long(*v)),
             _ => None,
         }
     }
@@ -408,18 +408,10 @@ impl Field {
             return None;
         }
         match &self.value {
-            FieldValue::Int(v) => {
-                Some(crate::util::numeric_utils::int_to_sortable_bytes(*v).to_vec())
-            }
-            FieldValue::Long(v) => {
-                Some(crate::util::numeric_utils::long_to_sortable_bytes(*v).to_vec())
-            }
-            FieldValue::Float(v) => {
-                Some(crate::util::numeric_utils::float_to_sortable_bytes(*v).to_vec())
-            }
-            FieldValue::Double(v) => {
-                Some(crate::util::numeric_utils::double_to_sortable_bytes(*v).to_vec())
-            }
+            FieldValue::Int(v) => Some(sortable_bytes::from_int(*v).to_vec()),
+            FieldValue::Long(v) => Some(sortable_bytes::from_long(*v).to_vec()),
+            FieldValue::Float(v) => Some(sortable_bytes::from_float(*v).to_vec()),
+            FieldValue::Double(v) => Some(sortable_bytes::from_double(*v).to_vec()),
             FieldValue::Bytes(b) => Some(b.clone()),
             _ => None,
         }
@@ -695,15 +687,11 @@ pub fn stored_bytes_field(name: &str, value: Vec<u8>) -> Field {
 /// Points: 2 dimensions, 4 bytes each. Not stored, no doc values.
 /// Latitude must be in [-90, 90], longitude in [-180, 180].
 pub fn lat_lon_point(name: &str, lat: f64, lon: f64) -> Field {
-    let encoded_lat = crate::util::numeric_utils::encode_latitude(lat);
-    let encoded_lon = crate::util::numeric_utils::encode_longitude(lon);
+    let encoded_lat = geo::encode_latitude(lat);
+    let encoded_lon = geo::encode_longitude(lon);
     let mut bytes = Vec::with_capacity(8);
-    bytes.extend_from_slice(&crate::util::numeric_utils::int_to_sortable_bytes(
-        encoded_lat,
-    ));
-    bytes.extend_from_slice(&crate::util::numeric_utils::int_to_sortable_bytes(
-        encoded_lon,
-    ));
+    bytes.extend_from_slice(&sortable_bytes::from_int(encoded_lat));
+    bytes.extend_from_slice(&sortable_bytes::from_int(encoded_lon));
     let ft = FieldTypeBuilder::new().point_dimensions(2, 2, 4).build();
     Field::new(name.to_string(), ft, FieldValue::Bytes(bytes))
 }
@@ -712,7 +700,7 @@ pub fn lat_lon_point(name: &str, lat: f64, lon: f64) -> Field {
 ///
 /// Points: `dims*2` dimensions, 4 bytes each. Layout: `[min1..minN, max1..maxN]`.
 pub fn int_range_field(name: &str, mins: &[i32], maxs: &[i32]) -> Field {
-    let bytes = crate::util::numeric_utils::encode_int_range(mins, maxs);
+    let bytes = range::encode_int(mins, maxs);
     let dims = (mins.len() * 2) as u32;
     let ft = FieldTypeBuilder::new()
         .point_dimensions(dims, dims, 4)
@@ -724,7 +712,7 @@ pub fn int_range_field(name: &str, mins: &[i32], maxs: &[i32]) -> Field {
 ///
 /// Points: `dims*2` dimensions, 8 bytes each. Layout: `[min1..minN, max1..maxN]`.
 pub fn long_range_field(name: &str, mins: &[i64], maxs: &[i64]) -> Field {
-    let bytes = crate::util::numeric_utils::encode_long_range(mins, maxs);
+    let bytes = range::encode_long(mins, maxs);
     let dims = (mins.len() * 2) as u32;
     let ft = FieldTypeBuilder::new()
         .point_dimensions(dims, dims, 8)
@@ -736,7 +724,7 @@ pub fn long_range_field(name: &str, mins: &[i64], maxs: &[i64]) -> Field {
 ///
 /// Points: `dims*2` dimensions, 4 bytes each. Layout: `[min1..minN, max1..maxN]`.
 pub fn float_range_field(name: &str, mins: &[f32], maxs: &[f32]) -> Field {
-    let bytes = crate::util::numeric_utils::encode_float_range(mins, maxs);
+    let bytes = range::encode_float(mins, maxs);
     let dims = (mins.len() * 2) as u32;
     let ft = FieldTypeBuilder::new()
         .point_dimensions(dims, dims, 4)
@@ -748,7 +736,7 @@ pub fn float_range_field(name: &str, mins: &[f32], maxs: &[f32]) -> Field {
 ///
 /// Points: `dims*2` dimensions, 8 bytes each. Layout: `[min1..minN, max1..maxN]`.
 pub fn double_range_field(name: &str, mins: &[f64], maxs: &[f64]) -> Field {
-    let bytes = crate::util::numeric_utils::encode_double_range(mins, maxs);
+    let bytes = range::encode_double(mins, maxs);
     let dims = (mins.len() * 2) as u32;
     let ft = FieldTypeBuilder::new()
         .point_dimensions(dims, dims, 8)
@@ -919,10 +907,7 @@ mod tests {
 
         let pb = f.point_bytes().unwrap();
         assert_eq!(pb.len(), 4);
-        assert_eq!(
-            pb,
-            crate::util::numeric_utils::int_to_sortable_bytes(42).to_vec()
-        );
+        assert_eq!(pb, sortable_bytes::from_int(42).to_vec());
 
         if let Some(StoredValue::Int(v)) = f.stored_value() {
             assert_eq!(v, 42);
@@ -944,15 +929,12 @@ mod tests {
         );
         assert_eq!(
             f.numeric_value(),
-            Some(crate::util::numeric_utils::float_to_sortable_int(1.5) as i64)
+            Some(sortable_bytes::float_to_int(1.5) as i64)
         );
 
         let pb = f.point_bytes().unwrap();
         assert_eq!(pb.len(), 4);
-        assert_eq!(
-            pb,
-            crate::util::numeric_utils::float_to_sortable_bytes(1.5).to_vec()
-        );
+        assert_eq!(pb, sortable_bytes::from_float(1.5).to_vec());
 
         if let Some(StoredValue::Float(v)) = f.stored_value() {
             assert_eq!(v, 1.5);
@@ -974,15 +956,12 @@ mod tests {
         );
         assert_eq!(
             f.numeric_value(),
-            Some(crate::util::numeric_utils::double_to_sortable_long(9.87))
+            Some(sortable_bytes::double_to_long(9.87))
         );
 
         let pb = f.point_bytes().unwrap();
         assert_eq!(pb.len(), 8);
-        assert_eq!(
-            pb,
-            crate::util::numeric_utils::double_to_sortable_bytes(9.87).to_vec()
-        );
+        assert_eq!(pb, sortable_bytes::from_double(9.87).to_vec());
 
         if let Some(StoredValue::Double(v)) = f.stored_value() {
             assert_eq!(v, 9.87);
@@ -1210,12 +1189,8 @@ mod tests {
         assert_len_eq_x!(&pb, 8);
 
         // Verify encoded bytes match expected values
-        let expected_lat = crate::util::numeric_utils::int_to_sortable_bytes(
-            crate::util::numeric_utils::encode_latitude(40.7128),
-        );
-        let expected_lon = crate::util::numeric_utils::int_to_sortable_bytes(
-            crate::util::numeric_utils::encode_longitude(-74.006),
-        );
+        let expected_lat = sortable_bytes::from_int(geo::encode_latitude(40.7128));
+        let expected_lon = sortable_bytes::from_int(geo::encode_longitude(-74.006));
         assert_eq!(&pb[0..4], &expected_lat);
         assert_eq!(&pb[4..8], &expected_lon);
     }

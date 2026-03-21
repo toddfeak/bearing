@@ -1870,7 +1870,7 @@ mod tests {
         assert_eq!(score_data.points[0].1.len(), 4);
         if let DocValuesAccumulator::SortedNumeric(ref vals) = score_data.doc_values {
             assert_eq!(vals.len(), 1);
-            let expected = crate::util::numeric_utils::float_to_sortable_int(1.5) as i64;
+            let expected = crate::encoding::sortable_bytes::float_to_int(1.5) as i64;
             assert_eq!(vals[0].1, vec![expected]);
         } else {
             panic!("expected SortedNumeric for FloatField");
@@ -1891,7 +1891,7 @@ mod tests {
         assert_eq!(rating_data.points[0].1.len(), 8);
         if let DocValuesAccumulator::SortedNumeric(ref vals) = rating_data.doc_values {
             assert_eq!(vals.len(), 1);
-            let expected = crate::util::numeric_utils::double_to_sortable_long(9.87);
+            let expected = crate::encoding::sortable_bytes::double_to_long(9.87);
             assert_eq!(vals[0].1, vec![expected]);
         } else {
             panic!("expected SortedNumeric for DoubleField");

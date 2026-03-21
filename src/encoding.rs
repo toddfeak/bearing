@@ -9,9 +9,12 @@
 //! All encoding functions operate on [`std::io::Write`] / [`std::io::Read`],
 //! keeping them independent of any project-specific I/O traits.
 
+pub mod geo;
 pub mod group_vint;
 pub mod lowercase_ascii;
 pub mod lz4;
+pub mod range;
+pub mod sortable_bytes;
 pub mod string;
 pub mod varint;
 pub mod zigzag;
