@@ -142,6 +142,7 @@ pub fn check_header(
 }
 
 /// Reads and validates an index header (header + segment ID + suffix), returning the version.
+#[cfg(test)]
 pub fn check_index_header(
     input: &mut dyn DataInput,
     codec: &str,

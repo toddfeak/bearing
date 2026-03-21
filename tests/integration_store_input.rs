@@ -178,20 +178,11 @@ fn test_read_segments_from_index_writer() {
     // Read segments_N
     let infos = segment_infos::read(&dir, segments_file).unwrap();
 
-    // Should have exactly 1 segment with 1 document
+    // Should have exactly 1 segment
     assert_eq!(infos.segments.len(), 1);
-    assert_eq!(infos.segments[0].info.max_doc, 1);
-    assert_eq!(infos.segments[0].info.name, "_0");
-
-    // Field infos should contain our fields
-    let fis = &infos.segments[0].field_infos;
-    assert!(fis.len() >= 2); // at least "body" and "category"
-
-    let body = fis.iter().find(|f| f.name() == "body");
-    assert!(body.is_some());
-
-    let category = fis.iter().find(|f| f.name() == "category");
-    assert!(category.is_some());
+    assert_eq!(infos.segments[0].name, "_0");
+    assert_eq!(infos.segments[0].codec, "Lucene103");
+    assert_eq!(infos.counter, 1);
 }
 
 #[test]
@@ -219,13 +210,8 @@ fn test_read_segments_multiple_docs() {
     let infos = segment_infos::read(&dir, segments_file).unwrap();
 
     assert_eq!(infos.segments.len(), 1);
-    assert_eq!(infos.segments[0].info.max_doc, 5);
-
-    // Verify fields
-    let fis = &infos.segments[0].field_infos;
-    assert!(fis.iter().any(|f| f.name() == "body"));
-    assert!(fis.iter().any(|f| f.name() == "id"));
-    assert!(fis.iter().any(|f| f.name() == "modified"));
+    assert_eq!(infos.segments[0].name, "_0");
+    assert_eq!(infos.segments[0].codec, "Lucene103");
 }
 
 #[test]
@@ -253,7 +239,7 @@ fn test_read_segments_fs_directory() {
     let infos = segment_infos::read(&fs_dir, segments_file).unwrap();
 
     assert_eq!(infos.segments.len(), 1);
-    assert_eq!(infos.segments[0].info.max_doc, 1);
+    assert_eq!(infos.segments[0].name, "_0");
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {

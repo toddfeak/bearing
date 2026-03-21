@@ -7,8 +7,6 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::codecs::lucene94::field_infos_format;
-use crate::codecs::lucene99::segment_info_format;
 use crate::index::SegmentCommitInfo;
 use crate::index::index_file_names;
 use crate::store::checksum_input::ChecksumIndexInput;
@@ -151,10 +149,41 @@ pub fn write(
     Ok(out.into_inner())
 }
 
+/// A raw segment entry parsed from a `segments_N` file.
+///
+/// Contains only what's stored in the `segments_N` file itself — no data from
+/// `.si` or `.fnm` files. The caller is responsible for reading those via the
+/// appropriate codec format readers.
+#[derive(Debug)]
+pub struct SegmentEntry {
+    /// Segment name (e.g., "_0").
+    pub name: String,
+    /// Segment ID (16 bytes).
+    pub id: [u8; codec_util::ID_LENGTH],
+    /// Codec name (e.g., "Lucene103").
+    pub codec: String,
+    /// Delete generation.
+    pub del_gen: i64,
+    /// Number of deleted documents.
+    pub del_count: i32,
+    /// Field infos generation.
+    pub field_infos_gen: i64,
+    /// Doc values generation.
+    pub doc_values_gen: i64,
+    /// Number of soft-deleted documents.
+    pub soft_del_count: i32,
+    /// Segment commit info ID (optional).
+    pub sci_id: Option<[u8; codec_util::ID_LENGTH]>,
+}
+
 /// Result of reading a `segments_N` file.
+///
+/// Contains only the data stored in the `segments_N` file. Per-segment metadata
+/// (`.si`, `.fnm`) must be read separately by the caller using the codec name
+/// from each [`SegmentEntry`].
 pub struct SegmentInfosRead {
-    /// The segment commit infos in this commit.
-    pub segments: Vec<SegmentCommitInfo>,
+    /// The raw segment entries in this commit.
+    pub segments: Vec<SegmentEntry>,
     /// The commit generation (from the filename suffix).
     pub generation: i64,
     /// The segment infos version (monotonically increasing).
@@ -167,8 +196,9 @@ pub struct SegmentInfosRead {
 
 /// Reads a `segments_N` file from `directory`.
 ///
-/// The `segment_file_name` should be the full filename (e.g., `"segments_1"`).
-/// Returns the parsed segment infos including all segment metadata.
+/// Returns only the data stored in the `segments_N` file. Does NOT read
+/// per-segment `.si` or `.fnm` files — the caller should use the codec name
+/// from each [`SegmentEntry`] to dispatch to the appropriate format readers.
 pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<SegmentInfosRead> {
     // Parse generation from filename
     let gen_suffix = segment_file_name.strip_prefix("segments_").ok_or_else(|| {
@@ -231,41 +261,19 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
     // Per-segment entries
     let mut segments = Vec::with_capacity(num_segments as usize);
     for _ in 0..num_segments {
-        // Segment name
         let seg_name = input.read_string()?;
 
-        // Segment ID (16 bytes)
         let mut seg_id = [0u8; codec_util::ID_LENGTH];
         input.read_bytes(&mut seg_id)?;
 
-        // Codec name (read and validate)
         let codec_name = input.read_string()?;
-        if codec_name != SEGMENT_CODEC_NAME {
-            return Err(io::Error::other(format!(
-                "unsupported codec: {codec_name:?}, expected {SEGMENT_CODEC_NAME:?}"
-            )));
-        }
 
-        // Read segment info (.si file) and field infos (.fnm file)
-        let si = segment_info_format::read(directory, &seg_name, &seg_id)?;
-        let fis = field_infos_format::read(directory, &si, "")?;
-
-        // Del gen (BE long)
         let del_gen = input.read_be_long()?;
-
-        // Del count (BE int)
         let del_count = input.read_be_int()?;
-
-        // Field infos gen (BE long)
         let field_infos_gen = input.read_be_long()?;
-
-        // Doc values gen (BE long)
         let doc_values_gen = input.read_be_long()?;
-
-        // Soft del count (BE int)
         let soft_del_count = input.read_be_int()?;
 
-        // SCI ID
         let sci_id = match input.read_byte()? {
             1 => {
                 let mut id = [0u8; codec_util::ID_LENGTH];
@@ -278,24 +286,27 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
             }
         };
 
-        // Field infos files (set of strings — skip for now)
+        // Field infos files (set of strings)
         let _field_infos_files = input.read_set_of_strings()?;
 
-        // Doc values updates files (BE int count, then per-field sets — skip for now)
+        // Doc values updates files
         let num_dv_fields = input.read_be_int()?;
         for _ in 0..num_dv_fields {
             let _field_number = input.read_be_int()?;
             let _files = input.read_set_of_strings()?;
         }
 
-        let mut sci = SegmentCommitInfo::new(si, fis, sci_id);
-        sci.del_gen = del_gen;
-        sci.del_count = del_count;
-        sci.field_infos_gen = field_infos_gen;
-        sci.doc_values_gen = doc_values_gen;
-        sci.soft_del_count = soft_del_count;
-
-        segments.push(sci);
+        segments.push(SegmentEntry {
+            name: seg_name,
+            id: seg_id,
+            codec: codec_name,
+            del_gen,
+            del_count,
+            field_infos_gen,
+            doc_values_gen,
+            soft_del_count,
+            sci_id,
+        });
     }
 
     // User data
@@ -550,40 +561,23 @@ mod tests {
 
     #[test]
     fn test_read_roundtrip_single_segment() {
-        use crate::codecs::lucene94::field_infos_format;
-        use crate::codecs::lucene99::segment_info_format;
-
         let seg_id = [0xABu8; 16];
         let sci_id = [0xCDu8; 16];
         let sci = make_test_segment_commit_info("_0", 3, seg_id, Some(sci_id));
 
-        // Write .si and .fnm files to a directory
-        let shared_dir: crate::store::SharedDirectory =
-            std::sync::Mutex::new(Box::new(crate::store::MemoryDirectory::new()));
-        let si_files = vec!["_0.fnm".to_string()];
-        segment_info_format::write(&shared_dir, &sci.info, &si_files).unwrap();
-        field_infos_format::write(&shared_dir, &sci.info, "", &sci.field_infos).unwrap();
-
-        // Write segments_N
         let user_data = HashMap::new();
         let file = write(&[&sci], 1, 1, 1, &user_data).unwrap();
 
-        // Add segments_N to the directory
-        shared_dir
-            .lock()
-            .unwrap()
-            .write_file(&file.name, &file.data)
-            .unwrap();
+        let mut dir = crate::store::MemoryDirectory::new();
+        dir.write_file(&file.name, &file.data).unwrap();
 
-        // Read it back
-        let dir_guard = shared_dir.lock().unwrap();
-        let result = read(&**dir_guard, &file.name).unwrap();
+        let result = read(&dir, &file.name).unwrap();
 
         assert_len_eq_x!(&result.segments, 1);
-        assert_eq!(result.segments[0].info.name, "_0");
-        assert_eq!(result.segments[0].info.max_doc, 3);
-        assert_eq!(result.segments[0].info.id, seg_id);
-        assert_eq!(result.segments[0].id, Some(sci_id));
+        assert_eq!(result.segments[0].name, "_0");
+        assert_eq!(result.segments[0].id, seg_id);
+        assert_eq!(result.segments[0].codec, "Lucene103");
+        assert_eq!(result.segments[0].sci_id, Some(sci_id));
         assert_eq!(result.version, 1);
         assert_eq!(result.counter, 1);
     }

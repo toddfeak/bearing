@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Segment info format writer for segment-level metadata (name, doc count, diagnostics).
 
-use std::collections::HashSet;
 use std::io;
 
 use log::debug;
@@ -9,8 +8,14 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
+use crate::store::SharedDirectory;
+
+#[cfg(test)]
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, SharedDirectory};
+#[cfg(test)]
+use crate::store::{DataInput, Directory};
+#[cfg(test)]
+use std::collections::HashSet;
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
 const VERSION_CURRENT: i32 = 0;
@@ -99,6 +104,7 @@ pub fn write(
 /// Reads a `.si` (segment info) file from `directory`.
 ///
 /// Validates the codec header, reads segment metadata, and verifies the footer checksum.
+#[cfg(test)]
 pub fn read(
     directory: &dyn Directory,
     segment_name: &str,

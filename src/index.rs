@@ -17,7 +17,7 @@ pub(crate) mod segment_worker_pool;
 
 pub use index_writer::{CommitResult, IndexWriter};
 pub use index_writer_config::IndexWriterConfig;
-pub use segment_infos::SegmentInfosRead;
+pub use segment_infos::{SegmentEntry, SegmentInfosRead};
 pub(crate) mod indexing_chain;
 pub mod segment_infos;
 

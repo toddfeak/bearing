@@ -8,9 +8,15 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::document::{DocValuesType, IndexOptions};
 use crate::index::index_file_names;
-use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig, SegmentInfo};
+use crate::index::{FieldInfos, SegmentInfo};
+use crate::store::SharedDirectory;
+
+#[cfg(test)]
+use crate::index::{FieldInfo, PointDimensionConfig};
+#[cfg(test)]
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, SharedDirectory};
+#[cfg(test)]
+use crate::store::{DataInput, Directory};
 
 const CODEC_NAME: &str = "Lucene94FieldInfos";
 const FORMAT_CURRENT: i32 = 2; // FORMAT_DOCVALUE_SKIPPER
@@ -117,6 +123,7 @@ pub fn write(
 /// Reads a `.fnm` (field infos) file from `directory`.
 ///
 /// Validates the codec header, reads per-field metadata, and verifies the footer checksum.
+#[cfg(test)]
 pub fn read(
     directory: &dyn Directory,
     segment_info: &SegmentInfo,
@@ -248,6 +255,7 @@ fn doc_values_byte(dvt: DocValuesType) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn byte_to_index_options(b: u8) -> io::Result<IndexOptions> {
     match b {
         0 => Ok(IndexOptions::None),
@@ -259,6 +267,7 @@ fn byte_to_index_options(b: u8) -> io::Result<IndexOptions> {
     }
 }
 
+#[cfg(test)]
 fn byte_to_doc_values_type(b: u8) -> io::Result<DocValuesType> {
     match b {
         0 => Ok(DocValuesType::None),
