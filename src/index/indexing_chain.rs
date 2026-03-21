@@ -102,9 +102,13 @@ pub struct PostingsArray {
     current_doc_ids: Vec<i32>,
     current_freqs: Vec<i32>,
 
-    // Per-term position/offset stream: position deltas + optional offset deltas
+    // Per-term position/offset pool: position deltas + optional offset deltas
     // written immediately during tokenization (only allocated when has_positions)
-    position_streams: Option<Vec<Vec<u8>>>,
+    positions_pool: Option<ByteBlockPool<DirectAllocator>>,
+    /// Per-term: start offset in positions_pool (empty when !has_positions).
+    positions_stream_starts: Vec<u32>,
+    /// Per-term: current global write address in positions_pool (empty when !has_positions).
+    positions_stream_addrs: Vec<u32>,
     /// Last position written per term (for delta encoding).
     last_positions: Vec<i32>,
 
@@ -139,11 +143,15 @@ impl PostingsArray {
             last_doc_ids: Vec::new(),
             current_doc_ids: Vec::new(),
             current_freqs: Vec::new(),
-            position_streams: if has_positions {
-                Some(Vec::new())
+            positions_pool: if has_positions {
+                let mut pool = ByteBlockPool::new(DirectAllocator);
+                pool.next_buffer();
+                Some(pool)
             } else {
                 None
             },
+            positions_stream_starts: Vec::new(),
+            positions_stream_addrs: Vec::new(),
             last_positions: Vec::new(),
             tv_freqs: if tv_positions || tv_offsets {
                 Some(Vec::new())
@@ -171,8 +179,12 @@ impl PostingsArray {
         self.last_doc_ids.push(0);
         self.current_doc_ids.push(-1);
         self.current_freqs.push(0);
-        if let Some(ref mut v) = self.position_streams {
-            v.push(Vec::new());
+        if let Some(ref mut pool) = self.positions_pool {
+            let local_offset = ByteSlicePool::new_slice(pool, FIRST_LEVEL_SIZE);
+            let global_offset = local_offset as u32 + pool.byte_offset() as u32;
+            self.positions_stream_starts.push(global_offset);
+            let writer = ByteSliceWriter::new(pool, local_offset);
+            self.positions_stream_addrs.push(writer.address() as u32);
         }
         if self.has_positions {
             self.last_positions.push(0);
@@ -195,7 +207,7 @@ impl PostingsArray {
     /// Records a token occurrence for the given term and document.
     ///
     /// When positions are enabled, position deltas (and optional offset deltas)
-    /// are written immediately to `position_streams` as vInts, avoiding the need to
+    /// are written immediately to `positions_pool` as vInts, avoiding the need to
     /// buffer positions in a `Vec<i32>` per term.
     #[inline]
     pub fn record_occurrence(
@@ -214,8 +226,11 @@ impl PostingsArray {
 
         if self.has_positions {
             let pos_delta = position - self.last_positions[tid];
-            let pos_stream = &mut self.position_streams.as_mut().unwrap()[tid];
-            store::encode_vint(pos_stream, pos_delta).expect("write to Vec");
+            let positions_pool = self.positions_pool.as_mut().unwrap();
+            let mut writer =
+                ByteSliceWriter::from_address(self.positions_stream_addrs[tid] as usize);
+            writer.write_vint(positions_pool, pos_delta);
+            self.positions_stream_addrs[tid] = writer.address() as u32;
             self.last_positions[tid] = position;
 
             if self.has_offsets {
@@ -271,7 +286,7 @@ impl PostingsArray {
     /// Encodes the current pending document for one term into its byte_stream.
     ///
     /// Only writes doc_delta and freq — position/offset data was already written
-    /// directly to `position_streams` during `record_occurrence`.
+    /// directly to `positions_pool` during `record_occurrence`.
     pub fn finalize_current_doc(&mut self, tid: usize) {
         if self.current_doc_ids[tid] < 0 {
             return;
@@ -303,7 +318,7 @@ impl PostingsArray {
     /// Decodes one term's data into a reusable `PostingsBuffer`.
     ///
     /// Reads doc_delta + freq from the byte pool and position/offset deltas
-    /// from `position_streams` in parallel.
+    /// from `positions_pool` in parallel.
     pub fn decode_into(&self, tid: usize, buf: &mut PostingsBuffer) -> io::Result<()> {
         buf.clear();
         let start = self.byte_stream_starts[tid] as usize;
@@ -311,9 +326,14 @@ impl PostingsArray {
         let mut reader = ByteSliceReader::new(&self.byte_pool, start, end);
         let mut last_doc_id = 0;
 
-        // Position stream: read via &mut &[u8] which implements io::Read
-        let mut pos_reader: Option<&[u8]> =
-            self.position_streams.as_ref().map(|v| v[tid].as_slice());
+        // Position stream reader from the positions_pool
+        let mut pos_reader = self.positions_pool.as_ref().map(|pool| {
+            ByteSliceReader::new(
+                pool,
+                self.positions_stream_starts[tid] as usize,
+                self.positions_stream_addrs[tid] as usize,
+            )
+        });
 
         while !reader.eof() {
             let doc_delta = store::read_vint(&mut reader)?;
@@ -774,7 +794,9 @@ impl IndexingChain {
             byte_streams_bytes += pfd.postings.byte_pool.mem_size(flags)
                 + pfd.postings.byte_stream_starts.mem_size(flags)
                 + pfd.postings.byte_stream_addrs.mem_size(flags);
-            position_streams_bytes += pfd.postings.position_streams.mem_size(flags);
+            position_streams_bytes += pfd.postings.positions_pool.mem_size(flags)
+                + pfd.postings.positions_stream_starts.mem_size(flags)
+                + pfd.postings.positions_stream_addrs.mem_size(flags);
             dv_bytes += pfd.doc_values.mem_size(flags);
             norms_bytes += pfd.norms.mem_size(flags) + pfd.norms_docs.mem_size(flags);
             points_bytes += pfd.points.mem_size(flags);
@@ -1798,10 +1820,11 @@ mod tests {
         }
 
         // Byte pool has doc_delta + freq (~20 bytes for 10 docs)
-        // position_streams has position deltas (~20 bytes for 10 docs × 2 positions)
+        // positions_pool has position deltas (~20 bytes for 10 docs × 2 positions)
         // Verify the byte pool data is compact by checking writer advancement
         let byte_len = pa.byte_stream_addrs[tid] as usize - pa.byte_stream_starts[tid] as usize;
-        let pos_len = pa.position_streams.as_ref().unwrap()[tid].len();
+        let pos_len =
+            pa.positions_stream_addrs[tid] as usize - pa.positions_stream_starts[tid] as usize;
         let total_bytes = byte_len + pos_len;
         assert!(
             total_bytes < 100,
