@@ -150,6 +150,7 @@ impl FieldType {
         self.doc_values_type != DocValuesType::None
     }
 
+    /// Returns true if this field type is indexed and has norms enabled.
     pub fn has_norms(&self) -> bool {
         self.is_indexed() && !self.omit_norms
     }

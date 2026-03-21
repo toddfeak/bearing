@@ -280,9 +280,6 @@ fn common_bytes(data: &[u8], o1: usize, o2: usize, limit: usize) -> usize {
 /// High-compression hash table for LZ4 that stores up to 256 occurrences of
 /// 4-byte sequences within a 64KB window. Produces better compression than the
 /// standard fast hash table at the cost of slower compression speed.
-///
-/// Reusable across multiple calls — call [`reset`](HighCompressionHashTable::reset)
-/// before each compression.
 pub struct HighCompressionHashTable {
     hash_table: Vec<i32>,
     chain_table: Vec<u16>,

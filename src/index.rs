@@ -143,6 +143,7 @@ impl FieldInfo {
         self.index_options != IndexOptions::None
     }
 
+    /// Returns true if this field is indexed and has norms enabled.
     pub fn has_norms(&self) -> bool {
         self.is_indexed() && !self.omit_norms
     }
@@ -197,6 +198,7 @@ pub struct FieldInfos {
 }
 
 impl FieldInfos {
+    /// Creates a new `FieldInfos` and computes aggregate flags from the field list.
     pub fn new(fields: Vec<FieldInfo>) -> Self {
         let mut by_name = HashMap::new();
         let mut by_number = HashMap::new();
@@ -391,10 +393,12 @@ impl SegmentCommitInfo {
         }
     }
 
+    /// Returns true if this segment has had deletions applied (del_gen != -1).
     pub fn has_deletions(&self) -> bool {
         self.del_gen != -1
     }
 
+    /// Returns true if this segment has had field info updates (field_infos_gen != -1).
     pub fn has_field_updates(&self) -> bool {
         self.field_infos_gen != -1
     }
