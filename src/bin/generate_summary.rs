@@ -3,8 +3,8 @@
 //! Generates a JSON summary of an index's structure and statistics.
 //!
 //! Produces the same format as the Java `GenerateIndexSummary` tool for
-//! golden-file comparison. Fields that require unimplemented readers
-//! (e.g., `termCount`, `dvDocCount`) output `0` as placeholders.
+//! golden-file comparison. `dvDocCount` outputs `0` as a placeholder
+//! until a doc values metadata reader is implemented.
 //!
 //! Usage: `generate_summary -index <path>`
 
@@ -17,6 +17,7 @@ use serde::Serialize;
 use bearing::codecs::lucene90::compound_reader::CompoundDirectory;
 use bearing::codecs::lucene94::field_infos_format;
 use bearing::codecs::lucene99::segment_info_format;
+use bearing::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
 use bearing::document::{DocValuesType, IndexOptions};
 use bearing::index::{FieldInfo, segment_infos};
 use bearing::store::{Directory, FSDirectory};
@@ -95,22 +96,31 @@ fn main() {
         summary.total_docs += si.max_doc;
         summary.max_doc += si.max_doc;
 
-        // Read field infos — use compound directory if needed
-        let field_infos = if si.is_compound_file {
+        // Read field infos and terms metadata — use compound directory if needed
+        let (field_infos, terms_reader) = if si.is_compound_file {
             let compound_dir =
                 CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap_or_else(|e| {
                     eprintln!("Failed to open compound dir for '{}': {e}", seg.name);
                     process::exit(1);
                 });
-            field_infos_format::read(&compound_dir, &si, "").unwrap_or_else(|e| {
+            let fi = field_infos_format::read(&compound_dir, &si, "").unwrap_or_else(|e| {
                 eprintln!("Failed to read field infos for '{}': {e}", seg.name);
                 process::exit(1);
-            })
+            });
+            let suffix = postings_suffix(&fi);
+            let tr = suffix.and_then(|s| {
+                BlockTreeTermsReader::open(&compound_dir, &seg.name, &s, &seg.id, &fi).ok()
+            });
+            (fi, tr)
         } else {
-            field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
+            let fi = field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
                 eprintln!("Failed to read field infos for '{}': {e}", seg.name);
                 process::exit(1);
-            })
+            });
+            let suffix = postings_suffix(&fi);
+            let tr = suffix
+                .and_then(|s| BlockTreeTermsReader::open(&dir, &seg.name, &s, &seg.id, &fi).ok());
+            (fi, tr)
         };
 
         let mut fields: Vec<&FieldInfo> = field_infos.iter().collect();
@@ -118,19 +128,26 @@ fn main() {
 
         let field_summaries = fields
             .iter()
-            .map(|fi| FieldSummary {
-                name: fi.name().to_string(),
-                number: fi.number(),
-                index_options: index_options_str(fi.index_options()).to_string(),
-                has_norms: fi.has_norms(),
-                store_term_vector: fi.store_term_vector(),
-                has_payloads: fi.has_payloads(),
-                doc_values_type: doc_values_type_str(fi.doc_values_type()).to_string(),
-                point_dimension_count: fi.point_config().dimension_count,
-                point_index_dimension_count: fi.point_config().index_dimension_count,
-                point_num_bytes: fi.point_config().num_bytes,
-                term_count: 0,
-                dv_doc_count: 0,
+            .map(|fi| {
+                let term_count = terms_reader
+                    .as_ref()
+                    .and_then(|r| r.field_reader(fi.number()))
+                    .map_or(0, |fr| fr.num_terms);
+
+                FieldSummary {
+                    name: fi.name().to_string(),
+                    number: fi.number(),
+                    index_options: index_options_str(fi.index_options()).to_string(),
+                    has_norms: fi.has_norms(),
+                    store_term_vector: fi.store_term_vector(),
+                    has_payloads: fi.has_payloads(),
+                    doc_values_type: doc_values_type_str(fi.doc_values_type()).to_string(),
+                    point_dimension_count: fi.point_config().dimension_count,
+                    point_index_dimension_count: fi.point_config().index_dimension_count,
+                    point_num_bytes: fi.point_config().num_bytes,
+                    term_count,
+                    dv_doc_count: 0,
+                }
             })
             .collect();
 
@@ -170,6 +187,15 @@ fn doc_values_type_str(dvt: DocValuesType) -> &'static str {
         DocValuesType::SortedNumeric => "SORTED_NUMERIC",
         DocValuesType::SortedSet => "SORTED_SET",
     }
+}
+
+/// Derives the per-field postings segment suffix (e.g., "Lucene103_0") from field attributes.
+fn postings_suffix(field_infos: &bearing::index::FieldInfos) -> Option<String> {
+    field_infos.iter().find_map(|fi| {
+        let format = fi.get_attribute("PerFieldPostingsFormat.format")?;
+        let suffix = fi.get_attribute("PerFieldPostingsFormat.suffix")?;
+        Some(format!("{format}_{suffix}"))
+    })
 }
 
 fn parse_args() -> String {
