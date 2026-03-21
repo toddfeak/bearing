@@ -10,11 +10,8 @@ use crate::index::SegmentInfo;
 use crate::index::index_file_names;
 use crate::store::SharedDirectory;
 
-#[cfg(test)]
 use crate::store::checksum_input::ChecksumIndexInput;
-#[cfg(test)]
 use crate::store::{DataInput, Directory};
-#[cfg(test)]
 use std::collections::HashSet;
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
@@ -104,7 +101,6 @@ pub fn write(
 /// Reads a `.si` (segment info) file from `directory`.
 ///
 /// Validates the codec header, reads segment metadata, and verifies the footer checksum.
-#[cfg(test)]
 pub fn read(
     directory: &dyn Directory,
     segment_name: &str,
