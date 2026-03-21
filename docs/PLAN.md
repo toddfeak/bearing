@@ -36,17 +36,20 @@ The write path is functional for the target field types but not feature complete
 
 ## Phase 1 — Read Path Foundation
 
-### 1. IndexInput & DataInput
-Random-access file reading with seek, position tracking, and primitive decoding (readVInt, readLong, etc.). Mirror of the existing DataOutput/IndexOutput write traits. Everything else depends on this.
+### 1. IndexInput & DataInput (done)
+`DataInput` trait with default implementations delegating to encoding functions via `DataInputReader` adapter. `IndexInput` trait with seek/slice. `ByteSliceIndexInput` (in-memory), `FSIndexInput` (file-backed with slice support), `ChecksumIndexInput` (CRC32-wrapping). `Directory::open_input` on both `FSDirectory` and `MemoryDirectory`. Encoding read functions for varint, zigzag, string, group-varint.
 
-**Testable:** Write bytes with existing DataOutput, read them back with DataInput. Round-trip tests for every primitive type.
+### 2. Codec Readers (in progress)
+Format-specific readers for each codec version. Each reader has its own read-side in-memory data structures optimized for seeking and iteration — they do NOT share internal structures with the writers. What they share is the file format and encoding utilities.
 
-### 2. Codec Readers
-Format-specific readers for each codec version. Each reader has its own read-side in-memory data structures optimized for seeking and iteration — they do NOT share internal structures with the writers. What they share is the file format and encoding utilities (VInt, PFor, LZ4, etc.).
+**Done:**
+- Segment info reader (lucene99) — reads `.si` files
+- Field infos reader (lucene94) — reads `.fnm` files
+- Segments_N reader — reads `segments_N` commit point, returns raw segment entries (name, id, codec name). Does NOT call codec readers — the caller dispatches to the right format readers based on the codec name. This creates the seam for future codec versioning.
+- Compound file reader (lucene90) — `CompoundDirectory` implements `Directory` (read-only) by parsing `.cfe` entry table and slicing `.cfs` data file. Codec readers use it transparently via `dir.open_input()`.
+- `codec_util` read functions — `check_header`, `check_footer` (production); `check_index_header`, `checksum_entire_file` (test-only until codec readers call them)
 
-Readers to build (order flexible, each is independently testable):
-- Segment info reader (lucene99)
-- Field infos reader (lucene94)
+**Remaining:**
 - Stored fields reader (lucene90)
 - Norms reader (lucene90)
 - Doc values reader (lucene90)
@@ -55,8 +58,6 @@ Readers to build (order flexible, each is independently testable):
 - Term vectors reader (lucene90)
 
 FOR/PFOR decode functions go in `codecs::lucene103::for_util` alongside the existing encode functions — format-version-specific, not a general encoding utility.
-
-**Testable:** Each reader independently — write a segment with existing writers, read it back with the corresponding reader, verify data matches.
 
 ### 3. Index Reader Hierarchy
 The public-facing reader API:

@@ -18,6 +18,9 @@ pub use checksum::CRC32;
 pub use fs::FSDirectory;
 pub use memory::{MemoryDirectory, MemoryIndexOutput};
 
+// Re-export CompoundDirectory — a read-only Directory for compound files (.cfs/.cfe)
+pub use crate::codecs::lucene90::compound_reader::CompoundDirectory;
+
 use std::collections::HashMap;
 use std::io;
 

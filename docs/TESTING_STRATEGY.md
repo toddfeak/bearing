@@ -28,17 +28,21 @@ Write/read tests for every primitive encoding function (VInt, VLong, ZInt, ZLong
 
 ### 2. Store-level round-trips (done)
 
-Write data via `DataOutput`/`IndexOutput`, read it back via `DataInput`/`IndexInput` through `Directory::open_input`. Covers both `MemoryDirectory` and `FSDirectory`. Integration tests in `tests/integration_store_input.rs` verify that index files written by `IndexWriter` are openable and have valid codec headers.
+Write data via `DataOutput`/`IndexOutput`, read it back via `DataInput`/`IndexInput` through `Directory::open_input`. Covers both `MemoryDirectory` and `FSDirectory`. Integration tests in `tests/integration_store_input.rs` verify that index files written by `IndexWriter` are openable and have valid codec headers. Includes compound file reading via `CompoundDirectory`.
 
-### 3. Codec-level round-trips (future — requires codec readers)
+### 3. Segment metadata round-trips (done)
 
-Write a segment with codec writers, read it back with the corresponding codec reader, verify field-level data matches. Each codec reader can be tested independently as it's built.
+Read `segments_N` to discover segments, then read `.si` and `.fnm` files to verify segment and field metadata. Works with both non-compound and compound indexes. The `segments_N` reader returns raw segment entries — codec dispatch to read `.si`/`.fnm` is the caller's responsibility.
 
-### 4. Index-level round-trips (future — requires IndexReader)
+### 4. Codec-level round-trips (future — requires data codec readers)
+
+Write a segment with codec writers, read it back with the corresponding codec reader, verify field-level data matches. Each codec reader can be tested independently as it's built. Remaining: stored fields, norms, doc values, points, postings, term vectors.
+
+### 5. Index-level round-trips (future — requires IndexReader)
 
 Write with `IndexWriter`, read with `IndexReader`/`DirectoryReader`, verify all field types and values survive the round trip.
 
-### 5. Java → Rust e2e (future — requires codec readers + Java fixtures)
+### 6. Java → Rust e2e (future — requires codec readers + Java fixtures)
 
 Java Lucene writes an index via `IndexAllFields`, Rust reads it and validates field values. Requires codec readers and golden fixture infrastructure.
 
@@ -54,7 +58,7 @@ Requires codec readers. When available, create Java-written golden indexes in `t
 
 ### Bearing writes → Bearing reads (partially unblocked)
 
-Store-level reading works via `Directory::open_input`. Full index-level round-trips require `IndexReader`.
+Store-level reading works via `Directory::open_input` and `CompoundDirectory`. Segment metadata (segments_N, .si, .fnm) can be read back and verified. Full index-level round-trips (field values, terms, postings) require data codec readers and `IndexReader`.
 
 ## Future Work
 

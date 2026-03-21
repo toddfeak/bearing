@@ -38,7 +38,12 @@ impl Directory for FSDirectory {
         let file = File::open(&file_path)?;
         let len = file.metadata()?.len();
         let reader = BufReader::new(file);
-        Ok(Box::new(FSIndexInput::new(name.to_string(), reader, len)))
+        Ok(Box::new(FSIndexInput::new(
+            name.to_string(),
+            reader,
+            len,
+            file_path,
+        )))
     }
 
     fn list_all(&self) -> io::Result<Vec<String>> {
@@ -171,26 +176,40 @@ impl IndexOutput for FSIndexOutput {
 }
 
 /// Filesystem-backed IndexInput wrapping a `BufReader<File>` with seek support.
+///
+/// Supports slicing: `offset` marks the start of this input's view within the
+/// file, and `len` bounds it. Reads and seeks are relative to the slice.
 struct FSIndexInput {
     name: String,
     reader: BufReader<File>,
+    /// Current position within this slice (0-based).
     pos: u64,
+    /// Absolute byte offset of the slice start within the file.
+    offset: u64,
+    /// Length of this slice in bytes.
     len: u64,
+    /// Path to the underlying file (for creating slices).
+    path: PathBuf,
 }
 
 impl FSIndexInput {
-    fn new(name: String, reader: BufReader<File>, len: u64) -> Self {
+    fn new(name: String, reader: BufReader<File>, len: u64, path: PathBuf) -> Self {
         Self {
             name,
             reader,
             pos: 0,
+            offset: 0,
             len,
+            path,
         }
     }
 }
 
 impl DataInput for FSIndexInput {
     fn read_byte(&mut self) -> io::Result<u8> {
+        if self.pos >= self.len {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
+        }
         let mut buf = [0u8; 1];
         self.reader.read_exact(&mut buf)?;
         self.pos += 1;
@@ -198,6 +217,9 @@ impl DataInput for FSIndexInput {
     }
 
     fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        if self.pos + buf.len() as u64 > self.len {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
+        }
         self.reader.read_exact(buf)?;
         self.pos += buf.len() as u64;
         Ok(())
@@ -218,7 +240,13 @@ impl IndexInput for FSIndexInput {
     }
 
     fn seek(&mut self, pos: u64) -> io::Result<()> {
-        self.reader.seek(io::SeekFrom::Start(pos))?;
+        if pos > self.len {
+            return Err(io::Error::other(format!(
+                "seek past end: {pos} > {}",
+                self.len
+            )));
+        }
+        self.reader.seek(io::SeekFrom::Start(self.offset + pos))?;
         self.pos = pos;
         Ok(())
     }
@@ -229,11 +257,29 @@ impl IndexInput for FSIndexInput {
 
     fn slice(
         &self,
-        _description: &str,
-        _offset: u64,
-        _length: u64,
+        description: &str,
+        offset: u64,
+        length: u64,
     ) -> io::Result<Box<dyn IndexInput>> {
-        todo!("FSIndexInput::slice not yet implemented")
+        if offset + length > self.len {
+            return Err(io::Error::other(format!(
+                "slice [{offset}..{}] out of bounds (length {})",
+                offset + length,
+                self.len
+            )));
+        }
+        let abs_offset = self.offset + offset;
+        let file = File::open(&self.path)?;
+        let mut reader = BufReader::new(file);
+        reader.seek(io::SeekFrom::Start(abs_offset))?;
+        Ok(Box::new(FSIndexInput {
+            name: description.to_string(),
+            reader,
+            pos: 0,
+            offset: abs_offset,
+            len: length,
+            path: self.path.clone(),
+        }))
     }
 }
 
@@ -448,6 +494,79 @@ mod tests {
         assert_eq!(input.read_le_int().unwrap(), 0x04030201);
         assert_eq!(input.read_string().unwrap(), "hello");
         assert_eq!(input.read_be_long().unwrap(), 0x0807060504030201);
+    }
+
+    #[test]
+    fn test_fs_index_input_slice() {
+        let dir_path = temp_dir("slice");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
+            .unwrap();
+
+        let input = dir.open_input("test.bin").unwrap();
+        let mut sliced = input.slice("slice", 2, 4).unwrap();
+
+        assert_eq!(sliced.length(), 4);
+        assert_eq!(sliced.file_pointer(), 0);
+        assert_eq!(sliced.read_byte().unwrap(), 30);
+        assert_eq!(sliced.read_byte().unwrap(), 40);
+        assert_eq!(sliced.read_byte().unwrap(), 50);
+        assert_eq!(sliced.read_byte().unwrap(), 60);
+        assert!(sliced.read_byte().is_err());
+    }
+
+    #[test]
+    fn test_fs_index_input_slice_seek() {
+        let dir_path = temp_dir("slice_seek");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("test.bin", &[10, 20, 30, 40, 50]).unwrap();
+
+        let input = dir.open_input("test.bin").unwrap();
+        let mut sliced = input.slice("slice", 1, 3).unwrap();
+
+        sliced.seek(2).unwrap();
+        assert_eq!(sliced.read_byte().unwrap(), 40);
+
+        sliced.seek(0).unwrap();
+        assert_eq!(sliced.read_byte().unwrap(), 20);
+
+        assert!(sliced.seek(4).is_err());
+    }
+
+    #[test]
+    fn test_fs_index_input_slice_of_slice() {
+        let dir_path = temp_dir("slice_of_slice");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
+            .unwrap();
+
+        let input = dir.open_input("test.bin").unwrap();
+        let outer = input.slice("outer", 1, 6).unwrap(); // bytes 20..70
+        let mut inner = outer.slice("inner", 2, 3).unwrap(); // bytes 40..60
+
+        assert_eq!(inner.length(), 3);
+        assert_eq!(inner.read_byte().unwrap(), 40);
+        assert_eq!(inner.read_byte().unwrap(), 50);
+        assert_eq!(inner.read_byte().unwrap(), 60);
+        assert!(inner.read_byte().is_err());
+    }
+
+    #[test]
+    fn test_fs_index_input_slice_out_of_bounds() {
+        let dir_path = temp_dir("slice_oob");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("test.bin", &[1, 2, 3]).unwrap();
+
+        let input = dir.open_input("test.bin").unwrap();
+        assert!(input.slice("bad", 2, 5).is_err());
     }
 
     /// RAII helper to clean up temp directories after tests.

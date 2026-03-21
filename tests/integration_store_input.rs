@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
-use bearing::store::{DataInput, DataOutput, Directory, FSDirectory, IndexInput, MemoryDirectory};
+use bearing::store::{
+    CompoundDirectory, DataInput, DataOutput, Directory, FSDirectory, IndexInput, MemoryDirectory,
+};
 
 #[test]
 fn test_memory_directory_write_then_read() {
@@ -240,6 +242,143 @@ fn test_read_segments_fs_directory() {
 
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
+}
+
+// --- Compound file tests ---
+
+#[test]
+fn test_read_segments_compound_mode() {
+    use bearing::document::{Document, keyword_field, text_field};
+    use bearing::index::{IndexWriter, segment_infos};
+
+    // Default config uses compound files
+    let writer = IndexWriter::new();
+
+    let mut doc = Document::new();
+    doc.add(text_field("body", "compound file test"));
+    doc.add(keyword_field("tag", "test"));
+    writer.add_document(doc).unwrap();
+
+    let result = writer.commit().unwrap();
+    let mut dir = MemoryDirectory::new();
+    result.write_to_directory(&mut dir).unwrap();
+
+    // segments_N should be readable even in compound mode
+    let files = dir.list_all().unwrap();
+    let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+    let infos = segment_infos::read(&dir, segments_file).unwrap();
+
+    assert_eq!(infos.segments.len(), 1);
+    assert_eq!(infos.segments[0].name, "_0");
+
+    // Should have .cfs and .cfe files
+    assert!(files.iter().any(|f| f.ends_with(".cfs")));
+    assert!(files.iter().any(|f| f.ends_with(".cfe")));
+}
+
+#[test]
+fn test_compound_directory_list_files() {
+    use bearing::document::{Document, keyword_field, text_field};
+    use bearing::index::{IndexWriter, segment_infos};
+
+    let writer = IndexWriter::new();
+
+    let mut doc = Document::new();
+    doc.add(text_field("body", "compound listing test"));
+    doc.add(keyword_field("tag", "test"));
+    writer.add_document(doc).unwrap();
+
+    let result = writer.commit().unwrap();
+    let mut dir = MemoryDirectory::new();
+    result.write_to_directory(&mut dir).unwrap();
+
+    // Read segments to get segment ID
+    let files = dir.list_all().unwrap();
+    let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+    let infos = segment_infos::read(&dir, segments_file).unwrap();
+    let seg = &infos.segments[0];
+
+    // Open compound directory
+    let compound_dir = CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap();
+    let compound_files = compound_dir.list_all().unwrap();
+
+    // Should contain segment files like .fnm, .fdt, .fdm, etc.
+    assert!(!compound_files.is_empty());
+    assert!(
+        compound_files.iter().any(|f| f.ends_with(".fnm")),
+        "expected .fnm in compound files: {compound_files:?}"
+    );
+}
+
+#[test]
+fn test_compound_directory_read_embedded_file() {
+    use bearing::document::{Document, keyword_field, text_field};
+    use bearing::index::{IndexWriter, segment_infos};
+
+    let writer = IndexWriter::new();
+
+    let mut doc = Document::new();
+    doc.add(text_field("body", "embedded file test"));
+    doc.add(keyword_field("tag", "test"));
+    writer.add_document(doc).unwrap();
+
+    let result = writer.commit().unwrap();
+    let mut dir = MemoryDirectory::new();
+    result.write_to_directory(&mut dir).unwrap();
+
+    let files = dir.list_all().unwrap();
+    let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+    let infos = segment_infos::read(&dir, segments_file).unwrap();
+    let seg = &infos.segments[0];
+
+    let compound_dir = CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap();
+
+    // Read a .fnm file from compound — should start with codec magic
+    let mut input = compound_dir.open_input(".fnm").unwrap();
+    let magic = input.read_be_int().unwrap();
+    assert_eq!(
+        magic, 0x3FD76C17_u32 as i32,
+        ".fnm in compound should start with CODEC_MAGIC"
+    );
+
+    // Read codec name after magic
+    let codec_name = input.read_string().unwrap();
+    assert_eq!(codec_name, "Lucene94FieldInfos");
+}
+
+#[test]
+fn test_compound_directory_fs() {
+    use bearing::document::{Document, keyword_field, text_field};
+    use bearing::index::{IndexWriter, segment_infos};
+
+    let dir_path = temp_dir("compound_fs");
+    let _cleanup = DirCleanup(&dir_path);
+
+    let writer = IndexWriter::new();
+
+    let mut doc = Document::new();
+    doc.add(text_field("body", "fs compound test"));
+    doc.add(keyword_field("tag", "test"));
+    writer.add_document(doc).unwrap();
+
+    let result = writer.commit().unwrap();
+    let mut fs_dir = FSDirectory::open(&dir_path).unwrap();
+    result.write_to_directory(&mut fs_dir).unwrap();
+
+    let files = fs_dir.list_all().unwrap();
+    let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+    let infos = segment_infos::read(&fs_dir, segments_file).unwrap();
+    let seg = &infos.segments[0];
+
+    // Open compound from FSDirectory — exercises FSIndexInput::slice()
+    let compound_dir = CompoundDirectory::open(&fs_dir, &seg.name, &seg.id).unwrap();
+    let compound_files = compound_dir.list_all().unwrap();
+    assert!(!compound_files.is_empty());
+
+    // Verify an embedded file is readable
+    let mut input = compound_dir.open_input(".fnm").unwrap();
+    let magic = input.read_be_int().unwrap();
+    assert_eq!(magic, 0x3FD76C17_u32 as i32);
 }
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
