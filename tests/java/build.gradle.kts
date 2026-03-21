@@ -44,3 +44,10 @@ tasks.register<JavaExec>("indexAllFields") {
         (if (threads != null) listOf("--threads", threads) else emptyList()) +
         (if (compound != null) listOf("--compound") else emptyList())
 }
+
+tasks.register<JavaExec>("generateIndexSummary") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "GenerateIndexSummary"
+    val indexDir = project.findProperty("indexDir") as? String
+    args = listOfNotNull(indexDir)
+}

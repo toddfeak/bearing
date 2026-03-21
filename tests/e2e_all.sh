@@ -127,6 +127,14 @@ else
     fail "VerifyImpacts failed" "VerifyImpacts"
 fi
 
+# --- 6. Golden Summary ---
+run_test "Golden index summary"
+if "$SCRIPT_DIR/e2e_golden.sh" 2>&1; then
+    pass
+else
+    fail "Golden summary mismatch" "GoldenSummary"
+fi
+
 # --- Summary ---
 echo ""
 echo "========================================"
