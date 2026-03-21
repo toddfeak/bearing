@@ -5,6 +5,7 @@
 use mem_dbg::MemSize;
 
 pub(crate) mod bit_util;
+pub mod byte_block_pool;
 pub(crate) mod compress;
 pub(crate) mod numeric_utils;
 pub(crate) mod packed;
