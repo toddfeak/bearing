@@ -717,7 +717,7 @@ mod tests {
         let dir = make_directory();
         let docs: Vec<TermVectorDoc> = vec![];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 0).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
         assert!(files[0].ends_with(".tvd"));
         assert!(files[1].ends_with(".tvx"));
         assert!(files[2].ends_with(".tvm"));
@@ -728,7 +728,7 @@ mod tests {
         let dir = make_directory();
         let docs = vec![TermVectorDoc { fields: vec![] }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
     }
 
     #[test]
@@ -749,7 +749,7 @@ mod tests {
             }],
         }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
 
         // Verify the .tvd file has valid content (header + chunk + footer)
         let dir_guard = dir.lock().unwrap();
@@ -784,7 +784,7 @@ mod tests {
             }],
         }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
     }
 
     #[test]
@@ -808,7 +808,7 @@ mod tests {
             }],
         }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
     }
 
     /// Verifies charsPerTerm is written as LE int (matching Lucene's
@@ -839,7 +839,7 @@ mod tests {
             }],
         }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
 
         // Read the .tvd bytes and verify charsPerTerm byte order
         let dir_guard = dir.lock().unwrap();
@@ -894,7 +894,7 @@ mod tests {
             },
         ];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 2).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
     }
 
     #[test]
@@ -930,7 +930,7 @@ mod tests {
             }],
         }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
     }
 
     #[test]
@@ -999,7 +999,7 @@ mod tests {
             }],
         }];
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
     }
 
     /// Writes term vectors with positions and offsets matching the
@@ -1032,7 +1032,7 @@ mod tests {
         }];
 
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
 
         let dir_guard = dir.lock().unwrap();
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
@@ -1064,7 +1064,7 @@ mod tests {
             .collect();
 
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, num_docs as i32).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
 
         // Read .tvm to verify num_chunks > 1
         let dir_guard = dir.lock().unwrap();
@@ -1111,7 +1111,7 @@ mod tests {
             .collect();
 
         let files = write(&dir, "_0", "", &make_segment_id(), &docs, num_docs as i32).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_len_eq_x!(&files, 3);
 
         // With ~500 bytes per doc, chunk flushes after ~8 docs (>= 4096 bytes).
         // Should produce at least 2 chunks.

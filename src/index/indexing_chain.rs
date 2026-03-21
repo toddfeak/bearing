@@ -1300,7 +1300,7 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         assert_eq!(chain.num_docs(), 1);
-        assert_eq!(chain.stored_docs().len(), 1);
+        assert_len_eq_x!(&chain.stored_docs(), 1);
 
         // Finalize pending postings before decoding
         chain.finalize_pending_postings();
@@ -1319,7 +1319,7 @@ mod tests {
         assert_some!(contents_data.term_id("world"));
 
         // Check norms exist for "contents" (has norms)
-        assert_eq!(contents_data.norms.len(), 1);
+        assert_len_eq_x!(&contents_data.norms, 1);
         assert_eq!(contents_data.norms_docs[0], 0);
 
         // Check no norms for "path" (omit_norms=true)
@@ -1327,11 +1327,11 @@ mod tests {
 
         // Check "modified" points
         let modified_data = chain.per_field().get("modified").unwrap();
-        assert_eq!(modified_data.points.len(), 1);
+        assert_len_eq_x!(&modified_data.points, 1);
         assert_eq!(modified_data.points[0].0, 0);
 
         // Check stored fields
-        assert_eq!(chain.stored_docs()[0].fields.len(), 1);
+        assert_len_eq_x!(&chain.stored_docs()[0].fields, 1);
     }
 
     #[test]
@@ -1403,7 +1403,7 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let fis = chain.build_field_infos();
-        assert_eq!(fis.len(), 3);
+        assert_len_eq_x!(&fis, 3);
         assert!(fis.has_postings());
         assert!(fis.has_doc_values());
         assert!(fis.has_point_values());
@@ -1421,7 +1421,7 @@ mod tests {
 
         let modified = chain.per_field().get("modified").unwrap();
         if let DocValuesAccumulator::SortedNumeric(ref vals) = modified.doc_values {
-            assert_eq!(vals.len(), 1);
+            assert_len_eq_x!(&vals, 1);
             assert_eq!(vals[0], (0, vec![42]));
         } else {
             panic!("expected SortedNumeric");
@@ -1439,7 +1439,7 @@ mod tests {
 
         let path_data = chain.per_field().get("path").unwrap();
         if let DocValuesAccumulator::SortedSet(ref vals) = path_data.doc_values {
-            assert_eq!(vals.len(), 1);
+            assert_len_eq_x!(&vals, 1);
             assert_eq!(vals[0].0, 0);
             assert_eq!(vals[0].1[0], BytesRef::from_utf8("/foo.txt"));
         } else {
@@ -1458,7 +1458,7 @@ mod tests {
 
         let count_data = chain.per_field().get("count").unwrap();
         if let DocValuesAccumulator::Numeric(ref vals) = count_data.doc_values {
-            assert_eq!(vals.len(), 1);
+            assert_len_eq_x!(&vals, 1);
             assert_eq!(vals[0], (0, 99));
         } else {
             panic!("expected Numeric");
@@ -1476,7 +1476,7 @@ mod tests {
 
         let payload_data = chain.per_field().get("payload").unwrap();
         if let DocValuesAccumulator::Binary(ref vals) = payload_data.doc_values {
-            assert_eq!(vals.len(), 1);
+            assert_len_eq_x!(&vals, 1);
             assert_eq!(vals[0], (0, vec![1, 2, 3]));
         } else {
             panic!("expected Binary");
@@ -1494,7 +1494,7 @@ mod tests {
 
         let cat_data = chain.per_field().get("category").unwrap();
         if let DocValuesAccumulator::Sorted(ref vals) = cat_data.doc_values {
-            assert_eq!(vals.len(), 1);
+            assert_len_eq_x!(&vals, 1);
             assert_eq!(vals[0].0, 0);
             assert_eq!(vals[0].1, BytesRef::new(b"animals".to_vec()));
         } else {
@@ -1515,7 +1515,7 @@ mod tests {
 
         let count_data = chain.per_field().get("count").unwrap();
         if let DocValuesAccumulator::Numeric(ref vals) = count_data.doc_values {
-            assert_eq!(vals.len(), 3);
+            assert_len_eq_x!(&vals, 3);
             assert_eq!(vals[0], (0, 0));
             assert_eq!(vals[1], (1, 10));
             assert_eq!(vals[2], (2, 20));
@@ -1576,7 +1576,7 @@ mod tests {
 
         let data = chain.per_field().get("payload").unwrap();
         if let DocValuesAccumulator::Binary(ref vals) = data.doc_values {
-            assert_eq!(vals.len(), 2);
+            assert_len_eq_x!(&vals, 2);
             assert_eq!(vals[1], (1, vec![2]));
         } else {
             panic!("expected Binary");
@@ -1598,7 +1598,7 @@ mod tests {
 
         let data = chain.per_field().get("cat").unwrap();
         if let DocValuesAccumulator::Sorted(ref vals) = data.doc_values {
-            assert_eq!(vals.len(), 2);
+            assert_len_eq_x!(&vals, 2);
         } else {
             panic!("expected Sorted");
         }
@@ -1619,7 +1619,7 @@ mod tests {
 
         let data = chain.per_field().get("tag").unwrap();
         if let DocValuesAccumulator::SortedSet(ref vals) = data.doc_values {
-            assert_eq!(vals.len(), 2);
+            assert_len_eq_x!(&vals, 2);
         } else {
             panic!("expected SortedSet");
         }
@@ -1640,7 +1640,7 @@ mod tests {
 
         let data = chain.per_field().get("ts").unwrap();
         if let DocValuesAccumulator::SortedNumeric(ref vals) = data.doc_values {
-            assert_eq!(vals.len(), 2);
+            assert_len_eq_x!(&vals, 2);
         } else {
             panic!("expected SortedNumeric");
         }
@@ -1697,7 +1697,7 @@ mod tests {
         IndexingChain::process_doc_values(&mut per_field, &meta, &field2, 1);
 
         if let DocValuesAccumulator::Sorted(ref vals) = per_field.doc_values {
-            assert_eq!(vals.len(), 2);
+            assert_len_eq_x!(&vals, 2);
             assert_eq!(vals[0].1, BytesRef::from_utf8("animals"));
             assert_eq!(vals[1].1, BytesRef::from_utf8("plants"));
         } else {
@@ -1843,17 +1843,17 @@ mod tests {
 
         let size_data = chain.per_field().get("size").unwrap();
         // Points: 4-byte sortable encoding
-        assert_eq!(size_data.points.len(), 1);
-        assert_eq!(size_data.points[0].1.len(), 4);
+        assert_len_eq_x!(&size_data.points, 1);
+        assert_len_eq_x!(&size_data.points[0].1, 4);
         // Doc values via numeric_value()
         if let DocValuesAccumulator::SortedNumeric(ref vals) = size_data.doc_values {
-            assert_eq!(vals.len(), 1);
+            assert_len_eq_x!(&vals, 1);
             assert_eq!(vals[0].1, vec![42]);
         } else {
             panic!("expected SortedNumeric for IntField");
         }
         // Stored
-        assert_eq!(chain.stored_docs()[0].fields.len(), 1);
+        assert_len_eq_x!(&chain.stored_docs()[0].fields, 1);
     }
 
     #[test]
@@ -1866,10 +1866,10 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let score_data = chain.per_field().get("score").unwrap();
-        assert_eq!(score_data.points.len(), 1);
-        assert_eq!(score_data.points[0].1.len(), 4);
+        assert_len_eq_x!(&score_data.points, 1);
+        assert_len_eq_x!(&score_data.points[0].1, 4);
         if let DocValuesAccumulator::SortedNumeric(ref vals) = score_data.doc_values {
-            assert_eq!(vals.len(), 1);
+            assert_len_eq_x!(&vals, 1);
             let expected = crate::encoding::sortable_bytes::float_to_int(1.5) as i64;
             assert_eq!(vals[0].1, vec![expected]);
         } else {
@@ -1887,17 +1887,17 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let rating_data = chain.per_field().get("rating").unwrap();
-        assert_eq!(rating_data.points.len(), 1);
-        assert_eq!(rating_data.points[0].1.len(), 8);
+        assert_len_eq_x!(&rating_data.points, 1);
+        assert_len_eq_x!(&rating_data.points[0].1, 8);
         if let DocValuesAccumulator::SortedNumeric(ref vals) = rating_data.doc_values {
-            assert_eq!(vals.len(), 1);
+            assert_len_eq_x!(&vals, 1);
             let expected = crate::encoding::sortable_bytes::double_to_long(9.87);
             assert_eq!(vals[0].1, vec![expected]);
         } else {
             panic!("expected SortedNumeric for DoubleField");
         }
         // Not stored
-        assert_eq!(chain.stored_docs()[0].fields.len(), 0);
+        assert_is_empty!(chain.stored_docs()[0].fields);
     }
 
     #[test]
@@ -1917,7 +1917,7 @@ mod tests {
         // No doc values
         assert_matches!(title_data.doc_values, DocValuesAccumulator::None);
         // Stored
-        assert_eq!(chain.stored_docs()[0].fields.len(), 1);
+        assert_len_eq_x!(&chain.stored_docs()[0].fields, 1);
     }
 
     #[test]
@@ -1933,7 +1933,7 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         // All should be stored, nothing indexed
-        assert_eq!(chain.stored_docs()[0].fields.len(), 4);
+        assert_len_eq_x!(&chain.stored_docs()[0].fields, 4);
         for field_name in &["notes", "extra_int", "extra_float", "extra_double"] {
             let data = chain.per_field().get(*field_name).unwrap();
             assert!(!data.has_postings());
@@ -2085,15 +2085,15 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let tv_docs = chain.term_vector_docs();
-        assert_eq!(tv_docs.len(), 1);
+        assert_len_eq_x!(&tv_docs, 1);
         let tv_doc = &tv_docs[0];
-        assert_eq!(tv_doc.fields.len(), 1);
+        assert_len_eq_x!(&tv_doc.fields, 1);
 
         let tv_field = &tv_doc.fields[0];
         assert!(tv_field.has_positions);
         assert!(tv_field.has_offsets);
         assert!(!tv_field.has_payloads);
-        assert_eq!(tv_field.terms.len(), 2);
+        assert_len_eq_x!(&tv_field.terms, 2);
 
         let hello = &tv_field.terms[0];
         assert_eq!(hello.term, "hello");
@@ -2160,7 +2160,7 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let tv_docs = chain.term_vector_docs();
-        assert_eq!(tv_docs.len(), 1);
+        assert_len_eq_x!(&tv_docs, 1);
         assert_is_empty!(tv_docs[0].fields);
     }
 
@@ -2185,10 +2185,10 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let tv_docs = chain.term_vector_docs();
-        assert_eq!(tv_docs.len(), 3);
-        assert_eq!(tv_docs[0].fields.len(), 1);
+        assert_len_eq_x!(&tv_docs, 3);
+        assert_len_eq_x!(&tv_docs[0].fields, 1);
         assert_is_empty!(tv_docs[1].fields);
-        assert_eq!(tv_docs[2].fields.len(), 1);
+        assert_len_eq_x!(&tv_docs[2].fields, 1);
     }
 
     #[test]
@@ -2201,7 +2201,7 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let tv_docs = chain.term_vector_docs();
-        assert_eq!(tv_docs.len(), 1);
+        assert_len_eq_x!(&tv_docs, 1);
         assert_is_empty!(tv_docs[0].fields);
     }
 
@@ -2262,7 +2262,7 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let tv_field = &chain.term_vector_docs()[0].fields[0];
-        assert_eq!(tv_field.terms.len(), 1);
+        assert_len_eq_x!(&tv_field.terms, 1);
 
         let term = &tv_field.terms[0];
         assert_eq!(term.term, "/foo/bar.txt");
@@ -2284,7 +2284,7 @@ mod tests {
         chain.process_document(doc, &analyzer).unwrap();
 
         let tv_doc = &chain.term_vector_docs()[0];
-        assert_eq!(tv_doc.fields.len(), 1);
+        assert_len_eq_x!(&tv_doc.fields, 1);
         // Only "body" has TV — verify by field number
         let body_fi = chain.build_field_infos();
         let body_number = body_fi.field_info_by_name("body").unwrap().number();

@@ -809,7 +809,7 @@ mod tests {
         let pos_bytes = &pos_data[pos_header_size..pos_data.len() - footer_size];
         // 4 positions with deltas: [0, 5, 10] -> deltas [0, 5, 5], [3] -> delta [3]
         // VInt encoding: 0, 5, 5, 3 = 4 bytes (all single-byte VInts)
-        assert_eq!(pos_bytes.len(), 4);
+        assert_len_eq_x!(&pos_bytes, 4);
         assert_eq!(pos_bytes[0], 0); // pos delta 0
         assert_eq!(pos_bytes[1], 5); // pos delta 5
         assert_eq!(pos_bytes[2], 5); // pos delta 5
@@ -1131,7 +1131,7 @@ mod tests {
         let names = pw.finish().unwrap();
 
         // Should produce .doc, .pos, .psm files
-        assert_eq!(names.len(), 3);
+        assert_len_eq_x!(&names, 3);
         assert_ends_with!(names[0], ".doc");
         assert_ends_with!(names[1], ".pos");
         assert_ends_with!(names[2], ".psm");
@@ -1155,11 +1155,11 @@ mod tests {
         // Value <= 0x7FFF fits in 2 bytes (a short)
         let mut buf = Vec::new();
         write_vint15(&mut VecOutput(&mut buf), 0).unwrap();
-        assert_eq!(buf.len(), 2); // always 2 bytes (a short)
+        assert_len_eq_x!(&buf, 2); // always 2 bytes (a short)
 
         let mut buf = Vec::new();
         write_vint15(&mut VecOutput(&mut buf), 0x7FFF).unwrap();
-        assert_eq!(buf.len(), 2);
+        assert_len_eq_x!(&buf, 2);
     }
 
     #[test]

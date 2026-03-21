@@ -1023,7 +1023,7 @@ mod tests {
             0x0B, 0x01, 0xB8, // run: byte=0x0B, len=1, suffix=0xB8
         ];
 
-        assert_eq!(bytes.len(), 20);
+        assert_len_eq_x!(&bytes, 20);
         assert_eq!(bytes, expected.as_slice());
     }
 
@@ -1079,7 +1079,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(names.len(), 3);
+        assert_len_eq_x!(&names, 3);
         let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
 
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1254,7 +1254,7 @@ mod tests {
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
         let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
-        assert_eq!(names.len(), 3);
+        assert_len_eq_x!(&names, 3);
 
         // Verify the .kdd leaf block contains correctly sorted data
         let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
@@ -1351,7 +1351,7 @@ mod tests {
         let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 1).unwrap();
 
         // Should succeed and produce 3 files
-        assert_eq!(names.len(), 3);
+        assert_len_eq_x!(&names, 3);
 
         // In the .kdm, the first field number should be 1 (modified), not 0 (contents)
         let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
@@ -1697,6 +1697,6 @@ mod tests {
         let dir = make_test_directory();
         let segment_id = [0u8; 16];
         let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
-        assert_eq!(names.len(), 3);
+        assert_len_eq_x!(&names, 3);
     }
 }

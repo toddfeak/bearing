@@ -647,7 +647,7 @@ mod tests {
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         // segments_1 + _0.si + _0.cfs + _0.cfe = 4
-        assert_eq!(names.len(), 4);
+        assert_len_eq_x!(&names, 4);
         assert_eq!(names[0], "segments_1");
         assert_contains!(names, &"_0.si");
         assert_contains!(names, &"_0.cfs");
@@ -698,7 +698,7 @@ mod tests {
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
         // segments_1 + _0.si + _0.cfs + _0.cfe = 4
-        assert_eq!(files.len(), 4);
+        assert_len_eq_x!(&files, 4);
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names[0], "segments_1");
@@ -777,7 +777,7 @@ mod tests {
         let files = writer.commit().unwrap().into_segment_files().unwrap();
 
         // segments_1 + 3 segments x (si + cfs + cfe) = 10
-        assert_eq!(files.len(), 10);
+        assert_len_eq_x!(&files, 10);
         assert_eq!(files[0].name, "segments_1");
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
@@ -812,7 +812,7 @@ mod tests {
         let files = writer.commit().unwrap().into_segment_files().unwrap();
 
         // segments_1 + _0.si + _0.cfs + _0.cfe = 4
-        assert_eq!(files.len(), 4);
+        assert_len_eq_x!(&files, 4);
         assert_eq!(files[0].name, "segments_1");
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert_contains!(names, &"_0.si");
@@ -890,7 +890,7 @@ mod tests {
         let writer = IndexWriter::new();
         let files = writer.commit().unwrap().into_segment_files().unwrap();
 
-        assert_eq!(files.len(), 1);
+        assert_len_eq_x!(&files, 1);
         assert_eq!(files[0].name, "segments_1");
     }
 
@@ -1091,7 +1091,7 @@ mod tests {
         let written = commit.write_to_directory(&mut dir).unwrap();
 
         // segments_1 + _0.si + _0.cfs + _0.cfe = 4
-        assert_eq!(written.len(), 4);
+        assert_len_eq_x!(&written, 4);
         assert_eq!(written[0], "segments_1");
         assert_contains!(written, &"_0.si".to_string());
         assert_contains!(written, &"_0.cfs".to_string());
@@ -1099,7 +1099,7 @@ mod tests {
 
         // All files should exist in the directory
         let files = dir.list_all().unwrap();
-        assert_eq!(files.len(), 4);
+        assert_len_eq_x!(&files, 4);
         for name in &written {
             assert!(
                 dir.file_length(name).unwrap() > 0,
@@ -1130,11 +1130,11 @@ mod tests {
         let written = commit.write_to_directory(&mut dir).unwrap();
 
         // segments_1 + 3 segments x (si + cfs + cfe) = 10
-        assert_eq!(written.len(), 10);
+        assert_len_eq_x!(&written, 10);
         assert_eq!(written[0], "segments_1");
 
         let files = dir.list_all().unwrap();
-        assert_eq!(files.len(), 10);
+        assert_len_eq_x!(&files, 10);
 
         // Verify all segment files are present
         let si_count = written.iter().filter(|n| n.ends_with(".si")).count();
@@ -1229,7 +1229,7 @@ mod tests {
 
         let result = writer.commit().unwrap();
         // segments_1 + _0.si + _0.cfs + _0.cfe = 4
-        assert_eq!(result.file_names().len(), 4);
+        assert_len_eq_x!(&result.file_names(), 4);
     }
 
     #[test]
@@ -1249,6 +1249,6 @@ mod tests {
 
         let result = writer.commit().unwrap();
         // segments_1 + 3 segments x (si + cfs + cfe) = 10
-        assert_eq!(result.file_names().len(), 10);
+        assert_len_eq_x!(&result.file_names(), 10);
     }
 }

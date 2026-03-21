@@ -140,7 +140,7 @@ mod tests {
         let bytes = out.bytes();
 
         assert_eq!(len, 15);
-        assert_eq!(bytes.len(), 15);
+        assert_len_eq_x!(&bytes, 15);
 
         // Magic (BE): 0x3fd76c17
         assert_eq!(bytes[0], 0x3f);
@@ -168,7 +168,7 @@ mod tests {
 
         // header(15) + 16(id) + 1(suffix len) + 3(suffix) = 35
         assert_eq!(len, 35);
-        assert_eq!(bytes.len(), 35);
+        assert_len_eq_x!(&bytes, 35);
 
         // ID starts at byte 15
         assert_eq!(&bytes[15..31], &[1u8; 16]);
@@ -191,7 +191,7 @@ mod tests {
         let bytes = out.bytes();
 
         // Total: 5 (data) + 16 (footer) = 21
-        assert_eq!(bytes.len(), 21);
+        assert_len_eq_x!(&bytes, 21);
 
         // Footer magic (BE): ~0x3fd76c17 = 0xC02893E8
         let footer_start = 5;

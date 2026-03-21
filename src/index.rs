@@ -470,7 +470,7 @@ mod tests {
         );
 
         let fis = FieldInfos::new(vec![fi_path, fi_modified, fi_contents]);
-        assert_eq!(fis.len(), 3);
+        assert_len_eq_x!(&fis, 3);
         assert!(fis.has_postings());
         assert!(fis.has_freq());
         assert!(fis.has_prox());

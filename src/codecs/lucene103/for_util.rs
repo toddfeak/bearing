@@ -359,7 +359,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".to_string());
         let longs = [0i64; BLOCK_SIZE];
         encode(&longs, 0, &mut out).unwrap();
-        assert_eq!(out.bytes().len(), 0);
+        assert_is_empty!(out.bytes());
     }
 
     #[test]
@@ -370,7 +370,7 @@ mod tests {
             *long = (i & 1) as i64;
         }
         encode(&longs, 1, &mut out).unwrap();
-        assert_eq!(out.bytes().len(), 16); // 1 bit * 128 / 8 = 16 bytes
+        assert_len_eq_x!(&out.bytes(), 16); // 1 bit * 128 / 8 = 16 bytes
     }
 
     #[test]
@@ -381,7 +381,7 @@ mod tests {
             *long = i as i64;
         }
         encode(&longs, 8, &mut out).unwrap();
-        assert_eq!(out.bytes().len(), 128); // 8 bits * 128 / 8 = 128 bytes
+        assert_len_eq_x!(&out.bytes(), 128); // 8 bits * 128 / 8 = 128 bytes
     }
 
     #[test]
@@ -439,7 +439,7 @@ mod tests {
         }
         // Deltas are all 1 (except first which is 0), needs 1 bit
         encode_deltas(1, &longs, &mut out).unwrap();
-        assert_eq!(out.bytes().len(), 16); // 1 bit * 128 / 8 = 16 bytes
+        assert_len_eq_x!(&out.bytes(), 16); // 1 bit * 128 / 8 = 16 bytes
     }
 
     #[test]

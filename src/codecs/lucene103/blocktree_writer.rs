@@ -1389,7 +1389,7 @@ mod tests {
         let trie = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("abc"), output);
 
         assert_none!(trie.root.output);
-        assert_eq!(trie.root.children.len(), 1);
+        assert_len_eq_x!(&trie.root.children, 1);
         assert_eq!(trie.root.children[0].label, b'a');
     }
 
@@ -1425,15 +1425,15 @@ mod tests {
         trie1.append(trie2);
 
         // Root should have one child 'a'
-        assert_eq!(trie1.root.children.len(), 1);
+        assert_len_eq_x!(&trie1.root.children, 1);
         let a_node = &trie1.root.children[0];
         assert_eq!(a_node.label, b'a');
         // 'a' should have one child 'b'
-        assert_eq!(a_node.children.len(), 1);
+        assert_len_eq_x!(&a_node.children, 1);
         let b_node = &a_node.children[0];
         assert_eq!(b_node.label, b'b');
         // 'b' should have two children 'c' and 'd'
-        assert_eq!(b_node.children.len(), 2);
+        assert_len_eq_x!(&b_node.children, 2);
         assert_eq!(b_node.children[0].label, b'c');
         assert_eq!(b_node.children[1].label, b'd');
     }

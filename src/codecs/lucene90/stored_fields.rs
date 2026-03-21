@@ -640,7 +640,7 @@ mod tests {
         let segment_id = [0u8; 16];
         let dir = test_directory();
         let names = write(&dir, "_0", "", &segment_id, &stored_docs, 3).unwrap();
-        assert_eq!(names.len(), 3);
+        assert_len_eq_x!(&names, 3);
 
         // Verify filenames
         assert_eq!(names[0], "_0.fdt");
@@ -814,7 +814,7 @@ mod tests {
         let segment_id = [0u8; 16];
         let dir = test_directory();
         let names = write(&dir, "_0", "", &segment_id, &[], 0).unwrap();
-        assert_eq!(names.len(), 3);
+        assert_len_eq_x!(&names, 3);
 
         // Files should have at least headers and footers
         let locked = dir.lock().unwrap();
@@ -905,7 +905,7 @@ mod tests {
         // Positive non-integer: 4 bytes
         let mut buf = Vec::new();
         write_zfloat(&mut VecOutput(&mut buf), 1.5).unwrap();
-        assert_eq!(buf.len(), 4);
+        assert_len_eq_x!(&buf, 4);
     }
 
     #[test]
@@ -913,7 +913,7 @@ mod tests {
         // Negative non-integer: 5 bytes (0xFF marker + 4-byte int)
         let mut buf = Vec::new();
         write_zfloat(&mut VecOutput(&mut buf), -1.5).unwrap();
-        assert_eq!(buf.len(), 5);
+        assert_len_eq_x!(&buf, 5);
         assert_eq!(buf[0], 0xFF);
     }
 
@@ -922,7 +922,7 @@ mod tests {
         // -0.0 is not a small integer; it's negative so 5 bytes
         let mut buf = Vec::new();
         write_zfloat(&mut VecOutput(&mut buf), -0.0).unwrap();
-        assert_eq!(buf.len(), 5);
+        assert_len_eq_x!(&buf, 5);
         assert_eq!(buf[0], 0xFF);
     }
 
@@ -944,7 +944,7 @@ mod tests {
         // 1.5 has exact float representation → 0xFE + 4-byte float bits = 5 bytes
         let mut buf = Vec::new();
         write_zdouble(&mut VecOutput(&mut buf), 1.5).unwrap();
-        assert_eq!(buf.len(), 5);
+        assert_len_eq_x!(&buf, 5);
         assert_eq!(buf[0], 0xFE);
     }
 
@@ -955,7 +955,7 @@ mod tests {
         let mut buf = Vec::new();
         let val = 1.0000000000000002_f64; // differs from f32 roundtrip
         write_zdouble(&mut VecOutput(&mut buf), val).unwrap();
-        assert_eq!(buf.len(), 8);
+        assert_len_eq_x!(&buf, 8);
     }
 
     #[test]
@@ -964,7 +964,7 @@ mod tests {
         let mut buf = Vec::new();
         let val = -1.0000000000000002_f64;
         write_zdouble(&mut VecOutput(&mut buf), val).unwrap();
-        assert_eq!(buf.len(), 9);
+        assert_len_eq_x!(&buf, 9);
         assert_eq!(buf[0], 0xFF);
     }
 
@@ -973,7 +973,7 @@ mod tests {
         // -0.0 is not a small integer, but is float-representable → 0xFE path (5 bytes)
         let mut buf = Vec::new();
         write_zdouble(&mut VecOutput(&mut buf), -0.0).unwrap();
-        assert_eq!(buf.len(), 5);
+        assert_len_eq_x!(&buf, 5);
         assert_eq!(buf[0], 0xFE);
     }
 
@@ -993,7 +993,7 @@ mod tests {
         let segment_id = [0u8; 16];
         let dir = test_directory();
         let names = write(&dir, "_0", "", &segment_id, &stored_docs, 1).unwrap();
-        assert_eq!(names.len(), 3);
+        assert_len_eq_x!(&names, 3);
         // All files should have content
         let locked = dir.lock().unwrap();
         for name in &names {

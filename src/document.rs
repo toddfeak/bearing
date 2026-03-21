@@ -821,14 +821,14 @@ mod tests {
         doc.add(keyword_field("path", "/foo.txt"));
         doc.add(long_field("modified", 100));
         doc.add(text_field("contents", "hello"));
-        assert_eq!(doc.fields.len(), 3);
+        assert_len_eq_x!(&doc.fields, 3);
     }
 
     #[test]
     fn test_point_bytes() {
         let f = long_field("modified", 42);
         let pb = f.point_bytes().unwrap();
-        assert_eq!(pb.len(), 8);
+        assert_len_eq_x!(&pb, 8);
         // 42 with sign-flip: 0x800000000000002A
         assert_eq!(pb, [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A]);
     }
@@ -906,7 +906,7 @@ mod tests {
         assert_eq!(f.numeric_value(), Some(42));
 
         let pb = f.point_bytes().unwrap();
-        assert_eq!(pb.len(), 4);
+        assert_len_eq_x!(&pb, 4);
         assert_eq!(pb, sortable_bytes::from_int(42).to_vec());
 
         if let Some(StoredValue::Int(v)) = f.stored_value() {
@@ -933,7 +933,7 @@ mod tests {
         );
 
         let pb = f.point_bytes().unwrap();
-        assert_eq!(pb.len(), 4);
+        assert_len_eq_x!(&pb, 4);
         assert_eq!(pb, sortable_bytes::from_float(1.5).to_vec());
 
         if let Some(StoredValue::Float(v)) = f.stored_value() {
@@ -960,7 +960,7 @@ mod tests {
         );
 
         let pb = f.point_bytes().unwrap();
-        assert_eq!(pb.len(), 8);
+        assert_len_eq_x!(&pb, 8);
         assert_eq!(pb, sortable_bytes::from_double(9.87).to_vec());
 
         if let Some(StoredValue::Double(v)) = f.stored_value() {

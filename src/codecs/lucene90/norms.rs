@@ -256,7 +256,7 @@ mod tests {
         let dir = test_directory();
         let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
 
-        assert_eq!(names.len(), 2);
+        assert_len_eq_x!(&names, 2);
         assert_eq!(names[0], "_0.nvm");
         assert_eq!(names[1], "_0.nvd");
 

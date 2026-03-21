@@ -151,7 +151,7 @@ mod tests {
 
         let mut buf = Vec::new();
         write_zlong(&mut buf, i64::MIN).unwrap();
-        assert_eq!(buf.len(), 10);
+        assert_len_eq_x!(&buf, 10);
         for &b in &buf[..9] {
             assert_eq!(b, 0xFF);
         }
@@ -159,7 +159,7 @@ mod tests {
 
         let mut buf = Vec::new();
         write_zlong(&mut buf, i64::MAX).unwrap();
-        assert_eq!(buf.len(), 10);
+        assert_len_eq_x!(&buf, 10);
         assert_eq!(buf[0], 0xFE);
         for &b in &buf[1..9] {
             assert_eq!(b, 0xFF);
@@ -184,14 +184,14 @@ mod tests {
     fn test_write_vint_sizes() {
         let mut buf = Vec::new();
         write_vint(&mut buf, 0).unwrap();
-        assert_eq!(buf.len(), 1);
+        assert_len_eq_x!(&buf, 1);
 
         buf.clear();
         write_vint(&mut buf, 127).unwrap();
-        assert_eq!(buf.len(), 1);
+        assert_len_eq_x!(&buf, 1);
 
         buf.clear();
         write_vint(&mut buf, 128).unwrap();
-        assert_eq!(buf.len(), 2);
+        assert_len_eq_x!(&buf, 2);
     }
 }

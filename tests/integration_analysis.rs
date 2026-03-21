@@ -17,7 +17,7 @@ fn standard_analyzer_basic_tokenization() {
     let analyzer = StandardAnalyzer::new();
     let tokens = analyzer.analyze("the quick brown fox");
 
-    assert_eq!(tokens.len(), 4);
+    assert_len_eq_x!(&tokens, 4);
     assert_eq!(tokens[0].text, "the");
     assert_eq!(tokens[1].text, "quick");
     assert_eq!(tokens[2].text, "brown");
@@ -29,7 +29,7 @@ fn standard_analyzer_lowercases() {
     let analyzer = StandardAnalyzer::new();
     let tokens = analyzer.analyze("Hello WORLD FoO");
 
-    assert_eq!(tokens.len(), 3);
+    assert_len_eq_x!(&tokens, 3);
     assert_eq!(tokens[0].text, "hello");
     assert_eq!(tokens[1].text, "world");
     assert_eq!(tokens[2].text, "foo");
@@ -140,7 +140,7 @@ fn unicode_basic_latin_extended() {
     let tokens = analyzer.analyze("café résumé naïve");
 
     // StandardAnalyzer should handle accented characters as part of words
-    assert_eq!(tokens.len(), 3);
+    assert_len_eq_x!(&tokens, 3);
     // Lowercasing is ASCII-only per the known limitations
     assert_eq!(tokens[0].text, "café");
     assert_eq!(tokens[1].text, "résumé");
@@ -169,7 +169,7 @@ fn single_character_tokens() {
     let analyzer = StandardAnalyzer::new();
     let tokens = analyzer.analyze("a b c");
 
-    assert_eq!(tokens.len(), 3);
+    assert_len_eq_x!(&tokens, 3);
     assert_eq!(tokens[0].text, "a");
     assert_eq!(tokens[1].text, "b");
     assert_eq!(tokens[2].text, "c");

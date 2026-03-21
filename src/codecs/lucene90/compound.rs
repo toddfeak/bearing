@@ -146,7 +146,7 @@ mod tests {
         let files = vec![file];
 
         let result = write("_0", &segment_id, &files).unwrap();
-        assert_eq!(result.len(), 2);
+        assert_len_eq_x!(&result, 2);
 
         let cfs = &result[0];
         let cfe = &result[1];

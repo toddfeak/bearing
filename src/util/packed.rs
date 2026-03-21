@@ -559,7 +559,7 @@ mod tests {
         assert_eq!(bytes[1], 0x61);
         assert_eq!(bytes[2], 0x45);
         // Padding: bpv=12 > 8: 16-12=4 bits → 1 byte padding
-        assert_eq!(bytes.len(), 4); // 3 data + 1 padding
+        assert_len_eq_x!(&bytes, 4); // 3 data + 1 padding
         assert_eq!(bytes[3], 0);
     }
 
@@ -600,7 +600,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".to_string());
         let w = DirectWriter::new(0);
         w.finish(&mut out).unwrap();
-        assert_eq!(out.bytes().len(), 0);
+        assert_is_empty!(out.bytes());
     }
 
     #[test]
@@ -617,7 +617,7 @@ mod tests {
         let blocks = writer.finish(&mut meta, &mut data).unwrap();
         assert_eq!(blocks, 1);
         // Meta: 8 (min) + 4 (avgInc) + 8 (offset) + 1 (bpv) = 21 bytes per block
-        assert_eq!(meta.bytes().len(), 21);
+        assert_len_eq_x!(&meta.bytes(), 21);
     }
 
     #[test]
@@ -649,7 +649,7 @@ mod tests {
         let mut data = MemoryIndexOutput::new("data".to_string());
 
         writer.finish(&mut meta, &mut data).unwrap();
-        assert_eq!(data.bytes().len(), 0); // no data for constant values
+        assert_is_empty!(data.bytes()); // no data for constant values
     }
 
     #[test]
@@ -704,7 +704,7 @@ mod tests {
         // Byte 1: 01_00001_0 = 0x42
         let values = [31_i64, 21, 1];
         let result = pack_msb(&values, 3, 5);
-        assert_eq!(result.len(), 2); // ceil(15/8) = 2
+        assert_len_eq_x!(&result, 2); // ceil(15/8) = 2
         assert_eq!(result, vec![0xFD, 0x42]);
     }
 
@@ -745,7 +745,7 @@ mod tests {
         write_block_packed_vlong(&mut out, -1).unwrap();
         // 8 continuation bytes of 0xFF, then final byte 0xFF
         let bytes = out.bytes();
-        assert_eq!(bytes.len(), 9);
+        assert_len_eq_x!(&bytes, 9);
         for &b in &bytes[..8] {
             assert_eq!(b, 0xFF);
         }
@@ -774,7 +774,7 @@ mod tests {
         // Token: bpv=0, min=42≠0 → bit0=0 → token=0x00
         // Then VLong(zigzag(42)-1) = VLong(84-1) = VLong(83) = single byte 83
         // No packed data since bpv=0
-        assert_eq!(out.bytes().len(), 2);
+        assert_len_eq_x!(&out.bytes(), 2);
         assert_eq!(out.bytes()[0], 0x00); // token
         assert_eq!(out.bytes()[1], 83); // zigzag(42)-1 = 83
     }
@@ -790,7 +790,7 @@ mod tests {
         w.finish(&mut out).unwrap();
         // Token: bpv=0, min=0 → bit0=1 → token=0x01
         // No VLong, no packed data
-        assert_eq!(out.bytes().len(), 1);
+        assert_len_eq_x!(&out.bytes(), 1);
         assert_eq!(out.bytes()[0], 0x01);
     }
 

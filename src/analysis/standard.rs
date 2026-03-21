@@ -312,7 +312,7 @@ mod tests {
     fn test_standard_tokenizer_simple() {
         let tokenizer = StandardTokenizer;
         let tokens = tokenizer.tokenize("hello world");
-        assert_eq!(tokens.len(), 2);
+        assert_len_eq_x!(&tokens, 2);
         assert_eq!(tokens[0].text, "hello");
         assert_eq!(tokens[0].start_offset, 0);
         assert_eq!(tokens[0].end_offset, 5);
@@ -325,7 +325,7 @@ mod tests {
     fn test_standard_tokenizer_contraction() {
         let tokenizer = StandardTokenizer;
         let tokens = tokenizer.tokenize("don't stop");
-        assert_eq!(tokens.len(), 2);
+        assert_len_eq_x!(&tokens, 2);
         assert_eq!(tokens[0].text, "don't");
         assert_eq!(tokens[1].text, "stop");
     }
@@ -334,7 +334,7 @@ mod tests {
     fn test_standard_tokenizer_numbers() {
         let tokenizer = StandardTokenizer;
         let tokens = tokenizer.tokenize("test123 456");
-        assert_eq!(tokens.len(), 2);
+        assert_len_eq_x!(&tokens, 2);
         assert_eq!(tokens[0].text, "test123");
         assert_eq!(tokens[1].text, "456");
     }
@@ -343,7 +343,7 @@ mod tests {
     fn test_standard_tokenizer_punctuation() {
         let tokenizer = StandardTokenizer;
         let tokens = tokenizer.tokenize("hello, world! foo.");
-        assert_eq!(tokens.len(), 3);
+        assert_len_eq_x!(&tokens, 3);
         assert_eq!(tokens[0].text, "hello");
         assert_eq!(tokens[1].text, "world");
         assert_eq!(tokens[2].text, "foo");
@@ -389,7 +389,7 @@ mod tests {
         // Ported from StandardAnalyzer default constructor: CharArraySet.EMPTY_SET
         let analyzer = StandardAnalyzer::new();
         let tokens = analyzer.analyze("the quick and brown fox");
-        assert_eq!(tokens.len(), 5);
+        assert_len_eq_x!(&tokens, 5);
         let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, vec!["the", "quick", "and", "brown", "fox"]);
         // All position increments should be 1
@@ -643,12 +643,12 @@ mod tests {
         // Apostrophe at end of word at end of input (line 76-77)
         let tokenizer = StandardTokenizer;
         let tokens = tokenizer.tokenize("don't");
-        assert_eq!(tokens.len(), 1);
+        assert_len_eq_x!(&tokens, 1);
         assert_eq!(tokens[0].text, "don't");
 
         // Trailing apostrophe with no following char
         let tokens = tokenizer.tokenize("hello'");
-        assert_eq!(tokens.len(), 1);
+        assert_len_eq_x!(&tokens, 1);
         assert_eq!(tokens[0].text, "hello");
     }
 
@@ -657,13 +657,13 @@ mod tests {
         // Apostrophe followed by non-alphanumeric (line 72-73)
         let tokenizer = StandardTokenizer;
         let tokens = tokenizer.tokenize("it' s");
-        assert_eq!(tokens.len(), 2);
+        assert_len_eq_x!(&tokens, 2);
         assert_eq!(tokens[0].text, "it");
         assert_eq!(tokens[1].text, "s");
 
         // Apostrophe followed by space
         let tokens = tokenizer.tokenize("don' t");
-        assert_eq!(tokens.len(), 2);
+        assert_len_eq_x!(&tokens, 2);
         assert_eq!(tokens[0].text, "don");
         assert_eq!(tokens[1].text, "t");
     }
@@ -751,7 +751,7 @@ mod tests {
     fn test_standard_analyzer_default() {
         let analyzer = StandardAnalyzer::default();
         let tokens = analyzer.analyze("hello");
-        assert_eq!(tokens.len(), 1);
+        assert_len_eq_x!(&tokens, 1);
         assert_eq!(tokens[0].text, "hello");
     }
 
@@ -761,20 +761,20 @@ mod tests {
         // A single token of exactly MAX_TOKEN_LENGTH (255) chars should be kept
         let long_word: String = "a".repeat(255);
         let tokens = tokenizer.tokenize(&long_word);
-        assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].text.len(), 255);
+        assert_len_eq_x!(&tokens, 1);
+        assert_len_eq_x!(&tokens[0].text, 255);
 
         // A token exceeding MAX_TOKEN_LENGTH (256+ chars) is truncated to 255
         let too_long: String = "b".repeat(300);
         let tokens = tokenizer.tokenize(&too_long);
-        assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].text.len(), 255);
+        assert_len_eq_x!(&tokens, 1);
+        assert_len_eq_x!(&tokens[0].text, 255);
 
         // A long token followed by a separator and another token
         let input = format!("{} short", "c".repeat(300));
         let tokens = tokenizer.tokenize(&input);
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].text.len(), 255);
+        assert_len_eq_x!(&tokens, 2);
+        assert_len_eq_x!(&tokens[0].text, 255);
         assert_eq!(tokens[1].text, "short");
     }
 

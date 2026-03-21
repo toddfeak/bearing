@@ -945,7 +945,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.len(), 2);
+        assert_len_eq_x!(&result, 2);
         assert_eq!(result[0], "_0_Lucene90_0.dvm");
         assert_eq!(result[1], "_0_Lucene90_0.dvd");
 
@@ -1188,7 +1188,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.len(), 2);
+        assert_len_eq_x!(&result, 2);
         assert_eq!(result[0], "_0_Lucene90_0.dvm");
         assert_eq!(result[1], "_0_Lucene90_0.dvd");
 
@@ -1426,7 +1426,7 @@ mod tests {
         .unwrap();
 
         // Should complete without error
-        assert_eq!(result.len(), 2);
+        assert_len_eq_x!(&result, 2);
     }
 
     #[test]
@@ -1457,7 +1457,7 @@ mod tests {
             3,
         )
         .unwrap();
-        assert_eq!(result.len(), 2);
+        assert_len_eq_x!(&result, 2);
     }
 
     #[test]
@@ -1896,7 +1896,7 @@ mod tests {
             3,
         )
         .unwrap();
-        assert_eq!(result.len(), 2);
+        assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
@@ -2047,7 +2047,7 @@ mod tests {
             3,
         )
         .unwrap();
-        assert_eq!(result.len(), 2);
+        assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
@@ -2099,7 +2099,7 @@ mod tests {
             2,
         )
         .unwrap();
-        assert_eq!(result.len(), 2);
+        assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();

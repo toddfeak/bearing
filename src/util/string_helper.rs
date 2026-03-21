@@ -16,29 +16,24 @@ pub fn random_id() -> [u8; ID_LENGTH] {
 
     let mut state = STATE.lock().unwrap();
     if state.is_none() {
-        // Seed from system time and thread ID
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
         let seed_hi = now.as_nanos() as u64;
         let seed_lo = {
-            // Hash the thread ID Debug representation as a stable seed
             let tid = format!("{:?}", std::thread::current().id());
-            let mut h: u64 = 0;
-            for b in tid.bytes() {
-                h = h.wrapping_mul(31).wrapping_add(b as u64);
-            }
-            h | 1 // ensure non-zero
+            tid.bytes()
+                .fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64))
+                | 1
         };
 
         // Mix with xorshift
         let mut x0 = seed_hi;
         let mut x1 = seed_lo;
         for _ in 0..10 {
-            let s1 = x0;
             let s0 = x1;
+            let s1 = x0 ^ (x0 << 23);
             x0 = s0;
-            let s1 = s1 ^ (s1 << 23);
             x1 = s1 ^ s0 ^ (s1 >> 17) ^ (s0 >> 26);
         }
 

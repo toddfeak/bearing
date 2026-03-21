@@ -271,7 +271,7 @@ fn document_construction() {
 
     doc.add(text_field("a", "hello"));
     doc.add(keyword_field("b", "world"));
-    assert_eq!(doc.fields.len(), 2);
+    assert_len_eq_x!(&doc.fields, 2);
     assert_eq!(doc.fields[0].name(), "a");
     assert_eq!(doc.fields[1].name(), "b");
 }
@@ -424,7 +424,7 @@ fn all_field_types_in_single_document() -> io::Result<()> {
     let doc = make_all_fields_doc();
 
     // Verify the document has the expected number of fields
-    assert_eq!(doc.fields.len(), 8);
+    assert_len_eq_x!(&doc.fields, 8);
 
     writer.add_document(doc)?;
     let result = writer.commit()?;

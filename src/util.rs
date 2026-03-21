@@ -58,7 +58,7 @@ mod tests {
     fn test_bytes_ref_from_str() {
         let br = BytesRef::from_utf8("hello");
         assert_eq!(br.as_slice(), b"hello");
-        assert_eq!(br.len(), 5);
+        assert_len_eq_x!(&br, 5);
     }
 
     #[test]
@@ -72,14 +72,14 @@ mod tests {
     fn test_bytes_ref_empty() {
         let br = BytesRef::default();
         assert!(br.is_empty());
-        assert_eq!(br.len(), 0);
+        assert_is_empty!(br);
     }
 
     #[test]
     fn test_bytes_ref_from_slice() {
         let br = BytesRef::from_slice(&[1, 2, 3]);
         assert_eq!(br.as_slice(), &[1, 2, 3]);
-        assert_eq!(br.len(), 3);
+        assert_len_eq_x!(&br, 3);
     }
 
     #[test]

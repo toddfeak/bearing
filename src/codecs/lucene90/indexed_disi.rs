@@ -401,7 +401,7 @@ mod tests {
         // Total blocks = 24 bytes
         // Jump table: 3 entries × 8 bytes = 24 bytes
         // Total = 48 bytes
-        assert_eq!(bytes.len(), 48);
+        assert_len_eq_x!(&bytes, 48);
 
         // Jump entry 0: index=0, offset=0
         assert_eq!(i32::from_le_bytes(bytes[24..28].try_into().unwrap()), 0);
