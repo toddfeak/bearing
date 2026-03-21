@@ -4,9 +4,7 @@
 
 use std::path::Path;
 
-use bearing::store::{
-    CompoundDirectory, DataInput, DataOutput, Directory, FSDirectory, IndexInput, MemoryDirectory,
-};
+use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory};
 
 #[test]
 fn test_memory_directory_write_then_read() {
@@ -392,5 +390,204 @@ struct DirCleanup<'a>(&'a Path);
 impl Drop for DirCleanup<'_> {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(self.0);
+    }
+}
+
+// ============================================================
+// Stored fields reader integration tests
+// ============================================================
+
+#[test]
+fn test_stored_fields_reader_round_trip() {
+    use bearing::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
+    use bearing::document::{Document, StoredValue, stored_int_field, stored_string_field};
+    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    let mut doc = Document::new();
+    doc.add(stored_string_field("title", "Hello World"));
+    doc.add(stored_int_field("count", 42));
+    writer.add_document(doc).unwrap();
+
+    let mut doc2 = Document::new();
+    doc2.add(stored_string_field("title", "Second Doc"));
+    doc2.add(stored_int_field("count", 99));
+    writer.add_document(doc2).unwrap();
+
+    let result = writer.commit().unwrap();
+
+    let mut mem_dir = MemoryDirectory::new();
+    for seg_file in result.into_segment_files().unwrap() {
+        mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
+    }
+
+    let files = mem_dir.list_all().unwrap();
+    let segments_file = files
+        .iter()
+        .find(|f| f.starts_with("segments_"))
+        .expect("no segments file");
+    let infos = segment_infos::read(&mem_dir, segments_file).unwrap();
+    let seg = &infos.segments[0];
+
+    let mut reader = StoredFieldsReader::open(&mem_dir, &seg.name, "", &seg.id).unwrap();
+
+    // Doc 0
+    let fields = reader.document(0).unwrap();
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::String(s) if s == "Hello World")),
+        "missing 'Hello World'"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::Int(42))),
+        "missing Int(42)"
+    );
+
+    // Doc 1
+    let fields1 = reader.document(1).unwrap();
+    assert!(
+        fields1
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::String(s) if s == "Second Doc")),
+        "missing 'Second Doc'"
+    );
+    assert!(
+        fields1
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::Int(99))),
+        "missing Int(99)"
+    );
+}
+
+#[test]
+fn test_stored_fields_reader_all_types() {
+    use bearing::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
+    use bearing::document::{
+        Document, StoredValue, stored_bytes_field, stored_double_field, stored_float_field,
+        stored_int_field, stored_long_field, stored_string_field,
+    };
+    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    let mut doc = Document::new();
+    doc.add(stored_string_field("s", "text value"));
+    doc.add(stored_int_field("i", 12345));
+    doc.add(stored_long_field("l", 9876543210));
+    doc.add(stored_float_field("f", 3.14));
+    doc.add(stored_double_field("d", 2.71828));
+    doc.add(stored_bytes_field("b", vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    writer.add_document(doc).unwrap();
+
+    let result = writer.commit().unwrap();
+
+    let mut mem_dir = MemoryDirectory::new();
+    for seg_file in result.into_segment_files().unwrap() {
+        mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
+    }
+
+    let files = mem_dir.list_all().unwrap();
+    let segments_file = files
+        .iter()
+        .find(|f| f.starts_with("segments_"))
+        .expect("no segments file");
+    let infos = segment_infos::read(&mem_dir, segments_file).unwrap();
+    let seg = &infos.segments[0];
+
+    let mut reader = StoredFieldsReader::open(&mem_dir, &seg.name, "", &seg.id).unwrap();
+    let fields = reader.document(0).unwrap();
+
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::String(s) if s == "text value")),
+        "missing string"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::Int(12345))),
+        "missing int"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::Long(9876543210))),
+        "missing long"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::Float(v) if (*v - 3.14).abs() < 0.001)),
+        "missing float"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::Double(v) if (*v - 2.71828).abs() < 0.00001)),
+        "missing double"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|f| matches!(&f.value, StoredValue::Bytes(b) if b == &[0xDE, 0xAD, 0xBE, 0xEF])),
+        "missing bytes"
+    );
+}
+
+#[test]
+fn test_stored_fields_reader_many_docs() {
+    use bearing::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
+    use bearing::document::{Document, StoredValue, stored_int_field, stored_string_field};
+    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..50 {
+        let mut doc = Document::new();
+        doc.add(stored_string_field("title", &format!("Document {i}")));
+        doc.add(stored_int_field("id", i));
+        writer.add_document(doc).unwrap();
+    }
+
+    let result = writer.commit().unwrap();
+
+    let mut mem_dir = MemoryDirectory::new();
+    for seg_file in result.into_segment_files().unwrap() {
+        mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
+    }
+
+    let files = mem_dir.list_all().unwrap();
+    let segments_file = files
+        .iter()
+        .find(|f| f.starts_with("segments_"))
+        .expect("no segments file");
+    let infos = segment_infos::read(&mem_dir, segments_file).unwrap();
+    let seg = &infos.segments[0];
+
+    let mut reader = StoredFieldsReader::open(&mem_dir, &seg.name, "", &seg.id).unwrap();
+
+    for i in 0..50 {
+        let fields = reader.document(i).unwrap();
+        let title = format!("Document {i}");
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::String(s) if s == &title)),
+            "missing title for doc {i}"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::Int(v) if *v == i as i32)),
+            "missing id for doc {i}"
+        );
     }
 }

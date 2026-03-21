@@ -15,41 +15,41 @@ use crate::index::indexing_chain::StoredDoc;
 use crate::store::{DataOutput, SharedDirectory, VecOutput};
 
 // File extensions
-const FIELDS_EXTENSION: &str = "fdt";
-const INDEX_EXTENSION: &str = "fdx";
-const META_EXTENSION: &str = "fdm";
+pub(crate) const FIELDS_EXTENSION: &str = "fdt";
+pub(crate) const INDEX_EXTENSION: &str = "fdx";
+pub(crate) const META_EXTENSION: &str = "fdm";
 
 // Codec names and versions
-const FORMAT_NAME: &str = "Lucene90StoredFieldsFastData";
-const INDEX_CODEC_NAME_IDX: &str = "Lucene90FieldsIndexIdx";
-const INDEX_CODEC_NAME_META: &str = "Lucene90FieldsIndexMeta";
-const FDT_VERSION: i32 = 1;
-const FDX_VERSION: i32 = 0;
-const FDM_VERSION: i32 = 1;
+pub(crate) const FORMAT_NAME: &str = "Lucene90StoredFieldsFastData";
+pub(crate) const INDEX_CODEC_NAME_IDX: &str = "Lucene90FieldsIndexIdx";
+pub(crate) const INDEX_CODEC_NAME_META: &str = "Lucene90FieldsIndexMeta";
+pub(crate) const FDT_VERSION: i32 = 1;
+pub(crate) const FDX_VERSION: i32 = 0;
+pub(crate) const FDM_VERSION: i32 = 1;
 
 // Compression parameters (BEST_SPEED mode)
-const CHUNK_SIZE: i32 = 10 * 8 * 1024; // 81920 bytes
-const BLOCK_SHIFT: u32 = 10;
+pub(crate) const CHUNK_SIZE: i32 = 10 * 8 * 1024; // 81920 bytes
+pub(crate) const BLOCK_SHIFT: u32 = 10;
 const NUM_SUB_BLOCKS: usize = 10;
 const DICT_SIZE_FACTOR: usize = 2;
 const LZ4_MAX_DISTANCE: usize = 1 << 16;
 
 // Type codes for stored field values
-const TYPE_STRING: u64 = 0x00;
-const TYPE_BYTE_ARR: u64 = 0x01;
-const TYPE_NUMERIC_INT: u64 = 0x02;
-const TYPE_NUMERIC_FLOAT: u64 = 0x03;
-const TYPE_NUMERIC_LONG: u64 = 0x04;
-const TYPE_NUMERIC_DOUBLE: u64 = 0x05;
-const TYPE_BITS: u32 = 3;
+pub(crate) const TYPE_STRING: u64 = 0x00;
+pub(crate) const TYPE_BYTE_ARR: u64 = 0x01;
+pub(crate) const TYPE_NUMERIC_INT: u64 = 0x02;
+pub(crate) const TYPE_NUMERIC_FLOAT: u64 = 0x03;
+pub(crate) const TYPE_NUMERIC_LONG: u64 = 0x04;
+pub(crate) const TYPE_NUMERIC_DOUBLE: u64 = 0x05;
+pub(crate) const TYPE_BITS: u32 = 3;
 
 // Timestamp compression constants for writeTLong
-const SECOND: i64 = 1000;
-const HOUR: i64 = 60 * 60 * SECOND;
-const DAY: i64 = 24 * HOUR;
-const SECOND_ENCODING: u8 = 0x40;
-const HOUR_ENCODING: u8 = 0x80;
-const DAY_ENCODING: u8 = 0xC0;
+pub(crate) const SECOND: i64 = 1000;
+pub(crate) const HOUR: i64 = 60 * 60 * SECOND;
+pub(crate) const DAY: i64 = 24 * HOUR;
+pub(crate) const SECOND_ENCODING: u8 = 0x40;
+pub(crate) const HOUR_ENCODING: u8 = 0x80;
+pub(crate) const DAY_ENCODING: u8 = 0xC0;
 
 /// Writes stored fields files (.fdt, .fdx, .fdm) for a segment.
 /// Returns the names of the files written.
@@ -523,6 +523,34 @@ fn write_zdouble(out: &mut dyn DataOutput, d: f64) -> io::Result<()> {
         out.write_le_long(double_bits)?;
     }
     Ok(())
+}
+
+// ============================================================
+// Test-only exports for round-trip testing from stored_fields_reader
+// ============================================================
+
+#[cfg(test)]
+pub(crate) fn write_zfloat_for_test(out: &mut dyn DataOutput, f: f32) -> io::Result<()> {
+    write_zfloat(out, f)
+}
+
+#[cfg(test)]
+pub(crate) fn write_zdouble_for_test(out: &mut dyn DataOutput, d: f64) -> io::Result<()> {
+    write_zdouble(out, d)
+}
+
+#[cfg(test)]
+pub(crate) fn write_tlong_for_test(out: &mut dyn DataOutput, l: i64) -> io::Result<()> {
+    write_tlong(out, l)
+}
+
+#[cfg(test)]
+pub(crate) fn save_ints_for_test(
+    values: &[i32],
+    count: usize,
+    out: &mut dyn DataOutput,
+) -> io::Result<()> {
+    save_ints(values, count, out)
 }
 
 // ============================================================

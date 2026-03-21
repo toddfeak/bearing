@@ -1,0 +1,973 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Stored fields reader for the Lucene90 compressing stored fields format.
+//!
+//! Reads `.fdt` (field data), `.fdx` (index), and `.fdm` (metadata) files
+//! written by [`super::stored_fields::write`].
+
+use std::io;
+
+use crate::codecs::codec_util;
+use crate::codecs::lucene90::stored_fields::{
+    DAY, DAY_ENCODING, FDM_VERSION, FDT_VERSION, FDX_VERSION, FIELDS_EXTENSION, FORMAT_NAME, HOUR,
+    HOUR_ENCODING, INDEX_CODEC_NAME_IDX, INDEX_CODEC_NAME_META, INDEX_EXTENSION, META_EXTENSION,
+    SECOND, SECOND_ENCODING, TYPE_BITS, TYPE_BYTE_ARR, TYPE_NUMERIC_DOUBLE, TYPE_NUMERIC_FLOAT,
+    TYPE_NUMERIC_INT, TYPE_NUMERIC_LONG, TYPE_STRING,
+};
+use crate::codecs::packed_readers::DirectMonotonicReader;
+use crate::document::StoredValue;
+use crate::encoding::lz4;
+use crate::encoding::zigzag;
+use crate::index::index_file_names;
+use crate::store::{DataInput, Directory, IndexInput};
+
+const STORED_FIELDS_INTS_BLOCK_SIZE: usize = 128;
+
+/// Reads the fields index from `.fdm` metadata and `.fdx` index files.
+///
+/// Maintains two [`DirectMonotonicReader`]s:
+/// - `docs`: maps chunk index to starting doc ID
+/// - `start_pointers`: maps chunk index to file pointer in `.fdt`
+struct FieldsIndexReader {
+    docs: DirectMonotonicReader,
+    start_pointers: DirectMonotonicReader,
+    num_chunks: u32,
+}
+
+impl FieldsIndexReader {
+    /// Loads the fields index from `.fdm` and `.fdx`.
+    fn open(meta_input: &mut dyn DataInput, fdx_input: &dyn IndexInput) -> io::Result<Self> {
+        let _num_docs = meta_input.read_le_int()?;
+        let block_shift = meta_input.read_le_int()? as u32;
+        let num_chunks = meta_input.read_le_int()? as u32;
+        let docs_start_pointer = meta_input.read_le_long()? as u64;
+
+        let docs = DirectMonotonicReader::load_with_shift(
+            meta_input,
+            fdx_input,
+            num_chunks,
+            docs_start_pointer,
+            block_shift,
+        )?;
+
+        let start_pointers_start = meta_input.read_le_long()? as u64;
+
+        let start_pointers = DirectMonotonicReader::load_with_shift(
+            meta_input,
+            fdx_input,
+            num_chunks,
+            start_pointers_start,
+            block_shift,
+        )?;
+
+        let _start_pointers_end = meta_input.read_le_long()?;
+        let _max_pointer = meta_input.read_le_long()?;
+
+        Ok(Self {
+            docs,
+            start_pointers,
+            num_chunks,
+        })
+    }
+
+    /// Returns the chunk index containing the given doc ID.
+    fn block_id(&mut self, doc_id: u32) -> io::Result<u32> {
+        // Binary search: find the last chunk whose starting doc ID <= doc_id
+        let mut lo = 0u32;
+        let mut hi = self.num_chunks;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let mid_doc = self.docs.get(mid as u64)? as u32;
+            if mid_doc <= doc_id {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        // lo is the first chunk with starting doc > doc_id, so the answer is lo - 1
+        if lo == 0 {
+            return Err(io::Error::other(format!(
+                "doc {doc_id} not found in any chunk"
+            )));
+        }
+        Ok(lo - 1)
+    }
+
+    /// Returns the file pointer in `.fdt` where the given chunk starts.
+    fn block_start_pointer(&mut self, block: u32) -> io::Result<u64> {
+        Ok(self.start_pointers.get(block as u64)? as u64)
+    }
+}
+
+/// A decoded stored field with its field number and value.
+pub struct StoredField {
+    /// The field number (matches the field's position in FieldInfos).
+    pub field_number: u32,
+    /// The stored value.
+    pub value: StoredValue,
+}
+
+/// Reads stored fields from a segment.
+///
+/// Opens `.fdt`, `.fdx`, and `.fdm` files and provides document-level
+/// access to stored field values.
+pub struct StoredFieldsReader {
+    fields_stream: Box<dyn IndexInput>,
+    index_reader: FieldsIndexReader,
+    chunk_size: i32,
+}
+
+impl StoredFieldsReader {
+    /// Opens a stored fields reader for the given segment.
+    pub fn open(
+        directory: &dyn Directory,
+        segment_name: &str,
+        segment_suffix: &str,
+        segment_id: &[u8; 16],
+    ) -> io::Result<Self> {
+        // Open .fdm (metadata)
+        let fdm_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
+        let mut meta_input = directory.open_input(&fdm_name)?;
+        codec_util::check_index_header(
+            meta_input.as_mut(),
+            INDEX_CODEC_NAME_META,
+            FDM_VERSION,
+            FDM_VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        let chunk_size = meta_input.read_vint()?;
+
+        // Open .fdx (index) — opened twice: once for header validation, once for data
+        let fdx_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
+        let fdx_input = directory.open_input(&fdx_name)?;
+        let mut fdx_check = directory.open_input(&fdx_name)?;
+        codec_util::check_index_header(
+            fdx_check.as_mut(),
+            INDEX_CODEC_NAME_IDX,
+            FDX_VERSION,
+            FDX_VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        // Read the fields index (needs meta_input + fdx_input)
+        let index_reader = FieldsIndexReader::open(meta_input.as_mut(), fdx_input.as_ref())?;
+
+        // Read remaining metadata
+        let _num_chunks = meta_input.read_vlong()?;
+        let _num_dirty_chunks = meta_input.read_vlong()?;
+        let _num_dirty_docs = meta_input.read_vlong()?;
+
+        // Open .fdt (field data)
+        let fdt_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, FIELDS_EXTENSION);
+        let mut fdt_input = directory.open_input(&fdt_name)?;
+        let header_len = codec_util::check_index_header(
+            fdt_input.as_mut(),
+            FORMAT_NAME,
+            FDT_VERSION,
+            FDT_VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+        // Skip past the header
+        fdt_input.seek(header_len as u64)?;
+
+        Ok(Self {
+            fields_stream: fdt_input,
+            index_reader,
+            chunk_size,
+        })
+    }
+
+    /// Reads all stored fields for the given document.
+    pub fn document(&mut self, doc_id: u32) -> io::Result<Vec<StoredField>> {
+        let block = self.index_reader.block_id(doc_id)?;
+        let start_pointer = self.index_reader.block_start_pointer(block)?;
+
+        self.fields_stream.seek(start_pointer)?;
+
+        // Read chunk header
+        let doc_base = self.fields_stream.read_vint()? as u32;
+        let token = self.fields_stream.read_vint()? as u32;
+        let chunk_docs = token >> 2;
+        let sliced = (token & 1) != 0;
+
+        if chunk_docs == 0 {
+            return Err(io::Error::other("chunk with 0 docs"));
+        }
+
+        let doc_in_chunk = doc_id - doc_base;
+        if doc_in_chunk >= chunk_docs {
+            return Err(io::Error::other(format!(
+                "doc {doc_id} not in chunk (base={doc_base}, docs={chunk_docs})"
+            )));
+        }
+
+        // Read numStoredFields and lengths arrays
+        let (num_stored_fields, offsets) = if chunk_docs == 1 {
+            let nsf = self.fields_stream.read_vint()?;
+            let length = self.fields_stream.read_vint()?;
+            (vec![nsf as i64], vec![0i64, length as i64])
+        } else {
+            let mut nsf = vec![0i64; chunk_docs as usize];
+            read_stored_fields_ints(self.fields_stream.as_mut(), chunk_docs as usize, &mut nsf)?;
+
+            let mut lengths = vec![0i64; chunk_docs as usize + 1];
+            read_stored_fields_ints(
+                self.fields_stream.as_mut(),
+                chunk_docs as usize,
+                &mut lengths[1..],
+            )?;
+            // Convert lengths to cumulative offsets
+            for i in 1..=chunk_docs as usize {
+                lengths[i] += lengths[i - 1];
+            }
+            (nsf, lengths)
+        };
+
+        let start_pointer_data = self.fields_stream.file_pointer();
+        let total_length = *offsets.last().unwrap() as usize;
+        let doc_offset = offsets[doc_in_chunk as usize] as usize;
+        let doc_length = offsets[doc_in_chunk as usize + 1] as usize - doc_offset;
+        let num_fields = num_stored_fields[doc_in_chunk as usize] as usize;
+
+        // Decompress the chunk data
+        let decompressed = self.decompress_chunk(start_pointer_data, total_length, sliced)?;
+
+        // Decode fields from the decompressed data for this document
+        let doc_data = &decompressed[doc_offset..doc_offset + doc_length];
+        decode_fields(doc_data, num_fields)
+    }
+
+    /// Decompresses the chunk data starting at the current stream position.
+    fn decompress_chunk(
+        &mut self,
+        _start: u64,
+        total_length: usize,
+        sliced: bool,
+    ) -> io::Result<Vec<u8>> {
+        if !sliced {
+            // Single LZ4 block with preset dictionary
+            self.decompress_lz4_with_dict(total_length)
+        } else {
+            // Multiple slices, each up to chunk_size bytes
+            let chunk_size = self.chunk_size as usize;
+            let mut result = Vec::with_capacity(total_length);
+            let mut remaining = total_length;
+
+            while remaining > 0 {
+                let block_len = remaining.min(chunk_size);
+                let block_data = self.decompress_lz4_with_dict(block_len)?;
+                result.extend_from_slice(&block_data);
+                remaining -= block_len;
+            }
+            Ok(result)
+        }
+    }
+
+    /// Decompresses a single LZ4-with-preset-dict block from the fields stream.
+    ///
+    /// Format: all compressed lengths first, then all compressed data.
+    fn decompress_lz4_with_dict(&mut self, decompressed_length: usize) -> io::Result<Vec<u8>> {
+        let dict_length = self.fields_stream.read_vint()? as usize;
+        let block_length = self.fields_stream.read_vint()? as usize;
+
+        // Read all compressed lengths first
+        let mut compressed_lengths = Vec::new();
+
+        // Dictionary compressed length
+        let dict_compressed_len = self.fields_stream.read_vint()? as usize;
+        compressed_lengths.push(dict_compressed_len);
+
+        // Sub-block compressed lengths
+        if block_length > 0 {
+            let data_length = decompressed_length.saturating_sub(dict_length);
+            let num_sub_blocks = data_length.div_ceil(block_length);
+            for _ in 0..num_sub_blocks {
+                compressed_lengths.push(self.fields_stream.read_vint()? as usize);
+            }
+        }
+
+        // Now read all compressed data
+        // Decompress dictionary
+        let mut dict_compressed = vec![0u8; dict_compressed_len];
+        self.fields_stream.read_bytes(&mut dict_compressed)?;
+        let dict = if dict_length > 0 {
+            lz4::decompress(&dict_compressed, dict_length)?
+        } else {
+            Vec::new()
+        };
+
+        // Decompress sub-blocks
+        if block_length == 0 {
+            // No sub-blocks — dictionary is the entire data
+            return Ok(dict);
+        }
+
+        // Result includes dictionary bytes followed by decompressed sub-blocks
+        let mut result = Vec::with_capacity(decompressed_length);
+        result.extend_from_slice(&dict);
+        let mut data_start = dict_length;
+
+        for &comp_len in &compressed_lengths[1..] {
+            let block_decompressed = (decompressed_length - data_start).min(block_length);
+            let mut compressed = vec![0u8; comp_len];
+            self.fields_stream.read_bytes(&mut compressed)?;
+
+            let block_data = lz4::decompress_with_prefix(&compressed, block_decompressed, &dict)?;
+            result.extend_from_slice(&block_data);
+            data_start += block_decompressed;
+        }
+
+        Ok(result)
+    }
+}
+
+/// Decodes stored fields from decompressed data.
+fn decode_fields(data: &[u8], num_fields: usize) -> io::Result<Vec<StoredField>> {
+    let mut fields = Vec::with_capacity(num_fields);
+    let mut reader = SliceReader::new(data);
+
+    for _ in 0..num_fields {
+        let info_and_bits = reader.read_vlong()?;
+        let field_number = (info_and_bits as u64 >> TYPE_BITS) as u32;
+        let type_code = info_and_bits as u64 & ((1 << TYPE_BITS) - 1);
+
+        let value = match type_code {
+            TYPE_STRING => {
+                let len = reader.read_vint()? as usize;
+                let s = std::str::from_utf8(reader.read_slice(len)?)
+                    .map_err(|e| io::Error::other(format!("invalid utf-8: {e}")))?;
+                StoredValue::String(s.to_string())
+            }
+            TYPE_BYTE_ARR => {
+                let len = reader.read_vint()? as usize;
+                StoredValue::Bytes(reader.read_slice(len)?.to_vec())
+            }
+            TYPE_NUMERIC_INT => StoredValue::Int(read_zint(&mut reader)?),
+            TYPE_NUMERIC_FLOAT => StoredValue::Float(read_zfloat(&mut reader)?),
+            TYPE_NUMERIC_LONG => StoredValue::Long(read_tlong(&mut reader)?),
+            TYPE_NUMERIC_DOUBLE => StoredValue::Double(read_zdouble(&mut reader)?),
+            _ => {
+                return Err(io::Error::other(format!(
+                    "unknown stored field type: {type_code}"
+                )));
+            }
+        };
+
+        fields.push(StoredField {
+            field_number,
+            value,
+        });
+    }
+
+    Ok(fields)
+}
+
+// ============================================================
+// StoredFieldsInts reading
+// ============================================================
+
+/// Reads `count` integers from the input using StoredFieldsInts encoding.
+fn read_stored_fields_ints(
+    input: &mut dyn DataInput,
+    count: usize,
+    values: &mut [i64],
+) -> io::Result<()> {
+    let bpv = input.read_byte()?;
+    match bpv {
+        0 => {
+            let v = input.read_vint()? as i64;
+            values[..count].fill(v);
+        }
+        8 => read_ints_8(input, count, values)?,
+        16 => read_ints_16(input, count, values)?,
+        32 => read_ints_32(input, count, values)?,
+        _ => {
+            return Err(io::Error::other(format!(
+                "unsupported bpv in StoredFieldsInts: {bpv}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn read_ints_8(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> io::Result<()> {
+    let mut k = 0;
+    while k + STORED_FIELDS_INTS_BLOCK_SIZE <= count {
+        // Read 16 LE longs, each packing 8 values
+        for i in 0..16 {
+            let l = input.read_le_long()? as u64;
+            values[k + i] = ((l >> 56) & 0xFF) as i64;
+            values[k + 16 + i] = ((l >> 48) & 0xFF) as i64;
+            values[k + 32 + i] = ((l >> 40) & 0xFF) as i64;
+            values[k + 48 + i] = ((l >> 32) & 0xFF) as i64;
+            values[k + 64 + i] = ((l >> 24) & 0xFF) as i64;
+            values[k + 80 + i] = ((l >> 16) & 0xFF) as i64;
+            values[k + 96 + i] = ((l >> 8) & 0xFF) as i64;
+            values[k + 112 + i] = (l & 0xFF) as i64;
+        }
+        k += STORED_FIELDS_INTS_BLOCK_SIZE;
+    }
+    while k < count {
+        values[k] = input.read_byte()? as i64;
+        k += 1;
+    }
+    Ok(())
+}
+
+fn read_ints_16(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> io::Result<()> {
+    let mut k = 0;
+    while k + STORED_FIELDS_INTS_BLOCK_SIZE <= count {
+        for i in 0..32 {
+            let l = input.read_le_long()? as u64;
+            values[k + i] = ((l >> 48) & 0xFFFF) as i64;
+            values[k + 32 + i] = ((l >> 32) & 0xFFFF) as i64;
+            values[k + 64 + i] = ((l >> 16) & 0xFFFF) as i64;
+            values[k + 96 + i] = (l & 0xFFFF) as i64;
+        }
+        k += STORED_FIELDS_INTS_BLOCK_SIZE;
+    }
+    while k < count {
+        values[k] = (input.read_le_short()? as u16) as i64;
+        k += 1;
+    }
+    Ok(())
+}
+
+fn read_ints_32(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> io::Result<()> {
+    let mut k = 0;
+    while k + STORED_FIELDS_INTS_BLOCK_SIZE <= count {
+        for i in 0..64 {
+            let l = input.read_le_long()? as u64;
+            values[k + i] = (l >> 32) as i64;
+            values[k + 64 + i] = (l & 0xFFFFFFFF) as i64;
+        }
+        k += STORED_FIELDS_INTS_BLOCK_SIZE;
+    }
+    while k < count {
+        values[k] = input.read_le_int()? as i64;
+        k += 1;
+    }
+    Ok(())
+}
+
+// ============================================================
+// Field value decoders
+// ============================================================
+
+/// Reads a zigzag-encoded variable-length int.
+fn read_zint(input: &mut SliceReader) -> io::Result<i32> {
+    input.read_zint()
+}
+
+/// Reads a variable-length float (ZFloat encoding).
+fn read_zfloat(input: &mut SliceReader) -> io::Result<f32> {
+    let header = input.read_byte()? as u32;
+    if header == 0xFF {
+        // Negative float: 4 bytes follow
+        let bits = input.read_le_int()? as u32;
+        Ok(f32::from_bits(bits))
+    } else if header >= 0x80 {
+        // Small integer [-1..125]
+        Ok((header as i32 - 0x80 - 1) as f32)
+    } else {
+        // Positive float: header is the high byte, 3 more bytes follow
+        let b1 = input.read_le_short()? as u16 as u32;
+        let b2 = input.read_byte()? as u32;
+        let bits = (header << 24) | (b1 << 8) | b2;
+        Ok(f32::from_bits(bits))
+    }
+}
+
+/// Reads a timestamp-compressed long (TLong encoding).
+fn read_tlong(input: &mut SliceReader) -> io::Result<i64> {
+    let header = input.read_byte()?;
+    let time_encoding = header & 0xC0;
+    let mut zig_zag = (header as u64 & 0x1F) as i64;
+
+    if (header & 0x20) != 0 {
+        // Upper bits follow
+        let upper = input.read_vlong()?;
+        zig_zag |= upper << 5;
+    }
+
+    let val = zigzag::decode_i64(zig_zag);
+
+    match time_encoding {
+        0x00 => Ok(val),
+        SECOND_ENCODING => Ok(val * SECOND),
+        HOUR_ENCODING => Ok(val * HOUR),
+        DAY_ENCODING => Ok(val * DAY),
+        _ => Err(io::Error::other(format!(
+            "unknown time encoding: {time_encoding:#x}"
+        ))),
+    }
+}
+
+/// Reads a variable-length double (ZDouble encoding).
+fn read_zdouble(input: &mut SliceReader) -> io::Result<f64> {
+    let header = input.read_byte()? as u32;
+    if header == 0xFF {
+        // Negative double: 8 bytes follow
+        let bits = input.read_le_long()? as u64;
+        Ok(f64::from_bits(bits))
+    } else if header == 0xFE {
+        // Float-representable: 4 bytes follow
+        let float_bits = input.read_le_int()? as u32;
+        Ok(f32::from_bits(float_bits) as f64)
+    } else if header >= 0x80 {
+        // Small integer [-1..124]
+        Ok((header as i32 - 0x80 - 1) as f64)
+    } else {
+        // Positive double: header is the high byte, 7 more bytes follow
+        let b4 = input.read_le_int()? as u32 as u64;
+        let b2 = input.read_le_short()? as u16 as u64;
+        let b1 = input.read_byte()? as u64;
+        let bits = ((header as u64) << 56) | (b4 << 24) | (b2 << 8) | b1;
+        Ok(f64::from_bits(bits))
+    }
+}
+
+// ============================================================
+// SliceReader: DataInput over a byte slice
+// ============================================================
+
+/// A [`DataInput`] implementation that reads from a byte slice.
+struct SliceReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SliceReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn read_slice(&mut self, len: usize) -> io::Result<&'a [u8]> {
+        if self.pos + len > self.data.len() {
+            return Err(io::Error::other("read past end of slice"));
+        }
+        let slice = &self.data[self.pos..self.pos + len];
+        self.pos += len;
+        Ok(slice)
+    }
+}
+
+impl DataInput for SliceReader<'_> {
+    fn read_byte(&mut self) -> io::Result<u8> {
+        if self.pos >= self.data.len() {
+            return Err(io::Error::other("read past end of slice"));
+        }
+        let b = self.data[self.pos];
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        if self.pos + buf.len() > self.data.len() {
+            return Err(io::Error::other("read past end of slice"));
+        }
+        buf.copy_from_slice(&self.data[self.pos..self.pos + buf.len()]);
+        self.pos += buf.len();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{
+        Document, StoredValue, stored_bytes_field, stored_double_field, stored_float_field,
+        stored_int_field, stored_long_field, stored_string_field,
+    };
+    use crate::index::{IndexWriter, IndexWriterConfig, segment_infos};
+    use crate::store::{Directory, MemoryDirectory};
+    use assertables::*;
+
+    /// Write a simple index and read stored fields back via StoredFieldsReader.
+    fn write_and_read_stored(docs: Vec<Document>) -> (Box<dyn Directory>, Vec<Vec<StoredField>>) {
+        let num_docs = docs.len();
+        let config = IndexWriterConfig::new().set_use_compound_file(false);
+        let writer = IndexWriter::with_config(config);
+        for doc in docs {
+            writer.add_document(doc).unwrap();
+        }
+        let result = writer.commit().unwrap();
+
+        let mut mem_dir = MemoryDirectory::new();
+        for seg_file in result.into_segment_files().unwrap() {
+            mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
+        }
+        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+
+        // Find the segment info to get segment name and ID
+        let files = dir.list_all().unwrap();
+        let segments_file = files
+            .iter()
+            .find(|f| f.starts_with("segments_"))
+            .expect("no segments file");
+        let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let seg = &infos.segments[0];
+
+        let mut reader = StoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+
+        let mut results = Vec::new();
+        for doc_id in 0..num_docs {
+            results.push(reader.document(doc_id as u32).unwrap());
+        }
+
+        (dir, results)
+    }
+
+    #[test]
+    fn test_round_trip_string_and_int() {
+        let mut doc = Document::new();
+        doc.add(stored_string_field("title", "Hello World"));
+        doc.add(stored_int_field("count", 42));
+
+        let mut doc2 = Document::new();
+        doc2.add(stored_string_field("title", "Second Doc"));
+        doc2.add(stored_int_field("count", 99));
+
+        let (_, results) = write_and_read_stored(vec![doc, doc2]);
+
+        // Doc 0
+        let fields = &results[0];
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::String(s) if s == "Hello World"))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::Int(42)))
+        );
+
+        // Doc 1
+        let fields1 = &results[1];
+        assert!(
+            fields1
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::String(s) if s == "Second Doc"))
+        );
+        assert!(
+            fields1
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::Int(99)))
+        );
+    }
+
+    #[test]
+    fn test_round_trip_all_types() {
+        let mut doc = Document::new();
+        doc.add(stored_string_field("s", "text"));
+        doc.add(stored_int_field("i", 123));
+        doc.add(stored_long_field("l", 456789));
+        doc.add(stored_float_field("f", 3.14));
+        doc.add(stored_double_field("d", 2.71828));
+        doc.add(stored_bytes_field("b", vec![1, 2, 3]));
+
+        let (_, results) = write_and_read_stored(vec![doc]);
+        let fields = &results[0];
+
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::String(s) if s == "text")),
+            "missing string"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::Int(123))),
+            "missing int"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::Long(456789))),
+            "missing long"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::Float(v) if (*v - 3.14).abs() < 0.001)),
+            "missing float"
+        );
+        assert!(
+            fields.iter().any(
+                |f| matches!(&f.value, StoredValue::Double(v) if (*v - 2.71828).abs() < 0.00001)
+            ),
+            "missing double"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::Bytes(b) if b == &[1, 2, 3])),
+            "missing bytes"
+        );
+    }
+
+    #[test]
+    fn test_read_zfloat_small_int() {
+        // Small int encoding: header = 0x80 + (1 + val)
+        // val=0 -> header=0x81
+        let data = [0x81u8];
+        let mut reader = SliceReader::new(&data);
+        assert_in_delta!(read_zfloat(&mut reader).unwrap(), 0.0, 0.001);
+
+        // val=42 -> header=0x80+43=0xAB
+        let data = [0xABu8];
+        let mut reader = SliceReader::new(&data);
+        assert_in_delta!(read_zfloat(&mut reader).unwrap(), 42.0, 0.001);
+
+        // val=-1 -> header=0x80+0=0x80
+        let data = [0x80u8];
+        let mut reader = SliceReader::new(&data);
+        assert_in_delta!(read_zfloat(&mut reader).unwrap(), -1.0, 0.001);
+    }
+
+    #[test]
+    fn test_read_zdouble_small_int() {
+        // val=0 -> header=0x81
+        let data = [0x81u8];
+        let mut reader = SliceReader::new(&data);
+        assert_in_delta!(read_zdouble(&mut reader).unwrap(), 0.0, 0.001);
+
+        // val=-1 -> header=0x80
+        let data = [0x80u8];
+        let mut reader = SliceReader::new(&data);
+        assert_in_delta!(read_zdouble(&mut reader).unwrap(), -1.0, 0.001);
+    }
+
+    #[test]
+    fn test_read_tlong_no_encoding() {
+        // val=5, no time encoding, no upper bits
+        // zigzag(5) = 10, header = 0x00 | 10 = 0x0A
+        let data = [0x0Au8];
+        let mut reader = SliceReader::new(&data);
+        assert_eq!(read_tlong(&mut reader).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_read_tlong_second_encoding() {
+        // val=5000 ms = 5 seconds, SECOND_ENCODING
+        // val/SECOND = 5, zigzag(5) = 10
+        // header = SECOND_ENCODING | 10 = 0x40 | 0x0A = 0x4A
+        let data = [0x4Au8];
+        let mut reader = SliceReader::new(&data);
+        assert_eq!(read_tlong(&mut reader).unwrap(), 5000);
+    }
+
+    #[test]
+    fn test_stored_fields_ints_uniform() {
+        // All values equal: marker=0, VInt=42
+        let data = [0x00u8, 42];
+        let mut reader = SliceReader::new(&data);
+        let mut values = vec![0i64; 4];
+        read_stored_fields_ints(&mut reader, 4, &mut values).unwrap();
+        assert_eq!(values, vec![42, 42, 42, 42]);
+    }
+
+    #[test]
+    fn test_stored_fields_ints_8bit() {
+        // 3 values (< 128 block size), 8-bit packing, remainder path
+        let data = [8u8, 10, 20, 30]; // marker=8, then 3 bytes
+        let mut reader = SliceReader::new(&data);
+        let mut values = vec![0i64; 3];
+        read_stored_fields_ints(&mut reader, 3, &mut values).unwrap();
+        assert_eq!(values, vec![10, 20, 30]);
+    }
+
+    // --- Write-then-read round-trip helpers using the writer functions ---
+
+    use crate::codecs::lucene90::stored_fields;
+    use crate::store::memory::MemoryIndexOutput;
+
+    /// Write a float with write_zfloat, then read it back with read_zfloat.
+    fn zfloat_round_trip(val: f32) -> f32 {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        stored_fields::write_zfloat_for_test(&mut out, val).unwrap();
+        let mut reader = SliceReader::new(out.bytes());
+        read_zfloat(&mut reader).unwrap()
+    }
+
+    /// Write a double with write_zdouble, then read it back with read_zdouble.
+    fn zdouble_round_trip(val: f64) -> f64 {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        stored_fields::write_zdouble_for_test(&mut out, val).unwrap();
+        let mut reader = SliceReader::new(out.bytes());
+        read_zdouble(&mut reader).unwrap()
+    }
+
+    /// Write a long with write_tlong, then read it back with read_tlong.
+    fn tlong_round_trip(val: i64) -> i64 {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        stored_fields::write_tlong_for_test(&mut out, val).unwrap();
+        let mut reader = SliceReader::new(out.bytes());
+        read_tlong(&mut reader).unwrap()
+    }
+
+    /// Write ints with save_ints, then read them back with read_stored_fields_ints.
+    fn stored_ints_round_trip(values: &[i32]) -> Vec<i64> {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        stored_fields::save_ints_for_test(values, values.len(), &mut out).unwrap();
+        let mut reader = SliceReader::new(out.bytes());
+        let mut result = vec![0i64; values.len()];
+        if values.len() == 1 {
+            result[0] = reader.read_vint().unwrap() as i64;
+        } else {
+            read_stored_fields_ints(&mut reader, values.len(), &mut result).unwrap();
+        }
+        result
+    }
+
+    // --- zfloat tests ---
+
+    #[test]
+    fn test_read_zfloat_negative() {
+        // Negative float: header=0xFF, then LE int of float bits
+        let val = -42.5f32;
+        assert_in_delta!(zfloat_round_trip(val), val, 0.001);
+    }
+
+    #[test]
+    fn test_read_zfloat_positive_non_integer() {
+        // Positive non-integer float: header is high byte of float bits
+        let val = 3.14f32;
+        assert_in_delta!(zfloat_round_trip(val), val, 0.001);
+    }
+
+    #[test]
+    fn test_read_zfloat_large_positive() {
+        assert_in_delta!(zfloat_round_trip(1_000_000.0), 1_000_000.0, 1.0);
+    }
+
+    #[test]
+    fn test_read_zfloat_boundary_values() {
+        // val=125 is the max small int
+        assert_in_delta!(zfloat_round_trip(125.0), 125.0, 0.001);
+        // val=126 should NOT use small int path (> 0x7D=125)
+        assert_in_delta!(zfloat_round_trip(126.0), 126.0, 0.001);
+    }
+
+    // --- zdouble tests ---
+
+    #[test]
+    fn test_read_zdouble_negative() {
+        let val = -99.99;
+        assert_in_delta!(zdouble_round_trip(val), val, 0.001);
+    }
+
+    #[test]
+    fn test_read_zdouble_float_representable() {
+        // A value that can be exactly represented as f32 uses the 0xFE path
+        let val = 3.14f32 as f64;
+        assert_in_delta!(zdouble_round_trip(val), val, 0.001);
+    }
+
+    #[test]
+    fn test_read_zdouble_positive_non_integer() {
+        // A value that cannot be represented as f32 uses the positive double path
+        let val = std::f64::consts::PI; // high precision, not float-representable
+        assert_in_delta!(zdouble_round_trip(val), val, 1e-10);
+    }
+
+    #[test]
+    fn test_read_zdouble_large_negative() {
+        assert_in_delta!(zdouble_round_trip(-1e15), -1e15, 1.0);
+    }
+
+    // --- tlong tests ---
+
+    #[test]
+    fn test_read_tlong_hour_encoding() {
+        // 2 hours = 7200000 ms
+        let val = 2 * HOUR;
+        assert_eq!(tlong_round_trip(val), val);
+    }
+
+    #[test]
+    fn test_read_tlong_day_encoding() {
+        // 3 days = 259200000 ms
+        let val = 3 * DAY;
+        assert_eq!(tlong_round_trip(val), val);
+    }
+
+    #[test]
+    fn test_read_tlong_upper_bits() {
+        // Large value that requires upper bits (zigzag value > 31)
+        // val=100 (not divisible by SECOND), zigzag(100)=200, needs upper bits
+        let val = 100i64;
+        assert_eq!(tlong_round_trip(val), val);
+    }
+
+    #[test]
+    fn test_read_tlong_negative() {
+        assert_eq!(tlong_round_trip(-5000), -5000);
+    }
+
+    #[test]
+    fn test_read_tlong_large_timestamp() {
+        // Typical epoch millis
+        let val = 1_700_000_000_000i64;
+        assert_eq!(tlong_round_trip(val), val);
+    }
+
+    // --- StoredFieldsInts tests ---
+
+    #[test]
+    fn test_stored_fields_ints_16bit_round_trip() {
+        let values: Vec<i32> = (0..5).map(|i| 256 + i * 100).collect();
+        let result = stored_ints_round_trip(&values);
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(result[i], v as i64, "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_stored_fields_ints_32bit_round_trip() {
+        let values: Vec<i32> = (0..5).map(|i| 70000 + i * 10000).collect();
+        let result = stored_ints_round_trip(&values);
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(result[i], v as i64, "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_stored_fields_ints_8bit_block_path() {
+        // 130 values triggers the block path (128 values per block + 2 remainder)
+        let values: Vec<i32> = (0..130).map(|i| (i % 200) as i32).collect();
+        let result = stored_ints_round_trip(&values);
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(result[i], v as i64, "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_stored_fields_ints_16bit_block_path() {
+        // 130 values with values > 255 triggers 16-bit block path
+        let values: Vec<i32> = (0..130).map(|i| 300 + i as i32).collect();
+        let result = stored_ints_round_trip(&values);
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(result[i], v as i64, "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_stored_fields_ints_32bit_block_path() {
+        // 130 values with values > 65535 triggers 32-bit block path
+        let values: Vec<i32> = (0..130).map(|i| 70000 + i as i32 * 1000).collect();
+        let result = stored_ints_round_trip(&values);
+        for (i, &v) in values.iter().enumerate() {
+            assert_eq!(result[i], v as i64, "mismatch at index {i}");
+        }
+    }
+}

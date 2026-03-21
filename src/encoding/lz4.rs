@@ -481,12 +481,10 @@ pub fn compress_high(input: &[u8], ht: &mut HighCompressionHashTable) -> Vec<u8>
     output
 }
 
-#[cfg(test)]
 use std::io;
 
-/// LZ4 decompress. `dest_len` is the expected uncompressed size.
-#[cfg(test)]
-fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
+/// LZ4 decompress a block. `dest_len` is the expected uncompressed size.
+pub fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
     let mut output = Vec::with_capacity(dest_len);
     let mut ip = 0;
 
@@ -499,10 +497,7 @@ fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
         if literal_len == 15 {
             loop {
                 if ip >= compressed.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "truncated literal length",
-                    ));
+                    return Err(io::Error::other("truncated literal length"));
                 }
                 let b = compressed[ip] as usize;
                 ip += 1;
@@ -515,10 +510,7 @@ fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
 
         // Copy literals
         if ip + literal_len > compressed.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "literal bytes out of bounds",
-            ));
+            return Err(io::Error::other("literal bytes out of bounds"));
         }
         output.extend_from_slice(&compressed[ip..ip + literal_len]);
         ip += literal_len;
@@ -529,19 +521,13 @@ fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
 
         // Match distance (LE u16)
         if ip + 2 > compressed.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "truncated match distance",
-            ));
+            return Err(io::Error::other("truncated match distance"));
         }
         let distance = compressed[ip] as usize | ((compressed[ip + 1] as usize) << 8);
         ip += 2;
 
         if distance == 0 || distance > output.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid match distance",
-            ));
+            return Err(io::Error::other("invalid match distance"));
         }
 
         // Match length
@@ -549,10 +535,7 @@ fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
         if (token & 0x0F) == 15 {
             loop {
                 if ip >= compressed.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "truncated match length",
-                    ));
+                    return Err(io::Error::other("truncated match length"));
                 }
                 let b = compressed[ip] as usize;
                 ip += 1;
@@ -572,6 +555,89 @@ fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
     }
 
     Ok(output)
+}
+
+/// LZ4 decompress with a preset dictionary prefix.
+///
+/// The dictionary bytes are placed at the start of the output buffer so that
+/// backward references in the compressed data can reach into the dictionary.
+/// Only the decompressed data (after the dictionary) is returned.
+pub fn decompress_with_prefix(
+    compressed: &[u8],
+    dest_len: usize,
+    prefix: &[u8],
+) -> io::Result<Vec<u8>> {
+    let mut output = Vec::from(prefix);
+    let target_len = prefix.len() + dest_len;
+    let mut ip = 0;
+
+    while ip < compressed.len() && output.len() < target_len {
+        let token = compressed[ip] as usize;
+        ip += 1;
+
+        // Literal length
+        let mut literal_len = token >> 4;
+        if literal_len == 15 {
+            loop {
+                if ip >= compressed.len() {
+                    return Err(io::Error::other("truncated literal length"));
+                }
+                let b = compressed[ip] as usize;
+                ip += 1;
+                literal_len += b;
+                if b < 255 {
+                    break;
+                }
+            }
+        }
+
+        // Copy literals
+        if ip + literal_len > compressed.len() {
+            return Err(io::Error::other("literal bytes out of bounds"));
+        }
+        output.extend_from_slice(&compressed[ip..ip + literal_len]);
+        ip += literal_len;
+
+        if output.len() >= target_len {
+            break;
+        }
+
+        // Match distance (LE u16)
+        if ip + 2 > compressed.len() {
+            return Err(io::Error::other("truncated match distance"));
+        }
+        let distance = compressed[ip] as usize | ((compressed[ip + 1] as usize) << 8);
+        ip += 2;
+
+        if distance == 0 || distance > output.len() {
+            return Err(io::Error::other("invalid match distance"));
+        }
+
+        // Match length
+        let mut match_len = (token & 0x0F) + MIN_MATCH;
+        if (token & 0x0F) == 15 {
+            loop {
+                if ip >= compressed.len() {
+                    return Err(io::Error::other("truncated match length"));
+                }
+                let b = compressed[ip] as usize;
+                ip += 1;
+                match_len += b;
+                if b < 255 {
+                    break;
+                }
+            }
+        }
+
+        // Copy match (may overlap, may reference prefix/dictionary)
+        let match_start = output.len() - distance;
+        for i in 0..match_len {
+            let b = output[match_start + i];
+            output.push(b);
+        }
+    }
+
+    Ok(output[prefix.len()..].to_vec())
 }
 
 #[cfg(test)]
@@ -652,7 +718,7 @@ mod tests {
         let compressed = compress_with_dictionary(&buffer, dict.len());
         // Decompress: need dict bytes in output buffer first, then decompress data
         let output = Vec::from(&dict[..]);
-        let decompressed = decompress_with_prefix(&compressed, data.len(), &output);
+        let decompressed = test_decompress_with_prefix(&compressed, data.len(), &output);
         assert_eq!(&decompressed, data);
     }
 
@@ -701,7 +767,7 @@ mod tests {
         assert_not_empty!(compressed);
 
         // Decompress with dictionary prefix and verify round-trip
-        let decompressed = decompress_with_prefix(&compressed, data.len(), dict);
+        let decompressed = test_decompress_with_prefix(&compressed, data.len(), dict);
         assert_eq!(
             &decompressed,
             data,
@@ -754,64 +820,9 @@ mod tests {
         );
     }
 
-    /// Decompress with a pre-existing prefix (dictionary) in the output buffer.
-    /// The compressed data may reference positions in the prefix.
-    fn decompress_with_prefix(compressed: &[u8], dest_len: usize, prefix: &[u8]) -> Vec<u8> {
-        let mut output = Vec::from(prefix);
-        let target_len = prefix.len() + dest_len;
-        let mut ip = 0;
-
-        while ip < compressed.len() && output.len() < target_len {
-            let token = compressed[ip] as usize;
-            ip += 1;
-
-            // Literal length
-            let mut literal_len = token >> 4;
-            if literal_len == 15 {
-                loop {
-                    let b = compressed[ip] as usize;
-                    ip += 1;
-                    literal_len += b;
-                    if b < 255 {
-                        break;
-                    }
-                }
-            }
-
-            output.extend_from_slice(&compressed[ip..ip + literal_len]);
-            ip += literal_len;
-
-            if output.len() >= target_len {
-                break;
-            }
-
-            // Match distance
-            let distance = compressed[ip] as usize | ((compressed[ip + 1] as usize) << 8);
-            ip += 2;
-
-            // Match length
-            let mut match_len = (token & 0x0F) + MIN_MATCH;
-            if (token & 0x0F) == 15 {
-                loop {
-                    let b = compressed[ip] as usize;
-                    ip += 1;
-                    match_len += b;
-                    if b < 255 {
-                        break;
-                    }
-                }
-            }
-
-            // Copy match (may overlap, may reference prefix/dictionary)
-            let match_start = output.len() - distance;
-            for i in 0..match_len {
-                let b = output[match_start + i];
-                output.push(b);
-            }
-        }
-
-        // Return only the data portion (after the prefix)
-        output[prefix.len()..].to_vec()
+    /// Test helper that unwraps the public decompress_with_prefix.
+    fn test_decompress_with_prefix(compressed: &[u8], dest_len: usize, prefix: &[u8]) -> Vec<u8> {
+        super::decompress_with_prefix(compressed, dest_len, prefix).unwrap()
     }
 
     #[test]

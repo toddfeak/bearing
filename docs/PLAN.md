@@ -47,10 +47,10 @@ Format-specific readers for each codec version. Each reader has its own read-sid
 - Field infos reader (lucene94) — reads `.fnm` files
 - Segments_N reader — reads `segments_N` commit point, returns raw segment entries (name, id, codec name). Does NOT call codec readers — the caller dispatches to the right format readers based on the codec name. This creates the seam for future codec versioning.
 - Compound file reader (lucene90) — `CompoundDirectory` implements `Directory` (read-only) by parsing `.cfe` entry table and slicing `.cfs` data file. Codec readers use it transparently via `dir.open_input()`.
-- `codec_util` read functions — `check_header`, `check_footer` (production); `check_index_header`, `checksum_entire_file` (test-only until codec readers call them)
+- `codec_util` read functions — `check_header`, `check_index_header`, `check_footer` (production); `checksum_entire_file` (test-only)
+- Stored fields reader (lucene90) — reads `.fdt`/`.fdx`/`.fdm` files, decompresses LZ4-with-preset-dict chunks, decodes all stored field value types (string, int, long, float, double, bytes). Uses `DirectReader` + `DirectMonotonicReader` for chunk index lookup.
 
 **Remaining:**
-- Stored fields reader (lucene90)
 - Norms reader (lucene90)
 - Doc values reader (lucene90)
 - Points/BKD reader (lucene90)

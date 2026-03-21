@@ -39,7 +39,7 @@
 extern crate assertables;
 
 pub mod analysis;
-pub(crate) mod codecs;
+pub mod codecs;
 pub mod document;
 pub mod encoding;
 pub mod index;

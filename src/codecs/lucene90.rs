@@ -8,4 +8,5 @@ pub mod indexed_disi;
 pub mod norms;
 pub mod points;
 pub mod stored_fields;
+pub mod stored_fields_reader;
 pub mod term_vectors;

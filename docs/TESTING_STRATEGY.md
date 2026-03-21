@@ -34,9 +34,13 @@ Write data via `DataOutput`/`IndexOutput`, read it back via `DataInput`/`IndexIn
 
 Read `segments_N` to discover segments, then read `.si` and `.fnm` files to verify segment and field metadata. Works with both non-compound and compound indexes. The `segments_N` reader returns raw segment entries — codec dispatch to read `.si`/`.fnm` is the caller's responsibility.
 
-### 4. Codec-level round-trips (future — requires data codec readers)
+### 4. Codec-level round-trips (partially done)
 
-Write a segment with codec writers, read it back with the corresponding codec reader, verify field-level data matches. Each codec reader can be tested independently as it's built. Remaining: stored fields, norms, doc values, points, postings, term vectors.
+Write a segment with codec writers, read it back with the corresponding codec reader, verify field-level data matches. Each codec reader can be tested independently as it's built.
+
+**Done:** Stored fields — write with `IndexWriter`, read back via `StoredFieldsReader`, verify all value types (string, int, long, float, double, bytes) match across single and multi-doc chunks. Tests in `tests/integration_store_input.rs` and unit tests in `stored_fields_reader.rs`.
+
+**Remaining:** norms, doc values, points, postings, term vectors.
 
 ### 5. Index-level round-trips (future — requires IndexReader)
 
