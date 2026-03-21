@@ -160,7 +160,7 @@ impl BlockTreeTermsWriter {
         let mut buf = PostingsBuffer::new();
 
         for &(term_str, term_id) in sorted_terms {
-            postings.decode_into(term_id, &mut buf);
+            postings.decode_into(term_id, &mut buf)?;
 
             // Accumulate unique doc IDs for doc_count
             for &doc_id in &buf.doc_ids {

@@ -9,7 +9,12 @@ use mem_dbg::MemSize;
 use crate::analysis::{Analyzer, TokenRef};
 use crate::document::{DocValuesType, Document, Field, FieldValue, IndexOptions, StoredValue};
 use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
+use crate::store;
 use crate::util::BytesRef;
+use crate::util::byte_block_pool::{
+    ByteBlockPool, ByteSlicePool, ByteSliceReader, ByteSliceWriter, DirectAllocator,
+    FIRST_LEVEL_SIZE,
+};
 
 /// Lightweight summary of a field's metadata, extracted from FieldInfo.
 /// Used to avoid cloning the full FieldInfo (which contains a HashMap) on every field visit.
@@ -32,34 +37,6 @@ impl From<&FieldInfo> for FieldMeta {
             has_point_values: fi.has_point_values(),
         }
     }
-}
-
-/// Writes a variable-length integer (1-5 bytes) into a `Vec<u8>`.
-/// High bit = continuation. Mirrors `DataOutput::write_vint`.
-fn write_vint(buf: &mut Vec<u8>, val: i32) {
-    let mut v = val as u32;
-    while (v & !0x7F) != 0 {
-        buf.push(((v & 0x7F) | 0x80) as u8);
-        v >>= 7;
-    }
-    buf.push(v as u8);
-}
-
-/// Reads a variable-length integer from a byte slice at the given offset.
-/// Advances `offset` past the consumed bytes.
-fn read_vint(data: &[u8], offset: &mut usize) -> i32 {
-    let mut result = 0i32;
-    let mut shift = 0;
-    loop {
-        let b = data[*offset] as i32;
-        *offset += 1;
-        result |= (b & 0x7F) << shift;
-        if b & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    result
 }
 
 /// Start and end offset buffers for offset-indexed fields.
@@ -110,10 +87,15 @@ impl TermMeta {
 /// Instead of one `PostingList` struct (~143 bytes) per term, stores per-term
 /// data in parallel Vecs indexed by term_id. This eliminates struct padding
 /// and per-Vec overhead, reducing per-term cost from ~193 bytes to ~33 bytes.
-#[derive(Clone, Debug, MemSize)]
+#[derive(Debug, MemSize)]
 pub struct PostingsArray {
-    // Per-term encoded data: doc_delta + freq as vInt byte streams
-    pub(crate) byte_streams: Vec<Vec<u8>>,
+    // Per-term encoded data: doc_delta + freq stored in a shared byte pool
+    byte_pool: ByteBlockPool<DirectAllocator>,
+    /// Per-term: global offset where the byte slice starts (for reading).
+    byte_stream_starts: Vec<u32>,
+    /// Per-term: current global write address (for writing and computing end).
+    byte_stream_addrs: Vec<u32>,
+    term_count: usize,
     last_doc_ids: Vec<i32>,
 
     // Current in-progress document state (per-term)
@@ -147,8 +129,13 @@ impl PostingsArray {
         tv_positions: bool,
         tv_offsets: bool,
     ) -> Self {
+        let mut byte_pool = ByteBlockPool::new(DirectAllocator);
+        byte_pool.next_buffer();
         Self {
-            byte_streams: Vec::new(),
+            byte_pool,
+            byte_stream_starts: Vec::new(),
+            byte_stream_addrs: Vec::new(),
+            term_count: 0,
             last_doc_ids: Vec::new(),
             current_doc_ids: Vec::new(),
             current_freqs: Vec::new(),
@@ -174,8 +161,13 @@ impl PostingsArray {
 
     /// Allocates a new slot for a term, returning its term_id.
     pub fn add_term(&mut self) -> usize {
-        let tid = self.byte_streams.len();
-        self.byte_streams.push(Vec::new());
+        let tid = self.term_count;
+        let local_offset = ByteSlicePool::new_slice(&mut self.byte_pool, FIRST_LEVEL_SIZE);
+        let global_offset = local_offset as u32 + self.byte_pool.byte_offset() as u32;
+        self.byte_stream_starts.push(global_offset);
+        let writer = ByteSliceWriter::new(&self.byte_pool, local_offset);
+        self.byte_stream_addrs.push(writer.address() as u32);
+        self.term_count += 1;
         self.last_doc_ids.push(0);
         self.current_doc_ids.push(-1);
         self.current_freqs.push(0);
@@ -223,7 +215,7 @@ impl PostingsArray {
         if self.has_positions {
             let pos_delta = position - self.last_positions[tid];
             let pos_stream = &mut self.position_streams.as_mut().unwrap()[tid];
-            write_vint(pos_stream, pos_delta);
+            store::encode_vint(pos_stream, pos_delta).expect("write to Vec");
             self.last_positions[tid] = position;
 
             if self.has_offsets {
@@ -287,12 +279,14 @@ impl PostingsArray {
 
         // doc_id delta
         let delta = self.current_doc_ids[tid] - self.last_doc_ids[tid];
-        write_vint(&mut self.byte_streams[tid], delta);
+        let mut writer = ByteSliceWriter::from_address(self.byte_stream_addrs[tid] as usize);
+        writer.write_vint(&mut self.byte_pool, delta);
 
         // freq (if field has freqs)
         if self.has_freqs {
-            write_vint(&mut self.byte_streams[tid], self.current_freqs[tid]);
+            writer.write_vint(&mut self.byte_pool, self.current_freqs[tid]);
         }
+        self.byte_stream_addrs[tid] = writer.address() as u32;
 
         self.last_doc_ids[tid] = self.current_doc_ids[tid];
         self.current_doc_ids[tid] = -1;
@@ -308,25 +302,26 @@ impl PostingsArray {
 
     /// Decodes one term's data into a reusable `PostingsBuffer`.
     ///
-    /// Reads doc_delta + freq from `byte_streams` and position/offset deltas
+    /// Reads doc_delta + freq from the byte pool and position/offset deltas
     /// from `position_streams` in parallel.
-    pub fn decode_into(&self, tid: usize, buf: &mut PostingsBuffer) {
+    pub fn decode_into(&self, tid: usize, buf: &mut PostingsBuffer) -> io::Result<()> {
         buf.clear();
-        let data = &self.byte_streams[tid];
-        let mut doc_offset = 0;
+        let start = self.byte_stream_starts[tid] as usize;
+        let end = self.byte_stream_addrs[tid] as usize;
+        let mut reader = ByteSliceReader::new(&self.byte_pool, start, end);
         let mut last_doc_id = 0;
 
-        // Position stream state (only when has_positions)
-        let pos_data = self.position_streams.as_ref().map(|v| v[tid].as_slice());
-        let mut pos_offset = 0;
+        // Position stream: read via &mut &[u8] which implements io::Read
+        let mut pos_reader: Option<&[u8]> =
+            self.position_streams.as_ref().map(|v| v[tid].as_slice());
 
-        while doc_offset < data.len() {
-            let doc_delta = read_vint(data, &mut doc_offset);
+        while !reader.eof() {
+            let doc_delta = store::read_vint(&mut reader)?;
             let doc_id = last_doc_id + doc_delta;
             last_doc_id = doc_id;
 
             let freq = if self.has_freqs {
-                read_vint(data, &mut doc_offset)
+                store::read_vint(&mut reader)?
             } else {
                 1
             };
@@ -334,19 +329,19 @@ impl PostingsArray {
             buf.doc_ids.push(doc_id);
             buf.freqs.push(freq);
 
-            if let Some(positions) = pos_data {
+            if let Some(ref mut pos_r) = pos_reader {
                 let start = buf.positions.len();
                 let mut last_pos = 0;
                 for _ in 0..freq {
-                    let pos_delta = read_vint(positions, &mut pos_offset);
+                    let pos_delta = store::read_vint(pos_r)?;
                     let pos = last_pos + pos_delta;
                     buf.positions.push(pos);
                     last_pos = pos;
 
                     if self.has_offsets {
                         // Consume offset data (not exposed in PostingsBuffer)
-                        read_vint(positions, &mut pos_offset);
-                        read_vint(positions, &mut pos_offset);
+                        store::read_vint(pos_r)?;
+                        store::read_vint(pos_r)?;
                     }
                 }
                 buf.position_starts.push(start);
@@ -356,11 +351,12 @@ impl PostingsArray {
         // Derive doc_freq and total_term_freq from decoded data
         buf.doc_freq = buf.doc_ids.len() as i32;
         buf.total_term_freq = buf.freqs.iter().map(|&f| f as i64).sum();
+        Ok(())
     }
 
     /// Returns the number of terms in this array.
     pub fn len(&self) -> usize {
-        self.byte_streams.len()
+        self.term_count
     }
 }
 
@@ -437,7 +433,7 @@ impl PostingsBuffer {
 /// compact struct-of-arrays `PostingsArray` indexed by term id. During
 /// HashMap rehash only the lightweight `(String, TermMeta)` entries are
 /// copied (~29 bytes each).
-#[derive(Clone, Debug, MemSize)]
+#[derive(Debug, MemSize)]
 pub struct PerFieldData {
     /// Term string -> packed metadata (includes term_id index into `postings`).
     term_ids: HashMap<String, TermMeta>,
@@ -775,7 +771,9 @@ impl IndexingChain {
         for pfd in self.per_field.values() {
             term_ids_bytes += pfd.term_ids.mem_size(flags);
             postings_bytes += pfd.postings.mem_size(flags);
-            byte_streams_bytes += pfd.postings.byte_streams.mem_size(flags);
+            byte_streams_bytes += pfd.postings.byte_pool.mem_size(flags)
+                + pfd.postings.byte_stream_starts.mem_size(flags)
+                + pfd.postings.byte_stream_addrs.mem_size(flags);
             position_streams_bytes += pfd.postings.position_streams.mem_size(flags);
             dv_bytes += pfd.doc_values.mem_size(flags);
             norms_bytes += pfd.norms.mem_size(flags) + pfd.norms_docs.mem_size(flags);
@@ -1263,7 +1261,7 @@ mod tests {
             .term_id(term)
             .unwrap_or_else(|| panic!("term not found: {term}"));
         let mut buf = PostingsBuffer::new();
-        pfd.postings.decode_into(tid, &mut buf);
+        pfd.postings.decode_into(tid, &mut buf).unwrap();
         buf
     }
 
@@ -1782,36 +1780,6 @@ mod tests {
     }
 
     #[test]
-    fn test_vint_encode_decode_roundtrip() {
-        let test_values = [0, 1, 127, 128, 255, 256, 16383, 16384, 0x7FFF_FFFF, -1];
-        for &val in &test_values {
-            let mut buf = Vec::new();
-            write_vint(&mut buf, val);
-            let mut offset = 0;
-            let decoded = read_vint(&buf, &mut offset);
-            assert_eq!(decoded, val, "round-trip failed for {val}");
-            assert_eq!(offset, buf.len(), "not all bytes consumed for {val}");
-        }
-    }
-
-    #[test]
-    fn test_vint_encoding_sizes() {
-        // 0..127 should encode as 1 byte
-        let mut buf = Vec::new();
-        write_vint(&mut buf, 0);
-        assert_eq!(buf.len(), 1);
-
-        buf.clear();
-        write_vint(&mut buf, 127);
-        assert_eq!(buf.len(), 1);
-
-        // 128 should encode as 2 bytes
-        buf.clear();
-        write_vint(&mut buf, 128);
-        assert_eq!(buf.len(), 2);
-    }
-
-    #[test]
     fn test_postings_array_byte_stream_compact() {
         let mut pa = PostingsArray::new(true, true, false, false, false);
         let tid = pa.add_term();
@@ -1822,17 +1790,19 @@ mod tests {
         pa.finalize_current_doc(tid);
 
         let mut buf = PostingsBuffer::new();
-        pa.decode_into(tid, &mut buf);
+        pa.decode_into(tid, &mut buf).unwrap();
         assert_len_eq_x!(&buf.doc_ids, 10);
         for (i, &doc_id) in buf.doc_ids.iter().enumerate() {
             assert_eq!(doc_id, i as i32);
             assert_eq!(buf.freqs[i], 2);
         }
 
-        // byte_streams now only has doc_delta + freq (~20 bytes for 10 docs)
+        // Byte pool has doc_delta + freq (~20 bytes for 10 docs)
         // position_streams has position deltas (~20 bytes for 10 docs × 2 positions)
-        let total_bytes =
-            pa.byte_streams[tid].len() + pa.position_streams.as_ref().unwrap()[tid].len();
+        // Verify the byte pool data is compact by checking writer advancement
+        let byte_len = pa.byte_stream_addrs[tid] as usize - pa.byte_stream_starts[tid] as usize;
+        let pos_len = pa.position_streams.as_ref().unwrap()[tid].len();
+        let total_bytes = byte_len + pos_len;
         assert!(
             total_bytes < 100,
             "combined streams should be compact, got {total_bytes} bytes",
@@ -1982,8 +1952,14 @@ mod tests {
             let tid_reader = pf_reader.term_id(term).unwrap_or_else(|| {
                 panic!("reader chain missing term: {term}");
             });
-            pf_text.postings.decode_into(tid_text, &mut buf_text);
-            pf_reader.postings.decode_into(tid_reader, &mut buf_reader);
+            pf_text
+                .postings
+                .decode_into(tid_text, &mut buf_text)
+                .unwrap();
+            pf_reader
+                .postings
+                .decode_into(tid_reader, &mut buf_reader)
+                .unwrap();
             assert_len_eq!(
                 &buf_text.doc_ids,
                 &buf_reader.doc_ids,
@@ -2041,8 +2017,14 @@ mod tests {
             let tid_reader = pf_reader.term_id(term).unwrap_or_else(|| {
                 panic!("reader chain missing term: {term}");
             });
-            pf_text.postings.decode_into(tid_text, &mut buf_text);
-            pf_reader.postings.decode_into(tid_reader, &mut buf_reader);
+            pf_text
+                .postings
+                .decode_into(tid_text, &mut buf_text)
+                .unwrap();
+            pf_reader
+                .postings
+                .decode_into(tid_reader, &mut buf_reader)
+                .unwrap();
             assert_len_eq!(
                 &buf_text.doc_ids,
                 &buf_reader.doc_ids,

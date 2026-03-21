@@ -217,6 +217,37 @@ impl DataOutput for VecOutput<'_> {
     }
 }
 
+/// Reads a variable-length integer (1-5 bytes) from any `io::Read` source.
+///
+/// High bit = continuation. Mirrors `DataInput::readVInt` in Lucene.
+pub fn read_vint(reader: &mut impl io::Read) -> io::Result<i32> {
+    let mut buf = [0u8; 1];
+    let mut result = 0i32;
+    let mut shift = 0;
+    loop {
+        reader.read_exact(&mut buf)?;
+        let b = buf[0] as i32;
+        result |= (b & 0x7F) << shift;
+        if b & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    Ok(result)
+}
+
+/// Writes a variable-length integer (1-5 bytes) to any `io::Write` sink.
+///
+/// High bit = continuation. Mirrors `DataInput::writeVInt` in Lucene.
+pub fn encode_vint(writer: &mut impl io::Write, val: i32) -> io::Result<()> {
+    let mut v = val as u32;
+    while (v & !0x7F) != 0 {
+        writer.write_all(&[((v & 0x7F) | 0x80) as u8])?;
+        v >>= 7;
+    }
+    writer.write_all(&[v as u8])
+}
+
 /// Trait for index file output with checksum and position tracking.
 pub trait IndexOutput: DataOutput + Send {
     /// Returns the name of this output (the file name).
@@ -525,6 +556,36 @@ mod tests {
         assert_eq!(buf[0], 0x01); // count = 1
         // The rest: string("key") = [3, k, e, y] + string("val") = [3, v, a, l]
         assert_eq!(&buf[1..], &[0x03, b'k', b'e', b'y', 0x03, b'v', b'a', b'l']);
+    }
+
+    #[test]
+    fn test_encode_read_vint_roundtrip() {
+        let test_values = [0, 1, 127, 128, 255, 256, 16383, 16384, 0x7FFF_FFFF, -1];
+        for &val in &test_values {
+            let mut buf = Vec::new();
+            encode_vint(&mut buf, val).unwrap();
+            let mut cursor = &buf[..];
+            let decoded = read_vint(&mut cursor).unwrap();
+            assert_eq!(decoded, val, "round-trip failed for {val}");
+            assert!(cursor.is_empty(), "not all bytes consumed for {val}");
+        }
+    }
+
+    #[test]
+    fn test_encode_vint_sizes() {
+        // 0..127 should encode as 1 byte
+        let mut buf = Vec::new();
+        encode_vint(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 1);
+
+        buf.clear();
+        encode_vint(&mut buf, 127).unwrap();
+        assert_eq!(buf.len(), 1);
+
+        // 128 should encode as 2 bytes
+        buf.clear();
+        encode_vint(&mut buf, 128).unwrap();
+        assert_eq!(buf.len(), 2);
     }
 
     #[test]

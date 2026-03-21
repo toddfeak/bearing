@@ -14,13 +14,13 @@ use std::rc::Rc;
 use mem_dbg::MemSize;
 
 /// Shift to convert a global byte offset to a buffer index.
-pub const BYTE_BLOCK_SHIFT: usize = 15;
+const BYTE_BLOCK_SHIFT: usize = 15;
 
 /// Size of each buffer in the pool (32 KB).
-pub const BYTE_BLOCK_SIZE: usize = 1 << BYTE_BLOCK_SHIFT;
+const BYTE_BLOCK_SIZE: usize = 1 << BYTE_BLOCK_SHIFT;
 
 /// Mask to extract position within a buffer from a global offset.
-pub const BYTE_BLOCK_MASK: usize = BYTE_BLOCK_SIZE - 1;
+const BYTE_BLOCK_MASK: usize = BYTE_BLOCK_SIZE - 1;
 
 // ---------------------------------------------------------------------------
 // Allocator trait + implementations
@@ -74,7 +74,7 @@ impl Allocator for DirectTrackingAllocator {
 }
 
 /// Default maximum number of buffered (recycled) blocks.
-pub const DEFAULT_BUFFERED_BLOCKS: usize = 64;
+const DEFAULT_BUFFERED_BLOCKS: usize = 64;
 
 /// Allocator that recycles unused byte blocks in a free list for reuse.
 ///
@@ -159,7 +159,7 @@ impl Allocator for RecyclingByteBlockAllocator {
 /// Bytes are written sequentially via [`append`](Self::append) and can be read
 /// back with [`read_byte`](Self::read_byte) or [`read_bytes`](Self::read_bytes).
 /// The pool grows by allocating new buffers from the [`Allocator`].
-#[derive(Debug)]
+#[derive(Debug, MemSize)]
 pub struct ByteBlockPool<A: Allocator> {
     /// Allocated buffers.
     buffers: Vec<Vec<u8>>,
@@ -294,6 +294,16 @@ impl<A: Allocator> ByteBlockPool<A> {
     pub fn get_buffer(&self, index: usize) -> &[u8] {
         &self.buffers[index]
     }
+
+    /// Global byte offset of the start of the current head buffer.
+    pub fn byte_offset(&self) -> i32 {
+        self.byte_offset
+    }
+
+    /// Number of allocated buffers in the pool.
+    pub fn num_buffers(&self) -> usize {
+        self.buffers.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,10 +311,10 @@ impl<A: Allocator> ByteBlockPool<A> {
 // ---------------------------------------------------------------------------
 
 /// Sizes for each slice growth level.
-pub const LEVEL_SIZE_ARRAY: [usize; 10] = [5, 14, 20, 30, 40, 40, 80, 80, 120, 200];
+const LEVEL_SIZE_ARRAY: [usize; 10] = [5, 14, 20, 30, 40, 40, 80, 80, 120, 200];
 
 /// Next level index for each level (last level stays at max).
-pub const NEXT_LEVEL_ARRAY: [usize; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 9];
+const NEXT_LEVEL_ARRAY: [usize; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 9];
 
 /// Size of the first slice level.
 pub const FIRST_LEVEL_SIZE: usize = LEVEL_SIZE_ARRAY[0];
@@ -402,6 +412,8 @@ impl ByteSlicePool {
 /// Tracks the current write position and automatically grows the slice when the
 /// end-of-slice marker is hit. Provides `write_byte`, `write_bytes`, and
 /// `write_vint` methods.
+#[derive(Debug, MemSize)]
+#[mem_size_flat]
 pub struct ByteSliceWriter {
     /// Index into `ByteBlockPool.buffers` for the current write position.
     buffer_index: usize,
@@ -410,13 +422,22 @@ pub struct ByteSliceWriter {
 }
 
 impl ByteSliceWriter {
-    /// Create a new writer starting at the given global offset (as returned by
-    /// [`ByteSlicePool::new_slice`]).
+    /// Create a new writer starting at the given buffer-local offset (as returned
+    /// by [`ByteSlicePool::new_slice`]). Converts to global using the pool's
+    /// current byte offset.
     pub fn new<A: Allocator>(pool: &ByteBlockPool<A>, start_offset: usize) -> Self {
-        let global = start_offset + pool.byte_offset as usize;
+        let global = start_offset + pool.byte_offset() as usize;
         Self {
             buffer_index: global >> BYTE_BLOCK_SHIFT,
             upto: global & BYTE_BLOCK_MASK,
+        }
+    }
+
+    /// Create a writer positioned at the given global address.
+    pub fn from_address(addr: usize) -> Self {
+        Self {
+            buffer_index: addr >> BYTE_BLOCK_SHIFT,
+            upto: addr & BYTE_BLOCK_MASK,
         }
     }
 
@@ -628,6 +649,22 @@ impl<'a, A: Allocator> ByteSliceReader<'a, A> {
             // Not final — reserve 4 bytes for forwarding address
             self.limit = self.upto + new_size - 4;
         }
+    }
+}
+
+impl<A: Allocator> io::Read for ByteSliceReader<'_, A> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.eof() {
+            return Ok(0);
+        }
+        let len = buf
+            .len()
+            .min(self.end_index - (self.upto + self.buffer_offset));
+        if len == 0 {
+            return Ok(0);
+        }
+        self.read_bytes(&mut buf[..len]);
+        Ok(len)
     }
 }
 
