@@ -29,6 +29,7 @@
 //!
 //! - [`analysis`] — Text analysis pipeline (tokenizers, filters, analyzers).
 //! - [`document`] — Document model and field factory functions.
+//! - [`encoding`] — Data encoding/decoding algorithms (varint, zigzag, packed ints, compression).
 //! - [`index`] — Index writer, configuration, and segment metadata types.
 //! - [`store`] — Storage abstraction (in-memory and filesystem directories).
 //! - [`util`] — Utility types such as [`util::BytesRef`].
@@ -40,6 +41,7 @@ extern crate assertables;
 pub mod analysis;
 pub(crate) mod codecs;
 pub mod document;
+pub mod encoding;
 pub mod index;
 pub mod store;
 #[cfg(test)]

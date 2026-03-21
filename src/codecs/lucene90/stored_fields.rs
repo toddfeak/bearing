@@ -7,10 +7,10 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::document::StoredValue;
+use crate::encoding::zigzag;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::StoredDoc;
 use crate::store::{DataOutput, SharedDirectory, VecOutput};
-use crate::util::bit_util;
 use crate::util::compress::lz4;
 use crate::util::packed::DirectMonotonicWriter;
 
@@ -447,7 +447,7 @@ fn write_tlong(out: &mut dyn DataOutput, l: i64) -> io::Result<()> {
         val /= SECOND;
     }
 
-    let zig_zag = bit_util::zig_zag_encode_i64(val);
+    let zig_zag = zigzag::encode_i64(val);
     let mut header = header_base | ((zig_zag as u8) & 0x1F);
     let upper_bits = ((zig_zag as u64) >> 5) as i64;
 

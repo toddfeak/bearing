@@ -8,10 +8,10 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::{CompetitiveImpactAccumulator, Impact, NormsLookup};
 use crate::document::IndexOptions;
+use crate::encoding::zigzag;
 use crate::index::FieldInfo;
 use crate::index::index_file_names::segment_file_name;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
-use crate::util::bit_util;
 
 use super::for_util::{self, BLOCK_SIZE};
 use super::postings_format::{
@@ -550,7 +550,7 @@ impl PostingsWriter {
         {
             // Both singletons at same file position: encode docID delta
             let delta = state.singleton_doc_id as i64 - last_state.singleton_doc_id as i64;
-            let encoded = bit_util::zig_zag_encode_i64(delta);
+            let encoded = zigzag::encode_i64(delta);
             buf.write_vlong((encoded << 1) | 0x01)?;
         } else {
             // Normal: encode file pointer delta

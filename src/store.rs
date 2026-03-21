@@ -55,44 +55,27 @@ pub trait DataOutput {
 
     /// Writes a variable-length integer (1-5 bytes). High bit = continuation.
     fn write_vint(&mut self, i: i32) -> io::Result<()> {
-        // Treat as unsigned for shifting
-        let mut val = i as u32;
-        while (val & !0x7F) != 0 {
-            self.write_byte(((val & 0x7F) | 0x80) as u8)?;
-            val >>= 7;
-        }
-        self.write_byte(val as u8)
+        crate::encoding::varint::write_vint(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a variable-length long (1-9 bytes). High bit = continuation.
     fn write_vlong(&mut self, i: i64) -> io::Result<()> {
-        let mut val = i as u64;
-        while (val & !0x7F) != 0 {
-            self.write_byte(((val & 0x7F) | 0x80) as u8)?;
-            val >>= 7;
-        }
-        self.write_byte(val as u8)
+        crate::encoding::varint::write_vlong(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a zigzag-encoded variable-length int.
     fn write_zint(&mut self, i: i32) -> io::Result<()> {
-        self.write_vint(crate::util::bit_util::zig_zag_encode_i32(i))
+        crate::encoding::varint::write_zint(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a zigzag-encoded variable-length long.
     fn write_zlong(&mut self, i: i64) -> io::Result<()> {
-        // Use signed vlong for zigzag (allows full i64 range)
-        let encoded = crate::util::bit_util::zig_zag_encode_i64(i);
-        self.write_signed_vlong(encoded)
+        crate::encoding::varint::write_zlong(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a variable-length long that may be negative (used by writeZLong).
-    fn write_signed_vlong(&mut self, mut i: i64) -> io::Result<()> {
-        while (i & !0x7Fi64) != 0 {
-            self.write_byte(((i & 0x7F) | 0x80) as u8)?;
-            i = ((i as u64) >> 7) as i64;
-        }
-        self.write_byte(i as u8)
+    fn write_signed_vlong(&mut self, i: i64) -> io::Result<()> {
+        crate::encoding::varint::write_signed_vlong(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a 32-bit integer in **big-endian** byte order.
@@ -199,6 +182,23 @@ fn num_bytes_for_group_vint(v: i32) -> u32 {
     4 - ((v as u32 | 1).leading_zeros() >> 3)
 }
 
+/// Adapter that wraps a [`DataOutput`] reference as an [`io::Write`].
+///
+/// This allows encoding functions (which accept `&mut impl io::Write`) to work
+/// with any [`DataOutput`] or [`IndexOutput`].
+pub struct DataOutputWriter<'a, T: ?Sized>(pub &'a mut T);
+
+impl<T: DataOutput + ?Sized> io::Write for DataOutputWriter<'_, T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write_bytes(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A [`DataOutput`] adapter for writing directly into a `Vec<u8>`.
 ///
 /// Use this instead of defining ad-hoc wrapper structs in individual codec modules.
@@ -219,33 +219,16 @@ impl DataOutput for VecOutput<'_> {
 
 /// Reads a variable-length integer (1-5 bytes) from any `io::Read` source.
 ///
-/// High bit = continuation. Mirrors `DataInput::readVInt` in Lucene.
+/// High bit = continuation.
 pub fn read_vint(reader: &mut impl io::Read) -> io::Result<i32> {
-    let mut buf = [0u8; 1];
-    let mut result = 0i32;
-    let mut shift = 0;
-    loop {
-        reader.read_exact(&mut buf)?;
-        let b = buf[0] as i32;
-        result |= (b & 0x7F) << shift;
-        if b & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    Ok(result)
+    crate::encoding::varint::read_vint(reader)
 }
 
 /// Writes a variable-length integer (1-5 bytes) to any `io::Write` sink.
 ///
-/// High bit = continuation. Mirrors `DataInput::writeVInt` in Lucene.
+/// High bit = continuation.
 pub fn encode_vint(writer: &mut impl io::Write, val: i32) -> io::Result<()> {
-    let mut v = val as u32;
-    while (v & !0x7F) != 0 {
-        writer.write_all(&[((v & 0x7F) | 0x80) as u8])?;
-        v >>= 7;
-    }
-    writer.write_all(&[v as u8])
+    crate::encoding::varint::write_vint(writer, val)
 }
 
 /// Trait for index file output with checksum and position tracking.
@@ -364,40 +347,6 @@ mod tests {
     }
 
     #[test]
-    fn test_write_vint() {
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_vint(0).unwrap();
-        assert_eq!(buf, [0x00]);
-
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_vint(127).unwrap();
-        assert_eq!(buf, [0x7F]);
-
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_vint(128).unwrap();
-        assert_eq!(buf, [0x80, 0x01]);
-
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_vint(16383).unwrap();
-        assert_eq!(buf, [0xFF, 0x7F]);
-
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_vint(16384).unwrap();
-        assert_eq!(buf, [0x80, 0x80, 0x01]);
-    }
-
-    #[test]
-    fn test_write_vlong() {
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_vlong(0).unwrap();
-        assert_eq!(buf, [0x00]);
-
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_vlong(128).unwrap();
-        assert_eq!(buf, [0x80, 0x01]);
-    }
-
-    #[test]
     fn test_write_string() {
         let mut buf = Vec::new();
         VecOutput(&mut buf).write_string("hello").unwrap();
@@ -451,74 +400,6 @@ mod tests {
         assert_eq!(align_offset(9, 8), 16);
     }
 
-    // Ported from org.apache.lucene.store.BaseDataOutputTestCase
-
-    #[test]
-    fn test_write_zint() {
-        // zigzag(0) = 0 → vint(0)
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zint(0).unwrap();
-        assert_eq!(buf, [0x00]);
-
-        // zigzag(-1) = 1 → vint(1)
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zint(-1).unwrap();
-        assert_eq!(buf, [0x01]);
-
-        // zigzag(1) = 2 → vint(2)
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zint(1).unwrap();
-        assert_eq!(buf, [0x02]);
-
-        // zigzag(i32::MIN) = u32::MAX → vint(0xFFFFFFFF)
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zint(i32::MIN).unwrap();
-        assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
-
-        // zigzag(i32::MAX) = u32::MAX - 1 → vint(0xFFFFFFFE)
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zint(i32::MAX).unwrap();
-        assert_eq!(buf, [0xFE, 0xFF, 0xFF, 0xFF, 0x0F]);
-    }
-
-    #[test]
-    fn test_write_zlong() {
-        // zigzag(0) = 0
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zlong(0).unwrap();
-        assert_eq!(buf, [0x00]);
-
-        // zigzag(-1) = 1
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zlong(-1).unwrap();
-        assert_eq!(buf, [0x01]);
-
-        // zigzag(1) = 2
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zlong(1).unwrap();
-        assert_eq!(buf, [0x02]);
-
-        // zigzag(i64::MIN) = -1 as i64 (all bits set) → 10 bytes
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zlong(i64::MIN).unwrap();
-        assert_eq!(buf.len(), 10);
-        // All continuation bytes are 0xFF, final byte is 0x01
-        for &b in &buf[..9] {
-            assert_eq!(b, 0xFF);
-        }
-        assert_eq!(buf[9], 0x01);
-
-        // zigzag(i64::MAX) = i64::MAX << 1 = 0xFFFFFFFFFFFFFFFE → 10 bytes
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_zlong(i64::MAX).unwrap();
-        assert_eq!(buf.len(), 10);
-        assert_eq!(buf[0], 0xFE);
-        for &b in &buf[1..9] {
-            assert_eq!(b, 0xFF);
-        }
-        assert_eq!(buf[9], 0x01);
-    }
-
     #[test]
     fn test_write_set_of_strings_empty() {
         let mut buf = Vec::new();
@@ -556,36 +437,6 @@ mod tests {
         assert_eq!(buf[0], 0x01); // count = 1
         // The rest: string("key") = [3, k, e, y] + string("val") = [3, v, a, l]
         assert_eq!(&buf[1..], &[0x03, b'k', b'e', b'y', 0x03, b'v', b'a', b'l']);
-    }
-
-    #[test]
-    fn test_encode_read_vint_roundtrip() {
-        let test_values = [0, 1, 127, 128, 255, 256, 16383, 16384, 0x7FFF_FFFF, -1];
-        for &val in &test_values {
-            let mut buf = Vec::new();
-            encode_vint(&mut buf, val).unwrap();
-            let mut cursor = &buf[..];
-            let decoded = read_vint(&mut cursor).unwrap();
-            assert_eq!(decoded, val, "round-trip failed for {val}");
-            assert!(cursor.is_empty(), "not all bytes consumed for {val}");
-        }
-    }
-
-    #[test]
-    fn test_encode_vint_sizes() {
-        // 0..127 should encode as 1 byte
-        let mut buf = Vec::new();
-        encode_vint(&mut buf, 0).unwrap();
-        assert_eq!(buf.len(), 1);
-
-        buf.clear();
-        encode_vint(&mut buf, 127).unwrap();
-        assert_eq!(buf.len(), 1);
-
-        // 128 should encode as 2 bytes
-        buf.clear();
-        encode_vint(&mut buf, 128).unwrap();
-        assert_eq!(buf.len(), 2);
     }
 
     #[test]
