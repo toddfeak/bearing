@@ -3,8 +3,8 @@
 
 use std::io;
 
+use crate::encoding::packed::bits_required;
 use crate::store::DataOutput;
-use crate::util::packed::bits_required;
 
 pub const BLOCK_SIZE: usize = 128;
 

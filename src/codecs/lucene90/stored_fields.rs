@@ -6,13 +6,13 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::packed_writers::DirectMonotonicWriter;
 use crate::document::StoredValue;
 use crate::encoding::lz4;
 use crate::encoding::zigzag;
 use crate::index::index_file_names;
 use crate::index::indexing_chain::StoredDoc;
 use crate::store::{DataOutput, SharedDirectory, VecOutput};
-use crate::util::packed::DirectMonotonicWriter;
 
 // File extensions
 const FIELDS_EXTENSION: &str = "fdt";

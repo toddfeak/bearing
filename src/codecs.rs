@@ -7,3 +7,4 @@ pub mod lucene103;
 pub mod lucene90;
 pub mod lucene94;
 pub mod lucene99;
+pub(crate) mod packed_writers;

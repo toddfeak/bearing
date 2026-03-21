@@ -5,7 +5,6 @@
 use mem_dbg::MemSize;
 
 pub mod byte_block_pool;
-pub(crate) mod packed;
 pub(crate) mod string_helper;
 
 /// A reference to a range of bytes, analogous to Java's BytesRef.

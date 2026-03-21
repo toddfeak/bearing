@@ -9,14 +9,12 @@ use mem_dbg::MemSize;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::packed_writers::{BlockPackedWriter, DirectMonotonicWriter, DirectWriter};
 use crate::encoding::lz4;
+use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_bits_required};
 use crate::index::index_file_names;
 use crate::index::indexing_chain::TermVectorDoc;
-use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
-use crate::util::packed::{
-    BlockPackedWriter, DirectMonotonicWriter, DirectWriter, packed_bits_required,
-    packed_ints_write, unsigned_bits_required,
-};
+use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 
 // File extensions
 const VECTORS_EXTENSION: &str = "tvd";
@@ -369,7 +367,7 @@ fn flush_field_nums(docs: &[TermVectorDoc], output: &mut dyn DataOutput) -> io::
     }
 
     let values: Vec<i64> = field_nums.iter().map(|&n| n as i64).collect();
-    packed_ints_write(output, &values, bits_required)?;
+    packed_ints_write(&mut DataOutputWriter(output), &values, bits_required)?;
 
     Ok(field_nums)
 }

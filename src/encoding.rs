@@ -13,6 +13,7 @@ pub mod geo;
 pub mod group_vint;
 pub mod lowercase_ascii;
 pub mod lz4;
+pub mod packed;
 pub mod range;
 pub mod sortable_bytes;
 pub mod string;
