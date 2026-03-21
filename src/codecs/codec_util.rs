@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Utilities for writing codec headers and footers with CRC32 integrity checks.
+//! Utilities for reading and writing codec headers and footers with CRC32 integrity checks.
 
 use std::io;
 
 use log::debug;
 
-use crate::store::{DataOutput, IndexOutput};
-
-#[cfg(test)]
 use crate::store::checksum_input::ChecksumIndexInput;
-#[cfg(test)]
-use crate::store::{DataInput, IndexInput};
+use crate::store::{DataInput, DataOutput, IndexInput, IndexOutput};
 
 /// Magic number written at the start of every codec header (big-endian).
 pub const CODEC_MAGIC: i32 = 0x3fd76c17_u32 as i32;
@@ -115,7 +111,6 @@ fn vint_size(mut val: u32) -> usize {
 ///   - The magic number matches [`CODEC_MAGIC`]
 ///   - The codec name matches `codec`
 ///   - The version is in `[min_version, max_version]`
-#[cfg(test)]
 pub fn check_header(
     input: &mut dyn DataInput,
     codec: &str,
@@ -147,7 +142,6 @@ pub fn check_header(
 }
 
 /// Reads and validates an index header (header + segment ID + suffix), returning the version.
-#[cfg(test)]
 pub fn check_index_header(
     input: &mut dyn DataInput,
     codec: &str,
@@ -184,7 +178,6 @@ pub fn check_index_header(
 ///
 /// The input must be a [`ChecksumIndexInput`] positioned just before the footer.
 /// The footer is 16 bytes: magic (BE int) + algorithm ID (BE int) + CRC32 (BE long).
-#[cfg(test)]
 pub fn check_footer(input: &mut ChecksumIndexInput) -> io::Result<()> {
     let remaining = input.length() - input.file_pointer();
     if remaining != FOOTER_LENGTH as u64 {

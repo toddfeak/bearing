@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Segment infos writer for the segments_N commit point file.
+//! Segment infos reader and writer for the segments_N commit point file.
 
 use std::collections::HashMap;
 use std::io;
@@ -7,10 +7,13 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::lucene94::field_infos_format;
+use crate::codecs::lucene99::segment_info_format;
 use crate::index::SegmentCommitInfo;
 use crate::index::index_file_names;
+use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, SegmentFile};
+use crate::store::{DataInput, DataOutput, Directory, SegmentFile};
 use crate::util::string_helper;
 
 /// Codec name for the segments_N file header.
@@ -146,6 +149,173 @@ pub fn write(
     codec_util::write_footer(&mut out)?;
 
     Ok(out.into_inner())
+}
+
+/// Result of reading a `segments_N` file.
+pub struct SegmentInfosRead {
+    /// The segment commit infos in this commit.
+    pub segments: Vec<SegmentCommitInfo>,
+    /// The commit generation (from the filename suffix).
+    pub generation: i64,
+    /// The segment infos version (monotonically increasing).
+    pub version: i64,
+    /// The segment name counter.
+    pub counter: i64,
+    /// User data written with this commit.
+    pub user_data: HashMap<String, String>,
+}
+
+/// Reads a `segments_N` file from `directory`.
+///
+/// The `segment_file_name` should be the full filename (e.g., `"segments_1"`).
+/// Returns the parsed segment infos including all segment metadata.
+pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<SegmentInfosRead> {
+    // Parse generation from filename
+    let gen_suffix = segment_file_name.strip_prefix("segments_").ok_or_else(|| {
+        io::Error::other(format!("invalid segments filename: {segment_file_name}"))
+    })?;
+    let generation = i64::from_str_radix(gen_suffix, 36)
+        .map_err(|e| io::Error::other(format!("invalid generation in {segment_file_name}: {e}")))?;
+
+    let input = directory.open_input(segment_file_name)?;
+    let mut input = ChecksumIndexInput::new(input);
+
+    // The segments_N file has a random ID we don't know ahead of time,
+    // so use check_header (not check_index_header) then read the ID and suffix manually.
+    codec_util::check_header(&mut input, CODEC_NAME, VERSION_CURRENT, VERSION_CURRENT)?;
+
+    // Read segment infos ID (16 bytes) — we discover it here
+    let mut _id = [0u8; codec_util::ID_LENGTH];
+    input.read_bytes(&mut _id)?;
+
+    // Read and validate suffix (should match generation in base-36)
+    let suffix_len = input.read_byte()? as usize;
+    let mut suffix_bytes = vec![0u8; suffix_len];
+    input.read_bytes(&mut suffix_bytes)?;
+    let suffix = String::from_utf8(suffix_bytes).map_err(|e| io::Error::other(e.to_string()))?;
+    if suffix != gen_suffix {
+        return Err(io::Error::other(format!(
+            "segments suffix mismatch: expected {gen_suffix:?}, got {suffix:?}"
+        )));
+    }
+
+    // Lucene version (VInts)
+    let _major = input.read_vint()?;
+    let _minor = input.read_vint()?;
+    let _bugfix = input.read_vint()?;
+
+    // Index created version major
+    let _index_created_version = input.read_vint()?;
+
+    // Segment infos version (BE long)
+    let version = input.read_be_long()?;
+
+    // Counter (VLong)
+    let counter = input.read_vlong()?;
+
+    // Number of segments (BE int)
+    let num_segments = input.read_be_int()?;
+    if num_segments < 0 {
+        return Err(io::Error::other(format!(
+            "invalid segment count: {num_segments}"
+        )));
+    }
+
+    // Min segment version (only present if segments > 0)
+    if num_segments > 0 {
+        let _min_major = input.read_vint()?;
+        let _min_minor = input.read_vint()?;
+        let _min_bugfix = input.read_vint()?;
+    }
+
+    // Per-segment entries
+    let mut segments = Vec::with_capacity(num_segments as usize);
+    for _ in 0..num_segments {
+        // Segment name
+        let seg_name = input.read_string()?;
+
+        // Segment ID (16 bytes)
+        let mut seg_id = [0u8; codec_util::ID_LENGTH];
+        input.read_bytes(&mut seg_id)?;
+
+        // Codec name (read and validate)
+        let codec_name = input.read_string()?;
+        if codec_name != SEGMENT_CODEC_NAME {
+            return Err(io::Error::other(format!(
+                "unsupported codec: {codec_name:?}, expected {SEGMENT_CODEC_NAME:?}"
+            )));
+        }
+
+        // Read segment info (.si file) and field infos (.fnm file)
+        let si = segment_info_format::read(directory, &seg_name, &seg_id)?;
+        let fis = field_infos_format::read(directory, &si, "")?;
+
+        // Del gen (BE long)
+        let del_gen = input.read_be_long()?;
+
+        // Del count (BE int)
+        let del_count = input.read_be_int()?;
+
+        // Field infos gen (BE long)
+        let field_infos_gen = input.read_be_long()?;
+
+        // Doc values gen (BE long)
+        let doc_values_gen = input.read_be_long()?;
+
+        // Soft del count (BE int)
+        let soft_del_count = input.read_be_int()?;
+
+        // SCI ID
+        let sci_id = match input.read_byte()? {
+            1 => {
+                let mut id = [0u8; codec_util::ID_LENGTH];
+                input.read_bytes(&mut id)?;
+                Some(id)
+            }
+            0 => None,
+            marker => {
+                return Err(io::Error::other(format!("invalid SCI ID marker: {marker}")));
+            }
+        };
+
+        // Field infos files (set of strings — skip for now)
+        let _field_infos_files = input.read_set_of_strings()?;
+
+        // Doc values updates files (BE int count, then per-field sets — skip for now)
+        let num_dv_fields = input.read_be_int()?;
+        for _ in 0..num_dv_fields {
+            let _field_number = input.read_be_int()?;
+            let _files = input.read_set_of_strings()?;
+        }
+
+        let mut sci = SegmentCommitInfo::new(si, fis, sci_id);
+        sci.del_gen = del_gen;
+        sci.del_count = del_count;
+        sci.field_infos_gen = field_infos_gen;
+        sci.doc_values_gen = doc_values_gen;
+        sci.soft_del_count = soft_del_count;
+
+        segments.push(sci);
+    }
+
+    // User data
+    let user_data = input.read_map_of_strings()?;
+
+    // Footer
+    codec_util::check_footer(&mut input)?;
+
+    debug!(
+        "segment_infos: read {segment_file_name}, version={version}, \
+         counter={counter}, num_segments={num_segments}"
+    );
+
+    Ok(SegmentInfosRead {
+        segments,
+        generation,
+        version,
+        counter,
+        user_data,
+    })
 }
 
 #[cfg(test)]
@@ -359,6 +529,66 @@ mod tests {
         // docValuesUpdatesFiles (empty)
         assert_eq!(r.read_be_int(), 0);
     }
+
+    // --- Read round-trip tests ---
+
+    #[test]
+    fn test_read_roundtrip_empty() {
+        let user_data = HashMap::new();
+        let file = write(&[], 1, 1, 0, &user_data).unwrap();
+
+        // Put the segments_N file into a directory
+        let mut dir = crate::store::MemoryDirectory::new();
+        dir.write_file(&file.name, &file.data).unwrap();
+
+        let result = read(&dir, &file.name).unwrap();
+        assert_is_empty!(&result.segments);
+        assert_eq!(result.version, 1);
+        assert_eq!(result.counter, 0);
+        assert_is_empty!(&result.user_data);
+    }
+
+    #[test]
+    fn test_read_roundtrip_single_segment() {
+        use crate::codecs::lucene94::field_infos_format;
+        use crate::codecs::lucene99::segment_info_format;
+
+        let seg_id = [0xABu8; 16];
+        let sci_id = [0xCDu8; 16];
+        let sci = make_test_segment_commit_info("_0", 3, seg_id, Some(sci_id));
+
+        // Write .si and .fnm files to a directory
+        let shared_dir: crate::store::SharedDirectory =
+            std::sync::Mutex::new(Box::new(crate::store::MemoryDirectory::new()));
+        let si_files = vec!["_0.fnm".to_string()];
+        segment_info_format::write(&shared_dir, &sci.info, &si_files).unwrap();
+        field_infos_format::write(&shared_dir, &sci.info, "", &sci.field_infos).unwrap();
+
+        // Write segments_N
+        let user_data = HashMap::new();
+        let file = write(&[&sci], 1, 1, 1, &user_data).unwrap();
+
+        // Add segments_N to the directory
+        shared_dir
+            .lock()
+            .unwrap()
+            .write_file(&file.name, &file.data)
+            .unwrap();
+
+        // Read it back
+        let dir_guard = shared_dir.lock().unwrap();
+        let result = read(&**dir_guard, &file.name).unwrap();
+
+        assert_len_eq_x!(&result.segments, 1);
+        assert_eq!(result.segments[0].info.name, "_0");
+        assert_eq!(result.segments[0].info.max_doc, 3);
+        assert_eq!(result.segments[0].info.id, seg_id);
+        assert_eq!(result.segments[0].id, Some(sci_id));
+        assert_eq!(result.version, 1);
+        assert_eq!(result.counter, 1);
+    }
+
+    // --- Write-side tests ---
 
     #[test]
     fn test_write_generation_suffix() {

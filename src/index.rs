@@ -17,8 +17,9 @@ pub(crate) mod segment_worker_pool;
 
 pub use index_writer::{CommitResult, IndexWriter};
 pub use index_writer_config::IndexWriterConfig;
+pub use segment_infos::SegmentInfosRead;
 pub(crate) mod indexing_chain;
-pub(crate) mod segment_infos;
+pub mod segment_infos;
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,15 +50,15 @@ pub struct FieldInfo {
     number: u32,
     store_term_vector: bool,
     omit_norms: bool,
-    store_payloads: bool,
+    pub(crate) store_payloads: bool,
     index_options: IndexOptions,
     doc_values_type: DocValuesType,
-    dv_gen: i64,
+    pub(crate) dv_gen: i64,
     attributes: HashMap<String, String>,
     point_config: PointDimensionConfig,
     vector_dimension: u32,
-    soft_deletes_field: bool,
-    is_parent_field: bool,
+    pub(crate) soft_deletes_field: bool,
+    pub(crate) is_parent_field: bool,
 }
 
 impl FieldInfo {
