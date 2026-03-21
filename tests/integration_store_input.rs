@@ -154,6 +154,108 @@ fn test_index_writer_codec_files_have_valid_headers() {
     }
 }
 
+#[test]
+fn test_read_segments_from_index_writer() {
+    use bearing::document::{Document, keyword_field, text_field};
+    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    let mut doc = Document::new();
+    doc.add(text_field("body", "the quick brown fox"));
+    doc.add(keyword_field("category", "animals"));
+    writer.add_document(doc).unwrap();
+
+    let result = writer.commit().unwrap();
+    let mut dir = MemoryDirectory::new();
+    result.write_to_directory(&mut dir).unwrap();
+
+    // Find the segments_N file
+    let files = dir.list_all().unwrap();
+    let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+
+    // Read segments_N
+    let infos = segment_infos::read(&dir, segments_file).unwrap();
+
+    // Should have exactly 1 segment with 1 document
+    assert_eq!(infos.segments.len(), 1);
+    assert_eq!(infos.segments[0].info.max_doc, 1);
+    assert_eq!(infos.segments[0].info.name, "_0");
+
+    // Field infos should contain our fields
+    let fis = &infos.segments[0].field_infos;
+    assert!(fis.len() >= 2); // at least "body" and "category"
+
+    let body = fis.iter().find(|f| f.name() == "body");
+    assert!(body.is_some());
+
+    let category = fis.iter().find(|f| f.name() == "category");
+    assert!(category.is_some());
+}
+
+#[test]
+fn test_read_segments_multiple_docs() {
+    use bearing::document::{Document, keyword_field, long_field, text_field};
+    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..5 {
+        let mut doc = Document::new();
+        doc.add(text_field("body", &format!("document number {i}")));
+        doc.add(keyword_field("id", &format!("doc_{i}")));
+        doc.add(long_field("modified", 1000 + i as i64));
+        writer.add_document(doc).unwrap();
+    }
+
+    let result = writer.commit().unwrap();
+    let mut dir = MemoryDirectory::new();
+    result.write_to_directory(&mut dir).unwrap();
+
+    let files = dir.list_all().unwrap();
+    let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+    let infos = segment_infos::read(&dir, segments_file).unwrap();
+
+    assert_eq!(infos.segments.len(), 1);
+    assert_eq!(infos.segments[0].info.max_doc, 5);
+
+    // Verify fields
+    let fis = &infos.segments[0].field_infos;
+    assert!(fis.iter().any(|f| f.name() == "body"));
+    assert!(fis.iter().any(|f| f.name() == "id"));
+    assert!(fis.iter().any(|f| f.name() == "modified"));
+}
+
+#[test]
+fn test_read_segments_fs_directory() {
+    use bearing::document::{Document, keyword_field, text_field};
+    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+
+    let dir_path = temp_dir("read_segments_fs");
+    let _cleanup = DirCleanup(&dir_path);
+
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    let mut doc = Document::new();
+    doc.add(text_field("body", "hello world"));
+    doc.add(keyword_field("tag", "test"));
+    writer.add_document(doc).unwrap();
+
+    let result = writer.commit().unwrap();
+    let mut fs_dir = FSDirectory::open(&dir_path).unwrap();
+    result.write_to_directory(&mut fs_dir).unwrap();
+
+    let files = fs_dir.list_all().unwrap();
+    let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+    let infos = segment_infos::read(&fs_dir, segments_file).unwrap();
+
+    assert_eq!(infos.segments.len(), 1);
+    assert_eq!(infos.segments[0].info.max_doc, 1);
+}
+
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("bearing_test_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
