@@ -4,11 +4,11 @@
 
 use std::fs;
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::store::checksum::CRC32;
-use crate::store::{DataOutput, Directory, IndexOutput};
+use crate::store::{DataInput, DataOutput, Directory, IndexInput, IndexOutput};
 
 /// Filesystem-backed directory for reading and writing index files.
 pub struct FSDirectory {
@@ -31,6 +31,14 @@ impl Directory for FSDirectory {
         let file = File::create(&file_path)?;
         let writer = BufWriter::new(file);
         Ok(Box::new(FSIndexOutput::new(name.to_string(), writer)))
+    }
+
+    fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>> {
+        let file_path = self.path.join(name);
+        let file = File::open(&file_path)?;
+        let len = file.metadata()?.len();
+        let reader = BufReader::new(file);
+        Ok(Box::new(FSIndexInput::new(name.to_string(), reader, len)))
     }
 
     fn list_all(&self) -> io::Result<Vec<String>> {
@@ -159,6 +167,73 @@ impl IndexOutput for FSIndexOutput {
 
     fn checksum(&self) -> u64 {
         self.crc.value()
+    }
+}
+
+/// Filesystem-backed IndexInput wrapping a `BufReader<File>` with seek support.
+struct FSIndexInput {
+    name: String,
+    reader: BufReader<File>,
+    pos: u64,
+    len: u64,
+}
+
+impl FSIndexInput {
+    fn new(name: String, reader: BufReader<File>, len: u64) -> Self {
+        Self {
+            name,
+            reader,
+            pos: 0,
+            len,
+        }
+    }
+}
+
+impl DataInput for FSIndexInput {
+    fn read_byte(&mut self) -> io::Result<u8> {
+        let mut buf = [0u8; 1];
+        self.reader.read_exact(&mut buf)?;
+        self.pos += 1;
+        Ok(buf[0])
+    }
+
+    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        self.reader.read_exact(buf)?;
+        self.pos += buf.len() as u64;
+        Ok(())
+    }
+
+    fn skip_bytes(&mut self, num_bytes: u64) -> io::Result<()> {
+        self.seek(self.pos + num_bytes)
+    }
+}
+
+impl IndexInput for FSIndexInput {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn file_pointer(&self) -> u64 {
+        self.pos
+    }
+
+    fn seek(&mut self, pos: u64) -> io::Result<()> {
+        self.reader.seek(io::SeekFrom::Start(pos))?;
+        self.pos = pos;
+        Ok(())
+    }
+
+    fn length(&self) -> u64 {
+        self.len
+    }
+
+    fn slice(
+        &self,
+        _description: &str,
+        _offset: u64,
+        _length: u64,
+    ) -> io::Result<Box<dyn IndexInput>> {
+        todo!("FSIndexInput::slice not yet implemented")
     }
 }
 
@@ -321,6 +396,58 @@ mod tests {
         let mut crc = CRC32::new();
         crc.update(b"test");
         assert_eq!(out.checksum(), crc.value());
+    }
+
+    #[test]
+    fn test_fs_directory_open_input() {
+        let dir_path = temp_dir("open_input");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("test.bin", b"hello world").unwrap();
+
+        let mut input = dir.open_input("test.bin").unwrap();
+        assert_eq!(input.name(), "test.bin");
+        assert_eq!(input.length(), 11);
+
+        let mut buf = [0u8; 5];
+        input.read_bytes(&mut buf).unwrap();
+        assert_eq!(&buf, b"hello");
+        assert_eq!(input.file_pointer(), 5);
+
+        input.seek(0).unwrap();
+        input.read_bytes(&mut buf).unwrap();
+        assert_eq!(&buf, b"hello");
+    }
+
+    #[test]
+    fn test_fs_directory_open_input_missing() {
+        let dir_path = temp_dir("open_input_missing");
+        let dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        assert!(dir.open_input("nonexistent.bin").is_err());
+    }
+
+    #[test]
+    fn test_fs_directory_open_input_roundtrip() {
+        use crate::store::DataInput;
+
+        let dir_path = temp_dir("open_input_roundtrip");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        {
+            let mut out = dir.create_output("roundtrip.bin").unwrap();
+            out.write_le_int(0x04030201).unwrap();
+            out.write_string("hello").unwrap();
+            out.write_be_long(0x0807060504030201).unwrap();
+        }
+
+        let mut input = dir.open_input("roundtrip.bin").unwrap();
+        assert_eq!(input.read_le_int().unwrap(), 0x04030201);
+        assert_eq!(input.read_string().unwrap(), "hello");
+        assert_eq!(input.read_be_long().unwrap(), 0x0807060504030201);
     }
 
     /// RAII helper to clean up temp directories after tests.
