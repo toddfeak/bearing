@@ -18,25 +18,49 @@ Shell-based tests that build the `indexfiles` binary, index test data, verify in
 
 Benchmarks indexing speed, memory usage, and correctness between Java Lucene and Rust.
 
+## Round-Trip Testing Layers
+
+Round-trip testing is being built incrementally as read-path infrastructure lands:
+
+### 1. Encoding round-trips (done)
+
+Write/read tests for every primitive encoding function (VInt, VLong, ZInt, ZLong, String, GroupVInt, ZigZag). These live in `src/encoding/` unit tests and exercise `io::Write`/`io::Read` directly.
+
+### 2. Store-level round-trips (done)
+
+Write data via `DataOutput`/`IndexOutput`, read it back via `DataInput`/`IndexInput` through `Directory::open_input`. Covers both `MemoryDirectory` and `FSDirectory`. Integration tests in `tests/integration_store_input.rs` verify that index files written by `IndexWriter` are openable and have valid codec headers.
+
+### 3. Codec-level round-trips (future — requires codec readers)
+
+Write a segment with codec writers, read it back with the corresponding codec reader, verify field-level data matches. Each codec reader can be tested independently as it's built.
+
+### 4. Index-level round-trips (future — requires IndexReader)
+
+Write with `IndexWriter`, read with `IndexReader`/`DirectoryReader`, verify all field types and values survive the round trip.
+
+### 5. Java → Rust e2e (future — requires codec readers + Java fixtures)
+
+Java Lucene writes an index via `IndexAllFields`, Rust reads it and validates field values. Requires codec readers and golden fixture infrastructure.
+
 ## Cross-Verification Strategy
 
 ### Bearing writes → Lucene reads (working)
 
 The e2e test writes an index with the Rust `indexfiles` binary and validates it with Java Lucene's `VerifyIndex`. This is the primary correctness check and runs today.
 
-### Lucene writes → Bearing reads (blocked)
+### Lucene writes → Bearing reads (future)
 
-Requires `IndexReader` implementation. When the read path lands, create Java-written golden indexes in `testdata/fixtures/` as regression anchors. The Java `IndexAllFields` utility in `tests/java/` can generate these fixtures.
+Requires codec readers. When available, create Java-written golden indexes in `testdata/fixtures/` as regression anchors. The Java `IndexAllFields` utility in `tests/java/` can generate these fixtures.
 
-### Bearing writes → Bearing reads (blocked)
+### Bearing writes → Bearing reads (partially unblocked)
 
-Requires `IndexReader` implementation. Once available, add round-trip tests that write with `IndexWriter` and read back with `IndexReader`, verifying all field types survive the round trip.
+Store-level reading works via `Directory::open_input`. Full index-level round-trips require `IndexReader`.
 
 ## Future Work
 
 ### Golden Fixtures
 
-When the read path exists:
+When codec readers exist:
 1. Generate indexes with Java Lucene 10.3.2 using `tests/java/IndexAllFields`
 2. Store in `testdata/fixtures/` with version metadata
 3. Write Rust tests that read these fixtures and verify field values

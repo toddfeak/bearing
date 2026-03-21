@@ -7,6 +7,11 @@ use log::debug;
 
 use crate::store::{DataOutput, IndexOutput};
 
+#[cfg(test)]
+use crate::store::checksum_input::ChecksumIndexInput;
+#[cfg(test)]
+use crate::store::{DataInput, IndexInput};
+
 /// Magic number written at the start of every codec header (big-endian).
 pub const CODEC_MAGIC: i32 = 0x3fd76c17_u32 as i32;
 
@@ -104,6 +109,129 @@ fn vint_size(mut val: u32) -> usize {
     size
 }
 
+/// Reads and validates a codec header, returning the version.
+///
+/// Checks that:
+///   - The magic number matches [`CODEC_MAGIC`]
+///   - The codec name matches `codec`
+///   - The version is in `[min_version, max_version]`
+#[cfg(test)]
+pub fn check_header(
+    input: &mut dyn DataInput,
+    codec: &str,
+    min_version: i32,
+    max_version: i32,
+) -> io::Result<i32> {
+    let actual_magic = input.read_be_int()?;
+    if actual_magic != CODEC_MAGIC {
+        return Err(io::Error::other(format!(
+            "codec header mismatch: expected 0x{CODEC_MAGIC:08X}, got 0x{actual_magic:08X}"
+        )));
+    }
+
+    let actual_codec = input.read_string()?;
+    if actual_codec != codec {
+        return Err(io::Error::other(format!(
+            "codec mismatch: expected {codec:?}, got {actual_codec:?}"
+        )));
+    }
+
+    let version = input.read_be_int()?;
+    if version < min_version || version > max_version {
+        return Err(io::Error::other(format!(
+            "version {version} out of range [{min_version}, {max_version}] for codec {codec:?}"
+        )));
+    }
+
+    Ok(version)
+}
+
+/// Reads and validates an index header (header + segment ID + suffix), returning the version.
+#[cfg(test)]
+pub fn check_index_header(
+    input: &mut dyn DataInput,
+    codec: &str,
+    min_version: i32,
+    max_version: i32,
+    expected_id: &[u8; ID_LENGTH],
+    expected_suffix: &str,
+) -> io::Result<i32> {
+    let version = check_header(input, codec, min_version, max_version)?;
+
+    let mut actual_id = [0u8; ID_LENGTH];
+    input.read_bytes(&mut actual_id)?;
+    if actual_id != *expected_id {
+        return Err(io::Error::other(format!(
+            "segment ID mismatch: expected {expected_id:02x?}, got {actual_id:02x?}"
+        )));
+    }
+
+    let suffix_len = input.read_byte()? as usize;
+    let mut suffix_bytes = vec![0u8; suffix_len];
+    input.read_bytes(&mut suffix_bytes)?;
+    let actual_suffix =
+        String::from_utf8(suffix_bytes).map_err(|e| io::Error::other(e.to_string()))?;
+    if actual_suffix != expected_suffix {
+        return Err(io::Error::other(format!(
+            "suffix mismatch: expected {expected_suffix:?}, got {actual_suffix:?}"
+        )));
+    }
+
+    Ok(version)
+}
+
+/// Validates a codec footer: checks magic, algorithm ID, and CRC32.
+///
+/// The input must be a [`ChecksumIndexInput`] positioned just before the footer.
+/// The footer is 16 bytes: magic (BE int) + algorithm ID (BE int) + CRC32 (BE long).
+#[cfg(test)]
+pub fn check_footer(input: &mut ChecksumIndexInput) -> io::Result<()> {
+    let remaining = input.length() - input.file_pointer();
+    if remaining != FOOTER_LENGTH as u64 {
+        return Err(io::Error::other(format!(
+            "expected {FOOTER_LENGTH} footer bytes remaining, got {remaining}"
+        )));
+    }
+
+    let magic = input.read_be_int()?;
+    if magic != FOOTER_MAGIC {
+        return Err(io::Error::other(format!(
+            "footer magic mismatch: expected 0x{:08X}, got 0x{magic:08X}",
+            FOOTER_MAGIC as u32
+        )));
+    }
+
+    let algorithm_id = input.read_be_int()?;
+    if algorithm_id != 0 {
+        return Err(io::Error::other(format!(
+            "unsupported checksum algorithm: {algorithm_id}"
+        )));
+    }
+
+    let checksum_before_crc = input.checksum();
+    let stored_checksum = input.read_be_long()? as u64;
+    if stored_checksum != checksum_before_crc {
+        return Err(io::Error::other(format!(
+            "checksum mismatch: stored 0x{stored_checksum:08X}, computed 0x{checksum_before_crc:08X}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Computes the CRC32 checksum of an entire file.
+///
+/// Seeks to the start, reads all bytes through a [`ChecksumIndexInput`],
+/// and returns the checksum.
+#[cfg(test)]
+pub fn checksum_entire_file(input: Box<dyn IndexInput>) -> io::Result<u64> {
+    let len = input.length();
+    let mut checksum_input = ChecksumIndexInput::new(input);
+    checksum_input.seek(0)?;
+    checksum_input.skip_bytes(len)?;
+    Ok(checksum_input.checksum())
+}
+
 /// Validates that a codec name is simple ASCII and not too long.
 fn validate_codec_name(codec: &str) -> io::Result<()> {
     if codec.len() >= 128 {
@@ -124,6 +252,7 @@ fn validate_codec_name(codec: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::memory::MemoryIndexOutput;
 
     // Ported from org.apache.lucene.codecs.TestCodecUtil
@@ -250,6 +379,138 @@ mod tests {
         // So test via header_length with a 127-char name (vint = 1 byte).
         let name = "a".repeat(127);
         assert_eq!(header_length(&name), 4 + 1 + 127 + 4);
+    }
+
+    // --- Read-side tests ---
+    // Ported from org.apache.lucene.codecs.TestCodecUtil
+
+    #[test]
+    fn test_check_header_roundtrip() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_header(&mut out, "FooBar", 5).unwrap();
+        let bytes = out.bytes().to_vec();
+
+        let mut input = ByteSliceIndexInput::new("test".into(), bytes);
+        let version = check_header(&mut input, "FooBar", 1, 10).unwrap();
+        assert_eq!(version, 5);
+    }
+
+    #[test]
+    fn test_check_header_wrong_magic() {
+        let bytes = vec![0x00, 0x00, 0x00, 0x00]; // wrong magic
+        let mut input = ByteSliceIndexInput::new("test".into(), bytes);
+        assert!(check_header(&mut input, "Test", 1, 1).is_err());
+    }
+
+    #[test]
+    fn test_check_header_wrong_codec() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_header(&mut out, "FooBar", 5).unwrap();
+        let bytes = out.bytes().to_vec();
+
+        let mut input = ByteSliceIndexInput::new("test".into(), bytes);
+        assert!(check_header(&mut input, "WrongName", 1, 10).is_err());
+    }
+
+    #[test]
+    fn test_check_header_version_too_low() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_header(&mut out, "Test", 3).unwrap();
+        let bytes = out.bytes().to_vec();
+
+        let mut input = ByteSliceIndexInput::new("test".into(), bytes);
+        assert!(check_header(&mut input, "Test", 5, 10).is_err());
+    }
+
+    #[test]
+    fn test_check_header_version_too_high() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_header(&mut out, "Test", 15).unwrap();
+        let bytes = out.bytes().to_vec();
+
+        let mut input = ByteSliceIndexInput::new("test".into(), bytes);
+        assert!(check_header(&mut input, "Test", 1, 10).is_err());
+    }
+
+    #[test]
+    fn test_check_index_header_roundtrip() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let id = [0xABu8; ID_LENGTH];
+        write_index_header(&mut out, "FooBar", 5, &id, "xyz").unwrap();
+        let bytes = out.bytes().to_vec();
+
+        let mut input = ByteSliceIndexInput::new("test".into(), bytes);
+        let version = check_index_header(&mut input, "FooBar", 1, 10, &id, "xyz").unwrap();
+        assert_eq!(version, 5);
+    }
+
+    #[test]
+    fn test_check_index_header_wrong_id() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let id = [0xABu8; ID_LENGTH];
+        write_index_header(&mut out, "Test", 1, &id, "s").unwrap();
+        let bytes = out.bytes().to_vec();
+
+        let wrong_id = [0xCDu8; ID_LENGTH];
+        let mut input = ByteSliceIndexInput::new("test".into(), bytes);
+        assert!(check_index_header(&mut input, "Test", 1, 1, &wrong_id, "s").is_err());
+    }
+
+    #[test]
+    fn test_check_index_header_wrong_suffix() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let id = [1u8; ID_LENGTH];
+        write_index_header(&mut out, "Test", 1, &id, "abc").unwrap();
+        let bytes = out.bytes().to_vec();
+
+        let mut input = ByteSliceIndexInput::new("test".into(), bytes);
+        assert!(check_index_header(&mut input, "Test", 1, 1, &id, "xyz").is_err());
+    }
+
+    #[test]
+    fn test_check_footer_roundtrip() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_header(&mut out, "Test", 1).unwrap();
+        out.write_bytes(b"payload data").unwrap();
+        write_footer(&mut out).unwrap();
+        let bytes = out.bytes().to_vec();
+
+        let inner = ByteSliceIndexInput::new("test".into(), bytes.clone());
+        let mut input = ChecksumIndexInput::new(Box::new(inner));
+        // Skip past header + payload to footer
+        let footer_pos = bytes.len() as u64 - FOOTER_LENGTH as u64;
+        input.seek(footer_pos).unwrap();
+        check_footer(&mut input).unwrap();
+    }
+
+    #[test]
+    fn test_check_footer_corrupted_crc() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_header(&mut out, "Test", 1).unwrap();
+        out.write_bytes(b"payload data").unwrap();
+        write_footer(&mut out).unwrap();
+        let mut bytes = out.bytes().to_vec();
+
+        // Corrupt a payload byte
+        bytes[header_length("Test")] ^= 0xFF;
+
+        let inner = ByteSliceIndexInput::new("test".into(), bytes.clone());
+        let mut input = ChecksumIndexInput::new(Box::new(inner));
+        let footer_pos = bytes.len() as u64 - FOOTER_LENGTH as u64;
+        input.seek(footer_pos).unwrap();
+        assert!(check_footer(&mut input).is_err());
+    }
+
+    #[test]
+    fn test_checksum_entire_file() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        out.write_bytes(b"hello world").unwrap();
+        let expected = out.checksum();
+        let bytes = out.bytes().to_vec();
+
+        let input = ByteSliceIndexInput::new("test".into(), bytes);
+        let actual = checksum_entire_file(Box::new(input)).unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

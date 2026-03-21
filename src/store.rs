@@ -10,6 +10,7 @@
 
 pub mod byte_slice_input;
 pub mod checksum;
+pub mod checksum_input;
 pub mod fs;
 pub mod memory;
 
