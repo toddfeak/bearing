@@ -9,5 +9,7 @@
 //! All encoding functions operate on [`std::io::Write`] / [`std::io::Read`],
 //! keeping them independent of any project-specific I/O traits.
 
+pub mod group_vint;
+pub mod string;
 pub mod varint;
 pub mod zigzag;

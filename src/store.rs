@@ -96,28 +96,17 @@ pub trait DataOutput {
 
     /// Writes a string as VInt-encoded byte length followed by UTF-8 bytes.
     fn write_string(&mut self, s: &str) -> io::Result<()> {
-        let bytes = s.as_bytes();
-        self.write_vint(bytes.len() as i32)?;
-        self.write_bytes(bytes)
+        crate::encoding::string::write_string(&mut DataOutputWriter(self), s)
     }
 
     /// Writes a set of strings: VInt count followed by each string.
     fn write_set_of_strings(&mut self, set: &[String]) -> io::Result<()> {
-        self.write_vint(set.len() as i32)?;
-        for s in set {
-            self.write_string(s)?;
-        }
-        Ok(())
+        crate::encoding::string::write_set_of_strings(&mut DataOutputWriter(self), set)
     }
 
     /// Writes a map of strings: VInt count followed by key-value pairs.
     fn write_map_of_strings(&mut self, map: &HashMap<String, String>) -> io::Result<()> {
-        self.write_vint(map.len() as i32)?;
-        for (k, v) in map {
-            self.write_string(k)?;
-            self.write_string(v)?;
-        }
-        Ok(())
+        crate::encoding::string::write_map_of_strings(&mut DataOutputWriter(self), map)
     }
 
     /// Writes integers using group-varint encoding.
@@ -125,61 +114,8 @@ pub trait DataOutput {
     /// followed by the ints in LE with variable byte widths.
     /// Remaining values (< 4) are written as regular VInts.
     fn write_group_vints(&mut self, values: &[i32], limit: usize) -> io::Result<()> {
-        let mut read_pos = 0;
-        let mut scratch = [0u8; 17]; // 1 flag + 4 * 4 bytes max
-
-        while limit - read_pos >= 4 {
-            let mut write_pos = 0;
-            let n1m1 = num_bytes_for_group_vint(values[read_pos]) - 1;
-            let n2m1 = num_bytes_for_group_vint(values[read_pos + 1]) - 1;
-            let n3m1 = num_bytes_for_group_vint(values[read_pos + 2]) - 1;
-            let n4m1 = num_bytes_for_group_vint(values[read_pos + 3]) - 1;
-            let flag = (n1m1 << 6) | (n2m1 << 4) | (n3m1 << 2) | n4m1;
-            scratch[write_pos] = flag as u8;
-            write_pos += 1;
-
-            // Write each int in LE, only the needed bytes
-            let le = (values[read_pos] as u32).to_le_bytes();
-            scratch[write_pos..write_pos + n1m1 as usize + 1]
-                .copy_from_slice(&le[..n1m1 as usize + 1]);
-            write_pos += n1m1 as usize + 1;
-            read_pos += 1;
-
-            let le = (values[read_pos] as u32).to_le_bytes();
-            scratch[write_pos..write_pos + n2m1 as usize + 1]
-                .copy_from_slice(&le[..n2m1 as usize + 1]);
-            write_pos += n2m1 as usize + 1;
-            read_pos += 1;
-
-            let le = (values[read_pos] as u32).to_le_bytes();
-            scratch[write_pos..write_pos + n3m1 as usize + 1]
-                .copy_from_slice(&le[..n3m1 as usize + 1]);
-            write_pos += n3m1 as usize + 1;
-            read_pos += 1;
-
-            let le = (values[read_pos] as u32).to_le_bytes();
-            scratch[write_pos..write_pos + n4m1 as usize + 1]
-                .copy_from_slice(&le[..n4m1 as usize + 1]);
-            write_pos += n4m1 as usize + 1;
-            read_pos += 1;
-
-            self.write_bytes(&scratch[..write_pos])?;
-        }
-
-        // Tail values as regular VInts
-        while read_pos < limit {
-            self.write_vint(values[read_pos])?;
-            read_pos += 1;
-        }
-
-        Ok(())
+        crate::encoding::group_vint::write_group_vints(&mut DataOutputWriter(self), values, limit)
     }
-}
-
-/// Returns the number of bytes needed to represent a non-negative int (1-4).
-fn num_bytes_for_group_vint(v: i32) -> u32 {
-    // 4 - (leading zeros / 8), but at least 1
-    4 - ((v as u32 | 1).leading_zeros() >> 3)
 }
 
 /// Adapter that wraps a [`DataOutput`] reference as an [`io::Write`].
@@ -347,108 +283,11 @@ mod tests {
     }
 
     #[test]
-    fn test_write_string() {
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_string("hello").unwrap();
-        // VInt(5) = 0x05, then "hello" as UTF-8
-        assert_eq!(buf, [0x05, b'h', b'e', b'l', b'l', b'o']);
-    }
-
-    // Ported from org.apache.lucene.util.TestGroupVInt
-    #[test]
-    fn test_write_group_vints_basic() {
-        let mut buf = Vec::new();
-        let values = [1, 2, 3, 4];
-        VecOutput(&mut buf).write_group_vints(&values, 4).unwrap();
-        // All values fit in 1 byte, so flag = 0b00_00_00_00 = 0x00
-        // Then 1, 2, 3, 4 each as 1 byte
-        assert_eq!(buf, [0x00, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn test_write_group_vints_mixed_sizes() {
-        let mut buf = Vec::new();
-        let values = [1, 256, 1, 1]; // 256 needs 2 bytes
-        VecOutput(&mut buf).write_group_vints(&values, 4).unwrap();
-        // n1m1=0, n2m1=1, n3m1=0, n4m1=0 → flag = (0<<6)|(1<<4)|(0<<2)|0 = 0x10
-        assert_eq!(buf[0], 0x10);
-        assert_eq!(buf[1], 1); // value 1
-        assert_eq!(buf[2], 0); // 256 LE low byte
-        assert_eq!(buf[3], 1); // 256 LE high byte
-        assert_eq!(buf[4], 1); // value 1
-        assert_eq!(buf[5], 1); // value 1
-    }
-
-    #[test]
-    fn test_write_group_vints_with_tail() {
-        let mut buf = Vec::new();
-        let values = [1, 2, 3, 4, 5, 6];
-        VecOutput(&mut buf).write_group_vints(&values, 6).unwrap();
-        // First 4 as group, then 5 and 6 as VInts
-        assert_eq!(buf[0], 0x00); // flag for [1,2,3,4]
-        assert_eq!(&buf[1..5], &[1, 2, 3, 4]);
-        assert_eq!(buf[5], 5); // VInt 5
-        assert_eq!(buf[6], 6); // VInt 6
-    }
-
-    #[test]
     fn test_align_offset() {
         assert_eq!(align_offset(0, 8), 0);
         assert_eq!(align_offset(1, 8), 8);
         assert_eq!(align_offset(7, 8), 8);
         assert_eq!(align_offset(8, 8), 8);
         assert_eq!(align_offset(9, 8), 16);
-    }
-
-    #[test]
-    fn test_write_set_of_strings_empty() {
-        let mut buf = Vec::new();
-        VecOutput(&mut buf).write_set_of_strings(&[]).unwrap();
-        assert_eq!(buf, [0x00]); // vint(0)
-    }
-
-    #[test]
-    fn test_write_set_of_strings() {
-        let mut buf = Vec::new();
-        let set = vec!["hello".to_string(), "world".to_string()];
-        VecOutput(&mut buf).write_set_of_strings(&set).unwrap();
-        // vint(2) + string("hello") + string("world")
-        let mut expected = vec![0x02]; // count = 2
-        expected.extend_from_slice(&[0x05, b'h', b'e', b'l', b'l', b'o']); // "hello"
-        expected.extend_from_slice(&[0x05, b'w', b'o', b'r', b'l', b'd']); // "world"
-        assert_eq!(buf, expected);
-    }
-
-    #[test]
-    fn test_write_map_of_strings_empty() {
-        let mut buf = Vec::new();
-        let map = HashMap::new();
-        VecOutput(&mut buf).write_map_of_strings(&map).unwrap();
-        assert_eq!(buf, [0x00]); // vint(0)
-    }
-
-    #[test]
-    fn test_write_map_of_strings() {
-        let mut buf = Vec::new();
-        let mut map = HashMap::new();
-        map.insert("key".to_string(), "val".to_string());
-        VecOutput(&mut buf).write_map_of_strings(&map).unwrap();
-        // vint(1) + string("key") + string("val")
-        assert_eq!(buf[0], 0x01); // count = 1
-        // The rest: string("key") = [3, k, e, y] + string("val") = [3, v, a, l]
-        assert_eq!(&buf[1..], &[0x03, b'k', b'e', b'y', 0x03, b'v', b'a', b'l']);
-    }
-
-    #[test]
-    fn test_num_bytes_for_group_vint() {
-        assert_eq!(num_bytes_for_group_vint(0), 1);
-        assert_eq!(num_bytes_for_group_vint(1), 1);
-        assert_eq!(num_bytes_for_group_vint(0xFF), 1);
-        assert_eq!(num_bytes_for_group_vint(0x100), 2);
-        assert_eq!(num_bytes_for_group_vint(0xFFFF), 2);
-        assert_eq!(num_bytes_for_group_vint(0x10000), 3);
-        assert_eq!(num_bytes_for_group_vint(0xFFFFFF), 3);
-        assert_eq!(num_bytes_for_group_vint(0x1000000), 4);
-        assert_eq!(num_bytes_for_group_vint(i32::MAX), 4);
     }
 }
