@@ -2,35 +2,35 @@
 
 //! ZigZag encoding/decoding for variable-length integers.
 //!
-//! ZigZag maps signed integers to unsigned so that small-magnitude values
+//! Maps signed integers to unsigned so that small-magnitude values
 //! (positive or negative) produce small encoded values, making them compact
 //! when followed by variable-length encoding (VInt/VLong).
+//!
+//! Mapping: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, 2 -> 4, ...
 
 /// Encodes a 32-bit integer.
-/// Maps signed integers to unsigned: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...
 pub fn encode_i32(i: i32) -> i32 {
     (i >> 31) ^ (i << 1)
 }
 
+/// Decodes a 32-bit integer.
+pub fn decode_i32(i: i32) -> i32 {
+    ((i as u32) >> 1) as i32 ^ -(i & 1)
+}
+
 /// Encodes a 64-bit integer.
-/// Maps signed integers to unsigned: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, ...
 pub fn encode_i64(i: i64) -> i64 {
     (i >> 63) ^ (i << 1)
+}
+
+/// Decodes a 64-bit integer.
+pub fn decode_i64(i: i64) -> i64 {
+    ((i as u64) >> 1) as i64 ^ -(i & 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Decodes a 32-bit integer.
-    fn decode_i32(i: i32) -> i32 {
-        ((i as u32) >> 1) as i32 ^ -(i & 1)
-    }
-
-    /// Decodes a 64-bit integer.
-    fn decode_i64(i: i64) -> i64 {
-        ((i as u64) >> 1) as i64 ^ -(i & 1)
-    }
 
     // Ported from org.apache.lucene.util.TestBitUtil
 

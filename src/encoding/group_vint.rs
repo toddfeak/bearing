@@ -45,6 +45,43 @@ pub fn write_group_vints(out: &mut impl io::Write, values: &[i32], limit: usize)
     Ok(())
 }
 
+/// Reads integers using group-varint encoding.
+pub fn read_group_vints(
+    reader: &mut impl io::Read,
+    values: &mut [i32],
+    limit: usize,
+) -> io::Result<()> {
+    let mut read_pos = 0;
+
+    while limit - read_pos >= 4 {
+        let mut flag_buf = [0u8; 1];
+        reader.read_exact(&mut flag_buf)?;
+        let flag = flag_buf[0] as u32;
+
+        let sizes = [
+            ((flag >> 6) & 0x03) + 1,
+            ((flag >> 4) & 0x03) + 1,
+            ((flag >> 2) & 0x03) + 1,
+            (flag & 0x03) + 1,
+        ];
+
+        for &size in &sizes {
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf[..size as usize])?;
+            values[read_pos] = i32::from_le_bytes(buf);
+            read_pos += 1;
+        }
+    }
+
+    // Tail values as regular VInts
+    while read_pos < limit {
+        values[read_pos] = varint::read_vint(reader)?;
+        read_pos += 1;
+    }
+
+    Ok(())
+}
+
 /// Returns the number of bytes needed to represent a non-negative int (1-4).
 fn num_bytes(v: i32) -> u32 {
     // 4 - (leading zeros / 8), but at least 1
@@ -91,6 +128,52 @@ mod tests {
         assert_eq!(&buf[1..5], &[1, 2, 3, 4]);
         assert_eq!(buf[5], 5); // VInt 5
         assert_eq!(buf[6], 6); // VInt 6
+    }
+
+    #[test]
+    fn test_read_basic_roundtrip() {
+        let values = [1, 2, 3, 4];
+        let mut buf = Vec::new();
+        write_group_vints(&mut buf, &values, 4).unwrap();
+        let mut cursor = &buf[..];
+        let mut decoded = [0i32; 4];
+        read_group_vints(&mut cursor, &mut decoded, 4).unwrap();
+        assert_eq!(decoded, values);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn test_read_mixed_sizes_roundtrip() {
+        let values = [1, 256, 1, 1];
+        let mut buf = Vec::new();
+        write_group_vints(&mut buf, &values, 4).unwrap();
+        let mut cursor = &buf[..];
+        let mut decoded = [0i32; 4];
+        read_group_vints(&mut cursor, &mut decoded, 4).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn test_read_with_tail_roundtrip() {
+        let values = [1, 2, 3, 4, 5, 6];
+        let mut buf = Vec::new();
+        write_group_vints(&mut buf, &values, 6).unwrap();
+        let mut cursor = &buf[..];
+        let mut decoded = [0i32; 6];
+        read_group_vints(&mut cursor, &mut decoded, 6).unwrap();
+        assert_eq!(decoded, values);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn test_read_large_values_roundtrip() {
+        let values = [0x01000000, 0x00010000, 0x00000100, 0x00000001];
+        let mut buf = Vec::new();
+        write_group_vints(&mut buf, &values, 4).unwrap();
+        let mut cursor = &buf[..];
+        let mut decoded = [0i32; 4];
+        read_group_vints(&mut cursor, &mut decoded, 4).unwrap();
+        assert_eq!(decoded, values);
     }
 
     #[test]
