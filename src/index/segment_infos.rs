@@ -183,7 +183,7 @@ pub struct SegmentEntry {
 /// from each [`SegmentEntry`].
 pub struct SegmentInfosRead {
     /// The raw segment entries in this commit.
-    pub segments: Vec<SegmentEntry>,
+    pub segments: Box<[SegmentEntry]>,
     /// The commit generation (from the filename suffix).
     pub generation: i64,
     /// The segment infos version (monotonically increasing).
@@ -321,7 +321,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
     );
 
     Ok(SegmentInfosRead {
-        segments,
+        segments: segments.into_boxed_slice(),
         generation,
         version,
         counter,

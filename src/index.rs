@@ -183,7 +183,7 @@ impl FieldInfo {
 /// A collection of FieldInfo objects indexed by name and number.
 #[derive(Clone, Debug)]
 pub struct FieldInfos {
-    fields: Vec<FieldInfo>,
+    fields: Box<[FieldInfo]>,
     by_name: HashMap<String, usize>,
     by_number: HashMap<u32, usize>,
     has_freq: bool,
@@ -251,7 +251,7 @@ impl FieldInfos {
         }
 
         Self {
-            fields,
+            fields: fields.into_boxed_slice(),
             by_name,
             by_number,
             has_freq,

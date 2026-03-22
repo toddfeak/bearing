@@ -102,8 +102,8 @@ struct BlockMeta {
 /// Values are reconstructed as `min + avg * index_within_block + delta`.
 pub(crate) struct DirectMonotonicReader {
     block_shift: u32,
-    blocks: Vec<BlockMeta>,
-    readers: Vec<DirectReader>,
+    blocks: Box<[BlockMeta]>,
+    readers: Box<[DirectReader]>,
 }
 
 impl DirectMonotonicReader {
@@ -139,8 +139,8 @@ impl DirectMonotonicReader {
 
         Ok(Self {
             block_shift,
-            blocks,
-            readers,
+            blocks: blocks.into_boxed_slice(),
+            readers: readers.into_boxed_slice(),
         })
     }
 
