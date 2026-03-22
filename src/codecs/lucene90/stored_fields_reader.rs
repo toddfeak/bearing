@@ -28,15 +28,19 @@ const STORED_FIELDS_INTS_BLOCK_SIZE: usize = 128;
 /// Maintains two [`DirectMonotonicReader`]s:
 /// - `docs`: maps chunk index to starting doc ID
 /// - `start_pointers`: maps chunk index to file pointer in `.fdt`
-struct FieldsIndexReader {
+pub(crate) struct FieldsIndexReader {
     docs: DirectMonotonicReader,
     start_pointers: DirectMonotonicReader,
-    num_chunks: u32,
+    /// Number of entries in the index (includes sentinel).
+    pub(crate) num_chunks: u32,
 }
 
 impl FieldsIndexReader {
-    /// Loads the fields index from `.fdm` and `.fdx`.
-    fn open(meta_input: &mut dyn DataInput, fdx_input: &dyn IndexInput) -> io::Result<Self> {
+    /// Loads the fields index from metadata and index files.
+    pub(crate) fn open(
+        meta_input: &mut dyn DataInput,
+        fdx_input: &dyn IndexInput,
+    ) -> io::Result<Self> {
         let _num_docs = meta_input.read_le_int()?;
         let block_shift = meta_input.read_le_int()? as u32;
         let num_chunks = meta_input.read_le_int()? as u32;

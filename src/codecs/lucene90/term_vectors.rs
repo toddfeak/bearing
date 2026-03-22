@@ -17,15 +17,15 @@ use crate::index::indexing_chain::TermVectorDoc;
 use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 
 // File extensions
-const VECTORS_EXTENSION: &str = "tvd";
-const INDEX_EXTENSION: &str = "tvx";
-const META_EXTENSION: &str = "tvm";
+pub(crate) const VECTORS_EXTENSION: &str = "tvd";
+pub(crate) const INDEX_EXTENSION: &str = "tvx";
+pub(crate) const META_EXTENSION: &str = "tvm";
 
 // Codec names and version
-const DATA_CODEC: &str = "Lucene90TermVectorsData";
-const INDEX_CODEC_IDX: &str = "Lucene90TermVectorsIndexIdx";
-const INDEX_CODEC_META: &str = "Lucene90TermVectorsIndexMeta";
-const VERSION: i32 = 0;
+pub(crate) const DATA_CODEC: &str = "Lucene90TermVectorsData";
+pub(crate) const INDEX_CODEC_IDX: &str = "Lucene90TermVectorsIndexIdx";
+pub(crate) const INDEX_CODEC_META: &str = "Lucene90TermVectorsIndexMeta";
+pub(crate) const VERSION: i32 = 0;
 
 // PackedInts.VERSION_CURRENT
 const PACKED_INTS_VERSION: i32 = 2;

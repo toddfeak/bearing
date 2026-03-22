@@ -17,6 +17,7 @@ use serde::Serialize;
 use bearing::codecs::lucene90::compound_reader::CompoundDirectory;
 use bearing::codecs::lucene90::doc_values_reader::DocValuesReader;
 use bearing::codecs::lucene90::norms_reader::NormsReader;
+use bearing::codecs::lucene90::term_vectors_reader::TermVectorsReader;
 use bearing::codecs::lucene94::field_infos_format;
 use bearing::codecs::lucene99::segment_info_format;
 use bearing::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
@@ -38,6 +39,7 @@ struct SegmentSummary {
     index: usize,
     max_doc: i32,
     num_docs: i32,
+    tv_chunks: i64,
     fields: Vec<FieldSummary>,
 }
 
@@ -99,8 +101,9 @@ fn main() {
         summary.total_docs += si.max_doc;
         summary.max_doc += si.max_doc;
 
-        // Read field infos, terms metadata, norms, and doc values — use compound directory if needed
-        let (field_infos, terms_reader, norms_reader, dv_reader) = if si.is_compound_file {
+        // Read field infos, terms/norms/dv/tv metadata — use compound directory if needed
+        let (field_infos, terms_reader, norms_reader, dv_reader, tv_reader) = if si.is_compound_file
+        {
             let compound_dir =
                 CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap_or_else(|e| {
                     eprintln!("Failed to open compound dir for '{}': {e}", seg.name);
@@ -122,7 +125,12 @@ fn main() {
             let dv = doc_values_suffix(&fi).and_then(|s| {
                 DocValuesReader::open(&compound_dir, &seg.name, &s, &seg.id, &fi).ok()
             });
-            (fi, tr, nr, dv)
+            let tv = if fi.has_vectors() {
+                TermVectorsReader::open(&compound_dir, &seg.name, "", &seg.id).ok()
+            } else {
+                None
+            };
+            (fi, tr, nr, dv, tv)
         } else {
             let fi = field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
                 eprintln!("Failed to read field infos for '{}': {e}", seg.name);
@@ -138,7 +146,12 @@ fn main() {
             };
             let dv = doc_values_suffix(&fi)
                 .and_then(|s| DocValuesReader::open(&dir, &seg.name, &s, &seg.id, &fi).ok());
-            (fi, tr, nr, dv)
+            let tv = if fi.has_vectors() {
+                TermVectorsReader::open(&dir, &seg.name, "", &seg.id).ok()
+            } else {
+                None
+            };
+            (fi, tr, nr, dv, tv)
         };
 
         let mut fields: Vec<&FieldInfo> = field_infos.iter().collect();
@@ -180,10 +193,13 @@ fn main() {
             })
             .collect();
 
+        let tv_chunks = tv_reader.as_ref().map_or(0, |r| r.num_chunks());
+
         summary.segments.push(SegmentSummary {
             index: i,
             max_doc: si.max_doc,
             num_docs: si.max_doc,
+            tv_chunks,
             fields: field_summaries,
         });
     }

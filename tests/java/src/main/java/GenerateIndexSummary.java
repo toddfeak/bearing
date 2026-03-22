@@ -4,8 +4,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
 
+import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.*;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.store.ChecksumIndexInput;
+import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 
 /**
@@ -59,6 +62,13 @@ public class GenerateIndexSummary {
         sb.append(indent).append("  \"index\": ").append(index).append(",\n");
         sb.append(indent).append("  \"maxDoc\": ").append(leaf.maxDoc()).append(",\n");
         sb.append(indent).append("  \"numDocs\": ").append(leaf.numDocs()).append(",\n");
+
+        // Term vector chunk count from .tvm metadata
+        long tvChunks = 0;
+        if (leaf instanceof SegmentReader sr) {
+            tvChunks = readTvChunks(sr);
+        }
+        sb.append(indent).append("  \"tvChunks\": ").append(tvChunks).append(",\n");
 
         // Fields
         sb.append(indent).append("  \"fields\": [\n");
@@ -153,6 +163,58 @@ public class GenerateIndexSummary {
         sb.append(indent).append("  \"normsDocCount\": ").append(normsDocCount).append("\n");
 
         sb.append(indent).append("}");
+    }
+
+    /**
+     * Reads num_chunks from the .tvm term vectors metadata file.
+     * Parses the same metadata format as Lucene90CompressingTermVectorsReader.
+     */
+    static long readTvChunks(SegmentReader sr) throws IOException {
+        SegmentInfo si = sr.getSegmentInfo().info;
+        Directory dir = si.dir;
+
+        // Find the .tvm file
+        String tvmName = IndexFileNames.segmentFileName(si.name, "", "tvm");
+        if (!Arrays.asList(dir.listAll()).contains(tvmName)) {
+            return 0;
+        }
+
+        try (ChecksumIndexInput in = dir.openChecksumInput(tvmName)) {
+            // Header
+            CodecUtil.checkIndexHeader(in, "Lucene90TermVectorsIndexMeta", 0, 0,
+                    si.getId(), "");
+
+            // packedIntsVersion, chunkSize
+            in.readVInt();
+            in.readVInt();
+
+            // FieldsIndex: numDocs, blockShift, numChunks
+            in.readInt(); // numDocs
+            int blockShift = in.readInt();
+            int numChunks = in.readInt();
+
+            // docsStartPointer
+            in.readLong();
+
+            // Skip DirectMonotonic meta blocks for docs index
+            // Each block is 21 bytes: long(8) + int(4) + long(8) + byte(1)
+            int blockSize = 1 << blockShift;
+            int numBlocks = (numChunks + blockSize - 1) / blockSize;
+            in.skipBytes(numBlocks * 21L);
+
+            // startPointersStartPointer
+            in.readLong();
+
+            // Skip DirectMonotonic meta blocks for start pointers index
+            in.skipBytes(numBlocks * 21L);
+
+            // startPointersEndPointer, maxPointer
+            in.readLong();
+            in.readLong();
+
+            // num_chunks (the value we want)
+            return in.readVLong();
+        }
     }
 
     static String escapeJson(String s) {

@@ -12,3 +12,4 @@ pub mod points;
 pub mod stored_fields;
 pub mod stored_fields_reader;
 pub mod term_vectors;
+pub mod term_vectors_reader;

@@ -52,11 +52,11 @@ Format-specific readers for each codec version. Each reader has its own read-sid
 - Block tree terms reader (lucene103) — reads `.tim`/`.tip`/`.tmd` files, provides per-field term metadata (term count, sum total term freq, doc count, min/max term).
 - Norms reader (lucene90) — reads `.nvm`/`.nvd` files. Eager metadata, lazy data reads. Supports ALL, EMPTY, and SPARSE (via IndexedDISI) patterns with 0/1/2/4/8-byte norm values.
 - Doc values metadata reader (lucene90) — reads `.dvm` metadata for all 5 doc values types (NUMERIC, BINARY, SORTED, SORTED_SET, SORTED_NUMERIC). Provides per-field document counts; value reads deferred.
+- Term vectors metadata reader (lucene90) — reads `.tvm`/`.tvx`/`.tvd` files. Eager metadata, lazy chunk data. Exposes chunk count for golden summary validation.
 
 **Remaining:**
 - Points/BKD reader (lucene90)
 - Postings reader + block tree terms reader (lucene103)
-- Term vectors reader (lucene90)
 
 FOR/PFOR decode functions go in `codecs::lucene103::for_util` alongside the existing encode functions — format-version-specific, not a general encoding utility.
 

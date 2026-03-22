@@ -6,6 +6,7 @@
       "index": 0,
       "maxDoc": 15,
       "numDocs": 15,
+      "tvChunks": 1,
       "fields": [
         {
           "name": "path",
