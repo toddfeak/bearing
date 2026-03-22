@@ -46,6 +46,7 @@ cargo clippy                   # lint
 - **Logging**: Use `log::debug!` at semantic boundaries (codec headers/footers, flush decisions). Do not log in hot loops.
 - **Rustdoc**: Keep `///` and `//!` documentation up to date when changing public API. All public items must be documented.
 - Only mention that something is ported from Lucene if it is very specific to Lucene, like a custom compression algorithm. The whole project is a port, we don't need to repeat it in comments.
+- **Lazy reader pattern**: Codec readers must follow Lucene's lazy loading strategy. Constructors read only lightweight metadata (headers, per-field stats, file pointers) and open file handles for later use. Actual data (posting lists, stored fields, BKD leaves, etc.) is read on demand during queries. This keeps index opening fast and memory footprint small. Each reader should do exactly what Lucene's corresponding Java reader does at construction time — no more, no less.
 
 ## Testing
 

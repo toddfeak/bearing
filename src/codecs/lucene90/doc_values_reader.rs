@@ -12,12 +12,12 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::doc_values::{
-    BINARY, DIRECT_MONOTONIC_BLOCK_SHIFT, META_CODEC, META_EXTENSION, NUMERIC, SORTED,
-    SORTED_NUMERIC, SORTED_SET, VERSION,
+    BINARY, DATA_CODEC, DATA_EXTENSION, DIRECT_MONOTONIC_BLOCK_SHIFT, META_CODEC, META_EXTENSION,
+    NUMERIC, SORTED, SORTED_NUMERIC, SORTED_SET, VERSION,
 };
 use crate::index::{FieldInfos, index_file_names};
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory};
+use crate::store::{DataInput, Directory, IndexInput};
 
 // ---------------------------------------------------------------------------
 // Entry types — one per doc values type, stored eagerly in memory
@@ -44,6 +44,8 @@ struct DocValuesEntry {
 pub struct DocValuesReader {
     /// Per-field metadata indexed by field number. `None` for fields without doc values.
     entries: Box<[Option<DocValuesEntry>]>,
+    /// Open handle to the `.dvd` data file for lazy value reads.
+    data: Box<dyn IndexInput>,
 }
 
 impl DocValuesReader {
@@ -61,7 +63,7 @@ impl DocValuesReader {
         let meta_input = directory.open_input(&dvm_name)?;
         let mut meta_in = ChecksumIndexInput::new(meta_input);
 
-        codec_util::check_index_header(
+        let version = codec_util::check_index_header(
             &mut meta_in,
             META_CODEC,
             VERSION,
@@ -74,12 +76,36 @@ impl DocValuesReader {
 
         codec_util::check_footer(&mut meta_in)?;
 
+        // Open .dvd (data) and validate header
+        let dvd_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
+        let mut data = directory.open_input(&dvd_name)?;
+        let data_version = codec_util::check_index_header(
+            data.as_mut(),
+            DATA_CODEC,
+            VERSION,
+            VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        if version != data_version {
+            return Err(io::Error::other(format!(
+                "format version mismatch: meta={version}, data={data_version}"
+            )));
+        }
+
         debug!(
             "doc_values_reader: opened {} entries for segment {segment_name}",
             entries.iter().filter(|e| e.is_some()).count()
         );
 
-        Ok(Self { entries })
+        Ok(Self { entries, data })
+    }
+
+    /// Returns a reference to the `.dvd` data input for lazy value reads.
+    pub fn data(&self) -> &dyn IndexInput {
+        self.data.as_ref()
     }
 
     /// Returns the number of documents that have values for the given field.
@@ -385,6 +411,7 @@ mod tests {
 
         let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
+        assert_gt!(reader.data().length(), 0);
     }
 
     #[test]
