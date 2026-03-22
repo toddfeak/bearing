@@ -1,0 +1,338 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Segment-level reader that wires all codec readers for a single segment.
+//!
+//! [`SegmentReader`] is the read-side equivalent of what [`super::IndexWriter`]
+//! produces: it opens all the files for one segment and provides access to the
+//! codec readers that decode stored fields, norms, doc values, term vectors,
+//! points, terms, and postings.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use bearing::index::segment_reader::SegmentReader;
+//! use bearing::store::FSDirectory;
+//! use std::path::Path;
+//!
+//! let dir = FSDirectory::open(Path::new("/path/to/index")).unwrap();
+//! let reader = SegmentReader::open(&dir, "_0", &[0u8; 16]).unwrap();
+//! println!("Segment has {} documents", reader.max_doc());
+//! ```
+
+use std::io;
+
+use log::debug;
+
+use crate::codecs::codec_util;
+use crate::codecs::lucene90::compound_reader::CompoundDirectory;
+use crate::codecs::lucene90::doc_values_reader::DocValuesReader;
+use crate::codecs::lucene90::norms_reader::NormsReader;
+use crate::codecs::lucene90::points_reader::PointsReader;
+use crate::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
+use crate::codecs::lucene90::term_vectors_reader::TermVectorsReader;
+use crate::codecs::lucene94::field_infos_format;
+use crate::codecs::lucene99::segment_info_format;
+use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
+use crate::codecs::lucene103::postings_reader::PostingsReader;
+use crate::index::FieldInfos;
+use crate::store::Directory;
+
+/// Reads all data for a single segment of a Lucene index.
+///
+/// Owns the codec readers for stored fields, norms, doc values, term vectors,
+/// points, terms, and postings. Each reader is created only if the segment
+/// contains the corresponding data (determined by [`FieldInfos`] flags).
+///
+/// Handles both compound (`.cfs`/`.cfe`) and non-compound segments
+/// transparently — callers do not need to know the storage format.
+pub struct SegmentReader {
+    segment_name: String,
+    field_infos: FieldInfos,
+    max_doc: i32,
+    stored_fields_reader: Option<StoredFieldsReader>,
+    norms_reader: Option<NormsReader>,
+    doc_values_reader: Option<DocValuesReader>,
+    term_vectors_reader: Option<TermVectorsReader>,
+    points_reader: Option<PointsReader>,
+    terms_reader: Option<BlockTreeTermsReader>,
+    postings_reader: Option<PostingsReader>,
+}
+
+impl SegmentReader {
+    /// Opens all codec readers for a single segment.
+    ///
+    /// Reads segment info to determine the file format (compound vs non-compound),
+    /// then opens each codec reader conditionally based on which data the segment
+    /// contains. File handles are kept open for lazy data access.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any segment file is missing, corrupt, or has a
+    /// version mismatch.
+    pub fn open(
+        directory: &dyn Directory,
+        segment_name: &str,
+        segment_id: &[u8; codec_util::ID_LENGTH],
+    ) -> io::Result<Self> {
+        let si = segment_info_format::read(directory, segment_name, segment_id)?;
+
+        let reader = if si.is_compound_file {
+            let compound_dir = CompoundDirectory::open(directory, segment_name, segment_id)?;
+            Self::open_from_directory(
+                directory,
+                &compound_dir,
+                segment_name,
+                segment_id,
+                si.max_doc,
+            )?
+        } else {
+            Self::open_from_directory(directory, directory, segment_name, segment_id, si.max_doc)?
+        };
+
+        debug!(
+            "segment_reader: opened segment {segment_name}, max_doc={}, fields={}",
+            reader.max_doc,
+            reader.field_infos.len()
+        );
+
+        Ok(reader)
+    }
+
+    /// Opens all codec readers from a specific directory (compound or raw).
+    ///
+    /// `parent_dir` is used to read segment info (which lives outside compound files).
+    /// `dir` is used for all other codec files (may be a CompoundDirectory).
+    fn open_from_directory(
+        parent_dir: &dyn Directory,
+        dir: &dyn Directory,
+        segment_name: &str,
+        segment_id: &[u8; codec_util::ID_LENGTH],
+        max_doc: i32,
+    ) -> io::Result<Self> {
+        let si = segment_info_format::read(parent_dir, segment_name, segment_id)?;
+        let field_infos = field_infos_format::read(dir, &si, "")?;
+
+        let postings_suffix = derive_suffix(&field_infos, "PerFieldPostingsFormat");
+        let dv_suffix = derive_suffix(&field_infos, "PerFieldDocValuesFormat");
+
+        let stored_fields_reader = StoredFieldsReader::open(dir, segment_name, "", segment_id).ok();
+
+        let norms_reader = if field_infos.has_norms() {
+            NormsReader::open(dir, segment_name, "", segment_id, &field_infos, max_doc).ok()
+        } else {
+            None
+        };
+
+        let doc_values_reader = dv_suffix.as_deref().and_then(|s| {
+            DocValuesReader::open(dir, segment_name, s, segment_id, &field_infos).ok()
+        });
+
+        let term_vectors_reader = if field_infos.has_vectors() {
+            TermVectorsReader::open(dir, segment_name, "", segment_id).ok()
+        } else {
+            None
+        };
+
+        let points_reader = if field_infos.has_point_values() {
+            PointsReader::open(dir, segment_name, "", segment_id, &field_infos).ok()
+        } else {
+            None
+        };
+
+        let terms_reader = postings_suffix.as_deref().and_then(|s| {
+            BlockTreeTermsReader::open(dir, segment_name, s, segment_id, &field_infos).ok()
+        });
+
+        let postings_reader = postings_suffix.as_deref().and_then(|s| {
+            PostingsReader::open(dir, segment_name, s, segment_id, &field_infos).ok()
+        });
+
+        Ok(Self {
+            segment_name: segment_name.to_string(),
+            field_infos,
+            max_doc,
+            stored_fields_reader,
+            norms_reader,
+            doc_values_reader,
+            term_vectors_reader,
+            points_reader,
+            terms_reader,
+            postings_reader,
+        })
+    }
+
+    /// Returns the segment name (e.g., `"_0"`).
+    pub fn segment_name(&self) -> &str {
+        &self.segment_name
+    }
+
+    /// Returns the field metadata for this segment.
+    pub fn field_infos(&self) -> &FieldInfos {
+        &self.field_infos
+    }
+
+    /// Returns the total number of documents in this segment (including deleted).
+    pub fn max_doc(&self) -> i32 {
+        self.max_doc
+    }
+
+    /// Returns a mutable reference to the stored fields reader.
+    ///
+    /// Required for reading stored field values, which involves seeking and
+    /// decompression. Returns `None` if the segment has no stored fields.
+    pub fn stored_fields_reader(&mut self) -> Option<&mut StoredFieldsReader> {
+        self.stored_fields_reader.as_mut()
+    }
+
+    /// Returns the norms reader, or `None` if no fields have norms.
+    ///
+    /// Use this for metadata queries like [`NormsReader::num_docs_with_field`].
+    /// For reading individual norm values, use [`norms_reader_mut`](Self::norms_reader_mut).
+    pub fn norms_reader(&self) -> Option<&NormsReader> {
+        self.norms_reader.as_ref()
+    }
+
+    /// Returns a mutable reference to the norms reader.
+    ///
+    /// Required for reading individual norm values, which involves seeking in
+    /// the data file.
+    pub fn norms_reader_mut(&mut self) -> Option<&mut NormsReader> {
+        self.norms_reader.as_mut()
+    }
+
+    /// Returns the doc values reader, or `None` if no fields have doc values.
+    pub fn doc_values_reader(&self) -> Option<&DocValuesReader> {
+        self.doc_values_reader.as_ref()
+    }
+
+    /// Returns the term vectors reader, or `None` if no fields have term vectors.
+    pub fn term_vectors_reader(&self) -> Option<&TermVectorsReader> {
+        self.term_vectors_reader.as_ref()
+    }
+
+    /// Returns the points/BKD reader, or `None` if no fields have point values.
+    pub fn points_reader(&self) -> Option<&PointsReader> {
+        self.points_reader.as_ref()
+    }
+
+    /// Returns the block tree terms reader, or `None` if no fields are indexed.
+    pub fn terms_reader(&self) -> Option<&BlockTreeTermsReader> {
+        self.terms_reader.as_ref()
+    }
+
+    /// Returns the postings reader, or `None` if no fields are indexed.
+    pub fn postings_reader(&self) -> Option<&PostingsReader> {
+        self.postings_reader.as_ref()
+    }
+}
+
+/// Derives a per-field codec suffix (e.g., `"Lucene103_0"`) from field attributes.
+fn derive_suffix(field_infos: &FieldInfos, prefix: &str) -> Option<String> {
+    let format_key = format!("{prefix}.format");
+    let suffix_key = format!("{prefix}.suffix");
+    field_infos.iter().find_map(|fi| {
+        let format = fi.get_attribute(&format_key)?;
+        let suffix = fi.get_attribute(&suffix_key)?;
+        Some(format!("{format}_{suffix}"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{self, Document};
+    use crate::index::{IndexWriter, IndexWriterConfig};
+    use crate::store::MemoryDirectory;
+
+    fn write_test_index(compound: bool) -> (Box<dyn Directory>, String, [u8; 16]) {
+        let config = IndexWriterConfig::new().set_use_compound_file(compound);
+        let writer = IndexWriter::with_config(config);
+
+        let mut doc = Document::new();
+        doc.add(document::text_field("content", "hello world"));
+        doc.add(document::string_field("path", "/test.txt", true));
+        writer.add_document(doc).unwrap();
+
+        let mut doc2 = Document::new();
+        doc2.add(document::text_field("content", "goodbye world"));
+        doc2.add(document::string_field("path", "/other.txt", true));
+        writer.add_document(doc2).unwrap();
+
+        let result = writer.commit().unwrap();
+        let seg_files = result.into_segment_files().unwrap();
+
+        let mut mem_dir = MemoryDirectory::new();
+        for sf in &seg_files {
+            mem_dir.write_file(&sf.name, &sf.data).unwrap();
+        }
+        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+
+        // Find segment info
+        let files = dir.list_all().unwrap();
+        let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+        let infos = crate::index::segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let seg = &infos.segments[0];
+
+        (dir, seg.name.clone(), seg.id)
+    }
+
+    #[test]
+    fn test_open_non_compound() {
+        let (dir, name, id) = write_test_index(false);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        assert_eq!(reader.max_doc(), 2);
+        assert_eq!(reader.segment_name(), &name);
+        assert!(reader.field_infos().len() > 0);
+        assert!(reader.terms_reader().is_some());
+        assert!(reader.postings_reader().is_some());
+    }
+
+    #[test]
+    fn test_open_compound() {
+        let (dir, name, id) = write_test_index(true);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        assert_eq!(reader.max_doc(), 2);
+        assert!(reader.terms_reader().is_some());
+        assert!(reader.postings_reader().is_some());
+    }
+
+    #[test]
+    fn test_stored_fields_access() {
+        let (dir, name, id) = write_test_index(false);
+        let mut reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        let sfr = reader.stored_fields_reader().unwrap();
+        let fields = sfr.document(0).unwrap();
+        assert!(!fields.is_empty());
+    }
+
+    #[test]
+    fn test_norms_access() {
+        let (dir, name, id) = write_test_index(false);
+        let mut reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        // "content" is a TextField with norms — get field number before mutable borrow
+        let field_number = reader
+            .field_infos()
+            .field_info_by_name("content")
+            .unwrap()
+            .number();
+
+        let nr = reader.norms_reader_mut().unwrap();
+        let norm = nr.get(field_number, 0).unwrap();
+        assert!(norm.is_some());
+    }
+
+    #[test]
+    fn test_field_metadata() {
+        let (dir, name, id) = write_test_index(false);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        let fi = reader.field_infos();
+        assert!(fi.field_info_by_name("content").is_some());
+        assert!(fi.field_info_by_name("path").is_some());
+        assert!(fi.has_postings());
+    }
+}

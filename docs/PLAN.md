@@ -39,7 +39,7 @@ The write path is functional for the target field types but not feature complete
 ### 1. IndexInput & DataInput (done)
 `DataInput` trait with default implementations delegating to encoding functions via `DataInputReader` adapter. `IndexInput` trait with seek/slice. `ByteSliceIndexInput` (in-memory), `FSIndexInput` (file-backed with slice support), `ChecksumIndexInput` (CRC32-wrapping). `Directory::open_input` on both `FSDirectory` and `MemoryDirectory`. Encoding read functions for varint, zigzag, string, group-varint.
 
-### 2. Codec Readers (in progress)
+### 2. Codec Readers (done)
 Format-specific readers for each codec version. Each reader has its own read-side in-memory data structures optimized for seeking and iteration — they do NOT share internal structures with the writers. What they share is the file format and encoding utilities.
 
 **Done:**
@@ -60,17 +60,19 @@ All codec metadata readers are complete. Golden summary validates per-field stat
 
 FOR/PFOR decode functions go in `codecs::lucene103::for_util` alongside the existing encode functions — format-version-specific, not a general encoding utility.
 
-### 3. Index Reader Hierarchy
-The public-facing reader API:
-- `LeafReader` / `SegmentReader` — opens a single segment, wires up all codec readers
-- `DirectoryReader` — opens an index directory, enumerates segments, provides `LeafReader` per segment
-- Public iterator traits: `Terms`, `TermsEnum`, `PostingsEnum`, doc values accessors
-
-**Testable:** Open an index written by the existing IndexWriter, enumerate segments, iterate terms, look up stored fields.
+### 3. Index Reader Hierarchy (done)
+- `SegmentReader` — opens a single segment, wires up all codec readers conditionally (compound/non-compound transparent). Provides access to stored fields, norms, doc values, term vectors, points, terms, and postings readers.
+- `DirectoryReader` — opens an index directory via `segments_N`, creates `SegmentReader` per segment. `LeafReaderContext` provides per-segment doc base for global doc ID mapping.
+- `generate_summary` binary simplified to use `DirectoryReader`, validating the hierarchy end-to-end across all E2E tests.
 
 ## Phase 2 — Search
 
 ### 4. Search Infrastructure
+Term iteration and posting list access:
+- `TermsEnum` — term seeking/iteration within `BlockTreeTermsReader` (requires trie index navigation)
+- `PostingsEnum` — doc ID iteration for a term (requires FOR/PFOR decode in `for_util`)
+- Public iterator traits for terms, postings, doc values
+
 Query execution:
 - `IndexSearcher` — entry point, holds a `DirectoryReader`
 - `Query` / `Weight` / `Scorer` / `BulkScorer` abstractions

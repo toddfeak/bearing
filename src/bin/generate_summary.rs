@@ -3,8 +3,7 @@
 //! Generates a JSON summary of an index's structure and statistics.
 //!
 //! Produces the same format as the Java `GenerateIndexSummary` tool for
-//! golden-file comparison. `dvDocCount` outputs `0` as a placeholder
-//! until a doc values metadata reader is implemented.
+//! golden-file comparison.
 //!
 //! Usage: `generate_summary -index <path>`
 
@@ -14,18 +13,10 @@ use std::process;
 
 use serde::Serialize;
 
-use bearing::codecs::lucene90::compound_reader::CompoundDirectory;
-use bearing::codecs::lucene90::doc_values_reader::DocValuesReader;
-use bearing::codecs::lucene90::norms_reader::NormsReader;
-use bearing::codecs::lucene90::points_reader::PointsReader;
-use bearing::codecs::lucene90::term_vectors_reader::TermVectorsReader;
-use bearing::codecs::lucene94::field_infos_format;
-use bearing::codecs::lucene99::segment_info_format;
-use bearing::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
-use bearing::codecs::lucene103::postings_reader::PostingsReader;
 use bearing::document::{DocValuesType, IndexOptions};
-use bearing::index::{FieldInfo, segment_infos};
-use bearing::store::{Directory, FSDirectory};
+use bearing::index::FieldInfo;
+use bearing::index::directory_reader::DirectoryReader;
+use bearing::store::FSDirectory;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,140 +67,50 @@ fn main() {
         process::exit(1);
     });
 
-    let files = dir.list_all().unwrap_or_else(|e| {
-        eprintln!("Failed to list files: {e}");
-        process::exit(1);
-    });
-    let segments_file = files
-        .iter()
-        .find(|f| f.starts_with("segments_"))
-        .unwrap_or_else(|| {
-            eprintln!("No segments_N file found in '{index_path}'");
-            process::exit(1);
-        });
-
-    let infos = segment_infos::read(&dir, segments_file).unwrap_or_else(|e| {
-        eprintln!("Failed to read segments: {e}");
+    let reader = DirectoryReader::open(&dir).unwrap_or_else(|e| {
+        eprintln!("Failed to open index: {e}");
         process::exit(1);
     });
 
     let mut summary = Summary {
-        total_docs: 0,
-        max_doc: 0,
+        total_docs: reader.max_doc(),
+        max_doc: reader.max_doc(),
         segments: Vec::new(),
     };
 
-    for (i, seg) in infos.segments.iter().enumerate() {
-        let si = segment_info_format::read(&dir, &seg.name, &seg.id).unwrap_or_else(|e| {
-            eprintln!("Failed to read segment info for '{}': {e}", seg.name);
-            process::exit(1);
-        });
+    for leaf in reader.leaves() {
+        let seg = &leaf.reader;
 
-        summary.total_docs += si.max_doc;
-        summary.max_doc += si.max_doc;
-
-        // Read field infos, terms/norms/dv/tv metadata — use compound directory if needed
-        let (field_infos, terms_reader, norms_reader, dv_reader, tv_reader, pts_reader) =
-            if si.is_compound_file {
-                let compound_dir = CompoundDirectory::open(&dir, &seg.name, &seg.id)
-                    .unwrap_or_else(|e| {
-                        eprintln!("Failed to open compound dir for '{}': {e}", seg.name);
-                        process::exit(1);
-                    });
-                let fi = field_infos_format::read(&compound_dir, &si, "").unwrap_or_else(|e| {
-                    eprintln!("Failed to read field infos for '{}': {e}", seg.name);
-                    process::exit(1);
-                });
-                let suffix = postings_suffix(&fi);
-                let tr = suffix.as_deref().and_then(|s| {
-                    BlockTreeTermsReader::open(&compound_dir, &seg.name, s, &seg.id, &fi).ok()
-                });
-                let nr = if fi.has_norms() {
-                    NormsReader::open(&compound_dir, &seg.name, "", &seg.id, &fi, si.max_doc).ok()
-                } else {
-                    None
-                };
-                let dv = doc_values_suffix(&fi).and_then(|s| {
-                    DocValuesReader::open(&compound_dir, &seg.name, &s, &seg.id, &fi).ok()
-                });
-                let tv = if fi.has_vectors() {
-                    TermVectorsReader::open(&compound_dir, &seg.name, "", &seg.id).ok()
-                } else {
-                    None
-                };
-                let pts = if fi.has_point_values() {
-                    PointsReader::open(&compound_dir, &seg.name, "", &seg.id, &fi).ok()
-                } else {
-                    None
-                };
-                if let Some(ref s) = suffix {
-                    let _ = PostingsReader::open(&compound_dir, &seg.name, s, &seg.id, &fi);
-                }
-                (fi, tr, nr, dv, tv, pts)
-            } else {
-                let fi = field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
-                    eprintln!("Failed to read field infos for '{}': {e}", seg.name);
-                    process::exit(1);
-                });
-                let suffix = postings_suffix(&fi);
-                let tr = suffix.as_deref().and_then(|s| {
-                    BlockTreeTermsReader::open(&dir, &seg.name, s, &seg.id, &fi).ok()
-                });
-                let nr = if fi.has_norms() {
-                    NormsReader::open(&dir, &seg.name, "", &seg.id, &fi, si.max_doc).ok()
-                } else {
-                    None
-                };
-                let dv = doc_values_suffix(&fi)
-                    .and_then(|s| DocValuesReader::open(&dir, &seg.name, &s, &seg.id, &fi).ok());
-                let tv = if fi.has_vectors() {
-                    TermVectorsReader::open(&dir, &seg.name, "", &seg.id).ok()
-                } else {
-                    None
-                };
-                let pts = if fi.has_point_values() {
-                    PointsReader::open(&dir, &seg.name, "", &seg.id, &fi).ok()
-                } else {
-                    None
-                };
-                if let Some(ref s) = suffix {
-                    let _ = PostingsReader::open(&dir, &seg.name, s, &seg.id, &fi);
-                }
-                (fi, tr, nr, dv, tv, pts)
-            };
-
-        let mut fields: Vec<&FieldInfo> = field_infos.iter().collect();
+        let mut fields: Vec<&FieldInfo> = seg.field_infos().iter().collect();
         fields.sort_by_key(|fi| fi.number());
 
         let field_summaries = fields
             .iter()
             .map(|fi| {
-                let field_reader = terms_reader
-                    .as_ref()
-                    .and_then(|r| r.field_reader(fi.number()));
+                let field_reader = seg.terms_reader().and_then(|r| r.field_reader(fi.number()));
 
                 let term_count = field_reader.map_or(0, |fr| fr.num_terms);
                 let sum_total_term_freq = field_reader.map_or(0, |fr| fr.sum_total_term_freq);
                 let sum_doc_freq = field_reader.map_or(0, |fr| fr.sum_doc_freq);
                 let terms_doc_count = field_reader.map_or(0, |fr| fr.doc_count as i64);
 
-                let norms_doc_count = norms_reader
-                    .as_ref()
+                let norms_doc_count = seg
+                    .norms_reader()
                     .and_then(|r| r.num_docs_with_field(fi.number()))
                     .unwrap_or(0) as i64;
 
-                let dv_doc_count = dv_reader
-                    .as_ref()
+                let dv_doc_count = seg
+                    .doc_values_reader()
                     .and_then(|r| r.num_docs_with_field(fi.number()))
                     .unwrap_or(0) as i64;
 
-                let point_doc_count = pts_reader
-                    .as_ref()
+                let point_doc_count = seg
+                    .points_reader()
                     .and_then(|r| r.doc_count(fi.number()))
                     .unwrap_or(0) as i64;
 
-                let point_count = pts_reader
-                    .as_ref()
+                let point_count = seg
+                    .points_reader()
                     .and_then(|r| r.point_count(fi.number()))
                     .unwrap_or(0);
 
@@ -236,12 +137,12 @@ fn main() {
             })
             .collect();
 
-        let tv_chunks = tv_reader.as_ref().map_or(0, |r| r.num_chunks());
+        let tv_chunks = seg.term_vectors_reader().map_or(0, |r| r.num_chunks());
 
         summary.segments.push(SegmentSummary {
-            index: i,
-            max_doc: si.max_doc,
-            num_docs: si.max_doc,
+            index: leaf.ord,
+            max_doc: seg.max_doc(),
+            num_docs: seg.max_doc(),
             tv_chunks,
             fields: field_summaries,
         });
@@ -276,24 +177,6 @@ fn doc_values_type_str(dvt: DocValuesType) -> &'static str {
         DocValuesType::SortedNumeric => "SORTED_NUMERIC",
         DocValuesType::SortedSet => "SORTED_SET",
     }
-}
-
-/// Derives the per-field postings segment suffix (e.g., "Lucene103_0") from field attributes.
-fn postings_suffix(field_infos: &bearing::index::FieldInfos) -> Option<String> {
-    field_infos.iter().find_map(|fi| {
-        let format = fi.get_attribute("PerFieldPostingsFormat.format")?;
-        let suffix = fi.get_attribute("PerFieldPostingsFormat.suffix")?;
-        Some(format!("{format}_{suffix}"))
-    })
-}
-
-/// Derives the per-field doc values segment suffix (e.g., "Lucene90_0") from field attributes.
-fn doc_values_suffix(field_infos: &bearing::index::FieldInfos) -> Option<String> {
-    field_infos.iter().find_map(|fi| {
-        let format = fi.get_attribute("PerFieldDocValuesFormat.format")?;
-        let suffix = fi.get_attribute("PerFieldDocValuesFormat.suffix")?;
-        Some(format!("{format}_{suffix}"))
-    })
 }
 
 fn parse_args() -> String {
