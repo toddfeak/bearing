@@ -99,6 +99,47 @@ pub fn compress(input: &[u8], len: usize) -> Option<Vec<u8>> {
     if out.len() < len { Some(out) } else { None }
 }
 
+/// Decompress lowercase ASCII data from a streaming reader.
+///
+/// `len` is the original uncompressed length. Reads compressed bytes from the
+/// reader and restores the original byte values.
+pub fn decompress_from_reader(
+    reader: &mut impl std::io::Read,
+    len: usize,
+) -> std::io::Result<Vec<u8>> {
+    let saved = len >> 2;
+    let compressed_len = len - saved;
+
+    // 1. Read the packed bytes
+    let mut out = vec![0u8; len];
+    reader.read_exact(&mut out[..compressed_len])?;
+
+    // 2. Restore the leading 2 bits of each packed byte
+    for i in 0..saved {
+        out[compressed_len + i] = ((out[i] & 0xC0) >> 2)
+            | ((out[saved + i] & 0xC0) >> 4)
+            | ((out[(saved << 1) + i] & 0xC0) >> 6);
+    }
+
+    // 3. Move back to the original range
+    for b in &mut out[..len] {
+        *b = ((*b & 0x1F) | 0x20 | ((*b & 0x20) << 1)).wrapping_sub(1);
+    }
+
+    // 4. Restore exceptions
+    let num_exceptions = crate::encoding::varint::read_vint(reader)?;
+    let mut byte = [0u8; 1];
+    let mut i = 0usize;
+    for _ in 0..num_exceptions {
+        reader.read_exact(&mut byte)?;
+        i += byte[0] as usize;
+        reader.read_exact(&mut byte)?;
+        out[i] = byte[0];
+    }
+
+    Ok(out)
+}
+
 /// Decompress data produced by [`compress`]. `len` is the original uncompressed length.
 #[cfg(test)]
 fn decompress(compressed: &[u8], len: usize) -> Vec<u8> {

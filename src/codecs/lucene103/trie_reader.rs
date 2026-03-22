@@ -535,6 +535,7 @@ mod tests {
         }
 
         sorted_terms.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        postings.finalize_all();
         (sorted_terms, postings)
     }
 

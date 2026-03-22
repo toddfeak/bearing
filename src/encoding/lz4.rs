@@ -640,6 +640,74 @@ pub fn decompress_with_prefix(
     Ok(output[prefix.len()..].to_vec())
 }
 
+/// LZ4 decompress from a streaming reader.
+///
+/// Reads compressed bytes directly from the input until `dest_len` output
+/// bytes are produced. The LZ4 format is self-delimiting so no compressed
+/// length needs to be known in advance.
+pub fn decompress_from_reader(reader: &mut impl io::Read, dest_len: usize) -> io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(dest_len);
+
+    while output.len() < dest_len {
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte)?;
+        let token = byte[0] as usize;
+
+        // Literal length
+        let mut literal_len = token >> 4;
+        if literal_len == 15 {
+            loop {
+                reader.read_exact(&mut byte)?;
+                let b = byte[0] as usize;
+                literal_len += b;
+                if b < 255 {
+                    break;
+                }
+            }
+        }
+
+        // Copy literals
+        let mut literal_buf = vec![0u8; literal_len];
+        reader.read_exact(&mut literal_buf)?;
+        output.extend_from_slice(&literal_buf);
+
+        if output.len() >= dest_len {
+            break;
+        }
+
+        // Match distance (LE u16)
+        let mut dist_buf = [0u8; 2];
+        reader.read_exact(&mut dist_buf)?;
+        let distance = dist_buf[0] as usize | ((dist_buf[1] as usize) << 8);
+
+        if distance == 0 || distance > output.len() {
+            return Err(io::Error::other("invalid match distance"));
+        }
+
+        // Match length
+        let mut match_len = (token & 0x0F) + MIN_MATCH;
+        if (token & 0x0F) == 15 {
+            loop {
+                reader.read_exact(&mut byte)?;
+                let b = byte[0] as usize;
+                match_len += b;
+                if b < 255 {
+                    break;
+                }
+            }
+        }
+
+        // Copy match (may overlap)
+        let match_start = output.len() - distance;
+        for i in 0..match_len {
+            let b = output[match_start + i];
+            output.push(b);
+        }
+    }
+
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

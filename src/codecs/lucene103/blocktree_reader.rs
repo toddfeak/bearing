@@ -68,6 +68,15 @@ impl FieldReader {
         let access = slice.random_access()?;
         super::trie_reader::TrieReader::new(access, self.root_fp)
     }
+
+    /// Returns a slice of the `.tip` file for reading floor data.
+    pub fn index_input(&self) -> io::Result<Box<dyn IndexInput>> {
+        self.index_in.slice(
+            "index input",
+            self.index_start as u64,
+            (self.index_end - self.index_start) as u64,
+        )
+    }
 }
 
 /// Block tree terms reader that provides access to per-field term metadata
@@ -352,6 +361,7 @@ mod tests {
 
         // Sort by term bytes
         sorted_terms.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        postings.finalize_all();
         (sorted_terms, postings)
     }
 
