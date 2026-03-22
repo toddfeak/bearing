@@ -11,13 +11,13 @@ use crate::document::IndexOptions;
 use crate::encoding::zigzag;
 use crate::index::FieldInfo;
 use crate::index::index_file_names::segment_file_name;
-use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 
-use super::for_util::{self, BLOCK_SIZE};
 use super::postings_format::{
     self, DOC_CODEC, DOC_EXTENSION, IntBlockTermState, META_CODEC, META_EXTENSION, POS_CODEC,
     POS_EXTENSION, VERSION_CURRENT,
 };
+use crate::encoding::pfor::{self, BLOCK_SIZE};
 
 /// Buffers position deltas and PFOR-encodes them in blocks of 128.
 /// Extracts the repeated pattern from singleton, VInt, and block encoding paths.
@@ -47,7 +47,7 @@ impl PositionEncoder {
             for (i, &val) in self.buffer.iter().enumerate().take(BLOCK_SIZE) {
                 longs[i] = val as i64;
             }
-            for_util::pfor_encode(&mut longs, pos_out)?;
+            pfor::pfor_encode(&mut longs, &mut DataOutputWriter(pos_out))?;
             self.buffer_upto = 0;
         }
         Ok(())
@@ -160,7 +160,7 @@ impl BlockFlushState {
 
         // 2. Doc encoding: decide between consecutive, FOR, or bitset
         let doc_range = (last_doc_id - self.level0_last_doc_id) as usize;
-        let bpv = for_util::for_delta_bits_required(doc_delta_buffer);
+        let bpv = pfor::for_delta_bits_required(doc_delta_buffer);
 
         if doc_range == BLOCK_SIZE {
             self.level0_buf.push(0u8);
@@ -170,8 +170,7 @@ impl BlockFlushState {
 
             if num_bits_next_bpv <= doc_range {
                 self.level0_buf.push(bpv as u8);
-                let mut enc = VecOutput(&mut self.level0_buf);
-                for_util::for_delta_encode(bpv, doc_delta_buffer, &mut enc)?;
+                pfor::for_delta_encode(bpv, doc_delta_buffer, &mut self.level0_buf)?;
             } else {
                 assert!(num_bitset_longs <= BLOCK_SIZE / 2);
                 self.level0_buf.push((-(num_bitset_longs as i8)) as u8);
@@ -197,8 +196,7 @@ impl BlockFlushState {
             for i in 0..BLOCK_SIZE {
                 longs[i] = freq_buffer[i] as i64;
             }
-            let mut enc = VecOutput(&mut self.level0_buf);
-            for_util::pfor_encode(&mut longs, &mut enc)?;
+            pfor::pfor_encode(&mut longs, &mut self.level0_buf)?;
         }
 
         // 4. Write skip header to scratch_buf

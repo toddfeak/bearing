@@ -12,14 +12,14 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::codecs::lucene103::for_util::{self, BLOCK_SIZE};
 use crate::codecs::lucene103::postings_format::{
     self, DOC_CODEC, DOC_EXTENSION, META_CODEC, META_EXTENSION, POS_CODEC, POS_EXTENSION,
     VERSION_CURRENT, VERSION_START,
 };
+use crate::encoding::pfor::{self, BLOCK_SIZE};
 use crate::index::{FieldInfos, index_file_names};
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::{DataInput, DataInputReader, Directory, IndexInput};
 
 /// Reads postings metadata for a segment and provides access to doc ID iteration.
 ///
@@ -270,7 +270,7 @@ impl BlockDocIterator {
             // FOR-delta encoded block
             let bpv = flag as u32;
             let mut arr = [0i32; BLOCK_SIZE];
-            for_util::for_delta_decode(bpv, input, self.prev_doc_id, &mut arr)?;
+            pfor::for_delta_decode(bpv, &mut DataInputReader(input), self.prev_doc_id, &mut arr)?;
             self.doc_buffer[..BLOCK_SIZE].copy_from_slice(&arr);
         } else {
             // BITSET: -flag longs encoding a bitset

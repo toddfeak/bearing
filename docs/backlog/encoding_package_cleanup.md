@@ -1,29 +1,9 @@
 # Encoding package cleanup
 
-## 1. Module boundaries — for_util and packed.rs
+## 1. Module boundaries — packed.rs
 
-Revisit whether `for_util.rs` (FOR/PFOR/ForDelta) and `packed.rs`
-(DirectWriter, DirectMonotonicWriter, BlockPackedWriter) belong in
-`src/encoding/` rather than their current locations under `codecs/` and
-`util/`.
-
-These are pure encoding algorithms that semantically belong with varint,
-zigzag, and lz4. The blocker is that they currently depend on
-`DataInput`/`DataOutput` instead of `io::Read`/`io::Write`. A partial
-migration is fine — move what works cleanly with `Read`/`Write`, leave
-what truly needs `IndexInput`/`IndexOutput`.
-
-### for_util.rs
-
-Currently in `codecs/lucene103/`. Encode uses `DataOutput`, decode uses
-`DataInput`. Both map straightforwardly to `io::Write`/`io::Read`
-(write_le_int → write_all with to_le_bytes, etc.).
-
-### packed.rs
-
-Currently in `util/`. `DirectWriter`, `DirectMonotonicWriter`, and
-`BlockPackedWriter` store `&mut dyn IndexOutput` and use `file_pointer()`
-for offset computation.
+`packed.rs` remains in `util/` with `DirectWriter`, `DirectMonotonicWriter`,
+and `BlockPackedWriter` depending on `IndexOutput::file_pointer()`.
 
 Verified feasible: `file_pointer()` is only used in
 `DirectMonotonicWriter::finish` (2 calls). Fix: have
@@ -35,9 +15,6 @@ Scope: ~40 call sites across 4 codec files (doc_values.rs,
 stored_fields.rs, term_vectors.rs) plus packed.rs tests need
 `DataOutputWriter` wrapping. Variable patterns vary, so needs manual
 per-file updates.
-
-Status: `numeric_utils.rs` already moved. `packed.rs` is the last
-remaining encoding item in `util/`.
 
 ## 2. Allocation efficiency
 

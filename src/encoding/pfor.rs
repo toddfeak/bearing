@@ -2,11 +2,28 @@
 //! Frame-of-reference (FOR) and patched FOR (PFOR) integer encoding utilities.
 
 use std::io;
+use std::io::{Read, Write};
 
-use crate::encoding::packed::bits_required;
-use crate::store::{DataInput, DataOutput};
+use super::packed::bits_required;
+use super::varint;
 
 pub const BLOCK_SIZE: usize = 128;
+
+fn read_le_int(r: &mut impl Read) -> io::Result<i32> {
+    let mut buf = [0u8; 4];
+    r.read_exact(&mut buf)?;
+    Ok(i32::from_le_bytes(buf))
+}
+
+fn write_le_int(w: &mut impl Write, val: i32) -> io::Result<()> {
+    w.write_all(&val.to_le_bytes())
+}
+
+fn read_byte(r: &mut impl Read) -> io::Result<u8> {
+    let mut buf = [0u8; 1];
+    r.read_exact(&mut buf)?;
+    Ok(buf[0])
+}
 
 // --- ForUtil ---
 // Frame-of-Reference bit packing for 128 integers.
@@ -95,7 +112,7 @@ fn expand16(ints: &mut [i32; BLOCK_SIZE]) {
 
 /// Encode 128 longs with the given bits per value using FOR bit packing.
 /// Uses ForUtil thresholds: bpv<=8 → collapse8, <=16 → collapse16, else → no collapse.
-pub fn encode(longs: &[i64; BLOCK_SIZE], bpv: u32, out: &mut dyn DataOutput) -> io::Result<()> {
+pub fn encode(longs: &[i64; BLOCK_SIZE], bpv: u32, out: &mut impl Write) -> io::Result<()> {
     if bpv == 0 {
         return Ok(());
     }
@@ -120,7 +137,7 @@ fn encode_ints(
     ints: &[i32; BLOCK_SIZE],
     bpv: u32,
     primitive_size: u32,
-    out: &mut dyn DataOutput,
+    out: &mut impl Write,
 ) -> io::Result<()> {
     let num_ints = (BLOCK_SIZE as u32) * primitive_size / 32;
     let num_ints_per_shift = bpv * 4;
@@ -187,7 +204,7 @@ fn encode_ints(
 
     // Phase 3: write output as 32-bit ints
     for &val in &tmp[..num_ints_per_shift as usize] {
-        out.write_le_int(val)?;
+        write_le_int(out, val)?;
     }
 
     Ok(())
@@ -195,11 +212,7 @@ fn encode_ints(
 
 /// Decode 128 FOR-encoded values with the given bits per value.
 /// Reverse of [`encode`]: reads packed LE ints, unpacks bits, then expands.
-pub fn decode(
-    bpv: u32,
-    input: &mut dyn DataInput,
-    longs: &mut [i64; BLOCK_SIZE],
-) -> io::Result<()> {
+pub fn decode(bpv: u32, input: &mut impl Read, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
     if bpv == 0 {
         longs.fill(0);
         return Ok(());
@@ -210,7 +223,7 @@ pub fn decode(
 
     // Read packed data as LE ints
     for val in &mut ints[..num_ints_per_shift] {
-        *val = input.read_le_int()?;
+        *val = read_le_int(input)?;
     }
 
     let primitive_size = if bpv <= 8 {
@@ -331,7 +344,7 @@ pub const MAX_EXCEPTIONS: usize = 7;
 /// Uses a min-heap to find the top MAX_EXCEPTIONS+1 values. The heap minimum
 /// determines the patched bpv. Exceptions (values exceeding the patched mask)
 /// are stored as (index, highBits) byte pairs after the FOR-encoded base values.
-pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut dyn DataOutput) -> io::Result<()> {
+pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut impl Write) -> io::Result<()> {
     // Find the top MAX_EXCEPTIONS+1 values using a min-heap approach.
     // We maintain a sorted array of size MAX_EXCEPTIONS+1 with the minimum at [0].
     let mut top = [0u64; MAX_EXCEPTIONS + 1];
@@ -403,18 +416,18 @@ pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut dyn DataOutput) -> i
             exc.1 = ((exc.1 as u64) << patched_bits_required) as u8;
         }
         let token = (num_exceptions as u8) << 5; // bpv = 0
-        out.write_byte(token)?;
-        out.write_vint(longs[0] as i32)?;
+        out.write_all(&[token])?;
+        varint::write_vint(out, longs[0] as i32)?;
     } else {
         let token = ((num_exceptions as u8) << 5) | (patched_bits_required as u8);
-        out.write_byte(token)?;
+        out.write_all(&[token])?;
         encode(longs, patched_bits_required, out)?;
     }
 
     // Write exception patches as (index, highBits) pairs
     for &(idx, high_bits) in &exceptions[..exception_count] {
-        out.write_byte(idx)?;
-        out.write_byte(high_bits)?;
+        out.write_all(&[idx])?;
+        out.write_all(&[high_bits])?;
     }
 
     Ok(())
@@ -422,19 +435,19 @@ pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut dyn DataOutput) -> i
 
 /// Decode 128 PFOR-encoded values.
 /// Reverse of [`pfor_encode`]: reads token byte, decodes base values, applies exception patches.
-pub fn pfor_decode(input: &mut dyn DataInput, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
-    let token = input.read_byte()? as u32;
+pub fn pfor_decode(input: &mut impl Read, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
+    let token = read_byte(input)? as u32;
     let bpv = token & 0x1F;
     if bpv == 0 {
-        let value = input.read_vint()? as i64;
+        let value = varint::read_vint(input)? as i64;
         longs.fill(value);
     } else {
         decode(bpv, input, longs)?;
     }
     let num_exceptions = token >> 5;
     for _ in 0..num_exceptions {
-        let position = input.read_byte()? as usize;
-        let patch = input.read_byte()? as i64;
+        let position = read_byte(input)? as usize;
+        let patch = read_byte(input)? as i64;
         longs[position] |= patch << bpv;
     }
     Ok(())
@@ -460,7 +473,7 @@ pub fn for_delta_bits_required(deltas: &[i32; BLOCK_SIZE]) -> u32 {
 pub fn for_delta_encode(
     bpv: u32,
     deltas: &[i32; BLOCK_SIZE],
-    out: &mut dyn DataOutput,
+    out: &mut impl Write,
 ) -> io::Result<()> {
     let mut ints = [0i32; BLOCK_SIZE];
     ints.copy_from_slice(deltas);
@@ -482,7 +495,7 @@ pub fn for_delta_encode(
 /// running sum starting from `base` (last doc ID from the previous block).
 pub fn for_delta_decode(
     bpv: u32,
-    input: &mut dyn DataInput,
+    input: &mut impl Read,
     base: i32,
     ints: &mut [i32; BLOCK_SIZE],
 ) -> io::Result<()> {
@@ -497,7 +510,7 @@ pub fn for_delta_decode(
 
     // Read packed data as LE ints
     for val in &mut ints[..num_ints_per_shift] {
-        *val = input.read_le_int()?;
+        *val = read_le_int(input)?;
     }
 
     // ForDelta uses different collapse thresholds from ForUtil
@@ -557,40 +570,7 @@ fn prefix_sum(arr: &mut [i32], base: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::DataInput;
-    use crate::store::memory::MemoryIndexOutput;
-
-    struct ByteSliceInput<'a> {
-        data: &'a [u8],
-        pos: usize,
-    }
-
-    impl<'a> ByteSliceInput<'a> {
-        fn new(data: &'a [u8]) -> Self {
-            Self { data, pos: 0 }
-        }
-    }
-
-    impl DataInput for ByteSliceInput<'_> {
-        fn read_byte(&mut self) -> io::Result<u8> {
-            if self.pos >= self.data.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-            }
-            let b = self.data[self.pos];
-            self.pos += 1;
-            Ok(b)
-        }
-
-        fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-            let end = self.pos + buf.len();
-            if end > self.data.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-            }
-            buf.copy_from_slice(&self.data[self.pos..end]);
-            self.pos = end;
-            Ok(())
-        }
-    }
+    use std::io::Cursor;
 
     /// Returns the number of bytes needed to encode 128 values with the given bits per value.
     fn num_bytes(bpv: u32) -> u32 {
@@ -610,11 +590,7 @@ mod tests {
     }
 
     /// Encode doc ID deltas with the given bits per value.
-    fn encode_deltas(
-        bpv: u32,
-        longs: &[i64; BLOCK_SIZE],
-        out: &mut dyn DataOutput,
-    ) -> io::Result<()> {
+    fn encode_deltas(bpv: u32, longs: &[i64; BLOCK_SIZE], out: &mut impl Write) -> io::Result<()> {
         let mut deltas = [0i64; BLOCK_SIZE];
         let mut prev = 0i64;
         for (i, &v) in longs.iter().enumerate() {
@@ -635,40 +611,40 @@ mod tests {
 
     #[test]
     fn test_for_util_encode_all_zeros() {
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let longs = [0i64; BLOCK_SIZE];
         encode(&longs, 0, &mut out).unwrap();
-        assert_is_empty!(out.bytes());
+        assert_is_empty!(&out);
     }
 
     #[test]
     fn test_for_util_encode_1bit() {
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, long) in longs.iter_mut().enumerate() {
             *long = (i & 1) as i64;
         }
         encode(&longs, 1, &mut out).unwrap();
-        assert_len_eq_x!(&out.bytes(), 16); // 1 bit * 128 / 8 = 16 bytes
+        assert_len_eq_x!(&&out, 16); // 1 bit * 128 / 8 = 16 bytes
     }
 
     #[test]
     fn test_for_util_encode_8bit() {
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, long) in longs.iter_mut().enumerate() {
             *long = i as i64;
         }
         encode(&longs, 8, &mut out).unwrap();
-        assert_len_eq_x!(&out.bytes(), 128); // 8 bits * 128 / 8 = 128 bytes
+        assert_len_eq_x!(&&out, 128); // 8 bits * 128 / 8 = 128 bytes
     }
 
     #[test]
     fn test_pfor_all_equal() {
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [42i64; BLOCK_SIZE];
         pfor_encode(&mut longs, &mut out).unwrap();
-        let bytes = out.bytes();
+        let bytes = &out;
         // Token byte with bpv=0, then VLong(42)
         assert_eq!(bytes[0], 0); // token: numExceptions=0, bpv=0
         assert_eq!(bytes[1], 42); // VLong(42)
@@ -676,13 +652,13 @@ mod tests {
 
     #[test]
     fn test_pfor_small_values() {
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, long) in longs.iter_mut().enumerate() {
             *long = (i % 4) as i64; // values 0-3, need 2 bits
         }
         pfor_encode(&mut longs, &mut out).unwrap();
-        let bytes = out.bytes();
+        let bytes = &out;
         // Token byte: no exceptions, bpv=2
         let token = bytes[0];
         let num_exceptions = token >> 5;
@@ -711,14 +687,14 @@ mod tests {
 
     #[test]
     fn test_encode_deltas() {
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, long) in longs.iter_mut().enumerate() {
             *long = i as i64;
         }
         // Deltas are all 1 (except first which is 0), needs 1 bit
         encode_deltas(1, &longs, &mut out).unwrap();
-        assert_len_eq_x!(&out.bytes(), 16); // 1 bit * 128 / 8 = 16 bytes
+        assert_len_eq_x!(&&out, 16); // 1 bit * 128 / 8 = 16 bytes
     }
 
     #[test]
@@ -745,37 +721,37 @@ mod tests {
     #[test]
     fn test_for_delta_encode_collapse8() {
         // bpv <= 3 uses collapse8 (primitive_size=8)
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut deltas = [1i32; BLOCK_SIZE];
         deltas[0] = 3; // max delta = 3, bpv = 2
         let bpv = for_delta_bits_required(&deltas);
         assert_eq!(bpv, 2);
         for_delta_encode(bpv, &deltas, &mut out).unwrap();
-        assert_eq!(out.bytes().len(), (bpv as usize) * 16); // bpv * 16 bytes
+        assert_eq!(out.len(), (bpv as usize) * 16); // bpv * 16 bytes
     }
 
     #[test]
     fn test_for_delta_encode_collapse16() {
         // bpv 4-10 uses collapse16 (primitive_size=16)
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut deltas = [1i32; BLOCK_SIZE];
         deltas[0] = 512; // bits_required(512|1) = 10
         let bpv = for_delta_bits_required(&deltas);
         assert!((4..=10).contains(&bpv), "bpv={bpv} should use collapse16");
         for_delta_encode(bpv, &deltas, &mut out).unwrap();
-        assert_eq!(out.bytes().len(), (bpv as usize) * 16);
+        assert_eq!(out.len(), (bpv as usize) * 16);
     }
 
     #[test]
     fn test_for_delta_encode_collapse32() {
         // bpv > 10 uses collapse32 (primitive_size=32)
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut deltas = [1i32; BLOCK_SIZE];
         deltas[0] = 2048; // bits_required(2048|1) = 12
         let bpv = for_delta_bits_required(&deltas);
         assert_gt!(bpv, 10);
         for_delta_encode(bpv, &deltas, &mut out).unwrap();
-        assert_eq!(out.bytes().len(), (bpv as usize) * 16);
+        assert_eq!(out.len(), (bpv as usize) * 16);
     }
 
     // --- Byte-exact cross-validation tests against Java Lucene 10.3.2 ForUtil ---
@@ -785,7 +761,7 @@ mod tests {
     #[test]
     fn test_for_util_bpv1_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.TestForUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i & 1) as i64;
@@ -796,13 +772,13 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
             0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     #[test]
     fn test_for_util_bpv3_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.TestForUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i % 8) as i64;
@@ -817,13 +793,13 @@ mod tests {
             0x11, 0x11, 0x11, 0x11, 0x37, 0x37, 0x37, 0x37,
             0x59, 0x59, 0x59, 0x59, 0x7F, 0x7F, 0x7F, 0x7F,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     #[test]
     fn test_for_util_bpv8_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.TestForUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, v) in longs.iter_mut().enumerate() {
             *v = i as i64;
@@ -848,13 +824,13 @@ mod tests {
             0x7C, 0x5C, 0x3C, 0x1C, 0x7D, 0x5D, 0x3D, 0x1D,
             0x7E, 0x5E, 0x3E, 0x1E, 0x7F, 0x5F, 0x3F, 0x1F,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     #[test]
     fn test_for_util_bpv10_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.TestForUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i * 8) as i64;
@@ -883,13 +859,13 @@ mod tests {
             0x23, 0xC8, 0x21, 0x48, 0x3C, 0xCA, 0x3C, 0x4A,
             0x0F, 0xCC, 0x07, 0x4C, 0x38, 0xCE, 0x38, 0x4E,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     #[test]
     fn test_for_util_bpv16_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.TestForUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i * 512) as i64;
@@ -930,13 +906,13 @@ mod tests {
             0x00, 0xF8, 0x00, 0x78, 0x00, 0xFA, 0x00, 0x7A,
             0x00, 0xFC, 0x00, 0x7C, 0x00, 0xFE, 0x00, 0x7E,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     #[test]
     fn test_for_util_bpv20_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.TestForUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i * 8192) as i64;
@@ -985,13 +961,13 @@ mod tests {
             0x0F, 0x00, 0x00, 0x98, 0x00, 0x0C, 0x00, 0x9A,
             0xFE, 0x00, 0x00, 0x9C, 0x00, 0x00, 0x00, 0x9E,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     #[test]
     fn test_for_delta_bpv2_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.ForDeltaUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut deltas = [1i32; BLOCK_SIZE];
         deltas[0] = 3;
         for_delta_encode(2, &deltas, &mut out).unwrap();
@@ -1002,13 +978,13 @@ mod tests {
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     #[test]
     fn test_for_delta_bpv5_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.ForDeltaUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut deltas = [1i32; BLOCK_SIZE];
         deltas[0] = 31;
         for_delta_encode(5, &deltas, &mut out).unwrap();
@@ -1025,13 +1001,13 @@ mod tests {
             0x42, 0x08, 0x42, 0x08, 0x42, 0x08, 0x42, 0x08,
             0x42, 0x08, 0x42, 0x08, 0x43, 0x08, 0x43, 0x08,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     #[test]
     fn test_pfor_exceptions_bytes_match_java() {
         // Ported from org.apache.lucene.codecs.lucene103.PForUtil
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         let mut longs = [0i64; BLOCK_SIZE];
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i % 4) as i64;
@@ -1050,7 +1026,7 @@ mod tests {
             0x25, 0x48, 0x48, 0x48, 0x88, 0x6F, 0x6F, 0x6F,
             0x6F, 0x0A, 0x3E, 0x32, 0x7D, 0x64, 0xFA,
         ];
-        assert_eq!(out.bytes(), expected);
+        assert_eq!(&out, expected);
     }
 
     // --- FOR decode round-trip tests ---
@@ -1061,11 +1037,11 @@ mod tests {
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i & 1) as i64;
         }
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         encode(&longs, 1, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         decode(1, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1076,11 +1052,11 @@ mod tests {
         for (i, v) in longs.iter_mut().enumerate() {
             *v = i as i64;
         }
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         encode(&longs, 8, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         decode(8, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1091,11 +1067,11 @@ mod tests {
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i * 512) as i64;
         }
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         encode(&longs, 16, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         decode(16, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1106,11 +1082,11 @@ mod tests {
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i * 8192) as i64;
         }
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         encode(&longs, 20, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         decode(20, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1120,7 +1096,7 @@ mod tests {
         let longs = [0i64; BLOCK_SIZE];
         let mut decoded = [99i64; BLOCK_SIZE];
         let empty: &[u8] = &[];
-        let mut input = ByteSliceInput::new(empty);
+        let mut input = Cursor::new(empty);
         decode(0, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1131,11 +1107,11 @@ mod tests {
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i % 8) as i64;
         }
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         encode(&longs, 3, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         decode(3, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1146,11 +1122,11 @@ mod tests {
         for (i, v) in longs.iter_mut().enumerate() {
             *v = (i * 8) as i64;
         }
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         encode(&longs, 10, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         decode(10, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1160,11 +1136,11 @@ mod tests {
     #[test]
     fn test_pfor_decode_roundtrip_all_equal() {
         let mut longs = [42i64; BLOCK_SIZE];
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         pfor_encode(&mut longs, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         pfor_decode(&mut input, &mut decoded).unwrap();
         assert_eq!([42i64; BLOCK_SIZE], decoded);
     }
@@ -1176,11 +1152,11 @@ mod tests {
             *v = (i % 4) as i64;
         }
         let mut longs = original;
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         pfor_encode(&mut longs, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         pfor_decode(&mut input, &mut decoded).unwrap();
         assert_eq!(original, decoded);
     }
@@ -1196,11 +1172,11 @@ mod tests {
         original[100] = 2000;
 
         let mut longs = original;
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         pfor_encode(&mut longs, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         pfor_decode(&mut input, &mut decoded).unwrap();
         assert_eq!(original, decoded);
     }
@@ -1213,12 +1189,12 @@ mod tests {
         deltas[0] = 3;
         let bpv = for_delta_bits_required(&deltas);
 
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         for_delta_encode(bpv, &deltas, &mut out).unwrap();
 
         let base = 100;
         let mut decoded = [0i32; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
 
         // Verify: prefix-sum of deltas starting from base
@@ -1237,12 +1213,12 @@ mod tests {
         deltas[0] = 31;
         let bpv = for_delta_bits_required(&deltas);
 
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         for_delta_encode(bpv, &deltas, &mut out).unwrap();
 
         let base = 0;
         let mut decoded = [0i32; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
 
         let mut expected = [0i32; BLOCK_SIZE];
@@ -1260,12 +1236,12 @@ mod tests {
         deltas[0] = 2048;
         let bpv = for_delta_bits_required(&deltas);
 
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         for_delta_encode(bpv, &deltas, &mut out).unwrap();
 
         let base = 50;
         let mut decoded = [0i32; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
 
         let mut expected = [0i32; BLOCK_SIZE];
@@ -1282,12 +1258,12 @@ mod tests {
         let deltas = [1i32; BLOCK_SIZE];
         let bpv = for_delta_bits_required(&deltas);
 
-        let mut out = MemoryIndexOutput::new("test".to_string());
+        let mut out = Vec::new();
         for_delta_encode(bpv, &deltas, &mut out).unwrap();
 
         let base = 0;
         let mut decoded = [0i32; BLOCK_SIZE];
-        let mut input = ByteSliceInput::new(out.bytes());
+        let mut input = Cursor::new(out.clone());
         for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
 
         // Sequential doc IDs: 1, 2, 3, ..., 128

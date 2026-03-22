@@ -283,7 +283,7 @@ fn decode_term_meta(
 
     if has_positions {
         state.pos_start_fp = last_state.pos_start_fp + reader.read_vlong()?;
-        if state.total_term_freq > crate::codecs::lucene103::for_util::BLOCK_SIZE as i64 {
+        if state.total_term_freq > crate::encoding::pfor::BLOCK_SIZE as i64 {
             state.last_pos_block_offset = reader.read_vlong()?;
         } else {
             state.last_pos_block_offset = -1;
