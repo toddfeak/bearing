@@ -51,9 +51,9 @@ Format-specific readers for each codec version. Each reader has its own read-sid
 - Stored fields reader (lucene90) — reads `.fdt`/`.fdx`/`.fdm` files, decompresses LZ4-with-preset-dict chunks, decodes all stored field value types (string, int, long, float, double, bytes). Uses `DirectReader` + `DirectMonotonicReader` for chunk index lookup.
 - Block tree terms reader (lucene103) — reads `.tim`/`.tip`/`.tmd` files, provides per-field term metadata (term count, sum total term freq, doc count, min/max term).
 - Norms reader (lucene90) — reads `.nvm`/`.nvd` files. Eager metadata, lazy data reads. Supports ALL, EMPTY, and SPARSE (via IndexedDISI) patterns with 0/1/2/4/8-byte norm values.
+- Doc values metadata reader (lucene90) — reads `.dvm` metadata for all 5 doc values types (NUMERIC, BINARY, SORTED, SORTED_SET, SORTED_NUMERIC). Provides per-field document counts; value reads deferred.
 
 **Remaining:**
-- Doc values reader (lucene90)
 - Points/BKD reader (lucene90)
 - Postings reader + block tree terms reader (lucene103)
 - Term vectors reader (lucene90)

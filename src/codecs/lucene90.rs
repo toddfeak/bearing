@@ -4,6 +4,7 @@
 pub mod compound;
 pub mod compound_reader;
 pub mod doc_values;
+pub mod doc_values_reader;
 pub mod indexed_disi;
 pub mod norms;
 pub mod norms_reader;

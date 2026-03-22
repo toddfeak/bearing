@@ -20,20 +20,20 @@ use crate::util::BytesRef;
 use crate::util::string_helper;
 
 // File extensions
-const DATA_EXTENSION: &str = "dvd";
-const META_EXTENSION: &str = "dvm";
+pub(crate) const DATA_EXTENSION: &str = "dvd";
+pub(crate) const META_EXTENSION: &str = "dvm";
 
 // Codec names and version
-const DATA_CODEC: &str = "Lucene90DocValuesData";
-const META_CODEC: &str = "Lucene90DocValuesMetadata";
-const VERSION: i32 = 0;
+pub(crate) const DATA_CODEC: &str = "Lucene90DocValuesData";
+pub(crate) const META_CODEC: &str = "Lucene90DocValuesMetadata";
+pub(crate) const VERSION: i32 = 0;
 
 // Doc values type bytes
-const NUMERIC: u8 = 0;
-const BINARY: u8 = 1;
-const SORTED: u8 = 2;
-const SORTED_SET: u8 = 3;
-const SORTED_NUMERIC: u8 = 4;
+pub(crate) const NUMERIC: u8 = 0;
+pub(crate) const BINARY: u8 = 1;
+pub(crate) const SORTED: u8 = 2;
+pub(crate) const SORTED_SET: u8 = 3;
+pub(crate) const SORTED_NUMERIC: u8 = 4;
 
 // Terms dictionary constants
 const TERMS_DICT_BLOCK_LZ4_SHIFT: usize = 6;
@@ -42,7 +42,7 @@ const TERMS_DICT_BLOCK_LZ4_MASK: usize = TERMS_DICT_BLOCK_LZ4_SIZE - 1;
 const TERMS_DICT_REVERSE_INDEX_SHIFT: i32 = 10;
 const TERMS_DICT_REVERSE_INDEX_SIZE: usize = 1 << TERMS_DICT_REVERSE_INDEX_SHIFT;
 const TERMS_DICT_REVERSE_INDEX_MASK: usize = TERMS_DICT_REVERSE_INDEX_SIZE - 1;
-const DIRECT_MONOTONIC_BLOCK_SHIFT: u32 = 16;
+pub(crate) const DIRECT_MONOTONIC_BLOCK_SHIFT: u32 = 16;
 
 /// Writes doc values files (.dvm, .dvd) for a segment.
 /// Returns the names of the files written.

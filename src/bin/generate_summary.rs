@@ -15,6 +15,7 @@ use std::process;
 use serde::Serialize;
 
 use bearing::codecs::lucene90::compound_reader::CompoundDirectory;
+use bearing::codecs::lucene90::doc_values_reader::DocValuesReader;
 use bearing::codecs::lucene90::norms_reader::NormsReader;
 use bearing::codecs::lucene94::field_infos_format;
 use bearing::codecs::lucene99::segment_info_format;
@@ -98,8 +99,8 @@ fn main() {
         summary.total_docs += si.max_doc;
         summary.max_doc += si.max_doc;
 
-        // Read field infos, terms metadata, and norms — use compound directory if needed
-        let (field_infos, terms_reader, norms_reader) = if si.is_compound_file {
+        // Read field infos, terms metadata, norms, and doc values — use compound directory if needed
+        let (field_infos, terms_reader, norms_reader, dv_reader) = if si.is_compound_file {
             let compound_dir =
                 CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap_or_else(|e| {
                     eprintln!("Failed to open compound dir for '{}': {e}", seg.name);
@@ -118,7 +119,10 @@ fn main() {
             } else {
                 None
             };
-            (fi, tr, nr)
+            let dv = doc_values_suffix(&fi).and_then(|s| {
+                DocValuesReader::open(&compound_dir, &seg.name, &s, &seg.id, &fi).ok()
+            });
+            (fi, tr, nr, dv)
         } else {
             let fi = field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
                 eprintln!("Failed to read field infos for '{}': {e}", seg.name);
@@ -132,7 +136,9 @@ fn main() {
             } else {
                 None
             };
-            (fi, tr, nr)
+            let dv = doc_values_suffix(&fi)
+                .and_then(|s| DocValuesReader::open(&dir, &seg.name, &s, &seg.id, &fi).ok());
+            (fi, tr, nr, dv)
         };
 
         let mut fields: Vec<&FieldInfo> = field_infos.iter().collect();
@@ -151,6 +157,11 @@ fn main() {
                     .and_then(|r| r.num_docs_with_field(fi.number()))
                     .unwrap_or(0) as i64;
 
+                let dv_doc_count = dv_reader
+                    .as_ref()
+                    .and_then(|r| r.num_docs_with_field(fi.number()))
+                    .unwrap_or(0) as i64;
+
                 FieldSummary {
                     name: fi.name().to_string(),
                     number: fi.number(),
@@ -163,7 +174,7 @@ fn main() {
                     point_index_dimension_count: fi.point_config().index_dimension_count,
                     point_num_bytes: fi.point_config().num_bytes,
                     term_count,
-                    dv_doc_count: 0,
+                    dv_doc_count,
                     norms_doc_count,
                 }
             })
@@ -182,6 +193,7 @@ fn main() {
         process::exit(1);
     });
     println!("{json}");
+    println!();
 }
 
 fn index_options_str(opt: IndexOptions) -> &'static str {
@@ -212,6 +224,15 @@ fn postings_suffix(field_infos: &bearing::index::FieldInfos) -> Option<String> {
     field_infos.iter().find_map(|fi| {
         let format = fi.get_attribute("PerFieldPostingsFormat.format")?;
         let suffix = fi.get_attribute("PerFieldPostingsFormat.suffix")?;
+        Some(format!("{format}_{suffix}"))
+    })
+}
+
+/// Derives the per-field doc values segment suffix (e.g., "Lucene90_0") from field attributes.
+fn doc_values_suffix(field_infos: &bearing::index::FieldInfos) -> Option<String> {
+    field_infos.iter().find_map(|fi| {
+        let format = fi.get_attribute("PerFieldDocValuesFormat.format")?;
+        let suffix = fi.get_attribute("PerFieldDocValuesFormat.suffix")?;
         Some(format!("{format}_{suffix}"))
     })
 }
