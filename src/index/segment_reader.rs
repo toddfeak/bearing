@@ -224,6 +224,65 @@ impl SegmentReader {
     pub fn postings_reader(&self) -> Option<&PostingsReader> {
         self.postings_reader.as_ref()
     }
+
+    /// Returns a doc ID iterator for documents containing the given term.
+    ///
+    /// Combines trie navigation, term block scanning, and doc ID iteration
+    /// into a single call. Returns `None` if the field doesn't exist, isn't
+    /// indexed, or the term is not found.
+    pub fn postings(
+        &self,
+        field: &str,
+        term: &[u8],
+    ) -> io::Result<Option<crate::codecs::lucene103::postings_reader::BlockDocIterator>> {
+        use crate::codecs::lucene103::segment_terms_enum;
+
+        let field_info = match self.field_infos.field_info_by_name(field) {
+            Some(fi) => fi,
+            None => return Ok(None),
+        };
+
+        let terms_reader = match self.terms_reader.as_ref() {
+            Some(tr) => tr,
+            None => return Ok(None),
+        };
+
+        let postings_reader = match self.postings_reader.as_ref() {
+            Some(pr) => pr,
+            None => return Ok(None),
+        };
+
+        let field_reader = match terms_reader.field_reader(field_info.number()) {
+            Some(fr) => fr,
+            None => return Ok(None),
+        };
+
+        // Navigate the trie to find the block containing this term
+        let trie = field_reader.new_trie_reader()?;
+        let trie_result = match trie.seek_to_block(term)? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        // Scan the block for the exact term and decode its metadata
+        let index_input = field_reader.index_input()?;
+        let term_state = segment_terms_enum::seek_exact(
+            terms_reader.terms_in(),
+            &trie_result,
+            term,
+            field_info.index_options(),
+            &*index_input,
+        )?;
+
+        let Some(state) = term_state else {
+            return Ok(None);
+        };
+
+        // Create a doc ID iterator from the term state
+        let index_has_freq = field_info.index_options().has_freqs();
+        let iter = postings_reader.block_doc_iterator(&state, index_has_freq)?;
+        Ok(Some(iter))
+    }
 }
 
 /// Derives a per-field codec suffix (e.g., `"Lucene103_0"`) from field attributes.
@@ -334,5 +393,130 @@ mod tests {
         assert!(fi.field_info_by_name("content").is_some());
         assert!(fi.field_info_by_name("path").is_some());
         assert!(fi.has_postings());
+    }
+
+    fn collect_docs(
+        iter: &mut crate::codecs::lucene103::postings_reader::BlockDocIterator,
+    ) -> Vec<i32> {
+        let mut docs = Vec::new();
+        while let Some(doc) = iter.next_doc().unwrap() {
+            docs.push(doc);
+        }
+        docs
+    }
+
+    #[test]
+    fn test_postings_term_found() {
+        let (dir, name, id) = write_test_index(false);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        // "world" appears in both docs (doc 0: "hello world", doc 1: "goodbye world")
+        let mut iter = reader.postings("content", b"world").unwrap().unwrap();
+        let docs = collect_docs(&mut iter);
+        assert_eq!(docs, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_postings_term_in_one_doc() {
+        let (dir, name, id) = write_test_index(false);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        // "hello" appears only in doc 0
+        let mut iter = reader.postings("content", b"hello").unwrap().unwrap();
+        let docs = collect_docs(&mut iter);
+        assert_eq!(docs, vec![0]);
+
+        // "goodbye" appears only in doc 1
+        let mut iter = reader.postings("content", b"goodbye").unwrap().unwrap();
+        let docs = collect_docs(&mut iter);
+        assert_eq!(docs, vec![1]);
+    }
+
+    #[test]
+    fn test_postings_nonexistent_term() {
+        let (dir, name, id) = write_test_index(false);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        let result = reader.postings("content", b"nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_postings_nonexistent_field() {
+        let (dir, name, id) = write_test_index(false);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        let result = reader.postings("no_such_field", b"hello").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_postings_string_field() {
+        let (dir, name, id) = write_test_index(false);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        // StringField "path" stores exact values as single tokens
+        let mut iter = reader.postings("path", b"/test.txt").unwrap().unwrap();
+        let docs = collect_docs(&mut iter);
+        assert_eq!(docs, vec![0]);
+
+        let mut iter = reader.postings("path", b"/other.txt").unwrap().unwrap();
+        let docs = collect_docs(&mut iter);
+        assert_eq!(docs, vec![1]);
+    }
+
+    #[test]
+    fn test_postings_compound_segment() {
+        let (dir, name, id) = write_test_index(true);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        let mut iter = reader.postings("content", b"world").unwrap().unwrap();
+        let docs = collect_docs(&mut iter);
+        assert_eq!(docs, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_postings_many_docs() {
+        // Write 200 docs to exercise full block + VInt tail
+        let config = IndexWriterConfig::new().set_use_compound_file(false);
+        let writer = IndexWriter::with_config(config);
+
+        for i in 0..200 {
+            let mut doc = Document::new();
+            doc.add(document::text_field("content", "common"));
+            if i % 2 == 0 {
+                doc.add(document::text_field("content", "even"));
+            }
+            writer.add_document(doc).unwrap();
+        }
+
+        let result = writer.commit().unwrap();
+        let seg_files = result.into_segment_files().unwrap();
+        let mut mem_dir = MemoryDirectory::new();
+        for sf in &seg_files {
+            mem_dir.write_file(&sf.name, &sf.data).unwrap();
+        }
+        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        let files = dir.list_all().unwrap();
+        let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+        let infos = crate::index::segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let seg = &infos.segments[0];
+
+        let reader = SegmentReader::open(dir.as_ref(), &seg.name, &seg.id).unwrap();
+
+        // "common" should be in all 200 docs
+        let mut iter = reader.postings("content", b"common").unwrap().unwrap();
+        let docs = collect_docs(&mut iter);
+        assert_eq!(docs.len(), 200);
+        assert_eq!(docs[0], 0);
+        assert_eq!(docs[199], 199);
+
+        // "even" should be in 100 docs (0, 2, 4, ..., 198)
+        let mut iter = reader.postings("content", b"even").unwrap().unwrap();
+        let docs = collect_docs(&mut iter);
+        assert_eq!(docs.len(), 100);
+        assert_eq!(docs[0], 0);
+        assert_eq!(docs[1], 2);
+        assert_eq!(docs[99], 198);
     }
 }

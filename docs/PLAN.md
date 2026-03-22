@@ -65,12 +65,25 @@ FOR/PFOR decode functions go in `codecs::lucene103::for_util` alongside the exis
 - `DirectoryReader` — opens an index directory via `segments_N`, creates `SegmentReader` per segment. `LeafReaderContext` provides per-segment doc base for global doc ID mapping.
 - `generate_summary` binary simplified to use `DirectoryReader`, validating the hierarchy end-to-end across all E2E tests.
 
+### 4. Term Seeking & Doc Iteration (done)
+First query path: given a field name and term, find all matching doc IDs.
+
+- **FOR/PFOR decode** — `for_util` decode functions (reverse of encode): `decode`, `pfor_decode`, `for_delta_decode` with expand/prefix-sum. Round-trip tested at all BPV thresholds.
+- **RandomAccessInput** — absolute-position read trait for trie navigation. Implemented for `ByteSliceIndexInput` and `FSIndexInput`.
+- **TrieReader** — navigates the `.tip` FST-like trie index. Handles all 3 node types (leaf, single-child, multi-children) and all 3 child save strategies (BITS, ARRAY, REVERSE_ARRAY). Returns block file pointer + floor data for term block lookup.
+- **SegmentTermsEnum** — parses `.tim` term blocks. Loads 5-section blocks (header, suffixes, suffix lengths, stats, metadata), scans suffixes for exact match, decodes `IntBlockTermState` with singleton RLE and delta encoding. Handles LZ4 and lowercase ASCII suffix compression. Floor block scanning for multi-block fields.
+- **BlockDocIterator** — sequential doc ID iteration from `.doc` file. Handles singleton (pulsed), VInt tail (group-varint), and full 128-doc blocks (FOR-delta, bitset, consecutive). Skips impact/freq data.
+- **SegmentReader::postings()** — end-to-end convenience: field lookup → trie seek → block scan → metadata decode → doc ID iteration. Works for both compound and non-compound segments.
+
+**Deferred from this step** (see `docs/backlog/block_doc_iterator_gaps.md`):
+- Frequency decoding — needed for scoring (BM25)
+- `advance(target)` / skip-based seeking — needed for conjunctive (AND) queries
+- Level1 skip handling — needed for terms with > 4096 docs (writer also limited)
+
 ## Phase 2 — Search
 
-### 4. Search Infrastructure
-Term iteration and posting list access:
-- `TermsEnum` — term seeking/iteration within `BlockTreeTermsReader` (requires trie index navigation)
-- `PostingsEnum` — doc ID iteration for a term (requires FOR/PFOR decode in `for_util`)
+### 5. Search Infrastructure
+- Frequency decoding in `BlockDocIterator` (prerequisite for scoring)
 - Public iterator traits for terms, postings, doc values
 
 Query execution:
@@ -81,7 +94,7 @@ Query execution:
 
 **Testable:** Once readers exist, even a basic TermQuery can be tested end-to-end.
 
-### 5. Core Query Types
+### 6. Core Query Types
 Start with the essentials:
 - `TermQuery` (single term lookup)
 - `BooleanQuery` (AND/OR/NOT composition)
