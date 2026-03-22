@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Lucene 9.0 format writers: compound files, doc values, norms, points, and stored fields.
+//! Lucene 9.0 format: compound files, doc values, norms, points, stored fields, and term vectors.
 
 pub mod compound;
 pub mod compound_reader;

@@ -49,9 +49,10 @@ Format-specific readers for each codec version. Each reader has its own read-sid
 - Compound file reader (lucene90) — `CompoundDirectory` implements `Directory` (read-only) by parsing `.cfe` entry table and slicing `.cfs` data file. Codec readers use it transparently via `dir.open_input()`.
 - `codec_util` read functions — `check_header`, `check_index_header`, `check_footer` (production); `checksum_entire_file` (test-only)
 - Stored fields reader (lucene90) — reads `.fdt`/`.fdx`/`.fdm` files, decompresses LZ4-with-preset-dict chunks, decodes all stored field value types (string, int, long, float, double, bytes). Uses `DirectReader` + `DirectMonotonicReader` for chunk index lookup.
+- Block tree terms reader (lucene103) — reads `.tim`/`.tip`/`.tmd` files, provides per-field term metadata (term count, sum total term freq, doc count, min/max term).
+- Norms reader (lucene90) — reads `.nvm`/`.nvd` files. Eager metadata, lazy data reads. Supports ALL, EMPTY, and SPARSE (via IndexedDISI) patterns with 0/1/2/4/8-byte norm values.
 
 **Remaining:**
-- Norms reader (lucene90)
 - Doc values reader (lucene90)
 - Points/BKD reader (lucene90)
 - Postings reader + block tree terms reader (lucene103)
