@@ -41,9 +41,9 @@ pub struct FieldReader {
     /// Number of documents that have at least one term in this field.
     pub doc_count: i32,
     /// Lexicographically smallest term in this field.
-    pub min_term: Vec<u8>,
+    pub min_term: Box<[u8]>,
     /// Lexicographically largest term in this field.
-    pub max_term: Vec<u8>,
+    pub max_term: Box<[u8]>,
     // Trie index pointers — used when creating a TrieReader for term enumeration
     #[allow(dead_code)]
     index_start: i64,
@@ -267,14 +267,14 @@ fn read_field_metadata(
 }
 
 /// Reads a length-prefixed byte array (VInt length + raw bytes).
-fn read_bytes_ref(input: &mut dyn DataInput) -> io::Result<Vec<u8>> {
+fn read_bytes_ref(input: &mut dyn DataInput) -> io::Result<Box<[u8]>> {
     let len = input.read_vint()?;
     if len < 0 {
         return Err(io::Error::other(format!("invalid bytes length: {len}")));
     }
     let mut buf = vec![0u8; len as usize];
     input.read_bytes(&mut buf)?;
-    Ok(buf)
+    Ok(buf.into_boxed_slice())
 }
 
 #[cfg(test)]
@@ -382,8 +382,8 @@ mod tests {
         assert_eq!(fr.num_terms, 3);
         // For DOCS-only, sumTotalTermFreq == sumDocFreq
         assert_eq!(fr.sum_total_term_freq, fr.sum_doc_freq);
-        assert_eq!(fr.min_term, b"alpha");
-        assert_eq!(fr.max_term, b"gamma");
+        assert_eq!(&*fr.min_term, b"alpha");
+        assert_eq!(&*fr.max_term, b"gamma");
         assert_ge!(fr.doc_count, 1);
 
         Ok(())
@@ -401,8 +401,8 @@ mod tests {
         // With freqs, sumTotalTermFreq >= sumDocFreq
         assert_ge!(fr.sum_total_term_freq, fr.sum_doc_freq);
         assert_ge!(fr.sum_doc_freq, fr.doc_count as i64);
-        assert_eq!(fr.min_term, b"hello");
-        assert_eq!(fr.max_term, b"world");
+        assert_eq!(&*fr.min_term, b"hello");
+        assert_eq!(&*fr.max_term, b"world");
 
         Ok(())
     }
@@ -511,8 +511,8 @@ mod tests {
         assert_eq!(fr.field_number, 0);
         assert_eq!(fr.num_terms, 5);
         assert_eq!(fr.doc_count, 3);
-        assert_eq!(fr.min_term, b"a");
-        assert_eq!(fr.max_term, b"z");
+        assert_eq!(&*fr.min_term, b"a");
+        assert_eq!(&*fr.max_term, b"z");
     }
 
     #[test]

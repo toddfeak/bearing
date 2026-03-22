@@ -107,14 +107,63 @@ pub struct StoredField {
     pub value: StoredValue,
 }
 
+/// Cached state for the most recently loaded block.
+///
+/// Mirrors Java's `BlockState` in `Lucene90CompressingStoredFieldsReader`.
+/// Caches block metadata and decompressed data so that consecutive reads
+/// within the same block skip seeking, metadata parsing, and decompression.
+struct BlockState {
+    /// First document ID in this block.
+    doc_base: u32,
+    /// Number of documents in this block (0 = no block loaded).
+    chunk_docs: u32,
+    /// Number of stored fields per document.
+    num_stored_fields: Box<[i64]>,
+    /// Cumulative byte offsets within the decompressed data (length = chunk_docs + 1).
+    offsets: Box<[i64]>,
+    /// Full decompressed chunk data.
+    decompressed: Box<[u8]>,
+}
+
+impl BlockState {
+    /// Creates an empty block state that matches no document.
+    fn new() -> Self {
+        Self {
+            doc_base: 0,
+            chunk_docs: 0,
+            num_stored_fields: Box::new([]),
+            offsets: Box::new([]),
+            decompressed: Box::new([]),
+        }
+    }
+
+    /// Returns `true` if `doc_id` is within the currently loaded block.
+    fn contains(&self, doc_id: u32) -> bool {
+        doc_id >= self.doc_base && doc_id < self.doc_base + self.chunk_docs
+    }
+
+    /// Extracts and decodes one document's stored fields from the cached block.
+    fn document(&self, doc_id: u32) -> io::Result<Vec<StoredField>> {
+        let index = (doc_id - self.doc_base) as usize;
+        let doc_offset = self.offsets[index] as usize;
+        let doc_length = self.offsets[index + 1] as usize - doc_offset;
+        let num_fields = self.num_stored_fields[index] as usize;
+        let doc_data = &self.decompressed[doc_offset..doc_offset + doc_length];
+        decode_fields(doc_data, num_fields)
+    }
+}
+
 /// Reads stored fields from a segment.
 ///
 /// Opens `.fdt`, `.fdx`, and `.fdm` files and provides document-level
-/// access to stored field values.
+/// access to stored field values. Caches the most recently loaded block
+/// so that consecutive reads within the same chunk avoid redundant I/O
+/// and decompression.
 pub struct StoredFieldsReader {
     fields_stream: Box<dyn IndexInput>,
     index_reader: FieldsIndexReader,
     chunk_size: i32,
+    state: BlockState,
 }
 
 impl StoredFieldsReader {
@@ -181,11 +230,28 @@ impl StoredFieldsReader {
             fields_stream: fdt_input,
             index_reader,
             chunk_size,
+            state: BlockState::new(),
         })
     }
 
     /// Reads all stored fields for the given document.
+    ///
+    /// If the document is in the currently cached block, returns its fields
+    /// directly from the cache. Otherwise, loads and caches the new block first.
     pub fn document(&mut self, doc_id: u32) -> io::Result<Vec<StoredField>> {
+        if !self.state.contains(doc_id) {
+            self.reset_state(doc_id)?;
+        }
+        self.state.document(doc_id)
+    }
+
+    /// Loads block metadata and decompressed data for the block containing `doc_id`.
+    ///
+    /// On failure, invalidates the cached state so stale data is never reused.
+    fn reset_state(&mut self, doc_id: u32) -> io::Result<()> {
+        // Invalidate first — if anything below fails, state stays empty
+        self.state.chunk_docs = 0;
+
         let block = self.index_reader.block_id(doc_id)?;
         let start_pointer = self.index_reader.block_start_pointer(block)?;
 
@@ -230,27 +296,25 @@ impl StoredFieldsReader {
             (nsf, lengths)
         };
 
-        let start_pointer_data = self.fields_stream.file_pointer();
         let total_length = *offsets.last().unwrap() as usize;
-        let doc_offset = offsets[doc_in_chunk as usize] as usize;
-        let doc_length = offsets[doc_in_chunk as usize + 1] as usize - doc_offset;
-        let num_fields = num_stored_fields[doc_in_chunk as usize] as usize;
 
         // Decompress the chunk data
-        let decompressed = self.decompress_chunk(start_pointer_data, total_length, sliced)?;
+        let decompressed = self.decompress_chunk(total_length, sliced)?;
 
-        // Decode fields from the decompressed data for this document
-        let doc_data = &decompressed[doc_offset..doc_offset + doc_length];
-        decode_fields(doc_data, num_fields)
+        // Store in cached state
+        self.state = BlockState {
+            doc_base,
+            chunk_docs,
+            num_stored_fields: num_stored_fields.into_boxed_slice(),
+            offsets: offsets.into_boxed_slice(),
+            decompressed: decompressed.into_boxed_slice(),
+        };
+
+        Ok(())
     }
 
     /// Decompresses the chunk data starting at the current stream position.
-    fn decompress_chunk(
-        &mut self,
-        _start: u64,
-        total_length: usize,
-        sliced: bool,
-    ) -> io::Result<Vec<u8>> {
+    fn decompress_chunk(&mut self, total_length: usize, sliced: bool) -> io::Result<Vec<u8>> {
         if !sliced {
             // Single LZ4 block with preset dictionary
             self.decompress_lz4_with_dict(total_length)
@@ -968,6 +1032,98 @@ mod tests {
         let result = stored_ints_round_trip(&values);
         for (i, &v) in values.iter().enumerate() {
             assert_eq!(result[i], v as i64, "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn test_block_state_cache_sequential_reads() {
+        // Write several small docs — they'll all land in the same chunk.
+        // Reading them sequentially should hit the cache after the first.
+        let mut docs = Vec::new();
+        for i in 0..5 {
+            let mut doc = Document::new();
+            doc.add(stored_string_field("name", &format!("doc_{i}")));
+            doc.add(stored_int_field("idx", i));
+            docs.push(doc);
+        }
+
+        let config = IndexWriterConfig::new().set_use_compound_file(false);
+        let writer = IndexWriter::with_config(config);
+        for doc in docs {
+            writer.add_document(doc).unwrap();
+        }
+        let result = writer.commit().unwrap();
+
+        let mut mem_dir = MemoryDirectory::new();
+        for seg_file in result.into_segment_files().unwrap() {
+            mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
+        }
+        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        let files = dir.list_all().unwrap();
+        let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+        let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let seg = &infos.segments[0];
+
+        let mut reader = StoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+
+        // First read loads the block
+        let fields0 = reader.document(0).unwrap();
+        assert_eq!(fields0.len(), 2);
+        assert!(reader.state.contains(0));
+
+        // Subsequent reads should hit the cache (same block)
+        for i in 1u32..5 {
+            assert!(
+                reader.state.contains(i),
+                "doc {i} should be in cached block"
+            );
+            let fields = reader.document(i).unwrap();
+            assert_eq!(fields.len(), 2);
+            // Verify the stored int value matches
+            let idx_field = fields.iter().find(|f| f.field_number == 1).unwrap();
+            assert_matches!(idx_field.value, StoredValue::Int(v) if v == i as i32);
+        }
+    }
+
+    #[test]
+    fn test_block_state_invalidated_on_new_block() {
+        // Write docs with large stored fields to force multiple chunks.
+        // Chunk size is 81920 bytes, so ~40KB per doc should force 2+ blocks.
+        let big_string: String = "x".repeat(45_000);
+
+        let mut docs = Vec::new();
+        for i in 0..4 {
+            let mut doc = Document::new();
+            doc.add(stored_string_field("data", &big_string));
+            doc.add(stored_int_field("idx", i));
+            docs.push(doc);
+        }
+
+        let config = IndexWriterConfig::new().set_use_compound_file(false);
+        let writer = IndexWriter::with_config(config);
+        for doc in docs {
+            writer.add_document(doc).unwrap();
+        }
+        let result = writer.commit().unwrap();
+
+        let mut mem_dir = MemoryDirectory::new();
+        for seg_file in result.into_segment_files().unwrap() {
+            mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
+        }
+        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        let files = dir.list_all().unwrap();
+        let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+        let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let seg = &infos.segments[0];
+
+        let mut reader = StoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+
+        // Read all docs and verify values — this exercises cache invalidation
+        // as docs should span multiple blocks
+        for i in 0u32..4 {
+            let fields = reader.document(i).unwrap();
+            let idx_field = fields.iter().find(|f| f.field_number == 1).unwrap();
+            assert_matches!(idx_field.value, StoredValue::Int(v) if v == i as i32);
         }
     }
 }
