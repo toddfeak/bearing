@@ -138,7 +138,19 @@ public class GenerateIndexSummary {
             default:
                 break;
         }
-        sb.append(indent).append("  \"dvDocCount\": ").append(dvDocCount).append("\n");
+        sb.append(indent).append("  \"dvDocCount\": ").append(dvDocCount).append(",\n");
+
+        // Norms doc count
+        long normsDocCount = 0;
+        if (fi.hasNorms()) {
+            NumericDocValues norms = leaf.getNormValues(fi.name);
+            if (norms != null) {
+                while (norms.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+                    normsDocCount++;
+                }
+            }
+        }
+        sb.append(indent).append("  \"normsDocCount\": ").append(normsDocCount).append("\n");
 
         sb.append(indent).append("}");
     }

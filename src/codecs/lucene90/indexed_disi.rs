@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! IndexedDISI bitset writer for encoding which documents have values.
+//! IndexedDISI bitset encoding for sparse document presence.
 //!
 //! Encodes sorted document IDs into 65536-doc blocks using one of three strategies:
 //! - **ALL**: block has all 65536 docs set (no data after header)
@@ -10,7 +10,7 @@
 
 use std::io;
 
-use crate::store::IndexOutput;
+use crate::store::{IndexInput, IndexOutput};
 
 /// Number of doc IDs per block.
 const BLOCK_SIZE: i32 = 65536;
@@ -211,10 +211,453 @@ fn flush_block_jumps(
     Ok(count as i16)
 }
 
+// ---------------------------------------------------------------------------
+// Reader
+// ---------------------------------------------------------------------------
+
+/// Block encoding method for the current block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Method {
+    Sparse,
+    Dense,
+    All,
+}
+
+/// Disk-based document ID set iterator with ordinal tracking.
+///
+/// Returns documents in sorted order and tracks the ordinal index (position
+/// among all set documents). Used by norms and doc values readers to map
+/// doc IDs to sparse value ordinals.
+pub struct IndexedDISI {
+    slice: Box<dyn IndexInput>,
+    jump_table: Option<Box<dyn IndexInput>>,
+    jump_table_entry_count: i32,
+    dense_rank_power: i8,
+    dense_rank_table: Option<Vec<u8>>,
+
+    // Block state
+    block: i32,
+    block_end: u64,
+    dense_bitmap_offset: u64,
+    next_block_index: i32,
+    method: Method,
+    doc: i32,
+    index: i32,
+
+    // SPARSE state
+    exists: bool,
+    next_exist_doc_in_block: i32,
+
+    // DENSE state
+    word: i64,
+    word_index: i32,
+    number_of_ones: i32,
+    dense_origo_index: i32,
+
+    // ALL state
+    gap: i32,
+
+    cost: i64,
+}
+
+impl IndexedDISI {
+    /// Creates an `IndexedDISI` by slicing block data and jump table from a parent input.
+    pub fn new(
+        data: &dyn IndexInput,
+        offset: i64,
+        length: i64,
+        jump_table_entry_count: i16,
+        dense_rank_power: u8,
+        cost: i64,
+    ) -> io::Result<Self> {
+        let block_slice = create_block_slice(data, offset, length, jump_table_entry_count as i32)?;
+        let jump_table = create_jump_table(data, offset, length, jump_table_entry_count as i32)?;
+        Self::from_parts(
+            block_slice,
+            jump_table,
+            jump_table_entry_count as i32,
+            dense_rank_power as i8,
+            cost,
+        )
+    }
+
+    /// Creates an `IndexedDISI` from pre-sliced block data and jump table.
+    fn from_parts(
+        slice: Box<dyn IndexInput>,
+        jump_table: Option<Box<dyn IndexInput>>,
+        jump_table_entry_count: i32,
+        dense_rank_power: i8,
+        cost: i64,
+    ) -> io::Result<Self> {
+        if !(7..=15).contains(&dense_rank_power) && dense_rank_power != -1 {
+            return Err(io::Error::other(format!(
+                "Acceptable values for denseRankPower are 7-15. Got {dense_rank_power}"
+            )));
+        }
+
+        let rank_index_shift = dense_rank_power - 7;
+        let dense_rank_table = if dense_rank_power == -1 {
+            None
+        } else {
+            Some(vec![0u8; DENSE_BLOCK_LONGS >> rank_index_shift as usize])
+        };
+
+        Ok(Self {
+            slice,
+            jump_table,
+            jump_table_entry_count,
+            dense_rank_power,
+            dense_rank_table,
+            block: -1,
+            block_end: 0,
+            dense_bitmap_offset: 0,
+            next_block_index: -1,
+            method: Method::Sparse,
+            doc: -1,
+            index: -1,
+            exists: false,
+            next_exist_doc_in_block: -1,
+            word: 0,
+            word_index: -1,
+            number_of_ones: 0,
+            dense_origo_index: 0,
+            gap: 0,
+            cost,
+        })
+    }
+
+    /// Returns the current document ID, or -1 if not positioned.
+    pub fn doc_id(&self) -> i32 {
+        self.doc
+    }
+
+    /// Returns the ordinal index of the current document among all set documents.
+    pub fn index(&self) -> i32 {
+        self.index
+    }
+
+    /// Returns the estimated number of documents in this set.
+    pub fn cost(&self) -> i64 {
+        self.cost
+    }
+
+    /// Advances to the first document at or after `target`.
+    ///
+    /// Returns `Ok(Some(doc))` if found, `Ok(None)` if no more documents.
+    pub fn advance(&mut self, target: i32) -> io::Result<Option<i32>> {
+        let target_block = target & 0xFFFF_0000u32 as i32;
+        if self.block < target_block {
+            self.advance_block(target_block)?;
+        }
+        if self.block == target_block {
+            if self.advance_within_block(target)? {
+                return Ok(Some(self.doc));
+            }
+            self.read_block_header()?;
+        }
+        let found = self.advance_within_block(self.block)?;
+        if !found {
+            self.doc = NO_MORE_DOCS;
+            return Ok(None);
+        }
+        if self.doc == NO_MORE_DOCS {
+            return Ok(None);
+        }
+        Ok(Some(self.doc))
+    }
+
+    /// Checks whether `target` is in the set and positions the index accordingly.
+    ///
+    /// After calling, `index()` returns the ordinal if the doc exists.
+    pub fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        let target_block = target & 0xFFFF_0000u32 as i32;
+        if self.block < target_block {
+            self.advance_block(target_block)?;
+        }
+        let found = self.block == target_block && self.advance_exact_within_block(target)?;
+        self.doc = target;
+        Ok(found)
+    }
+
+    /// Advances to the next document.
+    pub fn next_doc(&mut self) -> io::Result<Option<i32>> {
+        self.advance(self.doc + 1)
+    }
+
+    fn advance_block(&mut self, target_block: i32) -> io::Result<()> {
+        let block_index = target_block >> 16;
+
+        // Use jump table if destination is 2+ blocks ahead
+        if let Some(ref mut jt) = self.jump_table
+            && block_index >= (self.block >> 16) + 2
+        {
+            let in_range = if block_index < self.jump_table_entry_count {
+                block_index
+            } else {
+                self.jump_table_entry_count - 1
+            };
+            let jt_offset = in_range as u64 * 8;
+            jt.seek(jt_offset)?;
+            let index = jt.read_le_int()?;
+            let offset = jt.read_le_int()?;
+            self.next_block_index = index - 1;
+            self.slice.seek(offset as u64)?;
+            self.read_block_header()?;
+            return Ok(());
+        }
+
+        // Fallback: iterate blocks forward
+        loop {
+            self.slice.seek(self.block_end)?;
+            self.read_block_header()?;
+            if self.block >= target_block {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_block_header(&mut self) -> io::Result<()> {
+        self.block = (self.slice.read_le_short()? as u16 as i32) << 16;
+        let num_values = 1 + self.slice.read_le_short()? as u16 as i32;
+        self.index = self.next_block_index;
+        self.next_block_index = self.index + num_values;
+
+        if num_values <= MAX_ARRAY_LENGTH {
+            // SPARSE
+            self.method = Method::Sparse;
+            self.block_end = self.slice.file_pointer() + (num_values as u64 * 2);
+            self.next_exist_doc_in_block = -1;
+        } else if num_values == BLOCK_SIZE {
+            // ALL
+            self.method = Method::All;
+            self.block_end = self.slice.file_pointer();
+            self.gap = self.block - self.index - 1;
+        } else {
+            // DENSE
+            self.method = Method::Dense;
+            let rank_table_len = self.dense_rank_table.as_ref().map_or(0, |t| t.len());
+            self.dense_bitmap_offset = self.slice.file_pointer() + rank_table_len as u64;
+            self.block_end = self.dense_bitmap_offset + (1 << 13); // 8192 bytes
+
+            // Load rank table
+            if let Some(ref mut table) = self.dense_rank_table {
+                self.slice.read_bytes(table)?;
+            }
+            self.word_index = -1;
+            self.number_of_ones = self.index + 1;
+            self.dense_origo_index = self.number_of_ones;
+        }
+        Ok(())
+    }
+
+    fn advance_within_block(&mut self, target: i32) -> io::Result<bool> {
+        match self.method {
+            Method::Sparse => self.advance_within_sparse(target),
+            Method::Dense => self.advance_within_dense(target),
+            Method::All => {
+                self.advance_within_all(target);
+                Ok(true)
+            }
+        }
+    }
+
+    fn advance_exact_within_block(&mut self, target: i32) -> io::Result<bool> {
+        match self.method {
+            Method::Sparse => self.advance_exact_within_sparse(target),
+            Method::Dense => self.advance_exact_within_dense(target),
+            Method::All => {
+                self.advance_exact_within_all(target);
+                Ok(true)
+            }
+        }
+    }
+
+    // --- SPARSE block methods ---
+
+    fn advance_within_sparse(&mut self, target: i32) -> io::Result<bool> {
+        let target_in_block = target & 0xFFFF;
+        while self.index < self.next_block_index {
+            let doc = self.slice.read_le_short()? as u16 as i32;
+            self.index += 1;
+            if doc >= target_in_block {
+                self.doc = self.block | doc;
+                self.exists = true;
+                self.next_exist_doc_in_block = doc;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn advance_exact_within_sparse(&mut self, target: i32) -> io::Result<bool> {
+        let target_in_block = target & 0xFFFF;
+        if self.next_exist_doc_in_block > target_in_block {
+            return Ok(false);
+        }
+        if target == self.doc {
+            return Ok(self.exists);
+        }
+        while self.index < self.next_block_index {
+            let doc = self.slice.read_le_short()? as u16 as i32;
+            self.index += 1;
+            if doc >= target_in_block {
+                self.next_exist_doc_in_block = doc;
+                if doc != target_in_block {
+                    self.index -= 1;
+                    let pos = self.slice.file_pointer() - 2;
+                    self.slice.seek(pos)?;
+                    break;
+                }
+                self.exists = true;
+                return Ok(true);
+            }
+        }
+        self.exists = false;
+        Ok(false)
+    }
+
+    // --- DENSE block methods ---
+
+    fn advance_within_dense(&mut self, target: i32) -> io::Result<bool> {
+        let target_in_block = target & 0xFFFF;
+        let target_word_index = target_in_block >> 6;
+
+        // Rank skip if far enough ahead
+        if self.dense_rank_power != -1
+            && target_word_index - self.word_index >= (1 << (self.dense_rank_power - 6))
+        {
+            self.rank_skip(target_in_block)?;
+        }
+
+        // Read words up to target
+        for _ in (self.word_index + 1)..=target_word_index {
+            self.word = self.slice.read_le_long()?;
+            self.number_of_ones += self.word.count_ones() as i32;
+        }
+        self.word_index = target_word_index;
+
+        // Check if target bit or any after it in this word are set
+        let shift = target & 63;
+        let left_bits = ((self.word as u64) >> shift) as i64;
+        if left_bits != 0 {
+            self.doc = target + (left_bits as u64).trailing_zeros() as i32;
+            self.index = self.number_of_ones - left_bits.count_ones() as i32;
+            return Ok(true);
+        }
+
+        // Scan forward through remaining words
+        while self.word_index + 1 < 1024 {
+            self.word_index += 1;
+            self.word = self.slice.read_le_long()?;
+            if self.word != 0 {
+                self.index = self.number_of_ones;
+                self.number_of_ones += self.word.count_ones() as i32;
+                self.doc = self.block
+                    | (self.word_index << 6)
+                    | (self.word as u64).trailing_zeros() as i32;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn advance_exact_within_dense(&mut self, target: i32) -> io::Result<bool> {
+        let target_in_block = target & 0xFFFF;
+        let target_word_index = target_in_block >> 6;
+
+        // Rank skip if far enough ahead
+        if self.dense_rank_power != -1
+            && target_word_index - self.word_index >= (1 << (self.dense_rank_power - 6))
+        {
+            self.rank_skip(target_in_block)?;
+        }
+
+        for _ in (self.word_index + 1)..=target_word_index {
+            self.word = self.slice.read_le_long()?;
+            self.number_of_ones += self.word.count_ones() as i32;
+        }
+        self.word_index = target_word_index;
+
+        let shift = target & 63;
+        let left_bits = ((self.word as u64) >> shift) as i64;
+        self.index = self.number_of_ones - left_bits.count_ones() as i32;
+        Ok((left_bits & 1) != 0)
+    }
+
+    fn rank_skip(&mut self, target_in_block: i32) -> io::Result<()> {
+        let table = self.dense_rank_table.as_ref().unwrap();
+        let rank_index = target_in_block >> self.dense_rank_power;
+        let rank = ((table[(rank_index << 1) as usize] as u16) << 8
+            | table[((rank_index << 1) + 1) as usize] as u16) as i32;
+
+        let rank_aligned_word_index = (rank_index << self.dense_rank_power) >> 6;
+        self.slice
+            .seek(self.dense_bitmap_offset + rank_aligned_word_index as u64 * 8)?;
+        let rank_word = self.slice.read_le_long()?;
+        let dense_noo = rank + rank_word.count_ones() as i32;
+
+        self.word_index = rank_aligned_word_index;
+        self.word = rank_word;
+        self.number_of_ones = self.dense_origo_index + dense_noo;
+        Ok(())
+    }
+
+    // --- ALL block methods ---
+
+    fn advance_within_all(&mut self, target: i32) {
+        self.doc = target;
+        self.index = target - self.gap;
+    }
+
+    fn advance_exact_within_all(&mut self, target: i32) {
+        self.index = target - self.gap;
+    }
+}
+
+/// Slices the block data portion (without jump table) from a parent input.
+pub fn create_block_slice(
+    data: &dyn IndexInput,
+    offset: i64,
+    length: i64,
+    jump_table_entry_count: i32,
+) -> io::Result<Box<dyn IndexInput>> {
+    let jump_table_bytes = if jump_table_entry_count < 0 {
+        0
+    } else {
+        jump_table_entry_count as i64 * 8
+    };
+    data.slice(
+        "disi-blocks",
+        offset as u64,
+        (length - jump_table_bytes) as u64,
+    )
+}
+
+/// Slices the jump table portion from a parent input, or `None` if no jump table.
+pub fn create_jump_table(
+    data: &dyn IndexInput,
+    offset: i64,
+    length: i64,
+    jump_table_entry_count: i32,
+) -> io::Result<Option<Box<dyn IndexInput>>> {
+    if jump_table_entry_count <= 0 {
+        Ok(None)
+    } else {
+        let jump_table_bytes = jump_table_entry_count as i64 * 8;
+        let jt_offset = offset + length - jump_table_bytes;
+        let slice = data.slice("disi-jumptable", jt_offset as u64, jump_table_bytes as u64)?;
+        Ok(Some(slice))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::DataOutput;
+    use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::memory::MemoryIndexOutput;
+    use assertables::*;
 
     /// Helper to write a bitset and return the raw bytes and jump table entry count.
     fn write_and_get_bytes(doc_ids: &[i32], max_doc: i32) -> (Vec<u8>, i16) {
@@ -463,5 +906,381 @@ mod tests {
         let word64 =
             i64::from_le_bytes(bytes[word64_offset..word64_offset + 8].try_into().unwrap());
         assert_eq!(word64, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reader round-trip tests
+    // Ported from org.apache.lucene.codecs.lucene90.TestIndexedDISI
+    // -----------------------------------------------------------------------
+
+    /// Write a bitset and return an IndexedDISI reader over it.
+    fn write_and_read(doc_ids: &[i32], max_doc: i32) -> IndexedDISI {
+        let (bytes, entry_count) = write_and_get_bytes(doc_ids, max_doc);
+        let length = bytes.len() as i64;
+        let input: Box<dyn IndexInput> = Box::new(ByteSliceIndexInput::new("test".into(), bytes));
+        IndexedDISI::new(
+            input.as_ref(),
+            0,
+            length,
+            entry_count,
+            DEFAULT_DENSE_RANK_POWER as u8,
+            doc_ids.len() as i64,
+        )
+        .unwrap()
+    }
+
+    /// Verify next_doc() returns exactly the expected doc IDs in order.
+    fn assert_next_doc_sequence(disi: &mut IndexedDISI, expected: &[i32]) {
+        for (ordinal, &expected_doc) in expected.iter().enumerate() {
+            let doc = disi.next_doc().unwrap();
+            assert_eq!(doc, Some(expected_doc), "ordinal {ordinal}");
+            assert_eq!(disi.index(), ordinal as i32, "index at ordinal {ordinal}");
+        }
+        assert_none!(disi.next_doc().unwrap());
+    }
+
+    /// Verify advance() finds each expected doc, with index tracking.
+    fn assert_advance_sequence(disi: &mut IndexedDISI, expected: &[i32]) {
+        for (ordinal, &expected_doc) in expected.iter().enumerate() {
+            let doc = disi.advance(expected_doc).unwrap();
+            assert_eq!(doc, Some(expected_doc), "advance to {expected_doc}");
+            assert_eq!(disi.index(), ordinal as i32, "index at {expected_doc}");
+        }
+    }
+
+    /// Verify advance_exact() returns true for set docs and false for unset docs.
+    fn assert_advance_exact(doc_ids: &[i32], max_doc: i32) {
+        let mut disi = write_and_read(doc_ids, max_doc);
+        let doc_set: std::collections::HashSet<i32> = doc_ids.iter().copied().collect();
+
+        // Forward-only check: advance_exact can only go forward
+        let check_limit = max_doc.min(200_000);
+        let mut ordinal = 0;
+        for target in 0..check_limit {
+            let result = disi.advance_exact(target).unwrap();
+            if doc_set.contains(&target) {
+                assert!(result, "advance_exact({target}) should be true");
+                assert_eq!(disi.index(), ordinal, "index at doc {target}");
+                ordinal += 1;
+            } else {
+                assert!(!result, "advance_exact({target}) should be false");
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_empty() {
+        // Ported from TestIndexedDISI.testEmpty
+        let mut disi = write_and_read(&[], 10);
+        assert_none!(disi.next_doc().unwrap());
+    }
+
+    #[test]
+    fn test_read_one_doc() {
+        // Ported from TestIndexedDISI.testOneDoc
+        let mut disi = write_and_read(&[42], 100);
+        assert_next_doc_sequence(&mut disi, &[42]);
+    }
+
+    #[test]
+    fn test_read_two_docs() {
+        // Ported from TestIndexedDISI.testTwoDocs
+        let mut disi = write_and_read(&[42, 12345], 20000);
+        assert_next_doc_sequence(&mut disi, &[42, 12345]);
+    }
+
+    #[test]
+    fn test_read_all_docs() {
+        // Ported from TestIndexedDISI.testAllDocs
+        let docs: Vec<i32> = (0..65536).collect();
+        let mut disi = write_and_read(&docs, 65536);
+
+        // Verify first few and last
+        assert_eq!(disi.next_doc().unwrap(), Some(0));
+        assert_eq!(disi.index(), 0);
+        assert_eq!(disi.advance(65535).unwrap(), Some(65535));
+        assert_eq!(disi.index(), 65535);
+        assert_none!(disi.next_doc().unwrap());
+    }
+
+    #[test]
+    fn test_read_sparse_next_doc() {
+        // SPARSE block: few docs, iterate with next_doc
+        let docs = vec![10, 100, 1000, 5000, 60000];
+        let mut disi = write_and_read(&docs, 65536);
+        assert_next_doc_sequence(&mut disi, &docs);
+    }
+
+    #[test]
+    fn test_read_sparse_advance() {
+        // SPARSE block: advance to specific targets
+        let docs = vec![10, 100, 1000, 5000, 60000];
+        let mut disi = write_and_read(&docs, 65536);
+        assert_advance_sequence(&mut disi, &docs);
+    }
+
+    #[test]
+    fn test_read_sparse_advance_exact() {
+        // SPARSE block: advance_exact for presence/absence
+        let docs = vec![10, 100, 1000, 5000];
+        assert_advance_exact(&docs, 6000);
+    }
+
+    #[test]
+    fn test_read_dense_next_doc() {
+        // DENSE block: 5000 contiguous docs
+        let docs: Vec<i32> = (0..5000).collect();
+        let mut disi = write_and_read(&docs, 65536);
+
+        // Spot check first, middle, and end
+        assert_eq!(disi.next_doc().unwrap(), Some(0));
+        assert_eq!(disi.index(), 0);
+        assert_eq!(disi.advance(2500).unwrap(), Some(2500));
+        assert_eq!(disi.index(), 2500);
+        assert_eq!(disi.advance(4999).unwrap(), Some(4999));
+        assert_eq!(disi.index(), 4999);
+        assert_none!(disi.next_doc().unwrap());
+    }
+
+    #[test]
+    fn test_read_dense_advance_exact() {
+        // DENSE block: verify advance_exact with gaps
+        // Every 3rd doc set (like Java's DENSE test pattern)
+        let docs: Vec<i32> = (0..65536).filter(|d| d % 3 == 0).collect();
+        assert_gt!(docs.len(), MAX_ARRAY_LENGTH as usize); // confirm DENSE
+        assert_advance_exact(&docs, 65536);
+    }
+
+    #[test]
+    fn test_read_all_block_next_doc() {
+        // ALL block: every doc in range
+        let docs: Vec<i32> = (0..65536).collect();
+        let mut disi = write_and_read(&docs, 65536);
+
+        assert_eq!(disi.next_doc().unwrap(), Some(0));
+        assert_eq!(disi.index(), 0);
+        assert_eq!(disi.advance(32768).unwrap(), Some(32768));
+        assert_eq!(disi.index(), 32768);
+        assert_eq!(disi.advance(65535).unwrap(), Some(65535));
+        assert_eq!(disi.index(), 65535);
+        assert_none!(disi.next_doc().unwrap());
+    }
+
+    #[test]
+    fn test_read_all_block_advance_exact() {
+        // ALL block: every doc should exist
+        let docs: Vec<i32> = (0..65536).collect();
+        let mut disi = write_and_read(&docs, 65536);
+        for target in [0, 100, 32768, 65535] {
+            assert!(disi.advance_exact(target).unwrap(), "doc {target}");
+            assert_eq!(disi.index(), target);
+        }
+    }
+
+    #[test]
+    fn test_read_multi_block_sparse() {
+        // Multiple SPARSE blocks across block boundaries
+        let mut docs = vec![10, 100, 1000]; // block 0
+        docs.extend([65536 + 5, 65536 + 200]); // block 1
+        docs.extend([131072 + 42]); // block 2
+        let mut disi = write_and_read(&docs, 200000);
+        assert_next_doc_sequence(&mut disi, &docs);
+    }
+
+    #[test]
+    fn test_read_multi_block_advance() {
+        // Advance across block boundaries
+        let mut docs = vec![10, 100]; // block 0
+        docs.extend([65536 + 5, 65536 + 200]); // block 1
+        docs.extend([131072 + 42]); // block 2
+        let mut disi = write_and_read(&docs, 200000);
+
+        // Skip block 0 entirely
+        assert_eq!(disi.advance(65536).unwrap(), Some(65536 + 5));
+        assert_eq!(disi.index(), 2);
+
+        // Skip to block 2
+        assert_eq!(disi.advance(131072).unwrap(), Some(131072 + 42));
+        assert_eq!(disi.index(), 4);
+    }
+
+    #[test]
+    fn test_read_multi_block_advance_exact() {
+        // advance_exact across mixed blocks
+        let mut docs = vec![10, 100]; // block 0 sparse
+        docs.extend([65536 + 5]); // block 1 sparse
+        let mut disi = write_and_read(&docs, 200000);
+
+        assert!(disi.advance_exact(10).unwrap());
+        assert_eq!(disi.index(), 0);
+        assert!(!disi.advance_exact(50).unwrap());
+        assert!(disi.advance_exact(100).unwrap());
+        assert_eq!(disi.index(), 1);
+        assert!(disi.advance_exact(65536 + 5).unwrap());
+        assert_eq!(disi.index(), 2);
+    }
+
+    #[test]
+    fn test_read_mixed_block_types() {
+        // Ported from TestIndexedDISI.testRandomBlocks pattern
+        // Block 0: SPARSE (few docs)
+        // Block 1: ALL (65536 docs)
+        // Block 2: DENSE (every 3rd doc)
+        let mut docs: Vec<i32> = vec![0, 100, 4000]; // block 0: 3 docs = SPARSE
+        docs.extend(65536..131072); // block 1: all 65536 = ALL
+        let dense_docs: Vec<i32> = (131072..196608).filter(|d| d % 3 == 0).collect();
+        docs.extend(&dense_docs); // block 2: ~21845 docs = DENSE
+
+        let mut disi = write_and_read(&docs, 200000);
+
+        // SPARSE block
+        assert_eq!(disi.next_doc().unwrap(), Some(0));
+        assert_eq!(disi.index(), 0);
+        assert_eq!(disi.advance(100).unwrap(), Some(100));
+        assert_eq!(disi.index(), 1);
+
+        // ALL block
+        assert_eq!(disi.advance(65536).unwrap(), Some(65536));
+        assert_eq!(disi.index(), 3);
+        assert_eq!(disi.advance(100000).unwrap(), Some(100000));
+        assert_eq!(disi.index(), 3 + (100000 - 65536));
+
+        // DENSE block — 131072 % 3 == 2, so first set doc is 131073
+        assert_eq!(disi.advance(131072).unwrap(), Some(131073));
+        // Index = 3 (sparse) + 65536 (all) + 0 (first in dense)
+        assert_eq!(disi.index(), 3 + 65536);
+
+        assert_none!(disi.advance(200000).unwrap(), "past all blocks");
+    }
+
+    #[test]
+    fn test_read_advance_past_end() {
+        let docs = vec![10, 20, 30];
+        let mut disi = write_and_read(&docs, 100);
+        assert_none!(disi.advance(50).unwrap());
+    }
+
+    #[test]
+    fn test_read_half_full() {
+        // Ported from TestIndexedDISI.testHalfFull
+        // Every other doc — results in DENSE encoding
+        let docs: Vec<i32> = (0..65536).filter(|d| d % 2 == 0).collect();
+        assert_eq!(docs.len(), 32768);
+        let mut disi = write_and_read(&docs, 65536);
+
+        // Iterate through all and verify indices
+        let mut count = 0;
+        while let Some(doc) = disi.next_doc().unwrap() {
+            assert_eq!(doc, count * 2);
+            assert_eq!(disi.index(), count);
+            count += 1;
+        }
+        assert_eq!(count, 32768);
+    }
+
+    #[test]
+    fn test_read_one_doc_missing() {
+        // Ported from TestIndexedDISI.testOneDocMissing
+        // All docs except doc 500 — DENSE block
+        let docs: Vec<i32> = (0..65536).filter(|&d| d != 500).collect();
+        assert_eq!(docs.len(), 65535);
+        let mut disi = write_and_read(&docs, 65536);
+
+        // Doc 499 should exist at index 499
+        assert!(disi.advance_exact(499).unwrap());
+        assert_eq!(disi.index(), 499);
+
+        // Doc 500 should not exist
+        assert!(!disi.advance_exact(500).unwrap());
+
+        // Doc 501 should exist at index 500 (shifted down by 1)
+        assert!(disi.advance_exact(501).unwrap());
+        assert_eq!(disi.index(), 500);
+    }
+
+    #[test]
+    fn test_read_sparse_dense_boundary() {
+        // Ported from TestIndexedDISI.testSparseDenseBoundary
+        // Exactly 4095 docs (MAX_ARRAY_LENGTH) → SPARSE
+        let docs: Vec<i32> = (0..4095).collect();
+        let mut disi = write_and_read(&docs, 65536);
+        assert_next_doc_sequence(&mut disi, &docs);
+
+        // Exactly 4096 docs → DENSE
+        let docs: Vec<i32> = (0..4096).collect();
+        let mut disi = write_and_read(&docs, 65536);
+        assert_next_doc_sequence(&mut disi, &docs);
+    }
+
+    #[test]
+    fn test_read_block_boundary_docs() {
+        // Docs at block boundaries
+        let docs = vec![65535, 65536];
+        let mut disi = write_and_read(&docs, 200000);
+        assert_next_doc_sequence(&mut disi, &docs);
+    }
+
+    #[test]
+    fn test_read_dense_rank_skip() {
+        // Dense block with advance that should trigger rank-based skipping
+        // Every other doc = 32768 docs, DENSE
+        let docs: Vec<i32> = (0..65536).filter(|d| d % 2 == 0).collect();
+        let mut disi = write_and_read(&docs, 65536);
+
+        // Advance far enough to trigger rank skip (>= 2^(9-6) = 8 words = 512 docs)
+        assert_eq!(disi.advance(0).unwrap(), Some(0));
+        assert_eq!(disi.index(), 0);
+        // Jump well past the rank threshold
+        assert_eq!(disi.advance(2000).unwrap(), Some(2000));
+        assert_eq!(disi.index(), 1000);
+        assert_eq!(disi.advance(60000).unwrap(), Some(60000));
+        assert_eq!(disi.index(), 30000);
+    }
+
+    #[test]
+    fn test_illegal_dense_rank_power() {
+        // Ported from TestIndexedDISI.testIllegalDenseRankPower
+        let (bytes, _) = write_and_get_bytes(&[0], 10);
+        let length = bytes.len() as i64;
+        let input: Box<dyn IndexInput> = Box::new(ByteSliceIndexInput::new("test".into(), bytes));
+
+        for bad_power in [0u8, 1, 6, 16] {
+            let result = IndexedDISI::new(input.as_ref(), 0, length, 0, bad_power, 1);
+            assert!(result.is_err(), "power {bad_power} should be rejected");
+        }
+
+        // Valid powers should succeed
+        for good_power in [7u8, 9, 15] {
+            let result = IndexedDISI::new(input.as_ref(), 0, length, 0, good_power, 1);
+            assert!(result.is_ok(), "power {good_power} should be accepted");
+        }
+    }
+
+    #[test]
+    fn test_read_position_not_zero() {
+        // Ported from TestIndexedDISI.testPositionNotZero
+        // Write some prefix bytes, then the DISI data at a non-zero offset
+        let doc_ids = vec![10, 50, 1000];
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        // Write 37 garbage bytes first
+        for i in 0..37u8 {
+            out.write_byte(i).unwrap();
+        }
+        let offset = out.file_pointer() as i64;
+        let entry_count = write_bit_set(&doc_ids, 2000, &mut out).unwrap();
+        let length = out.file_pointer() as i64 - offset;
+
+        let bytes = out.bytes().to_vec();
+        let input: Box<dyn IndexInput> = Box::new(ByteSliceIndexInput::new("test".into(), bytes));
+        let mut disi = IndexedDISI::new(
+            input.as_ref(),
+            offset,
+            length,
+            entry_count,
+            DEFAULT_DENSE_RANK_POWER as u8,
+            doc_ids.len() as i64,
+        )
+        .unwrap();
+        assert_next_doc_sequence(&mut disi, &doc_ids);
     }
 }

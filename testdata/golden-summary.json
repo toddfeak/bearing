@@ -19,7 +19,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 15,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "modified",
@@ -33,7 +34,8 @@
           "pointIndexDimensionCount": 1,
           "pointNumBytes": 8,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "contents",
@@ -47,7 +49,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 164,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 15
         },
         {
           "name": "title",
@@ -61,7 +64,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 15,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "size",
@@ -75,7 +79,8 @@
           "pointIndexDimensionCount": 1,
           "pointNumBytes": 4,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "score",
@@ -89,7 +94,8 @@
           "pointIndexDimensionCount": 1,
           "pointNumBytes": 4,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "rating",
@@ -103,7 +109,8 @@
           "pointIndexDimensionCount": 1,
           "pointNumBytes": 8,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "notes",
@@ -117,7 +124,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "extra_int",
@@ -131,7 +139,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "extra_float",
@@ -145,7 +154,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "extra_double",
@@ -159,7 +169,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "location",
@@ -173,7 +184,8 @@
           "pointIndexDimensionCount": 2,
           "pointNumBytes": 4,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "int_range",
@@ -187,7 +199,8 @@
           "pointIndexDimensionCount": 2,
           "pointNumBytes": 4,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "long_range",
@@ -201,7 +214,8 @@
           "pointIndexDimensionCount": 2,
           "pointNumBytes": 8,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "float_range",
@@ -215,7 +229,8 @@
           "pointIndexDimensionCount": 2,
           "pointNumBytes": 4,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "double_range",
@@ -229,7 +244,8 @@
           "pointIndexDimensionCount": 2,
           "pointNumBytes": 8,
           "termCount": 0,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "features",
@@ -243,7 +259,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 2,
-          "dvDocCount": 0
+          "dvDocCount": 0,
+          "normsDocCount": 0
         },
         {
           "name": "dv_count",
@@ -257,7 +274,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "dv_hash",
@@ -271,7 +289,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "dv_category",
@@ -285,7 +304,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "dv_tag",
@@ -299,7 +319,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "dv_priority",
@@ -313,7 +334,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 15
+          "dvDocCount": 15,
+          "normsDocCount": 0
         },
         {
           "name": "sparse_count",
@@ -327,7 +349,8 @@
           "pointIndexDimensionCount": 0,
           "pointNumBytes": 0,
           "termCount": 0,
-          "dvDocCount": 7
+          "dvDocCount": 7,
+          "normsDocCount": 0
         }
       ]
     }

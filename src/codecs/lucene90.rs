@@ -6,6 +6,7 @@ pub mod compound_reader;
 pub mod doc_values;
 pub mod indexed_disi;
 pub mod norms;
+pub mod norms_reader;
 pub mod points;
 pub mod stored_fields;
 pub mod stored_fields_reader;

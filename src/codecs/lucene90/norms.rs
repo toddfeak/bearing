@@ -14,13 +14,13 @@ use crate::index::indexing_chain::PerFieldData;
 use crate::store::{DataOutput, SharedDirectory};
 
 // File extensions
-const DATA_EXTENSION: &str = "nvd";
-const META_EXTENSION: &str = "nvm";
+pub(crate) const DATA_EXTENSION: &str = "nvd";
+pub(crate) const META_EXTENSION: &str = "nvm";
 
 // Codec names and versions
-const DATA_CODEC: &str = "Lucene90NormsData";
-const META_CODEC: &str = "Lucene90NormsMetadata";
-const VERSION: i32 = 0;
+pub(crate) const DATA_CODEC: &str = "Lucene90NormsData";
+pub(crate) const META_CODEC: &str = "Lucene90NormsMetadata";
+pub(crate) const VERSION: i32 = 0;
 
 /// Writes norms files (.nvm, .nvd) for a segment.
 /// Returns the names of the files written.

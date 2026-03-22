@@ -15,6 +15,7 @@ use std::process;
 use serde::Serialize;
 
 use bearing::codecs::lucene90::compound_reader::CompoundDirectory;
+use bearing::codecs::lucene90::norms_reader::NormsReader;
 use bearing::codecs::lucene94::field_infos_format;
 use bearing::codecs::lucene99::segment_info_format;
 use bearing::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
@@ -54,6 +55,7 @@ struct FieldSummary {
     point_num_bytes: u32,
     term_count: i64,
     dv_doc_count: i64,
+    norms_doc_count: i64,
 }
 
 fn main() {
@@ -96,8 +98,8 @@ fn main() {
         summary.total_docs += si.max_doc;
         summary.max_doc += si.max_doc;
 
-        // Read field infos and terms metadata — use compound directory if needed
-        let (field_infos, terms_reader) = if si.is_compound_file {
+        // Read field infos, terms metadata, and norms — use compound directory if needed
+        let (field_infos, terms_reader, norms_reader) = if si.is_compound_file {
             let compound_dir =
                 CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap_or_else(|e| {
                     eprintln!("Failed to open compound dir for '{}': {e}", seg.name);
@@ -111,7 +113,12 @@ fn main() {
             let tr = suffix.and_then(|s| {
                 BlockTreeTermsReader::open(&compound_dir, &seg.name, &s, &seg.id, &fi).ok()
             });
-            (fi, tr)
+            let nr = if fi.has_norms() {
+                NormsReader::open(&compound_dir, &seg.name, "", &seg.id, &fi, si.max_doc).ok()
+            } else {
+                None
+            };
+            (fi, tr, nr)
         } else {
             let fi = field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
                 eprintln!("Failed to read field infos for '{}': {e}", seg.name);
@@ -120,7 +127,12 @@ fn main() {
             let suffix = postings_suffix(&fi);
             let tr = suffix
                 .and_then(|s| BlockTreeTermsReader::open(&dir, &seg.name, &s, &seg.id, &fi).ok());
-            (fi, tr)
+            let nr = if fi.has_norms() {
+                NormsReader::open(&dir, &seg.name, "", &seg.id, &fi, si.max_doc).ok()
+            } else {
+                None
+            };
+            (fi, tr, nr)
         };
 
         let mut fields: Vec<&FieldInfo> = field_infos.iter().collect();
@@ -133,6 +145,11 @@ fn main() {
                     .as_ref()
                     .and_then(|r| r.field_reader(fi.number()))
                     .map_or(0, |fr| fr.num_terms);
+
+                let norms_doc_count = norms_reader
+                    .as_ref()
+                    .and_then(|r| r.num_docs_with_field(fi.number()))
+                    .unwrap_or(0) as i64;
 
                 FieldSummary {
                     name: fi.name().to_string(),
@@ -147,6 +164,7 @@ fn main() {
                     point_num_bytes: fi.point_config().num_bytes,
                     term_count,
                     dv_doc_count: 0,
+                    norms_doc_count,
                 }
             })
             .collect();
