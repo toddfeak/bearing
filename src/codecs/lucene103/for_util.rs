@@ -4,7 +4,7 @@
 use std::io;
 
 use crate::encoding::packed::bits_required;
-use crate::store::DataOutput;
+use crate::store::{DataInput, DataOutput};
 
 pub const BLOCK_SIZE: usize = 128;
 
@@ -68,6 +68,28 @@ fn collapse8(ints: &mut [i32; BLOCK_SIZE]) {
 fn collapse16(ints: &mut [i32; BLOCK_SIZE]) {
     for i in 0..64 {
         ints[i] = (ints[i] << 16) | ints[64 + i];
+    }
+}
+
+/// Expand 32 packed ints into 128 values by extracting 4 bytes per int.
+/// Reverse of [`collapse8`].
+fn expand8(ints: &mut [i32; BLOCK_SIZE]) {
+    for i in (0..32).rev() {
+        let l = ints[i];
+        ints[i] = (l >> 24) & 0xFF;
+        ints[32 + i] = (l >> 16) & 0xFF;
+        ints[64 + i] = (l >> 8) & 0xFF;
+        ints[96 + i] = l & 0xFF;
+    }
+}
+
+/// Expand 64 packed ints into 128 values by extracting 2 halfwords per int.
+/// Reverse of [`collapse16`].
+fn expand16(ints: &mut [i32; BLOCK_SIZE]) {
+    for i in (0..64).rev() {
+        let l = ints[i];
+        ints[i] = (l >> 16) & 0xFFFF;
+        ints[64 + i] = l & 0xFFFF;
     }
 }
 
@@ -171,6 +193,134 @@ fn encode_ints(
     Ok(())
 }
 
+/// Decode 128 FOR-encoded values with the given bits per value.
+/// Reverse of [`encode`]: reads packed LE ints, unpacks bits, then expands.
+pub fn decode(
+    bpv: u32,
+    input: &mut dyn DataInput,
+    longs: &mut [i64; BLOCK_SIZE],
+) -> io::Result<()> {
+    if bpv == 0 {
+        longs.fill(0);
+        return Ok(());
+    }
+
+    let num_ints_per_shift = (bpv * 4) as usize;
+    let mut ints = [0i32; BLOCK_SIZE];
+
+    // Read packed data as LE ints
+    for val in &mut ints[..num_ints_per_shift] {
+        *val = input.read_le_int()?;
+    }
+
+    let primitive_size = if bpv <= 8 {
+        8
+    } else if bpv <= 16 {
+        16
+    } else {
+        32
+    };
+
+    // Decode: reverse the 3-phase bit packing
+    decode_ints(&mut ints, bpv, primitive_size);
+
+    // Expand collapsed values
+    if bpv <= 8 {
+        expand8(&mut ints);
+    } else if bpv <= 16 {
+        expand16(&mut ints);
+    }
+
+    for i in 0..BLOCK_SIZE {
+        longs[i] = ints[i] as i64;
+    }
+    Ok(())
+}
+
+/// Core decode: extract bit-packed values from packed ints.
+///
+/// Reverses `encode_ints`: each packed int contains multiple values shifted and
+/// OR'd together at `primitive_size` granularity. For primitive_size=8, the
+/// expanded MASKS8 operate on 4 bytes in parallel (SIMD-like trick matching
+/// Java's approach).
+fn decode_ints(ints: &mut [i32; BLOCK_SIZE], bpv: u32, primitive_size: u32) {
+    let num_ints_per_shift = (bpv * 4) as usize;
+    let num_collapsed = (BLOCK_SIZE as u32 * primitive_size / 32) as usize;
+
+    // When bpv == primitive_size, all bits are used — no masking needed
+    let mask = if bpv == primitive_size {
+        -1i32
+    } else {
+        match primitive_size {
+            8 => MASKS8[bpv as usize],
+            16 => MASKS16[bpv as usize],
+            _ => MASKS32[bpv as usize],
+        }
+    };
+
+    // Save packed data — extraction overwrites ints[]
+    let mut tmp = [0i32; BLOCK_SIZE];
+    tmp[..num_ints_per_shift].copy_from_slice(&ints[..num_ints_per_shift]);
+
+    // Phase 1: extract shift-aligned groups
+    // First group gets the topmost bpv bits within each primitive
+    let mut idx = 0usize;
+    let mut shift = (primitive_size - bpv) as i32;
+    for &packed in &tmp[..num_ints_per_shift] {
+        ints[idx] = (packed >> shift) & mask;
+        idx += 1;
+    }
+    shift -= bpv as i32;
+    while shift >= 0 {
+        for &packed in &tmp[..num_ints_per_shift] {
+            ints[idx] = (packed >> shift) & mask;
+            idx += 1;
+        }
+        shift -= bpv as i32;
+    }
+
+    // Phase 2: extract remaining values from leftover bits in packed ints.
+    // After phase 1, each packed int has `remaining_bits_per_int` unused lower bits.
+    let remaining_bits_per_int = (shift + bpv as i32) as u32;
+    if remaining_bits_per_int > 0 && idx < num_collapsed {
+        let mask_full = match primitive_size {
+            8 => MASKS8[remaining_bits_per_int as usize],
+            16 => MASKS16[remaining_bits_per_int as usize],
+            _ => MASKS32[remaining_bits_per_int as usize],
+        };
+        let mut tmp_idx = 0usize;
+        let mut remaining_bits = remaining_bits_per_int;
+        while idx < num_collapsed {
+            let mut b = bpv as i32 - remaining_bits as i32;
+            let rem_mask = match primitive_size {
+                8 => MASKS8[remaining_bits as usize],
+                16 => MASKS16[remaining_bits as usize],
+                _ => MASKS32[remaining_bits as usize],
+            };
+            let mut l = (tmp[tmp_idx] & rem_mask) << b;
+            tmp_idx += 1;
+            while b >= remaining_bits_per_int as i32 {
+                b -= remaining_bits_per_int as i32;
+                l |= (tmp[tmp_idx] & mask_full) << b;
+                tmp_idx += 1;
+            }
+            if b > 0 {
+                let b_mask = match primitive_size {
+                    8 => MASKS8[b as usize],
+                    16 => MASKS16[b as usize],
+                    _ => MASKS32[b as usize],
+                };
+                l |= (tmp[tmp_idx] >> (remaining_bits_per_int as i32 - b)) & b_mask;
+                remaining_bits = remaining_bits_per_int - b as u32;
+            } else {
+                remaining_bits = remaining_bits_per_int;
+            }
+            ints[idx] = l;
+            idx += 1;
+        }
+    }
+}
+
 // --- PForUtil ---
 // Patched Frame-of-Reference with up to 7 exceptions.
 
@@ -270,10 +420,29 @@ pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut dyn DataOutput) -> i
     Ok(())
 }
 
+/// Decode 128 PFOR-encoded values.
+/// Reverse of [`pfor_encode`]: reads token byte, decodes base values, applies exception patches.
+pub fn pfor_decode(input: &mut dyn DataInput, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
+    let token = input.read_byte()? as u32;
+    let bpv = token & 0x1F;
+    if bpv == 0 {
+        let value = input.read_vint()? as i64;
+        longs.fill(value);
+    } else {
+        decode(bpv, input, longs)?;
+    }
+    let num_exceptions = token >> 5;
+    for _ in 0..num_exceptions {
+        let position = input.read_byte()? as usize;
+        let patch = input.read_byte()? as i64;
+        longs[position] |= patch << bpv;
+    }
+    Ok(())
+}
+
 // --- ForDeltaUtil ---
 // Delta encoding for doc IDs.
 
-// --- ForDeltaUtil functions for block postings encoding ---
 // These use different collapse thresholds from ForUtil.
 
 /// Returns the bits required to encode the given raw delta values (OR-based).
@@ -308,10 +477,120 @@ pub fn for_delta_encode(
     encode_ints(&ints, bpv, primitive_size, out)
 }
 
+/// Decode 128 FOR-delta-encoded values with prefix-sum.
+/// Reads a block of FOR-encoded deltas, then converts to absolute values via
+/// running sum starting from `base` (last doc ID from the previous block).
+pub fn for_delta_decode(
+    bpv: u32,
+    input: &mut dyn DataInput,
+    base: i32,
+    ints: &mut [i32; BLOCK_SIZE],
+) -> io::Result<()> {
+    if bpv == 0 {
+        // All deltas are 0 — fill with base (all same value)
+        ints.fill(base);
+        return Ok(());
+    }
+
+    let num_ints_per_shift = (bpv * 4) as usize;
+    ints.fill(0);
+
+    // Read packed data as LE ints
+    for val in &mut ints[..num_ints_per_shift] {
+        *val = input.read_le_int()?;
+    }
+
+    // ForDelta uses different collapse thresholds from ForUtil
+    let primitive_size: u32 = if bpv <= 3 {
+        8
+    } else if bpv <= 10 {
+        16
+    } else {
+        32
+    };
+
+    // Decode bit packing
+    decode_ints(ints, bpv, primitive_size);
+
+    // Prefix-sum with expand, matching Java's prefixSum8/16/32
+    if bpv <= 3 {
+        // prefixSum8: sum collapsed 32 ints (base=0), expand, then add per-group offsets
+        prefix_sum(&mut ints[..32], 0);
+        expand8(ints);
+        let l0 = base;
+        let l1 = l0 + ints[31];
+        let l2 = l1 + ints[63];
+        let l3 = l2 + ints[95];
+        for i in 0..32 {
+            ints[i] += l0;
+            ints[32 + i] += l1;
+            ints[64 + i] += l2;
+            ints[96 + i] += l3;
+        }
+    } else if bpv <= 10 {
+        // prefixSum16: sum collapsed 64 ints (base=0), expand, then add per-half offsets
+        prefix_sum(&mut ints[..64], 0);
+        expand16(ints);
+        let l0 = base;
+        let l1 = base + ints[63];
+        for i in 0..64 {
+            ints[i] += l0;
+            ints[64 + i] += l1;
+        }
+    } else {
+        // prefixSum32: simple running sum over all 128 values
+        prefix_sum(&mut ints[..BLOCK_SIZE], base);
+    }
+
+    Ok(())
+}
+
+/// Running prefix sum: each element becomes the cumulative sum starting from `base`.
+fn prefix_sum(arr: &mut [i32], base: i32) {
+    let mut sum = base;
+    for val in arr.iter_mut() {
+        sum += *val;
+        *val = sum;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::DataInput;
     use crate::store::memory::MemoryIndexOutput;
+
+    struct ByteSliceInput<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> ByteSliceInput<'a> {
+        fn new(data: &'a [u8]) -> Self {
+            Self { data, pos: 0 }
+        }
+    }
+
+    impl DataInput for ByteSliceInput<'_> {
+        fn read_byte(&mut self) -> io::Result<u8> {
+            if self.pos >= self.data.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
+            }
+            let b = self.data[self.pos];
+            self.pos += 1;
+            Ok(b)
+        }
+
+        fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+            let end = self.pos + buf.len();
+            if end > self.data.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
+            }
+            buf.copy_from_slice(&self.data[self.pos..end]);
+            self.pos = end;
+            Ok(())
+        }
+    }
 
     /// Returns the number of bytes needed to encode 128 values with the given bits per value.
     fn num_bytes(bpv: u32) -> u32 {
@@ -772,5 +1051,250 @@ mod tests {
             0x6F, 0x0A, 0x3E, 0x32, 0x7D, 0x64, 0xFA,
         ];
         assert_eq!(out.bytes(), expected);
+    }
+
+    // --- FOR decode round-trip tests ---
+
+    #[test]
+    fn test_for_decode_roundtrip_bpv1() {
+        let mut longs = [0i64; BLOCK_SIZE];
+        for (i, v) in longs.iter_mut().enumerate() {
+            *v = (i & 1) as i64;
+        }
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        encode(&longs, 1, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        decode(1, &mut input, &mut decoded).unwrap();
+        assert_eq!(longs, decoded);
+    }
+
+    #[test]
+    fn test_for_decode_roundtrip_bpv8() {
+        let mut longs = [0i64; BLOCK_SIZE];
+        for (i, v) in longs.iter_mut().enumerate() {
+            *v = i as i64;
+        }
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        encode(&longs, 8, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        decode(8, &mut input, &mut decoded).unwrap();
+        assert_eq!(longs, decoded);
+    }
+
+    #[test]
+    fn test_for_decode_roundtrip_bpv16() {
+        let mut longs = [0i64; BLOCK_SIZE];
+        for (i, v) in longs.iter_mut().enumerate() {
+            *v = (i * 512) as i64;
+        }
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        encode(&longs, 16, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        decode(16, &mut input, &mut decoded).unwrap();
+        assert_eq!(longs, decoded);
+    }
+
+    #[test]
+    fn test_for_decode_roundtrip_bpv20() {
+        let mut longs = [0i64; BLOCK_SIZE];
+        for (i, v) in longs.iter_mut().enumerate() {
+            *v = (i * 8192) as i64;
+        }
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        encode(&longs, 20, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        decode(20, &mut input, &mut decoded).unwrap();
+        assert_eq!(longs, decoded);
+    }
+
+    #[test]
+    fn test_for_decode_roundtrip_bpv0() {
+        let longs = [0i64; BLOCK_SIZE];
+        let mut decoded = [99i64; BLOCK_SIZE];
+        let empty: &[u8] = &[];
+        let mut input = ByteSliceInput::new(empty);
+        decode(0, &mut input, &mut decoded).unwrap();
+        assert_eq!(longs, decoded);
+    }
+
+    #[test]
+    fn test_for_decode_roundtrip_bpv3() {
+        let mut longs = [0i64; BLOCK_SIZE];
+        for (i, v) in longs.iter_mut().enumerate() {
+            *v = (i % 8) as i64;
+        }
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        encode(&longs, 3, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        decode(3, &mut input, &mut decoded).unwrap();
+        assert_eq!(longs, decoded);
+    }
+
+    #[test]
+    fn test_for_decode_roundtrip_bpv10() {
+        let mut longs = [0i64; BLOCK_SIZE];
+        for (i, v) in longs.iter_mut().enumerate() {
+            *v = (i * 8) as i64;
+        }
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        encode(&longs, 10, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        decode(10, &mut input, &mut decoded).unwrap();
+        assert_eq!(longs, decoded);
+    }
+
+    // --- PFOR decode round-trip tests ---
+
+    #[test]
+    fn test_pfor_decode_roundtrip_all_equal() {
+        let mut longs = [42i64; BLOCK_SIZE];
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        pfor_encode(&mut longs, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        pfor_decode(&mut input, &mut decoded).unwrap();
+        assert_eq!([42i64; BLOCK_SIZE], decoded);
+    }
+
+    #[test]
+    fn test_pfor_decode_roundtrip_small_values() {
+        let mut original = [0i64; BLOCK_SIZE];
+        for (i, v) in original.iter_mut().enumerate() {
+            *v = (i % 4) as i64;
+        }
+        let mut longs = original;
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        pfor_encode(&mut longs, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        pfor_decode(&mut input, &mut decoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_pfor_decode_roundtrip_with_exceptions() {
+        let mut original = [0i64; BLOCK_SIZE];
+        for (i, v) in original.iter_mut().enumerate() {
+            *v = (i % 4) as i64;
+        }
+        original[10] = 500;
+        original[50] = 1000;
+        original[100] = 2000;
+
+        let mut longs = original;
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        pfor_encode(&mut longs, &mut out).unwrap();
+
+        let mut decoded = [0i64; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        pfor_decode(&mut input, &mut decoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    // --- ForDelta decode round-trip tests ---
+
+    #[test]
+    fn test_for_delta_decode_roundtrip_bpv2() {
+        let mut deltas = [1i32; BLOCK_SIZE];
+        deltas[0] = 3;
+        let bpv = for_delta_bits_required(&deltas);
+
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        for_delta_encode(bpv, &deltas, &mut out).unwrap();
+
+        let base = 100;
+        let mut decoded = [0i32; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
+
+        // Verify: prefix-sum of deltas starting from base
+        let mut expected = [0i32; BLOCK_SIZE];
+        let mut sum = base;
+        for (i, &d) in deltas.iter().enumerate() {
+            sum += d;
+            expected[i] = sum;
+        }
+        assert_eq!(expected, decoded);
+    }
+
+    #[test]
+    fn test_for_delta_decode_roundtrip_bpv5() {
+        let mut deltas = [1i32; BLOCK_SIZE];
+        deltas[0] = 31;
+        let bpv = for_delta_bits_required(&deltas);
+
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        for_delta_encode(bpv, &deltas, &mut out).unwrap();
+
+        let base = 0;
+        let mut decoded = [0i32; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
+
+        let mut expected = [0i32; BLOCK_SIZE];
+        let mut sum = base;
+        for (i, &d) in deltas.iter().enumerate() {
+            sum += d;
+            expected[i] = sum;
+        }
+        assert_eq!(expected, decoded);
+    }
+
+    #[test]
+    fn test_for_delta_decode_roundtrip_bpv12() {
+        let mut deltas = [1i32; BLOCK_SIZE];
+        deltas[0] = 2048;
+        let bpv = for_delta_bits_required(&deltas);
+
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        for_delta_encode(bpv, &deltas, &mut out).unwrap();
+
+        let base = 50;
+        let mut decoded = [0i32; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
+
+        let mut expected = [0i32; BLOCK_SIZE];
+        let mut sum = base;
+        for (i, &d) in deltas.iter().enumerate() {
+            sum += d;
+            expected[i] = sum;
+        }
+        assert_eq!(expected, decoded);
+    }
+
+    #[test]
+    fn test_for_delta_decode_roundtrip_all_ones() {
+        let deltas = [1i32; BLOCK_SIZE];
+        let bpv = for_delta_bits_required(&deltas);
+
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        for_delta_encode(bpv, &deltas, &mut out).unwrap();
+
+        let base = 0;
+        let mut decoded = [0i32; BLOCK_SIZE];
+        let mut input = ByteSliceInput::new(out.bytes());
+        for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
+
+        // Sequential doc IDs: 1, 2, 3, ..., 128
+        let mut expected = [0i32; BLOCK_SIZE];
+        for (i, v) in expected.iter_mut().enumerate() {
+            *v = (i + 1) as i32;
+        }
+        assert_eq!(expected, decoded);
     }
 }
