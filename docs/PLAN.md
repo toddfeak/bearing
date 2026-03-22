@@ -54,9 +54,9 @@ Format-specific readers for each codec version. Each reader has its own read-sid
 - Doc values metadata reader (lucene90) — reads `.dvm` metadata for all 5 doc values types (NUMERIC, BINARY, SORTED, SORTED_SET, SORTED_NUMERIC). Provides per-field document counts; value reads deferred.
 - Term vectors metadata reader (lucene90) — reads `.tvm`/`.tvx`/`.tvd` files. Eager metadata, lazy chunk data. Exposes chunk count for golden summary validation.
 - Points/BKD metadata reader (lucene90) — reads `.kdm`/`.kdi`/`.kdd` files. Per-field BKD stats (pointCount, docCount, numLeaves). Tree/leaf data deferred.
+- Postings metadata reader (lucene103) — reads `.psm`/`.doc`/`.pos` files. Impact stats from metadata; posting list data deferred.
 
-**Remaining:**
-- Postings reader + block tree terms reader (lucene103)
+All codec metadata readers are complete. Golden summary validates per-field stats bidirectionally (Java write→Rust read, Rust write→Rust read) for: termCount, sumTotalTermFreq, sumDocFreq, termsDocCount, dvDocCount, normsDocCount, pointDocCount, pointCount, tvChunks.
 
 FOR/PFOR decode functions go in `codecs::lucene103::for_util` alongside the existing encode functions — format-version-specific, not a general encoding utility.
 

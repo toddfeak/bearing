@@ -104,23 +104,31 @@ public class GenerateIndexSummary {
         sb.append(indent).append("  \"pointIndexDimensionCount\": ").append(fi.getPointIndexDimensionCount()).append(",\n");
         sb.append(indent).append("  \"pointNumBytes\": ").append(fi.getPointNumBytes()).append(",\n");
 
-        // Term count (if indexed)
+        // Term statistics (if indexed)
         long termCount = 0;
+        long sumTotalTermFreq = 0;
+        long sumDocFreq = 0;
+        int termsDocCount = 0;
         if (fi.getIndexOptions() != IndexOptions.NONE) {
             Terms terms = leaf.terms(fi.name);
             if (terms != null) {
                 termCount = terms.size();
                 if (termCount == -1) {
-                    // Some implementations don't know the count; iterate
                     termCount = 0;
                     TermsEnum te = terms.iterator();
                     while (te.next() != null) {
                         termCount++;
                     }
                 }
+                sumTotalTermFreq = terms.getSumTotalTermFreq();
+                sumDocFreq = terms.getSumDocFreq();
+                termsDocCount = terms.getDocCount();
             }
         }
         sb.append(indent).append("  \"termCount\": ").append(termCount).append(",\n");
+        sb.append(indent).append("  \"sumTotalTermFreq\": ").append(sumTotalTermFreq).append(",\n");
+        sb.append(indent).append("  \"sumDocFreq\": ").append(sumDocFreq).append(",\n");
+        sb.append(indent).append("  \"termsDocCount\": ").append(termsDocCount).append(",\n");
 
         // Doc values doc count
         long dvDocCount = 0;

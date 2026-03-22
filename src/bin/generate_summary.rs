@@ -22,6 +22,7 @@ use bearing::codecs::lucene90::term_vectors_reader::TermVectorsReader;
 use bearing::codecs::lucene94::field_infos_format;
 use bearing::codecs::lucene99::segment_info_format;
 use bearing::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
+use bearing::codecs::lucene103::postings_reader::PostingsReader;
 use bearing::document::{DocValuesType, IndexOptions};
 use bearing::index::{FieldInfo, segment_infos};
 use bearing::store::{Directory, FSDirectory};
@@ -58,6 +59,9 @@ struct FieldSummary {
     point_index_dimension_count: u32,
     point_num_bytes: u32,
     term_count: i64,
+    sum_total_term_freq: i64,
+    sum_doc_freq: i64,
+    terms_doc_count: i64,
     dv_doc_count: i64,
     norms_doc_count: i64,
     point_doc_count: i64,
@@ -105,68 +109,74 @@ fn main() {
         summary.max_doc += si.max_doc;
 
         // Read field infos, terms/norms/dv/tv metadata — use compound directory if needed
-        let (field_infos, terms_reader, norms_reader, dv_reader, tv_reader, pts_reader) = if si
-            .is_compound_file
-        {
-            let compound_dir =
-                CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap_or_else(|e| {
-                    eprintln!("Failed to open compound dir for '{}': {e}", seg.name);
+        let (field_infos, terms_reader, norms_reader, dv_reader, tv_reader, pts_reader) =
+            if si.is_compound_file {
+                let compound_dir = CompoundDirectory::open(&dir, &seg.name, &seg.id)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to open compound dir for '{}': {e}", seg.name);
+                        process::exit(1);
+                    });
+                let fi = field_infos_format::read(&compound_dir, &si, "").unwrap_or_else(|e| {
+                    eprintln!("Failed to read field infos for '{}': {e}", seg.name);
                     process::exit(1);
                 });
-            let fi = field_infos_format::read(&compound_dir, &si, "").unwrap_or_else(|e| {
-                eprintln!("Failed to read field infos for '{}': {e}", seg.name);
-                process::exit(1);
-            });
-            let suffix = postings_suffix(&fi);
-            let tr = suffix.and_then(|s| {
-                BlockTreeTermsReader::open(&compound_dir, &seg.name, &s, &seg.id, &fi).ok()
-            });
-            let nr = if fi.has_norms() {
-                NormsReader::open(&compound_dir, &seg.name, "", &seg.id, &fi, si.max_doc).ok()
+                let suffix = postings_suffix(&fi);
+                let tr = suffix.as_deref().and_then(|s| {
+                    BlockTreeTermsReader::open(&compound_dir, &seg.name, s, &seg.id, &fi).ok()
+                });
+                let nr = if fi.has_norms() {
+                    NormsReader::open(&compound_dir, &seg.name, "", &seg.id, &fi, si.max_doc).ok()
+                } else {
+                    None
+                };
+                let dv = doc_values_suffix(&fi).and_then(|s| {
+                    DocValuesReader::open(&compound_dir, &seg.name, &s, &seg.id, &fi).ok()
+                });
+                let tv = if fi.has_vectors() {
+                    TermVectorsReader::open(&compound_dir, &seg.name, "", &seg.id).ok()
+                } else {
+                    None
+                };
+                let pts = if fi.has_point_values() {
+                    PointsReader::open(&compound_dir, &seg.name, "", &seg.id, &fi).ok()
+                } else {
+                    None
+                };
+                if let Some(ref s) = suffix {
+                    let _ = PostingsReader::open(&compound_dir, &seg.name, s, &seg.id, &fi);
+                }
+                (fi, tr, nr, dv, tv, pts)
             } else {
-                None
+                let fi = field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
+                    eprintln!("Failed to read field infos for '{}': {e}", seg.name);
+                    process::exit(1);
+                });
+                let suffix = postings_suffix(&fi);
+                let tr = suffix.as_deref().and_then(|s| {
+                    BlockTreeTermsReader::open(&dir, &seg.name, s, &seg.id, &fi).ok()
+                });
+                let nr = if fi.has_norms() {
+                    NormsReader::open(&dir, &seg.name, "", &seg.id, &fi, si.max_doc).ok()
+                } else {
+                    None
+                };
+                let dv = doc_values_suffix(&fi)
+                    .and_then(|s| DocValuesReader::open(&dir, &seg.name, &s, &seg.id, &fi).ok());
+                let tv = if fi.has_vectors() {
+                    TermVectorsReader::open(&dir, &seg.name, "", &seg.id).ok()
+                } else {
+                    None
+                };
+                let pts = if fi.has_point_values() {
+                    PointsReader::open(&dir, &seg.name, "", &seg.id, &fi).ok()
+                } else {
+                    None
+                };
+                if let Some(ref s) = suffix {
+                    let _ = PostingsReader::open(&dir, &seg.name, s, &seg.id, &fi);
+                }
+                (fi, tr, nr, dv, tv, pts)
             };
-            let dv = doc_values_suffix(&fi).and_then(|s| {
-                DocValuesReader::open(&compound_dir, &seg.name, &s, &seg.id, &fi).ok()
-            });
-            let tv = if fi.has_vectors() {
-                TermVectorsReader::open(&compound_dir, &seg.name, "", &seg.id).ok()
-            } else {
-                None
-            };
-            let pts = if fi.has_point_values() {
-                PointsReader::open(&compound_dir, &seg.name, "", &seg.id, &fi).ok()
-            } else {
-                None
-            };
-            (fi, tr, nr, dv, tv, pts)
-        } else {
-            let fi = field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
-                eprintln!("Failed to read field infos for '{}': {e}", seg.name);
-                process::exit(1);
-            });
-            let suffix = postings_suffix(&fi);
-            let tr = suffix
-                .and_then(|s| BlockTreeTermsReader::open(&dir, &seg.name, &s, &seg.id, &fi).ok());
-            let nr = if fi.has_norms() {
-                NormsReader::open(&dir, &seg.name, "", &seg.id, &fi, si.max_doc).ok()
-            } else {
-                None
-            };
-            let dv = doc_values_suffix(&fi)
-                .and_then(|s| DocValuesReader::open(&dir, &seg.name, &s, &seg.id, &fi).ok());
-            let tv = if fi.has_vectors() {
-                TermVectorsReader::open(&dir, &seg.name, "", &seg.id).ok()
-            } else {
-                None
-            };
-            let pts = if fi.has_point_values() {
-                PointsReader::open(&dir, &seg.name, "", &seg.id, &fi).ok()
-            } else {
-                None
-            };
-            (fi, tr, nr, dv, tv, pts)
-        };
 
         let mut fields: Vec<&FieldInfo> = field_infos.iter().collect();
         fields.sort_by_key(|fi| fi.number());
@@ -174,10 +184,14 @@ fn main() {
         let field_summaries = fields
             .iter()
             .map(|fi| {
-                let term_count = terms_reader
+                let field_reader = terms_reader
                     .as_ref()
-                    .and_then(|r| r.field_reader(fi.number()))
-                    .map_or(0, |fr| fr.num_terms);
+                    .and_then(|r| r.field_reader(fi.number()));
+
+                let term_count = field_reader.map_or(0, |fr| fr.num_terms);
+                let sum_total_term_freq = field_reader.map_or(0, |fr| fr.sum_total_term_freq);
+                let sum_doc_freq = field_reader.map_or(0, |fr| fr.sum_doc_freq);
+                let terms_doc_count = field_reader.map_or(0, |fr| fr.doc_count as i64);
 
                 let norms_doc_count = norms_reader
                     .as_ref()
@@ -211,6 +225,9 @@ fn main() {
                     point_index_dimension_count: fi.point_config().index_dimension_count,
                     point_num_bytes: fi.point_config().num_bytes,
                     term_count,
+                    sum_total_term_freq,
+                    sum_doc_freq,
+                    terms_doc_count,
                     dv_doc_count,
                     norms_doc_count,
                     point_doc_count,

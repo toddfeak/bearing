@@ -5,4 +5,5 @@ pub mod blocktree_reader;
 pub mod blocktree_writer;
 pub mod for_util;
 pub mod postings_format;
+pub mod postings_reader;
 pub mod postings_writer;
