@@ -17,6 +17,7 @@ use serde::Serialize;
 use bearing::codecs::lucene90::compound_reader::CompoundDirectory;
 use bearing::codecs::lucene90::doc_values_reader::DocValuesReader;
 use bearing::codecs::lucene90::norms_reader::NormsReader;
+use bearing::codecs::lucene90::points_reader::PointsReader;
 use bearing::codecs::lucene90::term_vectors_reader::TermVectorsReader;
 use bearing::codecs::lucene94::field_infos_format;
 use bearing::codecs::lucene99::segment_info_format;
@@ -59,6 +60,8 @@ struct FieldSummary {
     term_count: i64,
     dv_doc_count: i64,
     norms_doc_count: i64,
+    point_doc_count: i64,
+    point_count: i64,
 }
 
 fn main() {
@@ -102,7 +105,8 @@ fn main() {
         summary.max_doc += si.max_doc;
 
         // Read field infos, terms/norms/dv/tv metadata — use compound directory if needed
-        let (field_infos, terms_reader, norms_reader, dv_reader, tv_reader) = if si.is_compound_file
+        let (field_infos, terms_reader, norms_reader, dv_reader, tv_reader, pts_reader) = if si
+            .is_compound_file
         {
             let compound_dir =
                 CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap_or_else(|e| {
@@ -130,7 +134,12 @@ fn main() {
             } else {
                 None
             };
-            (fi, tr, nr, dv, tv)
+            let pts = if fi.has_point_values() {
+                PointsReader::open(&compound_dir, &seg.name, "", &seg.id, &fi).ok()
+            } else {
+                None
+            };
+            (fi, tr, nr, dv, tv, pts)
         } else {
             let fi = field_infos_format::read(&dir, &si, "").unwrap_or_else(|e| {
                 eprintln!("Failed to read field infos for '{}': {e}", seg.name);
@@ -151,7 +160,12 @@ fn main() {
             } else {
                 None
             };
-            (fi, tr, nr, dv, tv)
+            let pts = if fi.has_point_values() {
+                PointsReader::open(&dir, &seg.name, "", &seg.id, &fi).ok()
+            } else {
+                None
+            };
+            (fi, tr, nr, dv, tv, pts)
         };
 
         let mut fields: Vec<&FieldInfo> = field_infos.iter().collect();
@@ -175,6 +189,16 @@ fn main() {
                     .and_then(|r| r.num_docs_with_field(fi.number()))
                     .unwrap_or(0) as i64;
 
+                let point_doc_count = pts_reader
+                    .as_ref()
+                    .and_then(|r| r.doc_count(fi.number()))
+                    .unwrap_or(0) as i64;
+
+                let point_count = pts_reader
+                    .as_ref()
+                    .and_then(|r| r.point_count(fi.number()))
+                    .unwrap_or(0);
+
                 FieldSummary {
                     name: fi.name().to_string(),
                     number: fi.number(),
@@ -189,6 +213,8 @@ fn main() {
                     term_count,
                     dv_doc_count,
                     norms_doc_count,
+                    point_doc_count,
+                    point_count,
                 }
             })
             .collect();

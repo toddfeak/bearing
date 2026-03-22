@@ -21,7 +21,9 @@
           "pointNumBytes": 0,
           "termCount": 15,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "modified",
@@ -36,7 +38,9 @@
           "pointNumBytes": 8,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "contents",
@@ -51,7 +55,9 @@
           "pointNumBytes": 0,
           "termCount": 164,
           "dvDocCount": 0,
-          "normsDocCount": 15
+          "normsDocCount": 15,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "title",
@@ -66,7 +72,9 @@
           "pointNumBytes": 0,
           "termCount": 15,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "size",
@@ -81,7 +89,9 @@
           "pointNumBytes": 4,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "score",
@@ -96,7 +106,9 @@
           "pointNumBytes": 4,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "rating",
@@ -111,7 +123,9 @@
           "pointNumBytes": 8,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "notes",
@@ -126,7 +140,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "extra_int",
@@ -141,7 +157,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "extra_float",
@@ -156,7 +174,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "extra_double",
@@ -171,7 +191,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "location",
@@ -186,7 +208,9 @@
           "pointNumBytes": 4,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "int_range",
@@ -201,7 +225,9 @@
           "pointNumBytes": 4,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "long_range",
@@ -216,7 +242,9 @@
           "pointNumBytes": 8,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "float_range",
@@ -231,7 +259,9 @@
           "pointNumBytes": 4,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "double_range",
@@ -246,7 +276,9 @@
           "pointNumBytes": 8,
           "termCount": 0,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 15,
+          "pointCount": 15
         },
         {
           "name": "features",
@@ -261,7 +293,9 @@
           "pointNumBytes": 0,
           "termCount": 2,
           "dvDocCount": 0,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "dv_count",
@@ -276,7 +310,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "dv_hash",
@@ -291,7 +327,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "dv_category",
@@ -306,7 +344,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "dv_tag",
@@ -321,7 +361,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "dv_priority",
@@ -336,7 +378,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 15,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         },
         {
           "name": "sparse_count",
@@ -351,7 +395,9 @@
           "pointNumBytes": 0,
           "termCount": 0,
           "dvDocCount": 7,
-          "normsDocCount": 0
+          "normsDocCount": 0,
+          "pointDocCount": 0,
+          "pointCount": 0
         }
       ]
     }

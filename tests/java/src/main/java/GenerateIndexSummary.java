@@ -160,7 +160,20 @@ public class GenerateIndexSummary {
                 }
             }
         }
-        sb.append(indent).append("  \"normsDocCount\": ").append(normsDocCount).append("\n");
+        sb.append(indent).append("  \"normsDocCount\": ").append(normsDocCount).append(",\n");
+
+        // Point stats
+        long pointDocCount = 0;
+        long pointCount = 0;
+        if (fi.getPointDimensionCount() > 0) {
+            PointValues pv = leaf.getPointValues(fi.name);
+            if (pv != null) {
+                pointDocCount = pv.getDocCount();
+                pointCount = pv.size();
+            }
+        }
+        sb.append(indent).append("  \"pointDocCount\": ").append(pointDocCount).append(",\n");
+        sb.append(indent).append("  \"pointCount\": ").append(pointCount).append("\n");
 
         sb.append(indent).append("}");
     }

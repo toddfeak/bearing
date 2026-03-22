@@ -13,19 +13,19 @@ use crate::index::indexing_chain::PerFieldData;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 
 // File extensions
-const DATA_EXTENSION: &str = "kdd";
-const INDEX_EXTENSION: &str = "kdi";
-const META_EXTENSION: &str = "kdm";
+pub(crate) const DATA_EXTENSION: &str = "kdd";
+pub(crate) const INDEX_EXTENSION: &str = "kdi";
+pub(crate) const META_EXTENSION: &str = "kdm";
 
 // Codec names and version for the outer Lucene90PointsFormat files
-const DATA_CODEC: &str = "Lucene90PointsFormatData";
-const INDEX_CODEC: &str = "Lucene90PointsFormatIndex";
-const META_CODEC: &str = "Lucene90PointsFormatMeta";
-const FORMAT_VERSION: i32 = 1; // VERSION_BKD_VECTORIZED_BPV24
+pub(crate) const DATA_CODEC: &str = "Lucene90PointsFormatData";
+pub(crate) const INDEX_CODEC: &str = "Lucene90PointsFormatIndex";
+pub(crate) const META_CODEC: &str = "Lucene90PointsFormatMeta";
+pub(crate) const FORMAT_VERSION: i32 = 1; // VERSION_BKD_VECTORIZED_BPV24
 
 // BKD inner codec name and version (simple header, not index header)
-const BKD_CODEC: &str = "BKD";
-const BKD_VERSION: i32 = 10; // VERSION_VECTORIZE_BPV24_AND_INTRODUCE_BPV21
+pub(crate) const BKD_CODEC: &str = "BKD";
+pub(crate) const BKD_VERSION: i32 = 10; // VERSION_VECTORIZE_BPV24_AND_INTRODUCE_BPV21
 
 // BKD configuration
 const MAX_POINTS_IN_LEAF: i32 = 512; // BKDConfig.DEFAULT_MAX_POINTS_IN_LEAF_NODE
