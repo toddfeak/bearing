@@ -7,10 +7,10 @@
 //! by [`super::blocktree_writer::TrieBuilder`].
 //!
 //! Node types:
-//! - [`SIGN_NO_CHILDREN`] — leaf node with output (block FP)
-//! - [`SIGN_SINGLE_CHILD_WITH_OUTPUT`] — single child, has block FP
-//! - [`SIGN_SINGLE_CHILD_WITHOUT_OUTPUT`] — single child, no block FP
-//! - [`SIGN_MULTI_CHILDREN`] — multiple children with strategy-based lookup
+//! - `SIGN_NO_CHILDREN` — leaf node with output (block FP)
+//! - `SIGN_SINGLE_CHILD_WITH_OUTPUT` — single child, has block FP
+//! - `SIGN_SINGLE_CHILD_WITHOUT_OUTPUT` — single child, no block FP
+//! - `SIGN_MULTI_CHILDREN` — multiple children with strategy-based lookup
 
 use std::io;
 
@@ -249,7 +249,7 @@ pub struct TrieSeekResult {
     pub output_fp: i64,
     /// Whether the block contains terms (vs only sub-blocks).
     pub has_terms: bool,
-    /// File pointer to floor data, or [`NO_FLOOR_DATA`].
+    /// File pointer to floor data, or `NO_FLOOR_DATA`.
     pub floor_data_fp: i64,
     /// Number of target bytes consumed to reach this node.
     pub depth: usize,
