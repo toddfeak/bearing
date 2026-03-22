@@ -94,6 +94,12 @@ impl IndexInput for ChecksumIndexInput {
             "ChecksumIndexInput does not support slice",
         ))
     }
+
+    fn random_access(&self) -> io::Result<Box<dyn crate::store::RandomAccessInput>> {
+        Err(io::Error::other(
+            "ChecksumIndexInput does not support random_access",
+        ))
+    }
 }
 
 #[cfg(test)]

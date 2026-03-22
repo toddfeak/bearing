@@ -314,6 +314,25 @@ pub trait IndexInput: DataInput + Send {
     /// Creates a new IndexInput representing a slice of this input.
     fn slice(&self, description: &str, offset: u64, length: u64)
     -> io::Result<Box<dyn IndexInput>>;
+
+    /// Returns a [`RandomAccessInput`] for absolute-position reads over the
+    /// full extent of this input. Used by data structures like tries that
+    /// navigate by absolute file pointer.
+    fn random_access(&self) -> io::Result<Box<dyn RandomAccessInput>>;
+}
+
+/// Absolute-position reads without mutating seek state.
+///
+/// Mirrors Java's `RandomAccessInput`. Designed for data structures like tries
+/// that navigate by absolute file pointer rather than sequential reads.
+/// All multi-byte reads use **little-endian** byte order, matching Java's
+/// `RandomAccessInput` convention.
+pub trait RandomAccessInput: Send {
+    /// Reads a single byte at the given absolute position.
+    fn read_byte_at(&self, pos: u64) -> io::Result<u8>;
+
+    /// Reads an 8-byte little-endian long at the given absolute position.
+    fn read_le_long_at(&self, pos: u64) -> io::Result<i64>;
 }
 
 /// Trait for index file output with checksum and position tracking.

@@ -281,6 +281,45 @@ impl IndexInput for FSIndexInput {
             path: self.path.clone(),
         }))
     }
+
+    fn random_access(&self) -> io::Result<Box<dyn crate::store::RandomAccessInput>> {
+        Ok(Box::new(FSIndexInput::new(
+            format!("{} [random]", self.name),
+            BufReader::new(File::open(&self.path)?),
+            self.len,
+            self.path.clone(),
+        )))
+    }
+}
+
+impl crate::store::RandomAccessInput for FSIndexInput {
+    fn read_byte_at(&self, pos: u64) -> io::Result<u8> {
+        if pos >= self.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("read_byte_at({pos}) past end (len={})", self.len),
+            ));
+        }
+        let mut file = File::open(&self.path)?;
+        file.seek(io::SeekFrom::Start(self.offset + pos))?;
+        let mut buf = [0u8; 1];
+        file.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn read_le_long_at(&self, pos: u64) -> io::Result<i64> {
+        if pos + 8 > self.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("read_le_long_at({pos}) past end (len={})", self.len),
+            ));
+        }
+        let mut file = File::open(&self.path)?;
+        file.seek(io::SeekFrom::Start(self.offset + pos))?;
+        let mut buf = [0u8; 8];
+        file.read_exact(&mut buf)?;
+        Ok(i64::from_le_bytes(buf))
+    }
 }
 
 #[cfg(test)]

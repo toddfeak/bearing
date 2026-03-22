@@ -4,7 +4,7 @@
 
 use std::io;
 
-use crate::store::{DataInput, IndexInput};
+use crate::store::{DataInput, IndexInput, RandomAccessInput};
 
 /// An [`IndexInput`] that reads from an owned byte vector.
 ///
@@ -115,6 +115,40 @@ impl IndexInput for ByteSliceIndexInput {
             length,
         )))
     }
+
+    fn random_access(&self) -> io::Result<Box<dyn RandomAccessInput>> {
+        Ok(Box::new(ByteSliceIndexInput::slice_internal(
+            format!("{} [random]", self.name),
+            self.data.clone(),
+            self.offset,
+            self.len,
+        )))
+    }
+}
+
+impl RandomAccessInput for ByteSliceIndexInput {
+    fn read_byte_at(&self, pos: u64) -> io::Result<u8> {
+        let abs = self.offset + pos as usize;
+        if pos as usize >= self.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("read_byte_at({pos}) past end (len={})", self.len),
+            ));
+        }
+        Ok(self.data[abs])
+    }
+
+    fn read_le_long_at(&self, pos: u64) -> io::Result<i64> {
+        let abs = self.offset + pos as usize;
+        if pos as usize + 8 > self.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("read_le_long_at({pos}) past end (len={})", self.len),
+            ));
+        }
+        let bytes: [u8; 8] = self.data[abs..abs + 8].try_into().unwrap();
+        Ok(i64::from_le_bytes(bytes))
+    }
 }
 
 #[cfg(test)]
@@ -191,5 +225,34 @@ mod tests {
         let mut sliced = input.slice("slice", 1, 3).unwrap();
         sliced.seek(2).unwrap();
         assert_eq!(sliced.read_byte().unwrap(), 40);
+    }
+
+    #[test]
+    fn test_random_access_read_byte() {
+        let input = ByteSliceIndexInput::new("test".into(), vec![10, 20, 30, 40, 50]);
+        let ra = input.random_access().unwrap();
+        assert_eq!(ra.read_byte_at(0).unwrap(), 10);
+        assert_eq!(ra.read_byte_at(2).unwrap(), 30);
+        assert_eq!(ra.read_byte_at(4).unwrap(), 50);
+        assert!(ra.read_byte_at(5).is_err());
+    }
+
+    #[test]
+    fn test_random_access_read_long() {
+        let data: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xFF];
+        let input = ByteSliceIndexInput::new("test".into(), data);
+        let ra = input.random_access().unwrap();
+        assert_eq!(ra.read_le_long_at(0).unwrap(), 0x0807060504030201_i64);
+        assert!(ra.read_le_long_at(2).is_err());
+    }
+
+    #[test]
+    fn test_random_access_on_slice() {
+        let input = ByteSliceIndexInput::new("test".into(), vec![10, 20, 30, 40, 50]);
+        let sliced = input.slice("slice", 1, 3).unwrap();
+        let ra = sliced.random_access().unwrap();
+        assert_eq!(ra.read_byte_at(0).unwrap(), 20);
+        assert_eq!(ra.read_byte_at(2).unwrap(), 40);
+        assert!(ra.read_byte_at(3).is_err());
     }
 }

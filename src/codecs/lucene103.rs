@@ -7,3 +7,4 @@ pub mod for_util;
 pub mod postings_format;
 pub mod postings_reader;
 pub mod postings_writer;
+pub mod trie_reader;
