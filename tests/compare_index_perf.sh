@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
-# Usage: compare_java_rust.sh [-docs DIR] [--debug] [--threads N] [--1t] [--no-verify] [--compound]
+# Usage: compare_index_perf.sh [-docs DIR] [--debug] [--threads N] [--1t] [--no-verify] [--compound]
 #
 # Options:
 #   -docs DIR      Documents directory (default: testdata/docs)
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: compare_java_rust.sh [-docs DIR] [--debug] [--threads N] [--1t] [--no-verify] [--compound]"
+            echo "Usage: compare_index_perf.sh [-docs DIR] [--debug] [--threads N] [--1t] [--no-verify] [--compound]"
             exit 1
             ;;
     esac

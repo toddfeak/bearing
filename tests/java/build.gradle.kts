@@ -51,3 +51,21 @@ tasks.register<JavaExec>("generateIndexSummary") {
     val indexDir = project.findProperty("indexDir") as? String
     args = listOfNotNull(indexDir)
 }
+
+tasks.register<JavaExec>("queryIndex") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "QueryIndex"
+    val indexDir = project.findProperty("indexDir") as? String
+    val wordsFile = project.findProperty("wordsFile") as? String
+    val outputFile = project.findProperty("outputFile") as? String
+    args = listOfNotNull(indexDir, wordsFile, outputFile)
+}
+
+// Generic task: run any main class without registering a dedicated task.
+//   ./tests/java/gradlew -p tests/java -q runJava -PmainClass=MyTool -Pargs="arg1 arg2 arg3"
+tasks.register<JavaExec>("runJava") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = (project.findProperty("mainClass") as? String) ?: "UNSET"
+    val rawArgs = project.findProperty("args") as? String ?: ""
+    args = if (rawArgs.isBlank()) emptyList() else rawArgs.split(" ")
+}

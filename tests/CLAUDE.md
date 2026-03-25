@@ -37,7 +37,7 @@ python3 testdata/gen_golden_docs.py
 
 ## Java Test Utilities
 
-`tests/java/` is a Gradle project containing Java utilities that validate Rust-generated indexes using Java Lucene. The Lucene dependency is fetched from Maven Central automatically. These are invoked by the shell scripts — no need to run Gradle directly.
+`tests/java/` is a Gradle project containing Java utilities that validate Rust-generated indexes using Java Lucene. The Lucene dependency is fetched from Maven Central automatically.
 
 | Utility | Purpose |
 |---|---|
@@ -45,16 +45,37 @@ python3 testdata/gen_golden_docs.py
 | `VerifyImpacts` | Checks competitive impact data in `.doc` skip blocks for proper norms |
 | `IndexAllFields` | Indexes documents with all field types (baseline for cross-validation) |
 | `GenerateIndexSummary` | Reads an index and emits a JSON summary of structure and aggregate statistics |
+| `QueryIndex` | Queries an index with a word list, reports timing, optionally writes results to file |
 
-## Performance Comparison
+### Running Java utilities
+
+Most utilities have a dedicated Gradle task (e.g., `verifyIndex`, `queryIndex`). For any
+Java class — including new or temporary ones — use the generic `runJava` task:
+
+```bash
+# Dedicated task (registered in build.gradle.kts):
+GRADLE="./tests/java/gradlew -p tests/java"
+$GRADLE -q verifyIndex -PindexDir=/tmp/idx -PdocCount=100
+
+# Generic task (works for ANY class with a main method, no gradle changes needed):
+$GRADLE -q runJava -PmainClass=QueryIndex -Pargs="/tmp/idx /tmp/words.txt"
+$GRADLE -q runJava -PmainClass=MyNewTool -Pargs="arg1 arg2 arg3"
+```
+
+To add a new Java utility:
+1. Create `tests/java/src/main/java/MyTool.java` with a `public static void main`
+2. Run it immediately with `runJava` — no `build.gradle.kts` changes required
+3. If the tool is permanent and needs structured property passing, add a dedicated task
+
+## Indexing Performance Comparison
 
 Compare indexing speed, memory usage, and correctness between Java Lucene and Rust:
 
 ```bash
-./tests/compare_java_rust.sh                                  # default: MT, release, verify
-./tests/compare_java_rust.sh --1t                             # also run single-threaded
-./tests/compare_java_rust.sh --debug                          # debug build
-./tests/compare_java_rust.sh -docs /tmp/perf-docs --no-verify # large corpus, skip verify
+./tests/compare_index_perf.sh                                  # default: MT, release, verify
+./tests/compare_index_perf.sh --1t                             # also run single-threaded
+./tests/compare_index_perf.sh --debug                          # debug build
+./tests/compare_index_perf.sh -docs /tmp/perf-docs --no-verify # large corpus, skip verify
 ```
 
 | Flag | Default | Description |
@@ -65,6 +86,24 @@ Compare indexing speed, memory usage, and correctness between Java Lucene and Ru
 | `--1t` | off | Also run single-threaded (1T) for both Java and Rust |
 | `--no-verify` | verify on | Skip VerifyIndex validation |
 | `--compound` | off | Use compound file format (.cfs/.cfe) |
+
+## Query Performance Comparison
+
+Compare query speed between Java Lucene and Rust on the same index:
+
+```bash
+./tests/compare_query_perf.sh -docs /tmp/gutenberg-small-500   # 500 docs, 500 queries
+./tests/compare_query_perf.sh -docs /tmp/gutenberg-small-2000  # 2000 docs, 2000 queries
+```
+
+Builds a Java index, generates one query word per document, queries with both Java and
+Rust, verifies results match (ignoring `totalHits` differences from early termination),
+and reports average query time.
+
+| Flag | Default | Description |
+|---|---|---|
+| `-docs DIR` | *(required)* | Documents directory |
+| `--threads N` | `1` | Thread count for indexing |
 
 ## CLI Reference
 
