@@ -234,7 +234,7 @@ impl SegmentReader {
         &self,
         field: &str,
         term: &[u8],
-    ) -> io::Result<Option<crate::codecs::lucene103::postings_reader::BlockDocIterator>> {
+    ) -> io::Result<Option<crate::codecs::lucene103::postings_reader::BlockPostingsEnum>> {
         use crate::codecs::lucene103::segment_terms_enum;
 
         let field_info = match self.field_infos.field_info_by_name(field) {
@@ -280,7 +280,7 @@ impl SegmentReader {
 
         // Create a doc ID iterator from the term state
         let index_has_freq = field_info.index_options().has_freqs();
-        let iter = postings_reader.block_doc_iterator(&state, index_has_freq)?;
+        let iter = postings_reader.postings(&state, index_has_freq, false)?;
         Ok(Some(iter))
     }
 }
@@ -396,10 +396,15 @@ mod tests {
     }
 
     fn collect_docs(
-        iter: &mut crate::codecs::lucene103::postings_reader::BlockDocIterator,
+        iter: &mut crate::codecs::lucene103::postings_reader::BlockPostingsEnum,
     ) -> Vec<i32> {
+        use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
         let mut docs = Vec::new();
-        while let Some(doc) = iter.next_doc().unwrap() {
+        loop {
+            let doc = iter.next_doc().unwrap();
+            if doc == NO_MORE_DOCS {
+                break;
+            }
             docs.push(doc);
         }
         docs
