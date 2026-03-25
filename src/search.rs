@@ -4,7 +4,9 @@
 
 pub mod collector;
 pub mod doc_id_set_iterator;
+pub mod query;
 pub mod scorable;
+pub mod scorer;
 pub mod similarity;
 pub mod top_docs;
 
@@ -13,7 +15,9 @@ pub use collector::{
     RangeDocIdStream, ScoreMode,
 };
 pub use doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
+pub use query::{BulkScorer, ScorerSupplier, Weight};
 pub use scorable::Scorable;
+pub use scorer::{ImpactsSource, Scorer};
 pub use similarity::{
     BM25Similarity, BulkSimScorer, CollectionStatistics, SimScorer, Similarity, TermStatistics,
 };
