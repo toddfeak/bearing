@@ -261,6 +261,9 @@ pub trait Similarity {
         collection_stats: &CollectionStatistics,
         term_stats: &[TermStatistics],
     ) -> Box<dyn SimScorer>;
+
+    /// Clone this `Similarity` into a `Box`. Required for storing trait objects.
+    fn box_clone(&self) -> Box<dyn Similarity>;
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +381,10 @@ impl Similarity for BM25Similarity {
 
         let weight = boost * idf;
         Box::new(BM25Scorer { weight, cache })
+    }
+
+    fn box_clone(&self) -> Box<dyn Similarity> {
+        Box::new(BM25Similarity::new(self.k1, self.b, self.discount_overlaps))
     }
 }
 

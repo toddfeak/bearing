@@ -3,7 +3,9 @@
 //! Collection pipeline: `Collector`, `LeafCollector`, `CollectorManager`, `ScoreMode`,
 //! `DocIdStream`, `SimpleScorable`, and `DocAndFloatFeatureBuffer`.
 
+use std::cell::Cell;
 use std::io;
+use std::rc::Rc;
 
 use super::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
 use super::scorable::Scorable;
@@ -146,15 +148,43 @@ impl DocIdStream for RangeDocIdStream {
 // LeafCollector
 // ---------------------------------------------------------------------------
 
+/// Shared scoring context between the BulkScorer and the LeafCollector.
+///
+/// In Java, `LeafCollector.setScorer(Scorable)` passes a reference that the collector stores
+/// and later calls `scorer.score()` on. In Rust, we can't store the `&mut dyn Scorable`
+/// reference across `set_scorer`/`collect` calls due to lifetime constraints.
+///
+/// `ScoreContext` provides safe shared access via `Cell<f32>`: the BulkScorer writes the
+/// current score before each `collect()` call, and the collector reads it. The collector
+/// writes `min_competitive_score` to signal the scorer to skip non-competitive docs.
+pub struct ScoreContext {
+    /// The current document's score. Written by the BulkScorer before `collect()`.
+    pub score: Cell<f32>,
+    /// The minimum competitive score. Written by the collector, read by the BulkScorer
+    /// to propagate to the scorer via `Scorer::set_min_competitive_score`.
+    pub min_competitive_score: Cell<f32>,
+}
+
+impl ScoreContext {
+    /// Creates a new `ScoreContext` with zeroed values.
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self {
+            score: Cell::new(0.0),
+            min_competitive_score: Cell::new(0.0),
+        })
+    }
+}
+
 /// Per-segment collector that receives matching documents and their scores.
 ///
-/// The `set_scorer` method is called before collection begins, allowing the collector to
-/// hold onto the `Scorable` and call `score()` during collection.
+/// The `set_scorer` method is called before collection begins, passing a shared `ScoreContext`.
+/// The BulkScorer writes the current document's score to the context before calling `collect()`.
+/// Collectors that need the score read it from the context.
 pub trait LeafCollector {
-    /// Called before successive calls to `collect`. Implementations that need the score of
-    /// the current document should save the passed-in `Scorable` and call `scorer.score()`
-    /// when needed.
-    fn set_scorer(&mut self, scorer: &mut dyn Scorable) -> io::Result<()>;
+    /// Called before successive calls to `collect`. The `score_context` is shared between the
+    /// BulkScorer (which writes the score) and this collector (which reads it and may write
+    /// `min_competitive_score`).
+    fn set_scorer(&mut self, score_context: Rc<ScoreContext>) -> io::Result<()>;
 
     /// Called once for every document matching a query, with the unbased document number.
     fn collect(&mut self, doc: i32) -> io::Result<()>;
@@ -170,15 +200,17 @@ pub trait LeafCollector {
 
     /// Bulk-collect doc IDs from a `DocIdStream`.
     ///
-    /// The default implementation calls `stream.for_each(|doc| self.collect(doc))`.
+    /// The default implementation buffers doc IDs from the stream and then collects them.
     fn collect_stream(&mut self, stream: &mut dyn DocIdStream) -> io::Result<()> {
-        let this = self as *mut Self;
+        let mut docs = Vec::new();
         stream.for_each(&mut |doc| {
-            // SAFETY: We need &mut self inside the closure, but the borrow checker can't
-            // prove that stream.for_each won't alias. This is safe because for_each only
-            // calls the closure with doc IDs and doesn't access self.
-            unsafe { &mut *this }.collect(doc)
-        })
+            docs.push(doc);
+            Ok(())
+        })?;
+        for doc in docs {
+            self.collect(doc)?;
+        }
+        Ok(())
     }
 
     /// Optionally returns an iterator over competitive documents. Returns `None` by default.
@@ -234,16 +266,16 @@ pub trait CollectorManager {
 // ---------------------------------------------------------------------------
 
 /// Simplest implementation of `Scorable`, implemented via simple getters and setters.
-#[cfg(test)]
-pub(crate) struct SimpleScorable {
-    score: f32,
-    min_competitive_score: f32,
+pub struct SimpleScorable {
+    /// The current score.
+    pub score: f32,
+    /// The minimum competitive score.
+    pub min_competitive_score: f32,
 }
 
-#[cfg(test)]
 impl SimpleScorable {
     /// Sole constructor.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             score: 0.0,
             min_competitive_score: 0.0,
@@ -251,17 +283,22 @@ impl SimpleScorable {
     }
 
     /// Set the score.
-    pub(crate) fn set_score(&mut self, score: f32) {
+    pub fn set_score(&mut self, score: f32) {
         self.score = score;
     }
 
     /// Get the min competitive score.
-    pub(crate) fn min_competitive_score(&self) -> f32 {
+    pub fn min_competitive_score(&self) -> f32 {
         self.min_competitive_score
     }
 }
 
-#[cfg(test)]
+impl Default for SimpleScorable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Scorable for SimpleScorable {
     fn score(&mut self) -> io::Result<f32> {
         Ok(self.score)

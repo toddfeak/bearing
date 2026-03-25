@@ -1,13 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Query execution types: `Weight`, `ScorerSupplier`, and `BulkScorer`.
+//! Query execution types: `Query`, `Weight`, `ScorerSupplier`, `BulkScorer`, and
+//! `BatchScoreBulkScorer`.
 
 use std::io;
+use std::rc::Rc;
 
-use super::collector::LeafCollector;
+use super::collector::{DocAndFloatFeatureBuffer, LeafCollector, ScoreContext, ScoreMode};
 use super::doc_id_set_iterator::DocIdSetIterator;
 use super::scorer::Scorer;
 use crate::index::directory_reader::LeafReaderContext;
+use crate::search::similarity::Similarity;
+
+// ---------------------------------------------------------------------------
+// Query
+// ---------------------------------------------------------------------------
+
+/// Trait for all query types.
+///
+/// Since `IndexSearcher` is not yet available, `create_weight` takes a `&dyn Similarity`
+/// directly. This will be changed to take `IndexSearcher` when that type is ported (Tier 7).
+pub trait Query {
+    /// Expert: Constructs an appropriate `Weight` implementation for this query.
+    ///
+    /// `score_mode` indicates how the produced scorers will be consumed.
+    /// `boost` is the boost propagated by parent queries.
+    /// `similarity` is used for scoring — will be replaced by `IndexSearcher` parameter later.
+    fn create_weight(
+        &self,
+        similarity: &dyn Similarity,
+        score_mode: ScoreMode,
+        boost: f32,
+    ) -> io::Result<Box<dyn Weight>>;
+}
 
 // ---------------------------------------------------------------------------
 // BulkScorer
@@ -173,7 +198,8 @@ impl DefaultBulkScorer {
 
 impl BulkScorer for DefaultBulkScorer {
     fn score(&mut self, collector: &mut dyn LeafCollector, min: i32, max: i32) -> io::Result<i32> {
-        collector.set_scorer(self.scorer.as_mut())?;
+        let score_context = ScoreContext::new();
+        collector.set_scorer(Rc::clone(&score_context))?;
         let competitive_iterator = collector.competitive_iterator();
 
         let iterator = self.scorer.iterator();
@@ -242,6 +268,105 @@ impl ScorerSupplier for DefaultScorerSupplier {
 
     fn cost(&self) -> i64 {
         self.cost
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BatchScoreBulkScorer
+// ---------------------------------------------------------------------------
+
+/// A bulk scorer that uses `Scorer::next_docs_and_scores` to score documents in batches.
+///
+/// Used when `ScoreMode::needs_scores()` is true and `Scorer::next_docs_and_scores` has
+/// optimizations to run faster than one-by-one iteration. If the collector has a
+/// competitive iterator, falls back to `DefaultBulkScorer`.
+pub struct BatchScoreBulkScorer {
+    scorer: Box<dyn Scorer>,
+    buffer: DocAndFloatFeatureBuffer,
+}
+
+impl BatchScoreBulkScorer {
+    /// Sole constructor.
+    pub fn new(scorer: Box<dyn Scorer>) -> Self {
+        Self {
+            scorer,
+            buffer: DocAndFloatFeatureBuffer::new(),
+        }
+    }
+}
+
+impl BulkScorer for BatchScoreBulkScorer {
+    fn score(&mut self, collector: &mut dyn LeafCollector, min: i32, max: i32) -> io::Result<i32> {
+        let score_context = ScoreContext::new();
+
+        // If there is a competitive iterator, fall back to DefaultBulkScorer
+        if collector.competitive_iterator().is_some() {
+            collector.set_scorer(Rc::clone(&score_context))?;
+            let competitive_iterator = collector.competitive_iterator();
+
+            let iterator = self.scorer.iterator();
+
+            if iterator.doc_id() < min {
+                if iterator.doc_id() == min - 1 {
+                    iterator.next_doc()?;
+                } else {
+                    iterator.advance(min)?;
+                }
+            }
+
+            match competitive_iterator {
+                None => {
+                    DefaultBulkScorer::score_iterator(collector, iterator, max)?;
+                }
+                Some(mut ci) => {
+                    let ci_doc = ci.doc_id();
+                    let effective_min = if ci_doc > min { ci_doc.min(max) } else { min };
+                    if iterator.doc_id() < effective_min {
+                        iterator.advance(effective_min)?;
+                    }
+                    DefaultBulkScorer::score_competitive_iterator(
+                        collector,
+                        iterator,
+                        ci.as_mut(),
+                        max,
+                    )?;
+                }
+            }
+
+            return Ok(self.scorer.iterator().doc_id());
+        }
+
+        collector.set_scorer(Rc::clone(&score_context))?;
+        self.scorer
+            .set_min_competitive_score(score_context.min_competitive_score.get())?;
+
+        if self.scorer.doc_id() < min {
+            self.scorer.iterator().advance(min)?;
+        }
+
+        loop {
+            self.scorer.next_docs_and_scores(max, &mut self.buffer)?;
+            if self.buffer.size == 0 {
+                break;
+            }
+            let size = self.buffer.size;
+            for i in 0..size {
+                let score = self.buffer.features[i];
+                score_context.score.set(score);
+                if score >= score_context.min_competitive_score.get() {
+                    collector.collect(self.buffer.docs[i])?;
+                }
+            }
+            self.scorer
+                .set_min_competitive_score(score_context.min_competitive_score.get())?;
+        }
+
+        Ok(self.scorer.doc_id())
+    }
+
+    fn cost(&self) -> i64 {
+        // TODO: Same issue as DefaultBulkScorer — Scorer::iterator() requires &mut self.
+        0
     }
 }
 
@@ -379,7 +504,7 @@ mod tests {
     }
 
     impl LeafCollector for DocCollector {
-        fn set_scorer(&mut self, _scorer: &mut dyn Scorable) -> io::Result<()> {
+        fn set_scorer(&mut self, _score_context: Rc<ScoreContext>) -> io::Result<()> {
             Ok(())
         }
         fn collect(&mut self, doc: i32) -> io::Result<()> {
@@ -420,6 +545,122 @@ mod tests {
         bulk.score(&mut collector, 0, 5).unwrap();
 
         assert!(collector.docs.is_empty());
+    }
+
+    // -- BatchScoreBulkScorer tests --
+
+    /// Leaf collector that records (doc, score) pairs via ScoreContext.
+    struct ScoreCollector {
+        docs: Vec<i32>,
+        scores: Vec<f32>,
+        score_context: Option<Rc<ScoreContext>>,
+    }
+
+    impl ScoreCollector {
+        fn new() -> Self {
+            Self {
+                docs: Vec::new(),
+                scores: Vec::new(),
+                score_context: None,
+            }
+        }
+    }
+
+    impl LeafCollector for ScoreCollector {
+        fn set_scorer(&mut self, score_context: Rc<ScoreContext>) -> io::Result<()> {
+            self.score_context = Some(score_context);
+            Ok(())
+        }
+        fn collect(&mut self, doc: i32) -> io::Result<()> {
+            self.docs.push(doc);
+            if let Some(ref ctx) = self.score_context {
+                self.scores.push(ctx.score.get());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_batch_score_bulk_scorer_collects_all_docs() {
+        let scorer = FullMockScorer::new(vec![0, 5, 10], vec![1.0, 2.0, 3.0]);
+        let mut bulk = BatchScoreBulkScorer::new(Box::new(scorer));
+        let mut collector = ScoreCollector::new();
+
+        bulk.score(&mut collector, 0, NO_MORE_DOCS).unwrap();
+
+        assert_eq!(collector.docs, vec![0, 5, 10]);
+        assert_eq!(collector.scores.len(), 3);
+        // All scores should be positive (computed by FullMockScorer)
+        for &s in &collector.scores {
+            assert!(s > 0.0, "expected positive score, got {s}");
+        }
+    }
+
+    #[test]
+    fn test_batch_score_bulk_scorer_respects_range() {
+        let scorer = FullMockScorer::new(vec![0, 5, 10, 15], vec![1.0, 2.0, 3.0, 4.0]);
+        let mut bulk = BatchScoreBulkScorer::new(Box::new(scorer));
+        let mut collector = DocCollector::new();
+
+        // Score docs in [3, 12) — should get doc 5 and 10
+        bulk.score(&mut collector, 3, 12).unwrap();
+
+        assert_eq!(collector.docs, vec![5, 10]);
+    }
+
+    #[test]
+    fn test_batch_score_bulk_scorer_empty_range() {
+        let scorer = FullMockScorer::new(vec![10, 20], vec![1.0, 2.0]);
+        let mut bulk = BatchScoreBulkScorer::new(Box::new(scorer));
+        let mut collector = DocCollector::new();
+
+        bulk.score(&mut collector, 0, 5).unwrap();
+
+        assert!(collector.docs.is_empty());
+    }
+
+    #[test]
+    fn test_batch_score_bulk_scorer_min_competitive_score() {
+        let scorer = FullMockScorer::new(vec![0, 1, 2, 3], vec![0.5, 1.5, 0.3, 2.0]);
+        let mut bulk = BatchScoreBulkScorer::new(Box::new(scorer));
+
+        // Collector that sets min_competitive_score to 1.0 after first collect
+        struct FilteringCollector {
+            docs: Vec<i32>,
+            score_context: Option<Rc<ScoreContext>>,
+            first_collect: bool,
+        }
+        impl LeafCollector for FilteringCollector {
+            fn set_scorer(&mut self, score_context: Rc<ScoreContext>) -> io::Result<()> {
+                self.score_context = Some(score_context);
+                Ok(())
+            }
+            fn collect(&mut self, doc: i32) -> io::Result<()> {
+                self.docs.push(doc);
+                if !self.first_collect {
+                    self.first_collect = true;
+                    // After first doc, set min competitive score to 1.0
+                    if let Some(ref ctx) = self.score_context {
+                        ctx.min_competitive_score.set(1.0);
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let mut collector = FilteringCollector {
+            docs: Vec::new(),
+            score_context: None,
+            first_collect: false,
+        };
+
+        bulk.score(&mut collector, 0, NO_MORE_DOCS).unwrap();
+
+        // Doc 0 (score 0.5) collected before threshold set
+        // Doc 1 (score 1.5) >= 1.0, collected
+        // Doc 2 (score 0.3) < 1.0, filtered by BatchScoreBulkScorer
+        // Doc 3 (score 2.0) >= 1.0, collected
+        assert_eq!(collector.docs, vec![0, 1, 3]);
     }
 
     // NOTE: Weight::scorer and Weight::bulk_scorer default method tests require a real

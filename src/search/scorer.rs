@@ -104,19 +104,23 @@ pub trait Scorer: Scorable {
 /// version takes the `ImpactsSource` as a parameter on each method call. This avoids
 /// borrow checker conflicts when `TermScorer` needs to own both the iterator (which is the
 /// `ImpactsSource`) and the cache simultaneously.
+/// Compute maximum scores based on `Impacts` and keep them in a cache in order not to run
+/// expensive similarity score computations multiple times on the same data.
+///
+/// Unlike Java's `MaxScoreCache`, this Rust version takes both the `ImpactsSource` and
+/// `SimScorer` as parameters on each method call. This avoids borrow checker conflicts
+/// when `TermScorer` needs to own the iterator, scorer, and cache simultaneously.
 pub struct MaxScoreCache {
-    scorer: Box<dyn SimScorer>,
     global_max_score: f32,
     max_score_cache: Vec<f32>,
     max_score_cache_up_to: Vec<i32>,
 }
 
 impl MaxScoreCache {
-    /// Sole constructor.
-    pub fn new(scorer: Box<dyn SimScorer>) -> Self {
+    /// Sole constructor. Computes the global max score from the given scorer.
+    pub fn new(scorer: &dyn SimScorer) -> Self {
         let global_max_score = scorer.score(f32::MAX, 1);
         Self {
-            scorer,
             global_max_score,
             max_score_cache: Vec::new(),
             max_score_cache_up_to: Vec::new(),
@@ -145,21 +149,26 @@ impl MaxScoreCache {
         }
     }
 
-    fn compute_max_score(&self, impacts: &[Impact]) -> f32 {
+    fn compute_max_score(&self, scorer: &dyn SimScorer, impacts: &[Impact]) -> f32 {
         let mut max_score = 0.0f32;
         for impact in impacts {
-            max_score = max_score.max(self.scorer.score(impact.freq as f32, impact.norm));
+            max_score = max_score.max(scorer.score(impact.freq as f32, impact.norm));
         }
         max_score
     }
 
     /// Return the maximum score up to `up_to` included.
-    pub fn get_max_score(&mut self, source: &mut dyn ImpactsSource, up_to: i32) -> io::Result<f32> {
+    pub fn get_max_score(
+        &mut self,
+        source: &mut dyn ImpactsSource,
+        scorer: &dyn SimScorer,
+        up_to: i32,
+    ) -> io::Result<f32> {
         let level = self.get_level(source, up_to)?;
         if level == -1 {
             return Ok(self.global_max_score);
         }
-        self.get_max_score_for_level(source, level as usize)
+        self.get_max_score_for_level(source, scorer, level as usize)
     }
 
     /// Return the first level that includes all doc IDs up to `up_to`, or -1 if there is no
@@ -177,41 +186,43 @@ impl MaxScoreCache {
     }
 
     /// Return the maximum score for level zero.
-    #[expect(dead_code)]
     pub(crate) fn get_max_score_for_level_zero(
         &mut self,
         source: &mut dyn ImpactsSource,
+        scorer: &dyn SimScorer,
     ) -> io::Result<f32> {
-        self.get_max_score_for_level(source, 0)
+        self.get_max_score_for_level(source, scorer, 0)
     }
 
     /// Return the maximum score for the given `level`.
     fn get_max_score_for_level(
         &mut self,
         source: &mut dyn ImpactsSource,
+        scorer: &dyn SimScorer,
         level: usize,
     ) -> io::Result<f32> {
         self.ensure_cache_size(level + 1);
         let impacts = source.get_impacts()?;
         let level_up_to = impacts.get_doc_id_up_to(level);
         if self.max_score_cache_up_to[level] < level_up_to {
-            self.max_score_cache[level] = self.compute_max_score(impacts.get_impacts(level));
+            self.max_score_cache[level] =
+                self.compute_max_score(scorer, impacts.get_impacts(level));
             self.max_score_cache_up_to[level] = level_up_to;
         }
         Ok(self.max_score_cache[level])
     }
 
     /// Return the maximum level at which scores are all less than `min_score`, or -1 if none.
-    #[cfg(test)]
     fn get_skip_level(
         &mut self,
         source: &mut dyn ImpactsSource,
+        scorer: &dyn SimScorer,
         min_score: f32,
     ) -> io::Result<i32> {
         let impacts = source.get_impacts()?;
         let num_levels = impacts.num_levels();
         for level in 0..num_levels {
-            if self.get_max_score_for_level(source, level)? >= min_score {
+            if self.get_max_score_for_level(source, scorer, level)? >= min_score {
                 return Ok(level as i32 - 1);
             }
         }
@@ -220,13 +231,13 @@ impl MaxScoreCache {
 
     /// Return an inclusive upper bound of documents that all have a score less than
     /// `min_score`, or -1 if the current document may be competitive.
-    #[cfg(test)]
     pub(crate) fn get_skip_up_to(
         &mut self,
         source: &mut dyn ImpactsSource,
+        scorer: &dyn SimScorer,
         min_score: f32,
     ) -> io::Result<i32> {
-        let level = self.get_skip_level(source, min_score)?;
+        let level = self.get_skip_level(source, scorer, min_score)?;
         if level == -1 {
             return Ok(-1);
         }
@@ -265,23 +276,19 @@ pub struct ImpactsDISI<I: DocIdSetIterator> {
 // ---------------------------------------------------------------------------
 
 /// Maintains the maximum score and its corresponding document id concurrently.
-#[cfg(test)]
-pub(crate) struct MaxScoreAccumulator {
+pub struct MaxScoreAccumulator {
     /// We use 2^10-1 to check the remainder with a bitwise operation.
     acc: std::sync::atomic::AtomicI64,
-    /// Non-final and visible for tests.
-    #[expect(dead_code)]
+    /// The interval at which to check for global min competitive score updates.
     pub(crate) mod_interval: i64,
 }
 
 /// Default interval: 0x3ff (2^10 - 1).
-#[cfg(test)]
-const DEFAULT_INTERVAL: i64 = 0x3ff;
+pub(crate) const DEFAULT_INTERVAL: i64 = 0x3ff;
 
-#[cfg(test)]
 impl MaxScoreAccumulator {
     /// Sole constructor.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             acc: std::sync::atomic::AtomicI64::new(i64::MIN),
             mod_interval: DEFAULT_INTERVAL,
@@ -289,14 +296,20 @@ impl MaxScoreAccumulator {
     }
 
     /// Accumulate a new (doc, score) encoded as a long.
-    pub(crate) fn accumulate(&self, code: i64) {
+    pub fn accumulate(&self, code: i64) {
         self.acc
             .fetch_max(code, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get the current raw accumulated value.
-    pub(crate) fn get_raw(&self) -> i64 {
+    pub fn get_raw(&self) -> i64 {
         self.acc.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Default for MaxScoreAccumulator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -306,41 +319,37 @@ impl MaxScoreAccumulator {
 
 /// Encodes (doc, score) pairs as a long whose sort order matches
 /// `(score ascending, doc descending)`.
-#[cfg(test)]
-pub(crate) struct DocScoreEncoder;
+pub struct DocScoreEncoder;
 
-#[cfg(test)]
 impl DocScoreEncoder {
     /// The least competitive code: lowest possible score, highest possible doc ID.
-    pub(crate) const LEAST_COMPETITIVE_CODE: i64 = Self::encode(i32::MAX, f32::NEG_INFINITY);
+    pub const LEAST_COMPETITIVE_CODE: i64 = Self::encode(i32::MAX, f32::NEG_INFINITY);
 
     /// Encode a (doc, score) pair into a single i64.
-    pub(crate) const fn encode(doc_id: i32, score: f32) -> i64 {
+    pub const fn encode(doc_id: i32, score: f32) -> i64 {
         ((float_to_sortable_int(score) as i64) << 32) | ((i32::MAX - doc_id) as u32 as i64)
     }
 
     /// Extract the score from an encoded value.
-    pub(crate) const fn to_score(value: i64) -> f32 {
+    pub const fn to_score(value: i64) -> f32 {
         sortable_int_to_float((value >> 32) as i32)
     }
 
     /// Extract the doc ID from an encoded value.
-    pub(crate) const fn doc_id(value: i64) -> i32 {
+    pub const fn doc_id(value: i64) -> i32 {
         i32::MAX - (value as i32)
     }
 }
 
 /// Converts a float to a sortable int (matching Java's `NumericUtils.floatToSortableInt`).
-#[cfg(test)]
-const fn float_to_sortable_int(value: f32) -> i32 {
+pub(crate) const fn float_to_sortable_int(value: f32) -> i32 {
     let bits = value.to_bits() as i32;
     // If the sign bit is set, flip all bits; otherwise flip only the sign bit.
     bits ^ (bits >> 31) & 0x7fffffff
 }
 
 /// Converts a sortable int back to a float (matching Java's `NumericUtils.sortableIntToFloat`).
-#[cfg(test)]
-const fn sortable_int_to_float(encoded: i32) -> f32 {
+pub(crate) const fn sortable_int_to_float(encoded: i32) -> f32 {
     let bits = encoded ^ ((encoded >> 31) & 0x7fffffff);
     f32::from_bits(bits as u32)
 }
@@ -483,10 +492,11 @@ mod tests {
             100,
             vec![Impact { freq: 5, norm: 1 }, Impact { freq: 10, norm: 2 }],
         )]);
-        let mut cache = MaxScoreCache::new(Box::new(TestSimScorer));
+        let scorer = TestSimScorer;
+        let mut cache = MaxScoreCache::new(&scorer);
 
         // Max score at level 0: max(5/1, 10/2) = max(5.0, 5.0) = 5.0
-        let score = cache.get_max_score(&mut source, 100).unwrap();
+        let score = cache.get_max_score(&mut source, &scorer, 100).unwrap();
         assert_eq!(score, 5.0);
     }
 
@@ -496,21 +506,26 @@ mod tests {
             (50, vec![Impact { freq: 2, norm: 1 }]), // level 0: up to doc 50, max=2.0
             (200, vec![Impact { freq: 10, norm: 1 }]), // level 1: up to doc 200, max=10.0
         ]);
-        let mut cache = MaxScoreCache::new(Box::new(TestSimScorer));
+        let scorer = TestSimScorer;
+        let mut cache = MaxScoreCache::new(&scorer);
 
         // up_to=50 fits in level 0
-        assert_eq!(cache.get_max_score(&mut source, 50).unwrap(), 2.0);
+        assert_eq!(cache.get_max_score(&mut source, &scorer, 50).unwrap(), 2.0);
         // up_to=100 needs level 1
-        assert_eq!(cache.get_max_score(&mut source, 100).unwrap(), 10.0);
+        assert_eq!(
+            cache.get_max_score(&mut source, &scorer, 100).unwrap(),
+            10.0
+        );
     }
 
     #[test]
     fn test_max_score_cache_beyond_all_levels() {
         let mut source = MockImpactsSource::new(vec![(50, vec![Impact { freq: 2, norm: 1 }])]);
-        let mut cache = MaxScoreCache::new(Box::new(TestSimScorer));
+        let scorer = TestSimScorer;
+        let mut cache = MaxScoreCache::new(&scorer);
 
         // up_to=100 is beyond level 0 (up_to=50), so returns global max score
-        let score = cache.get_max_score(&mut source, 100).unwrap();
+        let score = cache.get_max_score(&mut source, &scorer, 100).unwrap();
         let global = TestSimScorer.score(f32::MAX, 1);
         assert_eq!(score, global);
     }
@@ -521,7 +536,8 @@ mod tests {
             (50, vec![Impact { freq: 2, norm: 1 }]),
             (200, vec![Impact { freq: 10, norm: 1 }]),
         ]);
-        let mut cache = MaxScoreCache::new(Box::new(TestSimScorer));
+        let scorer = TestSimScorer;
+        let mut cache = MaxScoreCache::new(&scorer);
 
         // advance_shallow returns doc_id_up_to for level 0
         let up_to = cache.advance_shallow(&mut source, 0).unwrap();
@@ -534,26 +550,28 @@ mod tests {
             (50, vec![Impact { freq: 2, norm: 1 }]),   // max=2.0
             (200, vec![Impact { freq: 10, norm: 1 }]), // max=10.0
         ]);
-        let mut cache = MaxScoreCache::new(Box::new(TestSimScorer));
+        let scorer = TestSimScorer;
+        let mut cache = MaxScoreCache::new(&scorer);
 
         // min_score=3.0: level 0 max is 2.0 < 3.0, so skip up to doc 50
-        let skip = cache.get_skip_up_to(&mut source, 3.0).unwrap();
+        let skip = cache.get_skip_up_to(&mut source, &scorer, 3.0).unwrap();
         assert_eq!(skip, 50);
 
         // min_score=1.0: level 0 max is 2.0 >= 1.0, so no skip (-1)
-        let skip = cache.get_skip_up_to(&mut source, 1.0).unwrap();
+        let skip = cache.get_skip_up_to(&mut source, &scorer, 1.0).unwrap();
         assert_eq!(skip, -1);
     }
 
     #[test]
     fn test_max_score_cache_caching() {
         let mut source = MockImpactsSource::new(vec![(100, vec![Impact { freq: 5, norm: 1 }])]);
-        let mut cache = MaxScoreCache::new(Box::new(TestSimScorer));
+        let scorer = TestSimScorer;
+        let mut cache = MaxScoreCache::new(&scorer);
 
         // First call computes and caches
-        assert_eq!(cache.get_max_score(&mut source, 100).unwrap(), 5.0);
+        assert_eq!(cache.get_max_score(&mut source, &scorer, 100).unwrap(), 5.0);
         // Second call should use cache (same result)
-        assert_eq!(cache.get_max_score(&mut source, 100).unwrap(), 5.0);
+        assert_eq!(cache.get_max_score(&mut source, &scorer, 100).unwrap(), 5.0);
     }
 
     #[test]

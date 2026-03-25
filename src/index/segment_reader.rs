@@ -19,6 +19,7 @@
 //! println!("Segment has {} documents", reader.max_doc());
 //! ```
 
+use std::cell::RefCell;
 use std::io;
 
 use log::debug;
@@ -50,7 +51,7 @@ pub struct SegmentReader {
     field_infos: FieldInfos,
     max_doc: i32,
     stored_fields_reader: Option<StoredFieldsReader>,
-    norms_reader: Option<NormsReader>,
+    norms_reader: Option<RefCell<NormsReader>>,
     doc_values_reader: Option<DocValuesReader>,
     term_vectors_reader: Option<TermVectorsReader>,
     points_reader: Option<PointsReader>,
@@ -118,7 +119,9 @@ impl SegmentReader {
         let stored_fields_reader = StoredFieldsReader::open(dir, segment_name, "", segment_id).ok();
 
         let norms_reader = if field_infos.has_norms() {
-            NormsReader::open(dir, segment_name, "", segment_id, &field_infos, max_doc).ok()
+            NormsReader::open(dir, segment_name, "", segment_id, &field_infos, max_doc)
+                .ok()
+                .map(RefCell::new)
         } else {
             None
         };
@@ -184,20 +187,28 @@ impl SegmentReader {
         self.stored_fields_reader.as_mut()
     }
 
-    /// Returns the norms reader, or `None` if no fields have norms.
+    /// Returns a reference to the norms reader `RefCell`, or `None` if no fields have norms.
     ///
-    /// Use this for metadata queries like [`NormsReader::num_docs_with_field`].
-    /// For reading individual norm values, use [`norms_reader_mut`](Self::norms_reader_mut).
-    pub fn norms_reader(&self) -> Option<&NormsReader> {
+    /// Use `borrow()` for metadata queries or `borrow_mut()` for reading individual
+    /// norm values (which involves seeking in the data file).
+    pub fn norms_reader(&self) -> Option<&RefCell<NormsReader>> {
         self.norms_reader.as_ref()
     }
 
-    /// Returns a mutable reference to the norms reader.
+    /// Returns a norm value for the given field and document.
     ///
-    /// Required for reading individual norm values, which involves seeking in
-    /// the data file.
-    pub fn norms_reader_mut(&mut self) -> Option<&mut NormsReader> {
-        self.norms_reader.as_mut()
+    /// Returns `Ok(1)` if no norms reader exists or the field has no norms.
+    pub fn get_norm(&self, field_number: u32, doc_id: i32) -> io::Result<i64> {
+        match &self.norms_reader {
+            Some(nr) => {
+                let mut reader = nr.borrow_mut();
+                match reader.get(field_number, doc_id)? {
+                    Some(n) => Ok(n),
+                    None => Ok(1),
+                }
+            }
+            None => Ok(1),
+        }
     }
 
     /// Returns the doc values reader, or `None` if no fields have doc values.
@@ -370,18 +381,17 @@ mod tests {
     #[test]
     fn test_norms_access() {
         let (dir, name, id) = write_test_index(false);
-        let mut reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
-        // "content" is a TextField with norms — get field number before mutable borrow
+        // "content" is a TextField with norms
         let field_number = reader
             .field_infos()
             .field_info_by_name("content")
             .unwrap()
             .number();
 
-        let nr = reader.norms_reader_mut().unwrap();
-        let norm = nr.get(field_number, 0).unwrap();
-        assert!(norm.is_some());
+        let norm = reader.get_norm(field_number, 0).unwrap();
+        assert_ne!(norm, 0);
     }
 
     #[test]
