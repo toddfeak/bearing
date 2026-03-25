@@ -870,11 +870,10 @@ mod tests {
         let mut buf_idx: usize = 0;
         let mut upto = FIRST_LEVEL_SIZE - 1; // level marker position
 
-        for expected_level in 1..=5 {
+        for (expected_level, &new_size) in LEVEL_SIZE_ARRAY.iter().enumerate().skip(1).take(5) {
             let new_upto = ByteSlicePool::alloc_slice(&mut pool, buf_idx, upto);
             buf_idx = pool.buffer_upto as usize;
             // The new slice should have the correct level marker at its end
-            let new_size = LEVEL_SIZE_ARRAY[expected_level];
             let marker_pos = new_upto + new_size - 3 - 1;
             assert_eq!(
                 pool.buffers[buf_idx][marker_pos] & 0x0F,

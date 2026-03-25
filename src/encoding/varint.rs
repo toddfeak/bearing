@@ -154,7 +154,7 @@ mod tests {
             let mut cursor = &buf[..];
             let decoded = read_vint(&mut cursor).unwrap();
             assert_eq!(decoded, val, "round-trip failed for {val}");
-            assert!(cursor.is_empty(), "not all bytes consumed for {val}");
+            assert_is_empty!(cursor);
         }
     }
 
@@ -178,7 +178,7 @@ mod tests {
             let mut cursor = &buf[..];
             let decoded = read_vlong(&mut cursor).unwrap();
             assert_eq!(decoded, val, "round-trip failed for {val}");
-            assert!(cursor.is_empty(), "not all bytes consumed for {val}");
+            assert_is_empty!(cursor);
         }
     }
 
@@ -216,7 +216,7 @@ mod tests {
             let mut cursor = &buf[..];
             let decoded = read_zint(&mut cursor).unwrap();
             assert_eq!(decoded, val, "round-trip failed for {val}");
-            assert!(cursor.is_empty(), "not all bytes consumed for {val}");
+            assert_is_empty!(cursor);
         }
     }
 
@@ -261,7 +261,7 @@ mod tests {
             let mut cursor = &buf[..];
             let decoded = read_zlong(&mut cursor).unwrap();
             assert_eq!(decoded, val, "round-trip failed for {val}");
-            assert!(cursor.is_empty(), "not all bytes consumed for {val}");
+            assert_is_empty!(cursor);
         }
     }
 
@@ -274,7 +274,7 @@ mod tests {
             let mut cursor = &buf[..];
             let decoded = read_signed_vlong(&mut cursor).unwrap();
             assert_eq!(decoded, val, "round-trip failed for {val}");
-            assert!(cursor.is_empty(), "not all bytes consumed for {val}");
+            assert_is_empty!(cursor);
         }
     }
 

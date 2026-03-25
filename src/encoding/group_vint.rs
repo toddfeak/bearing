@@ -139,7 +139,7 @@ mod tests {
         let mut decoded = [0i32; 4];
         read_group_vints(&mut cursor, &mut decoded, 4).unwrap();
         assert_eq!(decoded, values);
-        assert!(cursor.is_empty());
+        assert_is_empty!(cursor);
     }
 
     #[test]
@@ -162,7 +162,7 @@ mod tests {
         let mut decoded = [0i32; 6];
         read_group_vints(&mut cursor, &mut decoded, 6).unwrap();
         assert_eq!(decoded, values);
-        assert!(cursor.is_empty());
+        assert_is_empty!(cursor);
     }
 
     #[test]

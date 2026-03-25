@@ -577,7 +577,7 @@ mod tests {
             let term = format!("term_{i:04}");
             let state =
                 seek_term(dir.as_ref(), &fi, &id, term.as_bytes(), IndexOptions::Docs).unwrap();
-            assert!(state.is_some(), "should find term {term}");
+            assert_some!(&state);
             assert_eq!(state.unwrap().doc_freq, 1);
         }
 
@@ -696,7 +696,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(state.doc_freq, 2);
-        assert!(state.pos_start_fp >= 0);
+        assert_ge!(state.pos_start_fp, 0);
 
         let state = seek_term(
             dir.as_ref(),
@@ -773,7 +773,7 @@ mod tests {
             let term = format!("longprefix_abcdefghij_{i:04}_suffix");
             let state =
                 seek_term(dir.as_ref(), &fi, &id, term.as_bytes(), IndexOptions::Docs).unwrap();
-            assert!(state.is_some(), "should find term {term}");
+            assert_some!(&state);
             assert_eq!(state.unwrap().doc_freq, 1);
         }
     }

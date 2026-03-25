@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_standard_analyzer_default() {
-        let analyzer = StandardAnalyzer::default();
+        let analyzer = StandardAnalyzer;
         let tokens = analyzer.analyze("hello");
         assert_len_eq_x!(&tokens, 1);
         assert_eq!(tokens[0].text, "hello");

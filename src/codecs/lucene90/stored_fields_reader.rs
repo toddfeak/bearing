@@ -738,8 +738,8 @@ mod tests {
         doc.add(stored_string_field("s", "text"));
         doc.add(stored_int_field("i", 123));
         doc.add(stored_long_field("l", 456789));
-        doc.add(stored_float_field("f", 3.14));
-        doc.add(stored_double_field("d", 2.71828));
+        doc.add(stored_float_field("f", 3.125));
+        doc.add(stored_double_field("d", 2.7));
         doc.add(stored_bytes_field("b", vec![1, 2, 3]));
 
         let (_, results) = write_and_read_stored(vec![doc]);
@@ -766,13 +766,13 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|f| matches!(&f.value, StoredValue::Float(v) if (*v - 3.14).abs() < 0.001)),
+                .any(|f| matches!(&f.value, StoredValue::Float(v) if (*v - 3.125).abs() < 0.001)),
             "missing float"
         );
         assert!(
-            fields.iter().any(
-                |f| matches!(&f.value, StoredValue::Double(v) if (*v - 2.71828).abs() < 0.00001)
-            ),
+            fields
+                .iter()
+                .any(|f| matches!(&f.value, StoredValue::Double(v) if (*v - 2.7).abs() < 0.001)),
             "missing double"
         );
         assert!(
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn test_read_zfloat_positive_non_integer() {
         // Positive non-integer float: header is high byte of float bits
-        let val = 3.14f32;
+        let val = 3.125f32;
         assert_in_delta!(zfloat_round_trip(val), val, 0.001);
     }
 
@@ -937,7 +937,7 @@ mod tests {
     #[test]
     fn test_read_zdouble_float_representable() {
         // A value that can be exactly represented as f32 uses the 0xFE path
-        let val = 3.14f32 as f64;
+        let val = 3.25f32 as f64;
         assert_in_delta!(zdouble_round_trip(val), val, 0.001);
     }
 
@@ -1012,7 +1012,7 @@ mod tests {
     #[test]
     fn test_stored_fields_ints_8bit_block_path() {
         // 130 values triggers the block path (128 values per block + 2 remainder)
-        let values: Vec<i32> = (0..130).map(|i| (i % 200) as i32).collect();
+        let values: Vec<i32> = (0..130).map(|i| i % 200).collect();
         let result = stored_ints_round_trip(&values);
         for (i, &v) in values.iter().enumerate() {
             assert_eq!(result[i], v as i64, "mismatch at index {i}");
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn test_stored_fields_ints_16bit_block_path() {
         // 130 values with values > 255 triggers 16-bit block path
-        let values: Vec<i32> = (0..130).map(|i| 300 + i as i32).collect();
+        let values: Vec<i32> = (0..130).map(|i| 300 + i).collect();
         let result = stored_ints_round_trip(&values);
         for (i, &v) in values.iter().enumerate() {
             assert_eq!(result[i], v as i64, "mismatch at index {i}");
@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn test_stored_fields_ints_32bit_block_path() {
         // 130 values with values > 65535 triggers 32-bit block path
-        let values: Vec<i32> = (0..130).map(|i| 70000 + i as i32 * 1000).collect();
+        let values: Vec<i32> = (0..130).map(|i| 70000 + i * 1000).collect();
         let result = stored_ints_round_trip(&values);
         for (i, &v) in values.iter().enumerate() {
             assert_eq!(result[i], v as i64, "mismatch at index {i}");

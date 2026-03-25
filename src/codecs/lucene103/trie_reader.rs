@@ -605,10 +605,10 @@ mod tests {
 
         // Any term should find the root block
         let result = trie.seek_to_block(b"alpha").unwrap();
-        assert!(result.is_some());
+        assert_some!(&result);
         let r = result.unwrap();
         assert!(r.has_terms);
-        assert!(r.output_fp >= 0);
+        assert_ge!(r.output_fp, 0);
     }
 
     #[test]
@@ -632,18 +632,18 @@ mod tests {
 
         // Both prefixes should find blocks
         let a_result = trie.seek_to_block(b"aaa0025").unwrap();
-        assert!(a_result.is_some(), "should find block for aaa prefix");
+        assert_some!(&a_result);
 
         let b_result = trie.seek_to_block(b"bbb0025").unwrap();
-        assert!(b_result.is_some(), "should find block for bbb prefix");
+        assert_some!(&b_result);
 
         // The two prefixes should potentially point to different blocks
         let a_fp = a_result.unwrap().output_fp;
         let b_fp = b_result.unwrap().output_fp;
         // They might be the same root block or different — depends on trie structure
         // At minimum, both should be valid (>= 0)
-        assert!(a_fp >= 0);
-        assert!(b_fp >= 0);
+        assert_ge!(a_fp, 0);
+        assert_ge!(b_fp, 0);
     }
 
     #[test]
@@ -654,7 +654,7 @@ mod tests {
 
         // Empty target should still find the root block (empty prefix)
         let result = trie.seek_to_block(b"").unwrap();
-        assert!(result.is_some());
+        assert_some!(&result);
     }
 
     #[test]
@@ -687,7 +687,7 @@ mod tests {
 
         // Seeking should find the block
         let result = trie.seek_to_block(b"prefix_015").unwrap();
-        assert!(result.is_some());
+        assert_some!(&result);
     }
 
     #[test]
@@ -709,9 +709,9 @@ mod tests {
 
         // Verify we can navigate to a term in the block
         let result = trie.seek_to_block(b"aa0025").unwrap();
-        assert!(result.is_some());
+        assert_some!(&result);
         let r = result.unwrap();
-        assert!(r.output_fp >= 0);
+        assert_ge!(r.output_fp, 0);
     }
 
     #[test]
@@ -750,9 +750,9 @@ mod tests {
         let a_result = trie.seek_to_block(b"aaa0025").unwrap().unwrap();
         let b_result = trie.seek_to_block(b"bbb0025").unwrap().unwrap();
         let c_result = trie.seek_to_block(b"ccc0025").unwrap().unwrap();
-        assert!(a_result.output_fp >= 0);
-        assert!(b_result.output_fp >= 0);
-        assert!(c_result.output_fp >= 0);
+        assert_ge!(a_result.output_fp, 0);
+        assert_ge!(b_result.output_fp, 0);
+        assert_ge!(c_result.output_fp, 0);
     }
 
     #[test]
@@ -813,7 +813,7 @@ mod tests {
         // seek works for all prefixes.
         for prefix in [b"aa0025" as &[u8], b"ab0025", b"ac0025", b"ad0025"] {
             let result = trie.seek_to_block(prefix).unwrap();
-            assert!(result.is_some(), "should find block for {prefix:?}");
+            assert_some!(&result);
         }
     }
 

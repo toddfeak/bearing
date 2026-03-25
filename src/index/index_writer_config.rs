@@ -94,7 +94,7 @@ mod tests {
     fn test_default_config() {
         let config = IndexWriterConfig::new();
         assert_eq!(config.max_buffered_docs(), -1);
-        assert!((config.ram_buffer_size_mb() - 16.0).abs() < f64::EPSILON);
+        assert_in_delta!(config.ram_buffer_size_mb(), 16.0, f64::EPSILON);
     }
 
     #[test]
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn test_set_ram_buffer_size_mb() {
         let config = IndexWriterConfig::new().set_ram_buffer_size_mb(32.0);
-        assert!((config.ram_buffer_size_mb() - 32.0).abs() < f64::EPSILON);
+        assert_in_delta!(config.ram_buffer_size_mb(), 32.0, f64::EPSILON);
         assert_eq!(config.ram_buffer_size_bytes(), 32 * 1024 * 1024);
     }
 
@@ -125,7 +125,7 @@ mod tests {
             .set_max_buffered_docs(50)
             .set_ram_buffer_size_mb(8.0);
         assert_eq!(config.max_buffered_docs(), 50);
-        assert!((config.ram_buffer_size_mb() - 8.0).abs() < f64::EPSILON);
+        assert_in_delta!(config.ram_buffer_size_mb(), 8.0, f64::EPSILON);
     }
 
     #[test]

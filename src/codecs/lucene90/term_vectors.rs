@@ -753,7 +753,7 @@ mod tests {
         let dir_guard = dir.lock().unwrap();
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
         // Should have at least a header + some chunk data + footer
-        assert!(tvd_len > 40);
+        assert_gt!(tvd_len, 40);
     }
 
     #[test]
@@ -1012,10 +1012,10 @@ mod tests {
             .map(|i| TermVectorTerm {
                 term: format!("term_{i:04}"),
                 freq: 1,
-                positions: vec![i as i32],
+                positions: vec![i],
                 offsets: Some(Box::new(OffsetBuffers {
-                    start_offsets: vec![i as i32 * 10],
-                    end_offsets: vec![i as i32 * 10 + 9],
+                    start_offsets: vec![i * 10],
+                    end_offsets: vec![i * 10 + 9],
                 })),
             })
             .collect();
@@ -1061,7 +1061,7 @@ mod tests {
             })
             .collect();
 
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, num_docs as i32).unwrap();
+        let files = write(&dir, "_0", "", &make_segment_id(), &docs, num_docs).unwrap();
         assert_len_eq_x!(&files, 3);
 
         // Read .tvm to verify num_chunks > 1
@@ -1108,7 +1108,7 @@ mod tests {
             })
             .collect();
 
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, num_docs as i32).unwrap();
+        let files = write(&dir, "_0", "", &make_segment_id(), &docs, num_docs).unwrap();
         assert_len_eq_x!(&files, 3);
 
         // With ~500 bytes per doc, chunk flushes after ~8 docs (>= 4096 bytes).

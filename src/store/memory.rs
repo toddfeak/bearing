@@ -383,8 +383,6 @@ mod tests {
 
     #[test]
     fn test_memory_directory_open_input_roundtrip() {
-        use crate::store::DataInput;
-
         let mut dir = MemoryDirectory::new();
         {
             let mut out = dir.create_output("roundtrip.bin").unwrap();

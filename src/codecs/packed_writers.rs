@@ -399,7 +399,7 @@ mod tests {
         let mut w = DirectWriter::new(40);
         w.add(0x01);
         w.finish(&mut out).unwrap();
-        assert_eq!(out.bytes().len(), 5 + 3);
+        assert_len_eq_x!(out.bytes(), 5 + 3);
     }
 
     #[test]
@@ -492,7 +492,7 @@ mod tests {
         w.finish(&mut out).unwrap();
         let bytes = out.bytes();
         assert_eq!(bytes[0], 0x0D);
-        assert_eq!(bytes.len(), 1 + 48);
+        assert_len_eq_x!(bytes, 1 + 48);
     }
 
     #[test]

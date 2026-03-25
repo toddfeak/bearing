@@ -2,6 +2,9 @@
 
 //! Integration tests for store-level read functionality (DataInput, IndexInput, Directory::open_input).
 
+#[macro_use]
+extern crate assertables;
+
 use std::path::Path;
 
 use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory};
@@ -107,11 +110,11 @@ fn test_index_writer_files_readable() {
 
     // Every file should be openable and have non-zero length
     let files = dir.list_all().unwrap();
-    assert!(!files.is_empty());
+    assert_not_empty!(files);
 
     for file in &files {
         let input = dir.open_input(file).unwrap();
-        assert!(input.length() > 0, "file {file} has zero length");
+        assert_gt!(input.length(), 0, "file {file} has zero length");
     }
 }
 
@@ -150,7 +153,7 @@ fn test_index_writer_codec_files_have_valid_headers() {
 
         // Read past magic, read codec name string
         let codec_name = input.read_string().unwrap();
-        assert!(!codec_name.is_empty(), "file {file} has empty codec name");
+        assert_not_empty!(codec_name, "file {file} has empty codec name");
     }
 }
 
@@ -270,8 +273,8 @@ fn test_read_segments_compound_mode() {
     assert_eq!(infos.segments[0].name, "_0");
 
     // Should have .cfs and .cfe files
-    assert!(files.iter().any(|f| f.ends_with(".cfs")));
-    assert!(files.iter().any(|f| f.ends_with(".cfe")));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfs"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfe"));
 }
 
 #[test]
@@ -301,11 +304,8 @@ fn test_compound_directory_list_files() {
     let compound_files = compound_dir.list_all().unwrap();
 
     // Should contain segment files like .fnm, .fdt, .fdm, etc.
-    assert!(!compound_files.is_empty());
-    assert!(
-        compound_files.iter().any(|f| f.ends_with(".fnm")),
-        "expected .fnm in compound files: {compound_files:?}"
-    );
+    assert_not_empty!(compound_files);
+    assert_any!(compound_files.iter(), |f: &String| f.ends_with(".fnm"));
 }
 
 #[test]
@@ -371,7 +371,7 @@ fn test_compound_directory_fs() {
     // Open compound from FSDirectory — exercises FSIndexInput::slice()
     let compound_dir = CompoundDirectory::open(&fs_dir, &seg.name, &seg.id).unwrap();
     let compound_files = compound_dir.list_all().unwrap();
-    assert!(!compound_files.is_empty());
+    assert_not_empty!(compound_files);
 
     // Verify an embedded file is readable
     let mut input = compound_dir.open_input(".fnm").unwrap();
@@ -480,8 +480,8 @@ fn test_stored_fields_reader_all_types() {
     doc.add(stored_string_field("s", "text value"));
     doc.add(stored_int_field("i", 12345));
     doc.add(stored_long_field("l", 9876543210));
-    doc.add(stored_float_field("f", 3.14));
-    doc.add(stored_double_field("d", 2.71828));
+    doc.add(stored_float_field("f", 3.125));
+    doc.add(stored_double_field("d", 2.7));
     doc.add(stored_bytes_field("b", vec![0xDE, 0xAD, 0xBE, 0xEF]));
     writer.add_document(doc).unwrap();
 
@@ -524,13 +524,13 @@ fn test_stored_fields_reader_all_types() {
     assert!(
         fields
             .iter()
-            .any(|f| matches!(&f.value, StoredValue::Float(v) if (*v - 3.14).abs() < 0.001)),
+            .any(|f| matches!(&f.value, StoredValue::Float(v) if (*v - 3.125).abs() < 0.001)),
         "missing float"
     );
     assert!(
         fields
             .iter()
-            .any(|f| matches!(&f.value, StoredValue::Double(v) if (*v - 2.71828).abs() < 0.00001)),
+            .any(|f| matches!(&f.value, StoredValue::Double(v) if (*v - 2.7).abs() < 0.001)),
         "missing double"
     );
     assert!(

@@ -279,7 +279,7 @@ fn byte_to_doc_values_type(b: u8) -> io::Result<DocValuesType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Directory, MemoryDirectory, SharedDirectory};
+    use crate::store::{MemoryDirectory, SharedDirectory};
     use std::collections::HashMap;
 
     fn test_directory() -> SharedDirectory {

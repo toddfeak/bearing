@@ -643,7 +643,7 @@ mod tests {
     fn test_read_byte_eof() {
         let data = [];
         let mut input = ByteSliceInput::new(&data);
-        assert!(input.read_byte().is_err());
+        assert_err!(input.read_byte());
     }
 
     #[test]

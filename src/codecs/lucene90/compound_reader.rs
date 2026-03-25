@@ -186,7 +186,7 @@ mod tests {
     use super::*;
     use crate::codecs::lucene90::compound;
     use crate::store::memory::MemoryIndexOutput;
-    use crate::store::{DataOutput, IndexOutput, MemoryDirectory, SegmentFile};
+    use crate::store::{DataOutput, MemoryDirectory, SegmentFile};
 
     fn make_test_file(name: &str, segment_id: &[u8; 16], body: &[u8]) -> SegmentFile {
         let mut out = MemoryIndexOutput::new(name.to_string());
@@ -230,10 +230,10 @@ mod tests {
         let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
 
         let listed = compound_dir.list_all().unwrap();
-        assert_eq!(listed.len(), 2);
+        assert_len_eq_x!(&listed, 2);
         // Names should have segment prefix restored
-        assert!(listed.contains(&"_0.fnm".to_string()));
-        assert!(listed.contains(&"_0.fdt".to_string()));
+        assert_contains!(listed, &"_0.fnm".to_string());
+        assert_contains!(listed, &"_0.fdt".to_string());
     }
 
     #[test]
@@ -244,7 +244,7 @@ mod tests {
         let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
 
         let mut input = compound_dir.open_input(".fnm").unwrap();
-        assert!(input.length() > 0);
+        assert_gt!(input.length(), 0);
 
         // The embedded file includes its header + body + footer
         // Verify we can read the codec magic at the start
@@ -309,7 +309,7 @@ mod tests {
         let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
 
         let listed = compound_dir.list_all().unwrap();
-        assert_eq!(listed.len(), 3);
+        assert_len_eq_x!(&listed, 3);
 
         // Each file should be independently readable with valid header
         for name in &[".fnm", ".fdt", ".nvd"] {
@@ -326,7 +326,7 @@ mod tests {
         let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
 
         let data = compound_dir.read_file(".fnm").unwrap();
-        assert!(!data.is_empty());
+        assert_not_empty!(data);
         // First 4 bytes should be codec magic
         assert_eq!(&data[..4], &[0x3F, 0xD7, 0x6C, 0x17]);
     }

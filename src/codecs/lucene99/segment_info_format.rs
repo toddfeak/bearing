@@ -197,7 +197,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::store::{Directory, MemoryDirectory, SharedDirectory};
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
@@ -288,9 +288,9 @@ mod tests {
         assert_eq!(read_si.id, si.id);
         assert_eq!(read_si.diagnostics, si.diagnostics);
         assert_eq!(read_si.has_blocks, si.has_blocks);
-        assert_eq!(read_si.files.len(), files.len());
+        assert_len_eq_x!(&read_si.files, files.len());
         for f in &files {
-            assert!(read_si.files.contains(f));
+            assert_contains!(read_si.files, f);
         }
     }
 
@@ -333,7 +333,7 @@ mod tests {
 
         let wrong_id = [0xFFu8; 16];
         let dir_guard = dir.lock().unwrap();
-        assert!(read(&**dir_guard, &si.name, &wrong_id).is_err());
+        assert_err!(read(&**dir_guard, &si.name, &wrong_id));
     }
 
     // --- Write-side tests ---

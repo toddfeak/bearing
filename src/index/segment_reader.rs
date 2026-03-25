@@ -342,7 +342,7 @@ mod tests {
 
         assert_eq!(reader.max_doc(), 2);
         assert_eq!(reader.segment_name(), &name);
-        assert!(reader.field_infos().len() > 0);
+        assert_not_empty!(reader.field_infos());
         assert!(reader.terms_reader().is_some());
         assert!(reader.postings_reader().is_some());
     }
@@ -390,8 +390,8 @@ mod tests {
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
         let fi = reader.field_infos();
-        assert!(fi.field_info_by_name("content").is_some());
-        assert!(fi.field_info_by_name("path").is_some());
+        assert_some!(fi.field_info_by_name("content"));
+        assert_some!(fi.field_info_by_name("path"));
         assert!(fi.has_postings());
     }
 
@@ -507,14 +507,14 @@ mod tests {
         // "common" should be in all 200 docs
         let mut iter = reader.postings("content", b"common").unwrap().unwrap();
         let docs = collect_docs(&mut iter);
-        assert_eq!(docs.len(), 200);
+        assert_len_eq_x!(&docs, 200);
         assert_eq!(docs[0], 0);
         assert_eq!(docs[199], 199);
 
         // "even" should be in 100 docs (0, 2, 4, ..., 198)
         let mut iter = reader.postings("content", b"even").unwrap().unwrap();
         let docs = collect_docs(&mut iter);
-        assert_eq!(docs.len(), 100);
+        assert_len_eq_x!(&docs, 100);
         assert_eq!(docs[0], 0);
         assert_eq!(docs[1], 2);
         assert_eq!(docs[99], 198);

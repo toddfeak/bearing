@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn test_random_id_length() {
         let id = random_id();
-        assert_eq!(id.len(), ID_LENGTH);
+        assert_len_eq_x!(&id, ID_LENGTH);
     }
 
     #[test]

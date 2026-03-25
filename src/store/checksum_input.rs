@@ -156,7 +156,7 @@ mod tests {
     fn test_backward_seek_fails() {
         let mut input = make_checksum_input(&[1, 2, 3, 4, 5]);
         input.seek(3).unwrap();
-        assert!(input.seek(1).is_err());
+        assert_err!(input.seek(1));
     }
 
     #[test]

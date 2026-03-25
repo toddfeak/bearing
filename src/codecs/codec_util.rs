@@ -392,7 +392,7 @@ mod tests {
     fn test_check_header_wrong_magic() {
         let bytes = vec![0x00, 0x00, 0x00, 0x00]; // wrong magic
         let mut input = ByteSliceIndexInput::new("test".into(), bytes);
-        assert!(check_header(&mut input, "Test", 1, 1).is_err());
+        assert_err!(check_header(&mut input, "Test", 1, 1));
     }
 
     #[test]
@@ -402,7 +402,7 @@ mod tests {
         let bytes = out.bytes().to_vec();
 
         let mut input = ByteSliceIndexInput::new("test".into(), bytes);
-        assert!(check_header(&mut input, "WrongName", 1, 10).is_err());
+        assert_err!(check_header(&mut input, "WrongName", 1, 10));
     }
 
     #[test]
@@ -412,7 +412,7 @@ mod tests {
         let bytes = out.bytes().to_vec();
 
         let mut input = ByteSliceIndexInput::new("test".into(), bytes);
-        assert!(check_header(&mut input, "Test", 5, 10).is_err());
+        assert_err!(check_header(&mut input, "Test", 5, 10));
     }
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
         let bytes = out.bytes().to_vec();
 
         let mut input = ByteSliceIndexInput::new("test".into(), bytes);
-        assert!(check_header(&mut input, "Test", 1, 10).is_err());
+        assert_err!(check_header(&mut input, "Test", 1, 10));
     }
 
     #[test]
@@ -446,7 +446,7 @@ mod tests {
 
         let wrong_id = [0xCDu8; ID_LENGTH];
         let mut input = ByteSliceIndexInput::new("test".into(), bytes);
-        assert!(check_index_header(&mut input, "Test", 1, 1, &wrong_id, "s").is_err());
+        assert_err!(check_index_header(&mut input, "Test", 1, 1, &wrong_id, "s"));
     }
 
     #[test]
@@ -457,7 +457,7 @@ mod tests {
         let bytes = out.bytes().to_vec();
 
         let mut input = ByteSliceIndexInput::new("test".into(), bytes);
-        assert!(check_index_header(&mut input, "Test", 1, 1, &id, "xyz").is_err());
+        assert_err!(check_index_header(&mut input, "Test", 1, 1, &id, "xyz"));
     }
 
     #[test]
@@ -491,7 +491,7 @@ mod tests {
         let mut input = ChecksumIndexInput::new(Box::new(inner));
         let footer_pos = bytes.len() as u64 - FOOTER_LENGTH as u64;
         input.seek(footer_pos).unwrap();
-        assert!(check_footer(&mut input).is_err());
+        assert_err!(check_footer(&mut input));
     }
 
     #[test]

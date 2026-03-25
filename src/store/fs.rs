@@ -516,8 +516,6 @@ mod tests {
 
     #[test]
     fn test_fs_directory_open_input_roundtrip() {
-        use crate::store::DataInput;
-
         let dir_path = temp_dir("open_input_roundtrip");
         let mut dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);

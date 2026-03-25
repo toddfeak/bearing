@@ -99,12 +99,11 @@ mod tests {
     impl Analyzer for SplitAnalyzer {
         fn analyze(&self, text: &str) -> Vec<Token> {
             text.split_whitespace()
-                .enumerate()
-                .map(|(i, word)| Token {
+                .map(|word| Token {
                     text: word.to_string(),
                     start_offset: 0,
                     end_offset: word.len(),
-                    position_increment: if i == 0 { 1 } else { 1 },
+                    position_increment: 1,
                 })
                 .collect()
         }

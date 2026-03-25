@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(input.read_byte().unwrap(), 1);
         assert_eq!(input.read_byte().unwrap(), 2);
         assert_eq!(input.read_byte().unwrap(), 3);
-        assert!(input.read_byte().is_err());
+        assert_err!(input.read_byte());
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn test_seek_past_end() {
         let mut input = ByteSliceIndexInput::new("test".into(), vec![1, 2]);
-        assert!(input.seek(3).is_err());
+        assert_err!(input.seek(3));
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(sliced.read_byte().unwrap(), 20);
         assert_eq!(sliced.read_byte().unwrap(), 30);
         assert_eq!(sliced.read_byte().unwrap(), 40);
-        assert!(sliced.read_byte().is_err());
+        assert_err!(sliced.read_byte());
     }
 
     #[test]
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(ra.read_byte_at(0).unwrap(), 10);
         assert_eq!(ra.read_byte_at(2).unwrap(), 30);
         assert_eq!(ra.read_byte_at(4).unwrap(), 50);
-        assert!(ra.read_byte_at(5).is_err());
+        assert_err!(ra.read_byte_at(5));
     }
 
     #[test]
@@ -243,7 +243,7 @@ mod tests {
         let input = ByteSliceIndexInput::new("test".into(), data);
         let ra = input.random_access().unwrap();
         assert_eq!(ra.read_le_long_at(0).unwrap(), 0x0807060504030201_i64);
-        assert!(ra.read_le_long_at(2).is_err());
+        assert_err!(ra.read_le_long_at(2));
     }
 
     #[test]
@@ -253,6 +253,6 @@ mod tests {
         let ra = sliced.random_access().unwrap();
         assert_eq!(ra.read_byte_at(0).unwrap(), 20);
         assert_eq!(ra.read_byte_at(2).unwrap(), 40);
-        assert!(ra.read_byte_at(3).is_err());
+        assert_err!(ra.read_byte_at(3));
     }
 }

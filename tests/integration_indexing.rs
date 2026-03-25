@@ -66,24 +66,20 @@ fn single_threaded_index_and_commit() -> io::Result<()> {
     assert_not_empty!(files, "commit should produce segment files");
 
     // Should have a segments_N file
-    assert!(
-        files.iter().any(|f| f.name.starts_with("segments_")),
-        "should contain a segments file"
-    );
+    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
+        .name
+        .starts_with("segments_"));
     // Should have compound file entries (.cfs, .cfe)
-    assert!(
-        files.iter().any(|f| f.name.ends_with(".cfs")),
-        "should contain .cfs compound file"
-    );
-    assert!(
-        files.iter().any(|f| f.name.ends_with(".cfe")),
-        "should contain .cfe compound file entry"
-    );
+    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
+        .name
+        .ends_with(".cfs"));
+    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
+        .name
+        .ends_with(".cfe"));
     // Should have segment info (.si)
-    assert!(
-        files.iter().any(|f| f.name.ends_with(".si")),
-        "should contain .si segment info"
-    );
+    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
+        .name
+        .ends_with(".si"));
 
     Ok(())
 }
@@ -120,10 +116,9 @@ fn multi_threaded_indexing() -> io::Result<()> {
     assert_eq!(writer.num_docs(), num_threads * docs_per_thread);
 
     let files = result.into_segment_files()?;
-    assert!(
-        files.iter().any(|f| f.name.starts_with("segments_")),
-        "should contain a segments file"
-    );
+    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
+        .name
+        .starts_with("segments_"));
 
     Ok(())
 }
@@ -158,13 +153,13 @@ fn config_max_buffered_docs() -> io::Result<()> {
 #[test]
 fn config_ram_buffer_size() {
     let config = IndexWriterConfig::new().set_ram_buffer_size_mb(32.0);
-    assert!((config.ram_buffer_size_mb() - 32.0).abs() < f64::EPSILON);
+    assert_in_delta!(config.ram_buffer_size_mb(), 32.0, f64::EPSILON);
 }
 
 #[test]
 fn config_defaults() {
     let config = IndexWriterConfig::new();
-    assert!((config.ram_buffer_size_mb() - 16.0).abs() < f64::EPSILON);
+    assert_in_delta!(config.ram_buffer_size_mb(), 16.0, f64::EPSILON);
     assert_eq!(config.max_buffered_docs(), -1);
 }
 
@@ -180,7 +175,9 @@ fn empty_commit() -> io::Result<()> {
 
     let files = result.into_segment_files()?;
     // Even an empty commit should produce a segments file
-    assert!(files.iter().any(|f| f.name.starts_with("segments_")));
+    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
+        .name
+        .starts_with("segments_"));
 
     Ok(())
 }
@@ -237,7 +234,7 @@ fn field_accessors() {
     let f = text_field("body", "hello world");
     assert_eq!(f.name(), "body");
     assert_eq!(f.string_value(), Some("hello world"));
-    assert_eq!(f.numeric_value(), None);
+    assert_none!(f.numeric_value());
 
     let f = long_field("ts", 12345);
     assert_eq!(f.name(), "ts");
@@ -296,15 +293,12 @@ fn memory_directory_round_trip() -> io::Result<()> {
     let file_names = result.write_to_directory(&mut dir)?;
 
     assert_not_empty!(file_names);
-    assert!(file_names.iter().any(|n| n.starts_with("segments_")));
+    assert_any!(file_names.iter(), |n: &String| n.starts_with("segments_"));
 
     // Verify all files are accessible through the directory
     let listed = dir.list_all()?;
     for name in &file_names {
-        assert!(
-            listed.contains(name),
-            "file '{name}' written but not listed in directory"
-        );
+        assert_contains!(listed, name);
         let len = dir.file_length(name)?;
         assert_gt!(len, 0, "file '{name}' should have non-zero length");
     }
@@ -363,7 +357,7 @@ fn fs_directory_round_trip() -> io::Result<()> {
     // Files are already on disk — verify via file_names()
     let file_names = result.file_names();
     assert_not_empty!(file_names);
-    assert!(file_names.iter().any(|n| n.starts_with("segments_")));
+    assert_any!(file_names.iter(), |n: &String| n.starts_with("segments_"));
 
     for name in file_names {
         let path = tmp_dir.join(name);
@@ -406,8 +400,9 @@ fn multiple_segments_via_flush() -> io::Result<()> {
 
     // With max_buffered_docs=3 and 10 docs, we should have multiple .si files
     let si_count = files.iter().filter(|f| f.name.ends_with(".si")).count();
-    assert!(
-        si_count > 1,
+    assert_gt!(
+        si_count,
+        1,
         "expected multiple segments, got {si_count} .si files"
     );
 
@@ -433,9 +428,9 @@ fn all_field_types_in_single_document() -> io::Result<()> {
     let file_names = result.write_to_directory(&mut dir)?;
 
     // Should produce valid index files
-    assert!(file_names.iter().any(|n| n.starts_with("segments_")));
-    assert!(file_names.iter().any(|n| n.ends_with(".si")));
-    assert!(file_names.iter().any(|n| n.ends_with(".cfs")));
+    assert_any!(file_names.iter(), |n: &String| n.starts_with("segments_"));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".si"));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".cfs"));
 
     Ok(())
 }
@@ -498,8 +493,8 @@ fn non_compound_mode() -> io::Result<()> {
     assert!(!file_names.iter().any(|n| n.ends_with(".cfe")));
 
     // Individual sub-files present
-    assert!(file_names.iter().any(|n| n.ends_with(".fnm")));
-    assert!(file_names.iter().any(|n| n.ends_with(".si")));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".fnm"));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".si"));
 
     // Can still read files via into_segment_files
     let files = result.into_segment_files()?;
@@ -529,7 +524,7 @@ fn fs_directory_non_compound() -> io::Result<()> {
 
     let file_names = result.file_names();
     assert!(!file_names.iter().any(|n| n.ends_with(".cfs")));
-    assert!(file_names.iter().any(|n| n.ends_with(".fnm")));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".fnm"));
 
     // Verify files on disk
     for name in file_names {
@@ -566,7 +561,7 @@ fn doc_values_only_fields() -> io::Result<()> {
             "tag",
             &format!("tag-{}", i % 5),
         ));
-        doc.add(sorted_numeric_doc_values_field("priority", (i % 4) as i64));
+        doc.add(sorted_numeric_doc_values_field("priority", i % 4));
         writer.add_document(doc)?;
     }
 
@@ -577,14 +572,8 @@ fn doc_values_only_fields() -> io::Result<()> {
     let file_names = result.write_to_directory(&mut dir)?;
 
     // Doc values files should exist
-    assert!(
-        file_names.iter().any(|n| n.ends_with(".dvm")),
-        "expected .dvm file"
-    );
-    assert!(
-        file_names.iter().any(|n| n.ends_with(".dvd")),
-        "expected .dvd file"
-    );
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvm"));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvd"));
 
     // Verify files have content
     for name in &file_names {
@@ -617,8 +606,8 @@ fn doc_values_only_fields_non_compound() -> io::Result<()> {
     let file_names = result.file_names().to_vec();
 
     // Non-compound: .dvm and .dvd should be individual files
-    assert!(file_names.iter().any(|n| n.ends_with(".dvm")));
-    assert!(file_names.iter().any(|n| n.ends_with(".dvd")));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvm"));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvd"));
 
     Ok(())
 }
@@ -666,10 +655,9 @@ fn multi_valued_sorted_numeric_and_sorted_set() -> io::Result<()> {
 
     let files = result.into_segment_files()?;
     assert_not_empty!(files);
-    assert!(
-        files.iter().any(|f| f.name.ends_with(".cfs")),
-        "should contain compound file"
-    );
+    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
+        .name
+        .ends_with(".cfs"));
 
     Ok(())
 }
@@ -811,14 +799,8 @@ fn sparse_numeric_doc_values() -> io::Result<()> {
     let mut dir = MemoryDirectory::new();
     let file_names = result.write_to_directory(&mut dir)?;
 
-    assert!(
-        file_names.iter().any(|n| n.ends_with(".dvm")),
-        "expected .dvm file"
-    );
-    assert!(
-        file_names.iter().any(|n| n.ends_with(".dvd")),
-        "expected .dvd file"
-    );
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvm"));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvd"));
 
     for name in &file_names {
         if name.ends_with(".dvm") || name.ends_with(".dvd") {
@@ -851,14 +833,8 @@ fn sparse_norms_text_field() -> io::Result<()> {
     let mut dir = MemoryDirectory::new();
     let file_names = result.write_to_directory(&mut dir)?;
 
-    assert!(
-        file_names.iter().any(|n| n.ends_with(".nvm")),
-        "expected .nvm file"
-    );
-    assert!(
-        file_names.iter().any(|n| n.ends_with(".nvd")),
-        "expected .nvd file"
-    );
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".nvm"));
+    assert_any!(file_names.iter(), |n: &String| n.ends_with(".nvd"));
 
     for name in &file_names {
         if name.ends_with(".nvm") || name.ends_with(".nvd") {
@@ -985,11 +961,7 @@ fn multi_threaded_few_docs_with_points() -> io::Result<()> {
                     -74.006 + i as f64 * 0.01,
                 ));
                 doc.add(int_range_field("int_range", &[i as i32], &[i as i32 + 100]));
-                doc.add(long_range_field(
-                    "long_range",
-                    &[i as i64],
-                    &[i as i64 + 1000],
-                ));
+                doc.add(long_range_field("long_range", &[i], &[i + 1000]));
                 doc.add(float_range_field(
                     "float_range",
                     &[i as f32 / 10.0],

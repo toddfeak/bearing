@@ -365,9 +365,11 @@ mod tests {
         (sorted_terms, postings)
     }
 
+    type FieldData<'a> = Vec<(&'a str, IndexOptions, Vec<(&'a str, &'a [i32])>)>;
+
     fn write_and_read(
         field_infos_vec: Vec<FieldInfo>,
-        fields_data: Vec<(&str, IndexOptions, Vec<(&str, &[i32])>)>,
+        fields_data: FieldData<'_>,
     ) -> io::Result<BlockTreeTermsReader> {
         let field_infos = FieldInfos::new(field_infos_vec);
         let segment_name = "_0";
@@ -576,7 +578,7 @@ mod tests {
         let fi = docs_field_infos();
         let mut input = ByteSliceInput::new(&buf);
         let err = read_field_metadata(&mut input, &fi, &*dummy_index_input()).unwrap_err();
-        assert!(err.to_string().contains("invalid numTerms"), "{err}");
+        assert_contains!(err.to_string(), "invalid numTerms");
     }
 
     #[test]
@@ -589,7 +591,7 @@ mod tests {
         let fi = docs_field_infos();
         let mut input = ByteSliceInput::new(&buf);
         let err = read_field_metadata(&mut input, &fi, &*dummy_index_input()).unwrap_err();
-        assert!(err.to_string().contains("invalid field number"), "{err}");
+        assert_contains!(err.to_string(), "invalid field number");
     }
 
     #[test]
@@ -606,7 +608,7 @@ mod tests {
         let fi = docs_field_infos();
         let mut input = ByteSliceInput::new(&buf);
         let err = read_field_metadata(&mut input, &fi, &*dummy_index_input()).unwrap_err();
-        assert!(err.to_string().contains("invalid sumDocFreq"), "{err}");
+        assert_contains!(err.to_string(), "invalid sumDocFreq");
     }
 
     #[test]
@@ -626,10 +628,7 @@ mod tests {
 
         let mut input = ByteSliceInput::new(&buf);
         let err = read_field_metadata(&mut input, &fi, &*dummy_index_input()).unwrap_err();
-        assert!(
-            err.to_string().contains("invalid sumTotalTermFreq"),
-            "{err}"
-        );
+        assert_contains!(err.to_string(), "invalid sumTotalTermFreq");
     }
 
     #[test]

@@ -612,14 +612,8 @@ mod tests {
         // The .si file must contain the stored fields mode attribute
         let si_data = &files.iter().find(|f| f.name.ends_with(".si")).unwrap().data;
         let si_str = String::from_utf8_lossy(si_data);
-        assert!(
-            si_str.contains("Lucene90StoredFieldsFormat.mode"),
-            "segment must have Lucene90StoredFieldsFormat.mode attribute"
-        );
-        assert!(
-            si_str.contains("BEST_SPEED"),
-            "segment must have BEST_SPEED value"
-        );
+        assert_contains!(si_str, "Lucene90StoredFieldsFormat.mode");
+        assert_contains!(si_str, "BEST_SPEED");
     }
 
     // --- commit() integration tests ---
@@ -1036,10 +1030,7 @@ mod tests {
 
         let files = writer.commit().unwrap().into_segment_files().unwrap();
         let num_segments = files.iter().filter(|f| f.name.ends_with(".si")).count();
-        assert!(
-            num_segments > 1,
-            "expected multiple segments with small RAM buffer, got {num_segments}"
-        );
+        assert_gt!(num_segments, 1);
     }
 
     #[test]
@@ -1101,10 +1092,7 @@ mod tests {
         let files = dir.list_all().unwrap();
         assert_len_eq_x!(&files, 4);
         for name in &written {
-            assert!(
-                dir.file_length(name).unwrap() > 0,
-                "file {name} should be non-empty"
-            );
+            assert_gt!(dir.file_length(name).unwrap(), 0);
         }
     }
 

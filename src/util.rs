@@ -64,13 +64,12 @@ mod tests {
     fn test_bytes_ref_ordering() {
         let a = BytesRef::from_utf8("abc");
         let b = BytesRef::from_utf8("abd");
-        assert!(a < b);
+        assert_lt!(a, b);
     }
 
     #[test]
     fn test_bytes_ref_empty() {
         let br = BytesRef::default();
-        assert!(br.is_empty());
         assert_is_empty!(br);
     }
 

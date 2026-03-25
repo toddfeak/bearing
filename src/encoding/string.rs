@@ -97,7 +97,7 @@ mod tests {
             let mut cursor = &buf[..];
             let decoded = read_string(&mut cursor).unwrap();
             assert_eq!(&decoded, s);
-            assert!(cursor.is_empty());
+            assert_is_empty!(cursor);
         }
     }
 
@@ -128,7 +128,7 @@ mod tests {
         let mut cursor = &buf[..];
         let decoded = read_set_of_strings(&mut cursor).unwrap();
         assert_eq!(decoded, set);
-        assert!(cursor.is_empty());
+        assert_is_empty!(cursor);
     }
 
     #[test]
@@ -169,7 +169,7 @@ mod tests {
         let mut cursor = &buf[..];
         let decoded = read_map_of_strings(&mut cursor).unwrap();
         assert_eq!(decoded, map);
-        assert!(cursor.is_empty());
+        assert_is_empty!(cursor);
     }
 
     #[test]
