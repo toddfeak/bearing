@@ -1126,12 +1126,7 @@ fn bytes_required_vlong(v: i64) -> u32 {
 }
 
 fn write_long_n_bytes(v: i64, n: u32, out: &mut dyn DataOutput) -> io::Result<()> {
-    let mut v = v as u64;
-    for _ in 0..n {
-        out.write_byte(v as u8)?;
-        v >>= 8;
-    }
-    Ok(())
+    out.write_bytes(&(v as u64).to_le_bytes()[..n as usize])
 }
 
 /// Merge nodes from `other` into `this` at the given depth.

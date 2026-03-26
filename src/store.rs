@@ -2,8 +2,9 @@
 
 //! Storage abstraction layer: directories, data I/O, and index I/O.
 //!
-//! The [`Directory`] trait abstracts file storage. [`FSDirectory`] writes to the
-//! filesystem; [`MemoryDirectory`] holds files in memory (useful for tests).
+//! The [`Directory`] trait abstracts file storage. [`FSDirectory`] opens a
+//! filesystem directory; by default it returns an [`MmapDirectory`] for
+//! zero-copy reads. [`MemoryDirectory`] holds files in memory (for tests).
 //! [`DataOutput`] and [`IndexOutput`] define the byte-level writing interface
 //! used by codec writers. [`DataInput`] defines the byte-level reading interface
 //! used by codec readers.
@@ -13,10 +14,12 @@ pub mod checksum;
 pub mod checksum_input;
 pub mod fs;
 pub mod memory;
+pub mod mmap;
 
 pub use checksum::CRC32;
 pub use fs::FSDirectory;
 pub use memory::{MemoryDirectory, MemoryIndexOutput};
+pub use mmap::MmapDirectory;
 
 // Re-export CompoundDirectory — a read-only Directory for compound files (.cfs/.cfe)
 pub use crate::codecs::lucene90::compound_reader::CompoundDirectory;
@@ -41,22 +44,17 @@ pub trait DataOutput {
 
     /// Writes a 32-bit integer in **little-endian** byte order.
     fn write_le_int(&mut self, i: i32) -> io::Result<()> {
-        self.write_byte(i as u8)?;
-        self.write_byte((i >> 8) as u8)?;
-        self.write_byte((i >> 16) as u8)?;
-        self.write_byte((i >> 24) as u8)
+        self.write_bytes(&i.to_le_bytes())
     }
 
     /// Writes a 16-bit short in **little-endian** byte order.
     fn write_le_short(&mut self, i: i16) -> io::Result<()> {
-        self.write_byte(i as u8)?;
-        self.write_byte((i >> 8) as u8)
+        self.write_bytes(&i.to_le_bytes())
     }
 
     /// Writes a 64-bit long in **little-endian** byte order.
     fn write_le_long(&mut self, i: i64) -> io::Result<()> {
-        self.write_le_int(i as i32)?;
-        self.write_le_int((i >> 32) as i32)
+        self.write_bytes(&i.to_le_bytes())
     }
 
     /// Writes a variable-length integer (1-5 bytes). High bit = continuation.
@@ -87,17 +85,13 @@ pub trait DataOutput {
     /// Writes a 32-bit integer in **big-endian** byte order.
     /// Used by CodecUtil for headers/footers.
     fn write_be_int(&mut self, i: i32) -> io::Result<()> {
-        self.write_byte((i >> 24) as u8)?;
-        self.write_byte((i >> 16) as u8)?;
-        self.write_byte((i >> 8) as u8)?;
-        self.write_byte(i as u8)
+        self.write_bytes(&i.to_be_bytes())
     }
 
     /// Writes a 64-bit long in **big-endian** byte order.
     /// Used by CodecUtil for headers/footers.
     fn write_be_long(&mut self, i: i64) -> io::Result<()> {
-        self.write_be_int((i >> 32) as i32)?;
-        self.write_be_int(i as i32)
+        self.write_bytes(&i.to_be_bytes())
     }
 
     /// Writes a string as VInt-encoded byte length followed by UTF-8 bytes.
@@ -181,25 +175,23 @@ pub trait DataInput {
 
     /// Reads a 16-bit short in **little-endian** byte order.
     fn read_le_short(&mut self) -> io::Result<i16> {
-        let b0 = self.read_byte()? as i16;
-        let b1 = self.read_byte()? as i16;
-        Ok(b0 | (b1 << 8))
+        let mut buf = [0u8; 2];
+        self.read_bytes(&mut buf)?;
+        Ok(i16::from_le_bytes(buf))
     }
 
     /// Reads a 32-bit integer in **little-endian** byte order.
     fn read_le_int(&mut self) -> io::Result<i32> {
-        let b0 = self.read_byte()? as i32;
-        let b1 = self.read_byte()? as i32;
-        let b2 = self.read_byte()? as i32;
-        let b3 = self.read_byte()? as i32;
-        Ok(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+        let mut buf = [0u8; 4];
+        self.read_bytes(&mut buf)?;
+        Ok(i32::from_le_bytes(buf))
     }
 
     /// Reads a 64-bit long in **little-endian** byte order.
     fn read_le_long(&mut self) -> io::Result<i64> {
-        let low = self.read_le_int()? as u32 as i64;
-        let high = self.read_le_int()? as u32 as i64;
-        Ok(low | (high << 32))
+        let mut buf = [0u8; 8];
+        self.read_bytes(&mut buf)?;
+        Ok(i64::from_le_bytes(buf))
     }
 
     /// Reads a variable-length integer (1-5 bytes). High bit = continuation.
@@ -225,19 +217,17 @@ pub trait DataInput {
     /// Reads a 32-bit integer in **big-endian** byte order.
     /// Used by CodecUtil for headers/footers.
     fn read_be_int(&mut self) -> io::Result<i32> {
-        let b0 = self.read_byte()? as i32;
-        let b1 = self.read_byte()? as i32;
-        let b2 = self.read_byte()? as i32;
-        let b3 = self.read_byte()? as i32;
-        Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+        let mut buf = [0u8; 4];
+        self.read_bytes(&mut buf)?;
+        Ok(i32::from_be_bytes(buf))
     }
 
     /// Reads a 64-bit long in **big-endian** byte order.
     /// Used by CodecUtil for headers/footers.
     fn read_be_long(&mut self) -> io::Result<i64> {
-        let high = self.read_be_int()? as u32 as i64;
-        let low = self.read_be_int()? as u32 as i64;
-        Ok((high << 32) | low)
+        let mut buf = [0u8; 8];
+        self.read_bytes(&mut buf)?;
+        Ok(i64::from_be_bytes(buf))
     }
 
     /// Reads a string: VInt-encoded byte length followed by UTF-8 bytes.
@@ -351,8 +341,9 @@ pub trait IndexOutput: DataOutput + Send {
         let pos = self.file_pointer();
         let aligned = align_offset(pos, alignment);
         let padding = (aligned - pos) as usize;
-        for _ in 0..padding {
-            self.write_byte(0)?;
+        if padding > 0 {
+            const ZEROS: [u8; 16] = [0u8; 16];
+            self.write_bytes(&ZEROS[..padding])?;
         }
         Ok(aligned)
     }

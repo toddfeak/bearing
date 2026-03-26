@@ -482,22 +482,28 @@ fn reverse_array_lookup(
     if target_label > max_label {
         return Ok(-1);
     }
-    // Count how many labels in [min_label+1, target_label] are absent
-    let absent_count = strategy_bytes - 1; // first byte is max_label
-    let mut absent_before = 0i32;
-    for i in 0..absent_count {
-        let absent = access.read_byte_at((strategy_fp + 1 + i as i64) as u64)?;
-        if absent < target_label {
-            absent_before += 1;
-        } else if absent == target_label {
-            return Ok(-1); // target is absent
+    if target_label == max_label {
+        return Ok((max_label - min_label) as i32 - strategy_bytes as i32 + 1);
+    }
+    if strategy_bytes == 1 {
+        return Ok((target_label - min_label) as i32);
+    }
+    // Binary search in the sorted absent-labels array
+    let absent_fp = strategy_fp + 1;
+    let mut low = 0i32;
+    let mut high = strategy_bytes as i32 - 2;
+    while low <= high {
+        let mid = (low + high) as u32 >> 1;
+        let mid_label = access.read_byte_at((absent_fp + mid as i64) as u64)?;
+        if mid_label < target_label {
+            low = mid as i32 + 1;
+        } else if mid_label > target_label {
+            high = mid as i32 - 1;
         } else {
-            break; // sorted, no more absent labels before target
+            return Ok(-1); // target is in the absent list
         }
     }
-    // Position = (target_label - min_label) - absent_before
-    let raw_position = (target_label - min_label) as i32;
-    Ok(raw_position - absent_before)
+    Ok((target_label - min_label) as i32 - low)
 }
 
 #[cfg(test)]

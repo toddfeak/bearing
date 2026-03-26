@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Filesystem-backed [`Directory`] implementation.
+//! Filesystem-backed [`Directory`] implementations.
+//!
+//! [`FSDirectory`] uses file handles for reads (like Java's `NIOFSDirectory`).
+//! [`MmapDirectory`](super::mmap::MmapDirectory) uses memory-mapped I/O
+//! (like Java's `MMapDirectory`) and is preferred for read-heavy workloads.
+//! `FSDirectory::open()` returns an `MmapDirectory`.
 
 use std::fs;
 use std::fs::File;
@@ -10,27 +15,112 @@ use std::path::{Path, PathBuf};
 use crate::store::checksum::CRC32;
 use crate::store::{DataInput, DataOutput, Directory, IndexInput, IndexOutput};
 
-/// Filesystem-backed directory for reading and writing index files.
+// ============================================================
+// Shared filesystem helpers used by both FSDirectory and MmapDirectory
+// ============================================================
+
+pub(crate) fn fs_create_output(dir_path: &Path, name: &str) -> io::Result<Box<dyn IndexOutput>> {
+    let file_path = dir_path.join(name);
+    let file = File::create(&file_path)?;
+    let writer = BufWriter::new(file);
+    Ok(Box::new(FSIndexOutput::new(name.to_string(), writer)))
+}
+
+pub(crate) fn fs_list_all(dir_path: &Path) -> io::Result<Vec<String>> {
+    let mut names: Vec<String> = fs::read_dir(dir_path)?
+        .filter_map(|entry| {
+            entry.ok().and_then(|e| {
+                let ft = e.file_type().ok()?;
+                if ft.is_file() {
+                    e.file_name().into_string().ok()
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+pub(crate) fn fs_file_length(dir_path: &Path, name: &str) -> io::Result<u64> {
+    let file_path = dir_path.join(name);
+    let meta = fs::metadata(&file_path)?;
+    Ok(meta.len())
+}
+
+pub(crate) fn fs_delete_file(dir_path: &Path, name: &str) -> io::Result<()> {
+    fs::remove_file(dir_path.join(name))
+}
+
+pub(crate) fn fs_rename(dir_path: &Path, source: &str, dest: &str) -> io::Result<()> {
+    fs::rename(dir_path.join(source), dir_path.join(dest))
+}
+
+pub(crate) fn fs_read_file(dir_path: &Path, name: &str) -> io::Result<Vec<u8>> {
+    fs::read(dir_path.join(name))
+}
+
+pub(crate) fn fs_write_file(dir_path: &Path, name: &str, data: &[u8]) -> io::Result<()> {
+    fs::write(dir_path.join(name), data)
+}
+
+pub(crate) fn fs_sync(dir_path: &Path, names: &[&str]) -> io::Result<()> {
+    for name in names {
+        let file = File::open(dir_path.join(name))?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn fs_sync_meta_data(dir_path: &Path) -> io::Result<()> {
+    let dir = File::open(dir_path)?;
+    dir.sync_all()
+}
+
+// ============================================================
+// FSDirectory — file-handle-based reads
+// ============================================================
+
+/// Filesystem directory using file handles for reads.
+///
+/// For read-heavy workloads (queries), prefer
+/// [`MmapDirectory`](super::mmap::MmapDirectory) which avoids syscalls.
+/// `FSDirectory::open()` returns an `MmapDirectory` by default, matching
+/// Java's `FSDirectory.open()` behavior.
 pub struct FSDirectory {
     path: PathBuf,
 }
 
 impl FSDirectory {
-    /// Opens (or creates) an FSDirectory at the given path.
-    pub fn open(path: &Path) -> io::Result<Self> {
+    /// Opens (or creates) a filesystem directory at the given path.
+    ///
+    /// Returns an [`MmapDirectory`](super::mmap::MmapDirectory), matching
+    /// Java where `FSDirectory.open()` returns `MMapDirectory` on 64-bit.
+    pub fn open(path: &Path) -> io::Result<super::mmap::MmapDirectory> {
+        super::mmap::MmapDirectory::new(path)
+    }
+
+    /// Opens a filesystem directory with file-handle-based reads.
+    ///
+    /// Use this only when mmap is not desired. For most read workloads,
+    /// prefer `FSDirectory::open()` which returns an `MmapDirectory`.
+    pub fn open_with_file_handles(path: &Path) -> io::Result<Self> {
         fs::create_dir_all(path)?;
         Ok(Self {
             path: path.to_path_buf(),
         })
     }
+
+    /// Returns the filesystem path of this directory.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl Directory for FSDirectory {
     fn create_output(&mut self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
-        let file_path = self.path.join(name);
-        let file = File::create(&file_path)?;
-        let writer = BufWriter::new(file);
-        Ok(Box::new(FSIndexOutput::new(name.to_string(), writer)))
+        fs_create_output(&self.path, name)
     }
 
     fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>> {
@@ -47,61 +137,35 @@ impl Directory for FSDirectory {
     }
 
     fn list_all(&self) -> io::Result<Vec<String>> {
-        let mut names: Vec<String> = fs::read_dir(&self.path)?
-            .filter_map(|entry| {
-                entry.ok().and_then(|e| {
-                    let ft = e.file_type().ok()?;
-                    if ft.is_file() {
-                        e.file_name().into_string().ok()
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-        names.sort();
-        Ok(names)
+        fs_list_all(&self.path)
     }
 
     fn file_length(&self, name: &str) -> io::Result<u64> {
-        let file_path = self.path.join(name);
-        let meta = fs::metadata(&file_path)?;
-        Ok(meta.len())
+        fs_file_length(&self.path, name)
     }
 
     fn delete_file(&mut self, name: &str) -> io::Result<()> {
-        let file_path = self.path.join(name);
-        fs::remove_file(&file_path)
+        fs_delete_file(&self.path, name)
     }
 
     fn rename(&mut self, source: &str, dest: &str) -> io::Result<()> {
-        let src_path = self.path.join(source);
-        let dst_path = self.path.join(dest);
-        fs::rename(&src_path, &dst_path)
+        fs_rename(&self.path, source, dest)
     }
 
     fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
-        fs::read(self.path.join(name))
+        fs_read_file(&self.path, name)
     }
 
     fn write_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
-        let file_path = self.path.join(name);
-        fs::write(&file_path, data)?;
-        Ok(())
+        fs_write_file(&self.path, name, data)
     }
 
     fn sync(&self, names: &[&str]) -> io::Result<()> {
-        for name in names {
-            let file_path = self.path.join(name);
-            let file = File::open(&file_path)?;
-            file.sync_all()?;
-        }
-        Ok(())
+        fs_sync(&self.path, names)
     }
 
     fn sync_meta_data(&self) -> io::Result<()> {
-        let dir = File::open(&self.path)?;
-        dir.sync_all()
+        fs_sync_meta_data(&self.path)
     }
 }
 
