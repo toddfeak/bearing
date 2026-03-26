@@ -45,40 +45,21 @@ impl TermStates {
         let mut term_states = Self::new(leaves.len());
 
         for leaf in leaves {
-            let reader = &leaf.reader;
-            let field_info = match reader.field_infos().field_info_by_name(field) {
-                Some(fi) => fi,
+            let terms = match leaf.reader.terms(field) {
+                Some(t) => t,
                 None => continue,
             };
-            let terms_reader = match reader.terms_reader() {
-                Some(tr) => tr,
-                None => continue,
-            };
-            let field_reader = match terms_reader.field_reader(field_info.number()) {
-                Some(fr) => fr,
-                None => continue,
-            };
-            let trie = field_reader.new_trie_reader()?;
-            let trie_result = match trie.seek_to_block(term)? {
-                Some(r) => r,
-                None => continue,
-            };
-            let index_input = field_reader.index_input()?;
-            let state = crate::codecs::lucene103::segment_terms_enum::seek_exact(
-                terms_reader.terms_in(),
-                &trie_result,
-                term,
-                field_info.index_options(),
-                &*index_input,
-            )?;
-            if let Some(state) = state {
-                let ttf = if state.total_term_freq > 0 {
-                    state.total_term_freq
-                } else {
-                    state.doc_freq as i64
-                };
-                term_states.register(state, leaf.ord, state.doc_freq, ttf);
+
+            let mut terms_enum = terms.iterator()?;
+            if !terms_enum.seek_exact(term)? {
+                continue;
             }
+
+            let state = terms_enum.term_state()?;
+            let doc_freq = terms_enum.doc_freq()?;
+            let ttf = terms_enum.total_term_freq()?;
+            let ttf = if ttf > 0 { ttf } else { doc_freq as i64 };
+            term_states.register(state, leaf.ord, doc_freq, ttf);
         }
 
         Ok(term_states)

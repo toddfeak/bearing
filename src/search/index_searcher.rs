@@ -147,26 +147,14 @@ impl<'a> IndexSearcher<'a> {
         let mut sum_doc_freq: i64 = 0;
 
         for leaf in self.reader.leaves() {
-            let reader = &leaf.reader;
-
-            let field_info = match reader.field_infos().field_info_by_name(field) {
-                Some(fi) => fi,
+            let terms = match leaf.reader.terms(field) {
+                Some(t) => t,
                 None => continue,
             };
 
-            let terms_reader = match reader.terms_reader() {
-                Some(tr) => tr,
-                None => continue,
-            };
-
-            let field_reader = match terms_reader.field_reader(field_info.number()) {
-                Some(fr) => fr,
-                None => continue,
-            };
-
-            doc_count += field_reader.doc_count as i64;
-            sum_total_term_freq += field_reader.sum_total_term_freq;
-            sum_doc_freq += field_reader.sum_doc_freq;
+            doc_count += terms.get_doc_count() as i64;
+            sum_total_term_freq += terms.get_sum_total_term_freq();
+            sum_doc_freq += terms.get_sum_doc_freq();
         }
 
         if doc_count == 0 {

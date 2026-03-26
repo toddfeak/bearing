@@ -35,6 +35,7 @@ use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
 use crate::codecs::lucene103::postings_reader::PostingsReader;
+use crate::index::terms::Terms;
 use crate::index::{FieldInfos, SegmentInfo};
 use crate::store::Directory;
 
@@ -267,25 +268,35 @@ impl SegmentReader {
         self.postings_reader.as_ref()
     }
 
+    /// Returns the [`Terms`] for the given field, or `None` if the field
+    /// does not exist or has no indexed terms.
+    ///
+    /// Matches Java's `LeafReader.terms(String)`.
+    pub fn terms(&self, field: &str) -> Option<&dyn Terms> {
+        let fr = self
+            .terms_reader
+            .as_ref()?
+            .terms(field, &self.field_infos)?;
+        Some(fr as &dyn Terms)
+    }
+
     /// Returns a doc ID iterator for documents containing the given term.
     ///
-    /// Combines trie navigation, term block scanning, and doc ID iteration
-    /// into a single call. Returns `None` if the field doesn't exist, isn't
-    /// indexed, or the term is not found.
+    /// Combines term seeking via [`Terms::iterator()`](crate::index::terms::Terms::iterator) and postings creation into a
+    /// single call. Returns `None` if the field doesn't exist, isn't indexed,
+    /// or the term is not found.
     pub fn postings(
         &self,
         field: &str,
         term: &[u8],
     ) -> io::Result<Option<crate::codecs::lucene103::postings_reader::BlockPostingsEnum>> {
-        use crate::codecs::lucene103::segment_terms_enum;
-
         let field_info = match self.field_infos.field_info_by_name(field) {
             Some(fi) => fi,
             None => return Ok(None),
         };
 
-        let terms_reader = match self.terms_reader.as_ref() {
-            Some(tr) => tr,
+        let terms = match self.terms(field) {
+            Some(t) => t,
             None => return Ok(None),
         };
 
@@ -294,31 +305,12 @@ impl SegmentReader {
             None => return Ok(None),
         };
 
-        let field_reader = match terms_reader.field_reader(field_info.number()) {
-            Some(fr) => fr,
-            None => return Ok(None),
-        };
-
-        // Navigate the trie to find the block containing this term
-        let trie = field_reader.new_trie_reader()?;
-        let trie_result = match trie.seek_to_block(term)? {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        // Scan the block for the exact term and decode its metadata
-        let index_input = field_reader.index_input()?;
-        let term_state = segment_terms_enum::seek_exact(
-            terms_reader.terms_in(),
-            &trie_result,
-            term,
-            field_info.index_options(),
-            &*index_input,
-        )?;
-
-        let Some(state) = term_state else {
+        let mut terms_enum = terms.iterator()?;
+        if !terms_enum.seek_exact(term)? {
             return Ok(None);
-        };
+        }
+
+        let state = terms_enum.term_state()?;
 
         // Create a doc ID iterator from the term state
         let index_has_freq = field_info.index_options().has_freqs();
@@ -623,5 +615,19 @@ mod tests {
             reader.norms_reader().is_none(),
             "segment without norms should have no norms reader"
         );
+    }
+
+    #[test]
+    fn test_terms_by_name() {
+        let (dir, name, id) = write_test_index(false);
+        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+
+        let terms = reader.terms("content");
+        assert!(terms.is_some());
+        let terms = terms.unwrap();
+        assert_gt!(terms.size(), 0);
+        assert_gt!(terms.get_doc_count(), 0);
+
+        assert!(reader.terms("nonexistent").is_none());
     }
 }

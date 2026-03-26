@@ -23,6 +23,7 @@ pub(crate) mod indexing_chain;
 pub mod numeric_doc_values;
 pub mod segment_infos;
 pub mod segment_reader;
+pub mod terms;
 
 use std::collections::{HashMap, HashSet};
 

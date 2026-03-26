@@ -120,6 +120,15 @@ Single-term lookup with BM25 scoring. Produces byte-identical results to Java Lu
 | Avg query time | 23 µs | 48 µs | **2.0x faster** |
 | Peak RSS | 21 MB | 103 MB | **5x less memory** |
 
+#### Reader Abstractions for Query Path (done)
+- `Terms` trait and `TermsEnum` trait (`src/index/terms.rs`) — ported from Java's `org.apache.lucene.index`
+- `FieldReader` implements `Terms` — stat methods, `has_freqs/positions/offsets/payloads`, `iterator()`
+- `SegmentTermsEnum` implements `TermsEnum` — seek, term state, doc freq, total term freq
+- `SegmentReader::terms(field)` matching `LeafReader.terms(String)`
+- `BlockTreeTermsReader::terms(field_name)` matching `FieldsProducer.terms(String)`
+- `TermStates::build()` and `IndexSearcher::collection_statistics()` refactored to use Terms/TermsEnum
+- TrieReader 8-byte leaf node fix
+
 #### BooleanQuery (next)
 - `BooleanQuery` (AND/OR/NOT composition)
 - Then expand: phrase, range, wildcard, etc.

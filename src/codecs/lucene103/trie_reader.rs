@@ -264,7 +264,7 @@ fn load(access: &dyn RandomAccessInput, node: &mut Node, fp: i64) -> io::Result<
     node.sign = sign;
 
     match sign {
-        SIGN_NO_CHILDREN => load_leaf_node(term_flags, term_flags_long, fp, node),
+        SIGN_NO_CHILDREN => load_leaf_node(access, term_flags, term_flags_long, fp, node),
         SIGN_MULTI_CHILDREN => {
             load_multi_children_node(access, term_flags, term_flags_long, fp, node)
         }
@@ -273,6 +273,7 @@ fn load(access: &dyn RandomAccessInput, node: &mut Node, fp: i64) -> io::Result<
 }
 
 fn load_leaf_node(
+    access: &dyn RandomAccessInput,
     term_flags: u32,
     term_flags_long: i64,
     fp: i64,
@@ -282,14 +283,7 @@ fn load_leaf_node(
     node.output_fp = if fp_bytes_minus1 <= 6 {
         ((term_flags_long as u64 >> 8) & BYTES_MASK[fp_bytes_minus1]) as i64
     } else {
-        // Output FP doesn't fit in the header long — read a full long at fp+1
-        // (This would need another read_le_long_at call, but with LE data written
-        // as individual bytes, fp+1 gives us the output FP bytes.)
-        // Actually, for fp_bytes_minus1=7 (8 bytes), the output starts at byte
-        // offset 1 within the node data.
-        return Err(io::Error::other(
-            "leaf node with 8-byte output FP not yet supported",
-        ));
+        access.read_le_long_at((fp + 1) as u64)?
     };
     node.has_terms = (term_flags & LEAF_NODE_HAS_TERMS) != 0;
     node.floor_data_fp = if (term_flags & LEAF_NODE_HAS_FLOOR) != 0 {
@@ -987,5 +981,74 @@ mod tests {
                 r.output_fp
             );
         }
+    }
+
+    /// In-memory `RandomAccessInput` for unit tests.
+    struct BytesRandomAccess(Box<[u8]>);
+
+    impl RandomAccessInput for BytesRandomAccess {
+        fn read_byte_at(&self, pos: u64) -> io::Result<u8> {
+            Ok(self.0[pos as usize])
+        }
+        fn read_le_short_at(&self, pos: u64) -> io::Result<i16> {
+            let p = pos as usize;
+            Ok(i16::from_le_bytes([self.0[p], self.0[p + 1]]))
+        }
+        fn read_le_int_at(&self, pos: u64) -> io::Result<i32> {
+            let p = pos as usize;
+            Ok(i32::from_le_bytes(self.0[p..p + 4].try_into().unwrap()))
+        }
+        fn read_le_long_at(&self, pos: u64) -> io::Result<i64> {
+            let p = pos as usize;
+            Ok(i64::from_le_bytes(self.0[p..p + 8].try_into().unwrap()))
+        }
+    }
+
+    #[test]
+    fn test_load_leaf_node_8_byte_output_fp() {
+        // Craft a leaf node where fp_bytes_minus1 == 7 (8-byte output FP).
+        // Byte layout at fp:
+        //   byte 0: term_flags low byte = sign(0x00) | fp_bytes_minus1(7)<<2 = 0x1C
+        //   bytes 1-8: output FP as LE i64
+        let expected_fp: i64 = 0x0123_4567_89AB_CDEF;
+        let mut data = vec![0u8; 16];
+        // sign=NO_CHILDREN(0x00) | fp_bytes_minus1=7<<2=0x1C | has_terms(0x20)
+        data[0] = 0x1C | 0x20;
+        data[1..9].copy_from_slice(&expected_fp.to_le_bytes());
+
+        let access = BytesRandomAccess(data.into());
+        let mut node = Node::new();
+        let fp = 0i64;
+        let term_flags_long = access.read_le_long_at(fp as u64).unwrap();
+        let term_flags = term_flags_long as u32;
+
+        load_leaf_node(&access, term_flags, term_flags_long, fp, &mut node).unwrap();
+
+        assert_eq!(node.output_fp, expected_fp);
+        assert!(node.has_terms);
+        assert_eq!(node.floor_data_fp, NO_FLOOR_DATA);
+    }
+
+    #[test]
+    fn test_load_leaf_node_8_byte_with_floor() {
+        // Same as above but with floor data flag set.
+        let expected_fp: i64 = 0x00FF_FFFF_FFFF_FFFF;
+        let mut data = vec![0u8; 16];
+        // sign=NO_CHILDREN | fp_bytes_minus1=7<<2 | has_terms(0x20) | has_floor(0x40)
+        data[0] = 0x1C | 0x20 | 0x40;
+        data[1..9].copy_from_slice(&expected_fp.to_le_bytes());
+
+        let access = BytesRandomAccess(data.into());
+        let mut node = Node::new();
+        let fp = 0i64;
+        let term_flags_long = access.read_le_long_at(fp as u64).unwrap();
+        let term_flags = term_flags_long as u32;
+
+        load_leaf_node(&access, term_flags, term_flags_long, fp, &mut node).unwrap();
+
+        assert_eq!(node.output_fp, expected_fp);
+        assert!(node.has_terms);
+        // floor_data_fp = fp + 2 + fp_bytes_minus1 = 0 + 2 + 7 = 9
+        assert_eq!(node.floor_data_fp, 9);
     }
 }

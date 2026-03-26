@@ -87,12 +87,12 @@ fn main() {
         let field_summaries = fields
             .iter()
             .map(|fi| {
-                let field_reader = seg.terms_reader().and_then(|r| r.field_reader(fi.number()));
+                let terms = seg.terms(fi.name());
 
-                let term_count = field_reader.map_or(0, |fr| fr.num_terms);
-                let sum_total_term_freq = field_reader.map_or(0, |fr| fr.sum_total_term_freq);
-                let sum_doc_freq = field_reader.map_or(0, |fr| fr.sum_doc_freq);
-                let terms_doc_count = field_reader.map_or(0, |fr| fr.doc_count as i64);
+                let term_count = terms.map_or(0, |t| t.size());
+                let sum_total_term_freq = terms.map_or(0, |t| t.get_sum_total_term_freq());
+                let sum_doc_freq = terms.map_or(0, |t| t.get_sum_doc_freq());
+                let terms_doc_count = terms.map_or(0, |t| t.get_doc_count() as i64);
 
                 let norms_doc_count = seg
                     .norms_reader()

@@ -1,29 +1,132 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Term block parser for the Lucene 103 block tree terms dictionary.
+//! Term block parser and stateful iterator for the Lucene 103 block tree
+//! terms dictionary.
 //!
-//! Parses `.tim` term blocks found by [`super::trie_reader::TrieReader`] and
-//! scans within them to find exact terms and decode their metadata
-//! ([`IntBlockTermState`]).
+//! [`SegmentTermsEnum`] implements [`TermsEnum`] by navigating the trie in the
+//! `.tip` file and scanning term blocks in the `.tim` file.
+//!
+//! Internal helpers parse `.tim` term blocks found by
+//! [`super::trie_reader::TrieReader`] and scan within them to find exact terms
+//! and decode their metadata ([`IntBlockTermState`]).
 
 use std::io;
 
 use crate::codecs::lucene103::postings_format::IntBlockTermState;
+use crate::codecs::lucene103::trie_reader::TrieReader;
 use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4, zigzag};
+use crate::index::terms::TermsEnum;
 use crate::store::{DataInput, IndexInput};
 
 const COMPRESSION_NONE: u32 = 0;
 const COMPRESSION_LOWERCASE_ASCII: u32 = 1;
 const COMPRESSION_LZ4: u32 = 2;
 
-/// Seeks to an exact term in the `.tim` file and returns its metadata.
+/// Stateful iterator over terms in a single field of a single segment.
 ///
-/// Given a trie seek result (block FP + floor data), loads the appropriate
-/// block, scans through suffixes, and decodes stats + postings metadata
-/// for the matching term. Handles floor blocks by scanning floor data
-/// from the `.tip` file to find the right sub-block.
-pub fn seek_exact(
+/// Wraps trie navigation + block scanning into a [`TermsEnum`] implementation.
+/// Created by `FieldReader::iterator()` (via the [`Terms`](crate::index::terms::Terms) trait).
+pub struct SegmentTermsEnum {
+    /// Clone of the `.tim` terms dictionary input.
+    terms_in: Box<dyn IndexInput>,
+    /// Clone of the `.tip` index input (for floor data reads).
+    index_in: Box<dyn IndexInput>,
+    /// Trie navigator for this field.
+    trie: TrieReader,
+    /// Index options for this field.
+    index_options: IndexOptions,
+    /// The current term after a successful seek.
+    current_term: Vec<u8>,
+    /// The current term's metadata after a successful seek.
+    current_state: Option<IntBlockTermState>,
+}
+
+impl SegmentTermsEnum {
+    /// Creates a new `SegmentTermsEnum` for a field.
+    pub fn new(
+        terms_in: Box<dyn IndexInput>,
+        index_in: Box<dyn IndexInput>,
+        trie: TrieReader,
+        index_options: IndexOptions,
+    ) -> Self {
+        Self {
+            terms_in,
+            index_in,
+            trie,
+            index_options,
+            current_term: Vec::new(),
+            current_state: None,
+        }
+    }
+}
+
+impl TermsEnum for SegmentTermsEnum {
+    fn seek_exact(&mut self, target: &[u8]) -> io::Result<bool> {
+        let trie_result = match self.trie.seek_to_block(target)? {
+            Some(r) => r,
+            None => {
+                self.current_state = None;
+                return Ok(false);
+            }
+        };
+
+        let state = seek_exact_in_block(
+            &*self.terms_in,
+            &trie_result,
+            target,
+            self.index_options,
+            &*self.index_in,
+        )?;
+
+        match state {
+            Some(s) => {
+                self.current_term.clear();
+                self.current_term.extend_from_slice(target);
+                self.current_state = Some(s);
+                Ok(true)
+            }
+            None => {
+                self.current_state = None;
+                Ok(false)
+            }
+        }
+    }
+
+    fn seek_exact_with_state(&mut self, term: &[u8], state: IntBlockTermState) {
+        self.current_term.clear();
+        self.current_term.extend_from_slice(term);
+        self.current_state = Some(state);
+    }
+
+    fn term(&self) -> &[u8] {
+        &self.current_term
+    }
+
+    fn doc_freq(&self) -> io::Result<i32> {
+        match &self.current_state {
+            Some(s) => Ok(s.doc_freq),
+            None => Err(io::Error::other("TermsEnum not positioned")),
+        }
+    }
+
+    fn total_term_freq(&self) -> io::Result<i64> {
+        match &self.current_state {
+            Some(s) => Ok(s.total_term_freq),
+            None => Err(io::Error::other("TermsEnum not positioned")),
+        }
+    }
+
+    fn term_state(&self) -> io::Result<IntBlockTermState> {
+        match &self.current_state {
+            Some(s) => Ok(*s),
+            None => Err(io::Error::other("TermsEnum not positioned")),
+        }
+    }
+}
+
+/// Seeks to an exact term in the `.tim` file and returns its metadata.
+fn seek_exact_in_block(
     terms_in: &dyn IndexInput,
     trie_result: &super::trie_reader::TrieSeekResult,
     target: &[u8],
@@ -447,31 +550,21 @@ mod tests {
         Ok((dir, field_infos, segment_id))
     }
 
-    /// Open the blocktree reader and seek for a term using the trie + block parser.
+    /// Open the blocktree reader and seek for a term via TermsEnum.
     fn seek_term(
         dir: &dyn Directory,
         field_infos: &FieldInfos,
         segment_id: &[u8; 16],
         term: &[u8],
-        index_options: IndexOptions,
     ) -> io::Result<Option<IntBlockTermState>> {
         let reader = BlockTreeTermsReader::open(dir, "_0", "", segment_id, field_infos)?;
         let fr = reader.field_reader(0).unwrap();
-        let trie = fr.new_trie_reader()?;
-
-        let seek_result = trie.seek_to_block(term)?;
-        let Some(ref trie_result) = seek_result else {
-            return Ok(None);
-        };
-
-        let index_input = fr.index_input()?;
-        seek_exact(
-            reader.terms_in(),
-            trie_result,
-            term,
-            index_options,
-            &*index_input,
-        )
+        let mut terms_enum = fr.iterator()?;
+        if terms_enum.seek_exact(term)? {
+            Ok(Some(terms_enum.term_state()?))
+        } else {
+            Ok(None)
+        }
     }
 
     #[test]
@@ -479,13 +572,13 @@ mod tests {
         let terms = vec![("hello", &[5][..]), ("world", &[10])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"hello", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"hello")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
         assert_eq!(state.singleton_doc_id, 5);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"world", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"world")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
@@ -497,12 +590,12 @@ mod tests {
         let terms = vec![("hello", &[5, 6][..]), ("world", &[10, 11])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"hello", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"hello")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 2);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"world", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"world")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 2);
@@ -517,18 +610,16 @@ mod tests {
         ];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"alpha", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"alpha")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 3);
         assert_eq!(state.singleton_doc_id, -1);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"beta", IndexOptions::Docs)
-            .unwrap()
-            .unwrap();
+        let state = seek_term(dir.as_ref(), &fi, &id, b"beta").unwrap().unwrap();
         assert_eq!(state.doc_freq, 2);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"gamma", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"gamma")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 3);
@@ -539,10 +630,10 @@ mod tests {
         let terms = vec![("alpha", &[0][..]), ("gamma", &[1])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let result = seek_term(dir.as_ref(), &fi, &id, b"beta", IndexOptions::Docs).unwrap();
+        let result = seek_term(dir.as_ref(), &fi, &id, b"beta").unwrap();
         assert_none!(&result);
 
-        let result = seek_term(dir.as_ref(), &fi, &id, b"zzz", IndexOptions::Docs).unwrap();
+        let result = seek_term(dir.as_ref(), &fi, &id, b"zzz").unwrap();
         assert_none!(&result);
     }
 
@@ -551,7 +642,7 @@ mod tests {
         let terms = vec![("hello", &[0, 1, 2][..]), ("world", &[0])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::DocsAndFreqs).unwrap();
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"hello", IndexOptions::DocsAndFreqs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"hello")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 3);
@@ -575,14 +666,13 @@ mod tests {
         // Seek each term
         for i in 0..100 {
             let term = format!("term_{i:04}");
-            let state =
-                seek_term(dir.as_ref(), &fi, &id, term.as_bytes(), IndexOptions::Docs).unwrap();
+            let state = seek_term(dir.as_ref(), &fi, &id, term.as_bytes()).unwrap();
             assert_some!(&state);
             assert_eq!(state.unwrap().doc_freq, 1);
         }
 
         // Nonexistent term
-        let result = seek_term(dir.as_ref(), &fi, &id, b"term_9999", IndexOptions::Docs).unwrap();
+        let result = seek_term(dir.as_ref(), &fi, &id, b"term_9999").unwrap();
         assert_none!(&result);
     }
 
@@ -603,21 +693,19 @@ mod tests {
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
         // First term in the block
-        let state = seek_term(dir.as_ref(), &fi, &id, b"aardvark", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"aardvark")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
         assert_eq!(state.singleton_doc_id, 0);
 
         // Middle term (exercises skipping through singleton RLE)
-        let state = seek_term(dir.as_ref(), &fi, &id, b"fox", IndexOptions::Docs)
-            .unwrap()
-            .unwrap();
+        let state = seek_term(dir.as_ref(), &fi, &id, b"fox").unwrap().unwrap();
         assert_eq!(state.doc_freq, 1);
         assert_eq!(state.singleton_doc_id, 5);
 
         // Last term in the block
-        let state = seek_term(dir.as_ref(), &fi, &id, b"jaguar", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"jaguar")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
@@ -635,25 +723,23 @@ mod tests {
         ];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"alpha", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"alpha")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
         assert_eq!(state.singleton_doc_id, 0);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"beta", IndexOptions::Docs)
-            .unwrap()
-            .unwrap();
+        let state = seek_term(dir.as_ref(), &fi, &id, b"beta").unwrap().unwrap();
         assert_eq!(state.doc_freq, 3);
         assert_eq!(state.singleton_doc_id, -1);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"delta", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"delta")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 2);
         assert_eq!(state.singleton_doc_id, -1);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"gamma", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"gamma")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
@@ -673,7 +759,7 @@ mod tests {
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
         for (term, doc) in [("a", 0), ("bb", 1), ("ccc", 2), ("dddddddddd", 3)] {
-            let state = seek_term(dir.as_ref(), &fi, &id, term.as_bytes(), IndexOptions::Docs)
+            let state = seek_term(dir.as_ref(), &fi, &id, term.as_bytes())
                 .unwrap()
                 .unwrap();
             assert_eq!(state.doc_freq, 1);
@@ -686,27 +772,15 @@ mod tests {
         let terms = vec![("hello", &[0, 1][..]), ("world", &[0])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::DocsAndFreqsAndPositions).unwrap();
 
-        let state = seek_term(
-            dir.as_ref(),
-            &fi,
-            &id,
-            b"hello",
-            IndexOptions::DocsAndFreqsAndPositions,
-        )
-        .unwrap()
-        .unwrap();
+        let state = seek_term(dir.as_ref(), &fi, &id, b"hello")
+            .unwrap()
+            .unwrap();
         assert_eq!(state.doc_freq, 2);
         assert_ge!(state.pos_start_fp, 0);
 
-        let state = seek_term(
-            dir.as_ref(),
-            &fi,
-            &id,
-            b"world",
-            IndexOptions::DocsAndFreqsAndPositions,
-        )
-        .unwrap()
-        .unwrap();
+        let state = seek_term(dir.as_ref(), &fi, &id, b"world")
+            .unwrap()
+            .unwrap();
         assert_eq!(state.doc_freq, 1);
     }
 
@@ -725,29 +799,29 @@ mod tests {
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
         // First term
-        let state = seek_term(dir.as_ref(), &fi, &id, b"term_0000", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"term_0000")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
 
         // Last term
-        let state = seek_term(dir.as_ref(), &fi, &id, b"term_0099", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"term_0099")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
 
         // Term in the middle (likely different floor block than first/last)
-        let state = seek_term(dir.as_ref(), &fi, &id, b"term_0050", IndexOptions::Docs)
+        let state = seek_term(dir.as_ref(), &fi, &id, b"term_0050")
             .unwrap()
             .unwrap();
         assert_eq!(state.doc_freq, 1);
 
         // Before first
-        let result = seek_term(dir.as_ref(), &fi, &id, b"term_", IndexOptions::Docs).unwrap();
+        let result = seek_term(dir.as_ref(), &fi, &id, b"term_").unwrap();
         assert_none!(&result);
 
         // After last
-        let result = seek_term(dir.as_ref(), &fi, &id, b"term_0100", IndexOptions::Docs).unwrap();
+        let result = seek_term(dir.as_ref(), &fi, &id, b"term_0100").unwrap();
         assert_none!(&result);
     }
 
@@ -771,8 +845,7 @@ mod tests {
         // Verify several terms are findable (compression is transparent to reader)
         for i in [0, 10, 20, 39] {
             let term = format!("longprefix_abcdefghij_{i:04}_suffix");
-            let state =
-                seek_term(dir.as_ref(), &fi, &id, term.as_bytes(), IndexOptions::Docs).unwrap();
+            let state = seek_term(dir.as_ref(), &fi, &id, term.as_bytes()).unwrap();
             assert_some!(&state);
             assert_eq!(state.unwrap().doc_freq, 1);
         }
@@ -787,19 +860,108 @@ mod tests {
         let terms = vec![("aaa", &[10][..]), ("bbb", &[20]), ("ccc", &[30])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"aaa", IndexOptions::Docs)
-            .unwrap()
-            .unwrap();
+        let state = seek_term(dir.as_ref(), &fi, &id, b"aaa").unwrap().unwrap();
         assert_eq!(state.singleton_doc_id, 10);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"bbb", IndexOptions::Docs)
-            .unwrap()
-            .unwrap();
+        let state = seek_term(dir.as_ref(), &fi, &id, b"bbb").unwrap().unwrap();
         assert_eq!(state.singleton_doc_id, 20);
 
-        let state = seek_term(dir.as_ref(), &fi, &id, b"ccc", IndexOptions::Docs)
-            .unwrap()
-            .unwrap();
+        let state = seek_term(dir.as_ref(), &fi, &id, b"ccc").unwrap().unwrap();
         assert_eq!(state.singleton_doc_id, 30);
+    }
+
+    // --- SegmentTermsEnum (struct API) tests ---
+
+    use crate::index::terms::Terms;
+
+    /// Open a SegmentTermsEnum via FieldReader::iterator() for field 0.
+    fn open_terms_enum(
+        dir: &dyn Directory,
+        field_infos: &FieldInfos,
+        segment_id: &[u8; 16],
+    ) -> Box<dyn TermsEnum> {
+        let reader = BlockTreeTermsReader::open(dir, "_0", "", segment_id, field_infos).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        fr.iterator().unwrap()
+    }
+
+    #[test]
+    fn test_terms_enum_seek_exact() {
+        let terms = vec![("alpha", &[0, 1][..]), ("beta", &[2]), ("gamma", &[3])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let mut te = open_terms_enum(dir.as_ref(), &fi, &id);
+        assert!(te.seek_exact(b"alpha").unwrap());
+        assert_eq!(te.term(), b"alpha");
+        assert_eq!(te.doc_freq().unwrap(), 2);
+
+        assert!(te.seek_exact(b"gamma").unwrap());
+        assert_eq!(te.term(), b"gamma");
+        assert_eq!(te.doc_freq().unwrap(), 1);
+
+        assert!(!te.seek_exact(b"nonexistent").unwrap());
+    }
+
+    #[test]
+    fn test_terms_enum_term_state_roundtrip() {
+        let terms = vec![("hello", &[0, 1, 2][..]), ("world", &[3])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let mut te = open_terms_enum(dir.as_ref(), &fi, &id);
+        assert!(te.seek_exact(b"hello").unwrap());
+        let state = te.term_state().unwrap();
+        assert_eq!(state.doc_freq, 3);
+
+        // Seek to a different term
+        assert!(te.seek_exact(b"world").unwrap());
+        assert_eq!(te.doc_freq().unwrap(), 1);
+
+        // Restore via seek_exact_with_state
+        te.seek_exact_with_state(b"hello", state);
+        assert_eq!(te.term(), b"hello");
+        assert_eq!(te.doc_freq().unwrap(), 3);
+        assert_eq!(te.term_state().unwrap().doc_freq, 3);
+    }
+
+    #[test]
+    fn test_terms_enum_total_term_freq() {
+        let terms = vec![("hello", &[0, 1][..]), ("world", &[0])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::DocsAndFreqs).unwrap();
+
+        let mut te = open_terms_enum(dir.as_ref(), &fi, &id);
+        assert!(te.seek_exact(b"hello").unwrap());
+        assert_ge!(te.total_term_freq().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_terms_enum_unpositioned_errors() {
+        let terms = vec![("hello", &[0][..])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let te = open_terms_enum(dir.as_ref(), &fi, &id);
+        // Before any seek, doc_freq and term_state should error
+        assert!(te.doc_freq().is_err());
+        assert!(te.term_state().is_err());
+    }
+
+    #[test]
+    fn test_terms_enum_many_terms() {
+        let mut terms_data: Vec<(String, Vec<i32>)> = Vec::new();
+        for i in 0..100 {
+            terms_data.push((format!("term_{i:04}"), vec![i]));
+        }
+        let terms: Vec<(&str, &[i32])> = terms_data
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_slice()))
+            .collect();
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let mut te = open_terms_enum(dir.as_ref(), &fi, &id);
+        for i in 0..100 {
+            let term = format!("term_{i:04}");
+            assert!(te.seek_exact(term.as_bytes()).unwrap());
+            assert_eq!(te.doc_freq().unwrap(), 1);
+            assert_eq!(te.term(), term.as_bytes());
+        }
     }
 }
