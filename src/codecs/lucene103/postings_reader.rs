@@ -786,7 +786,7 @@ impl DocIdSetIterator for BlockPostingsEnum {
                     // Take the cumulative pop count for the given word, and subtract bits on
                     // the left of the current doc.
                     self.doc_buffer_upto = 1 + self.doc_buffer[word_index] as usize
-                        - (self.doc_bit_set[word_index] >> next).count_ones() as usize;
+                        - (self.doc_bit_set[word_index] >> (next & 0x3F)).count_ones() as usize;
                 } else {
                     // When only docs needed and block is UNARY encoded, we do not need to
                     // maintain doc_buffer_upto to record the iteration position in the block.
@@ -1078,6 +1078,13 @@ mod tests {
     fn write_single_term(
         doc_ids: &[i32],
     ) -> io::Result<(postings_format::IntBlockTermState, Box<dyn Directory>)> {
+        write_single_term_with_options(doc_ids, IndexOptions::Docs)
+    }
+
+    fn write_single_term_with_options(
+        doc_ids: &[i32],
+        options: IndexOptions,
+    ) -> io::Result<(postings_format::IntBlockTermState, Box<dyn Directory>)> {
         let segment_name = "_0";
         let segment_suffix = "";
         let segment_id = [0u8; 16];
@@ -1097,7 +1104,7 @@ mod tests {
                 &segment_id,
                 false,
             )?;
-            let state = writer.write_term(&postings, IndexOptions::Docs, &norms)?;
+            let state = writer.write_term(&postings, options, &norms)?;
             writer.finish()?;
             state
         };
@@ -1428,5 +1435,29 @@ mod tests {
         let mut iter = reader.postings(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
+    }
+
+    #[test]
+    fn test_advance_unary_with_freq() {
+        // Consecutive doc IDs trigger UNARY block encoding. Advancing with needs_freq=true
+        // into a position where the bit index >= 64 exercises the shift in the UNARY advance
+        // path. Java's `long >>> next` implicitly masks to `& 63`; Rust must do this
+        // explicitly to avoid overflow.
+        let doc_ids: Vec<i32> = (0..200).collect();
+        let (state, dir) =
+            write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
+        let reader = open_reader(dir.as_ref()).unwrap();
+        let mut iter = reader.postings(&state, true, false, false, true).unwrap();
+
+        // Advance to doc 100, which is bit index 100 in the UNARY block (word_index=1,
+        // bit offset 36). This is fine.
+        assert_eq!(iter.advance(100).unwrap(), 100);
+
+        // Advance to doc 128 (bit index 128 = word 2, bit 0). The shift `>> 128` would
+        // overflow without masking to `& 63`.
+        assert_eq!(iter.advance(128).unwrap(), 128);
+
+        // Verify continued iteration works
+        assert_eq!(iter.next_doc().unwrap(), 129);
     }
 }
