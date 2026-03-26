@@ -3,6 +3,8 @@
 //! Scorer hierarchy: `Scorer` trait, `MaxScoreCache`, `ImpactsDISI`, `MaxScoreAccumulator`,
 //! and `DocScoreEncoder`.
 
+use std::fmt;
+
 use crate::codecs::competitive_impact::Impact;
 use crate::search::collector::DocAndFloatFeatureBuffer;
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
@@ -48,7 +50,7 @@ pub trait ImpactsSource {
 ///
 /// A `Scorer` exposes an iterator over documents matching a query in increasing order of
 /// doc id.
-pub trait Scorer: Scorable {
+pub trait Scorer: Scorable + fmt::Debug {
     /// Returns the doc ID that is currently being scored.
     fn doc_id(&self) -> i32;
 
@@ -114,6 +116,15 @@ pub struct MaxScoreCache {
     global_max_score: f32,
     max_score_cache: Vec<f32>,
     max_score_cache_up_to: Vec<i32>,
+}
+
+impl fmt::Debug for MaxScoreCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MaxScoreCache")
+            .field("global_max_score", &self.global_max_score)
+            .field("cache_size", &self.max_score_cache.len())
+            .finish()
+    }
 }
 
 impl MaxScoreCache {
@@ -276,6 +287,7 @@ pub struct ImpactsDISI<I: DocIdSetIterator> {
 // ---------------------------------------------------------------------------
 
 /// Maintains the maximum score and its corresponding document id concurrently.
+#[derive(Debug)]
 pub struct MaxScoreAccumulator {
     /// We use 2^10-1 to check the remainder with a bitwise operation.
     acc: std::sync::atomic::AtomicI64,
@@ -319,6 +331,7 @@ impl Default for MaxScoreAccumulator {
 
 /// Encodes (doc, score) pairs as a long whose sort order matches
 /// `(score ascending, doc descending)`.
+#[derive(Debug)]
 pub struct DocScoreEncoder;
 
 impl DocScoreEncoder {

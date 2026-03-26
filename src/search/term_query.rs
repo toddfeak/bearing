@@ -2,6 +2,7 @@
 
 //! `TermQuery` matches documents containing a specific term, producing BM25 scores.
 
+use std::fmt;
 use std::io;
 
 use crate::codecs::lucene103::postings_reader::BlockPostingsEnum;
@@ -29,6 +30,15 @@ use crate::util::BytesRef;
 pub struct TermQuery {
     field: String,
     term: Vec<u8>,
+}
+
+impl fmt::Debug for TermQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TermQuery")
+            .field("field", &self.field)
+            .field("term", &String::from_utf8_lossy(&self.term))
+            .finish()
+    }
 }
 
 impl TermQuery {
@@ -116,11 +126,20 @@ impl Query for TermQuery {
 /// stats and cloned per-leaf.
 pub struct TermWeight {
     field: String,
-    #[expect(dead_code)]
     term: Vec<u8>,
     sim_scorer: Option<Box<dyn SimScorer>>,
     term_states: TermStates,
     score_mode: ScoreMode,
+}
+
+impl fmt::Debug for TermWeight {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TermWeight")
+            .field("field", &self.field)
+            .field("term", &String::from_utf8_lossy(&self.term))
+            .field("score_mode", &self.score_mode)
+            .finish()
+    }
 }
 
 impl Weight for TermWeight {
@@ -207,6 +226,15 @@ struct TermScorerSupplier {
     top_level_scoring_clause: bool,
 }
 
+impl fmt::Debug for TermScorerSupplier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TermScorerSupplier")
+            .field("doc_freq", &self.doc_freq)
+            .field("score_mode", &self.score_mode)
+            .finish()
+    }
+}
+
 impl ScorerSupplier for TermScorerSupplier {
     fn get(&mut self, _lead_cost: i64) -> io::Result<Box<dyn Scorer>> {
         let postings_enum = self
@@ -268,6 +296,14 @@ pub struct TermScorer {
     up_to: i32,
     max_score: f32,
     top_level_scoring_clause: bool,
+}
+
+impl fmt::Debug for TermScorer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TermScorer")
+            .field("doc_id", &self.postings_enum.doc_id())
+            .finish()
+    }
 }
 
 impl TermScorer {
@@ -539,7 +575,7 @@ mod tests {
         let searcher = IndexSearcher::new(&reader);
         let q = TermQuery::new("content", b"hello");
         let weight = q.create_weight(&searcher, ScoreMode::Complete, 1.0);
-        assert!(weight.is_ok());
+        assert_ok!(weight);
     }
 
     // -- TermScorer basic scoring tests --
@@ -555,9 +591,9 @@ mod tests {
 
         let leaf = &reader.leaves()[0];
         let supplier = weight.scorer_supplier(leaf).unwrap();
-        assert!(supplier.is_some(), "scorer_supplier should find the term");
+        let mut supplier = assert_some!(supplier);
 
-        let mut scorer = supplier.unwrap().get(i64::MAX).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
         let iter = scorer.iterator();
 
         // "hello" is in docs 0 and 1
@@ -646,7 +682,7 @@ mod tests {
 
         let leaf = &reader.leaves()[0];
         let supplier = weight.scorer_supplier(leaf).unwrap();
-        assert!(supplier.is_none(), "nonexistent term should return None");
+        assert_none!(supplier);
     }
 
     #[test]
@@ -660,7 +696,7 @@ mod tests {
 
         let leaf = &reader.leaves()[0];
         let supplier = weight.scorer_supplier(leaf).unwrap();
-        assert!(supplier.is_none(), "nonexistent field should return None");
+        assert_none!(supplier);
     }
 
     #[test]
@@ -722,6 +758,7 @@ mod tests {
 
         let mut bulk = BatchScoreBulkScorer::new(scorer);
 
+        #[derive(Debug)]
         struct CollectedDoc {
             docs: Vec<i32>,
         }
@@ -764,6 +801,7 @@ mod tests {
 
         let mut bulk = BatchScoreBulkScorer::new(scorer);
 
+        #[derive(Debug)]
         struct CollectedDoc {
             docs: Vec<i32>,
         }

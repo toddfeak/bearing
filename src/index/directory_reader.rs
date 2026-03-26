@@ -26,6 +26,7 @@
 //! }
 //! ```
 
+use std::fmt;
 use std::io;
 
 use crate::index::segment_infos;
@@ -37,6 +38,7 @@ use crate::store::Directory;
 /// Each segment has a `doc_base` — the absolute document ID offset for this
 /// segment within the full index. Local document IDs from the segment reader
 /// are converted to global IDs by adding `doc_base`.
+#[derive(Debug)]
 pub struct LeafReaderContext {
     /// The ordinal position of this segment (0-based).
     pub ord: usize,
@@ -60,6 +62,15 @@ pub struct LeafReaderContext {
 pub struct DirectoryReader {
     segments: Box<[LeafReaderContext]>,
     max_doc: i32,
+}
+
+impl fmt::Debug for DirectoryReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectoryReader")
+            .field("num_segments", &self.segments.len())
+            .field("max_doc", &self.max_doc)
+            .finish()
+    }
 }
 
 impl DirectoryReader {
@@ -244,6 +255,6 @@ mod tests {
     fn test_empty_directory_fails() {
         let dir = Box::new(MemoryDirectory::new()) as Box<dyn Directory>;
         let result = DirectoryReader::open(dir.as_ref());
-        assert!(result.is_err());
+        assert_err!(result);
     }
 }

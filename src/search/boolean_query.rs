@@ -79,6 +79,14 @@ impl BooleanClause {
     }
 }
 
+impl fmt::Debug for BooleanClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BooleanClause")
+            .field("occur", &self.occur)
+            .finish()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BooleanQuery
 // ---------------------------------------------------------------------------
@@ -107,6 +115,15 @@ impl BooleanQuery {
     }
 }
 
+impl fmt::Debug for BooleanQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BooleanQuery")
+            .field("min_should_match", &self.minimum_number_should_match)
+            .field("num_clauses", &self.clauses.len())
+            .finish()
+    }
+}
+
 impl Query for BooleanQuery {
     fn create_weight(
         &self,
@@ -132,6 +149,15 @@ impl Query for BooleanQuery {
 pub struct Builder {
     minimum_number_should_match: i32,
     clauses: Vec<BooleanClause>,
+}
+
+impl fmt::Debug for Builder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BooleanQuery::Builder")
+            .field("min_should_match", &self.minimum_number_should_match)
+            .field("num_clauses", &self.clauses.len())
+            .finish()
+    }
 }
 
 impl Builder {
@@ -178,6 +204,7 @@ impl Default for Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assertables::*;
 
     #[test]
     fn test_occur_display() {
@@ -212,6 +239,7 @@ mod tests {
     }
 
     /// Dummy query for testing BooleanClause.
+    #[derive(Debug)]
     struct DummyQuery;
     impl Query for DummyQuery {
         fn create_weight(
@@ -299,7 +327,7 @@ mod tests {
 
         let top_docs = searcher.search(&query, 10).unwrap();
         assert_eq!(top_docs.total_hits.value, 0);
-        assert!(top_docs.score_docs.is_empty());
+        assert_is_empty!(top_docs.score_docs);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 
 use super::boolean_query::{BooleanClause, Occur};
@@ -35,6 +36,16 @@ pub(crate) struct BooleanWeight {
     weighted_clauses: Vec<WeightedBooleanClause>,
     score_mode: ScoreMode,
     min_should_match: i32,
+}
+
+impl fmt::Debug for BooleanWeight {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BooleanWeight")
+            .field("num_clauses", &self.weighted_clauses.len())
+            .field("score_mode", &self.score_mode)
+            .field("min_should_match", &self.min_should_match)
+            .finish()
+    }
 }
 
 impl BooleanWeight {
@@ -146,6 +157,15 @@ struct BooleanScorerSupplier {
     min_should_match: i32,
     cost: Cell<i64>,
     top_level_scoring_clause: bool,
+}
+
+impl fmt::Debug for BooleanScorerSupplier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BooleanScorerSupplier")
+            .field("score_mode", &self.score_mode)
+            .field("min_should_match", &self.min_should_match)
+            .finish()
+    }
 }
 
 impl BooleanScorerSupplier {

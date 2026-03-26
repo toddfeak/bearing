@@ -4,6 +4,7 @@
 //! `DocIdStream`, `SimpleScorable`, and `DocAndFloatFeatureBuffer`.
 
 use std::cell::Cell;
+use std::fmt;
 use std::io;
 use std::rc::Rc;
 
@@ -95,6 +96,7 @@ pub trait DocIdStream {
 }
 
 /// A `DocIdStream` over a contiguous range `[min, max)`.
+#[derive(Debug)]
 pub struct RangeDocIdStream {
     up_to: i32,
     max: i32,
@@ -157,6 +159,7 @@ impl DocIdStream for RangeDocIdStream {
 /// `ScoreContext` provides safe shared access via `Cell<f32>`: the BulkScorer writes the
 /// current score before each `collect()` call, and the collector reads it. The collector
 /// writes `min_competitive_score` to signal the scorer to skip non-competitive docs.
+#[derive(Debug)]
 pub struct ScoreContext {
     /// The current document's score. Written by the BulkScorer before `collect()`.
     pub score: Cell<f32>,
@@ -180,7 +183,7 @@ impl ScoreContext {
 /// The `set_scorer` method is called before collection begins, passing a shared `ScoreContext`.
 /// The BulkScorer writes the current document's score to the context before calling `collect()`.
 /// Collectors that need the score read it from the context.
-pub trait LeafCollector {
+pub trait LeafCollector: fmt::Debug {
     /// Called before successive calls to `collect`. The `score_context` is shared between the
     /// BulkScorer (which writes the score) and this collector (which reads it and may write
     /// `min_competitive_score`).
@@ -231,7 +234,7 @@ pub trait LeafCollector {
 
 /// Expert: Collectors are primarily meant to be used to gather raw results from a search, and
 /// implement sorting or custom result filtering, collation, etc.
-pub trait Collector {
+pub trait Collector: fmt::Debug {
     /// The type of `LeafCollector` this collector creates.
     type Leaf: LeafCollector;
 
@@ -248,7 +251,7 @@ pub trait Collector {
 ///   set of leaves.
 /// - `reduce()` will be used to reduce the results of individual collections into a
 ///   meaningful result. This method is only called after all leaves have been fully collected.
-pub trait CollectorManager {
+pub trait CollectorManager: fmt::Debug {
     /// The type of `Collector` this manager creates.
     type Coll: Collector;
     /// The result type produced by `reduce`.
@@ -266,6 +269,7 @@ pub trait CollectorManager {
 // ---------------------------------------------------------------------------
 
 /// Simplest implementation of `Scorable`, implemented via simple getters and setters.
+#[derive(Debug)]
 pub struct SimpleScorable {
     /// The current score.
     pub score: f32,
@@ -316,6 +320,7 @@ impl Scorable for SimpleScorable {
 
 /// Wrapper around parallel arrays storing doc IDs and their corresponding features, stored as
 /// `f32`. These features may be anything, but are typically a term frequency or a score.
+#[derive(Debug)]
 pub struct DocAndFloatFeatureBuffer {
     /// Doc IDs.
     pub docs: Vec<i32>,
@@ -451,8 +456,8 @@ mod tests {
     fn test_feature_buffer_new() {
         let buf = DocAndFloatFeatureBuffer::new();
         assert_eq!(buf.size, 0);
-        assert!(buf.docs.is_empty());
-        assert!(buf.features.is_empty());
+        assert_is_empty!(buf.docs);
+        assert_is_empty!(buf.features);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! descending and then (when the scores are tied) by doc ID ascending.
 
 use std::cell::RefCell;
+use std::fmt;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -39,6 +40,16 @@ pub struct TopScoreDocCollector {
     total_hits_threshold: i32,
     min_score_acc: Option<Arc<MaxScoreAccumulator>>,
     after: Option<ScoreDoc>,
+}
+
+impl fmt::Debug for TopScoreDocCollector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.borrow();
+        f.debug_struct("TopScoreDocCollector")
+            .field("total_hits", &state.total_hits)
+            .field("total_hits_threshold", &self.total_hits_threshold)
+            .finish()
+    }
 }
 
 impl TopScoreDocCollector {
@@ -202,6 +213,15 @@ pub struct TopScoreDocLeafCollector {
     has_after: bool,
 }
 
+impl fmt::Debug for TopScoreDocLeafCollector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TopScoreDocLeafCollector")
+            .field("doc_base", &self.doc_base)
+            .field("total_hits_threshold", &self.total_hits_threshold)
+            .finish()
+    }
+}
+
 impl TopScoreDocLeafCollector {
     /// Collects a competitive hit by encoding (doc + doc_base, score) into the heap.
     fn collect_competitive_hit(&mut self, doc: i32, score: f32) -> io::Result<()> {
@@ -323,6 +343,7 @@ impl LeafCollector for TopScoreDocLeafCollector {
 // ---------------------------------------------------------------------------
 
 /// Creates `TopScoreDocCollector` instances and reduces their results into a single `TopDocs`.
+#[derive(Debug)]
 pub struct TopScoreDocCollectorManager {
     num_hits: i32,
     after: Option<ScoreDoc>,
@@ -492,7 +513,7 @@ mod tests {
         let top_docs = collector.top_docs();
         assert_eq!(top_docs.total_hits.value, 0);
         assert_eq!(top_docs.total_hits.relation, Relation::EqualTo);
-        assert!(top_docs.score_docs.is_empty());
+        assert_is_empty!(top_docs.score_docs);
     }
 
     #[test]
@@ -564,11 +585,11 @@ mod tests {
 
         // Request beyond size
         let top_docs = collector.top_docs_range(10, 5);
-        assert!(top_docs.score_docs.is_empty());
+        assert_is_empty!(top_docs.score_docs);
 
         // Request zero
         let top_docs = collector.top_docs_range(0, 0);
-        assert!(top_docs.score_docs.is_empty());
+        assert_is_empty!(top_docs.score_docs);
     }
 
     // -- TopScoreDocCollectorManager tests --
@@ -577,13 +598,13 @@ mod tests {
     fn test_manager_construction() {
         let manager = TopScoreDocCollectorManager::new(10, None, 100);
         assert_eq!(manager.num_hits, 10);
-        assert!(manager.min_score_acc.is_some());
+        assert_some!(manager.min_score_acc);
     }
 
     #[test]
     fn test_manager_construction_exact_count() {
         let manager = TopScoreDocCollectorManager::new(10, None, i32::MAX);
-        assert!(manager.min_score_acc.is_none());
+        assert_none!(manager.min_score_acc);
     }
 
     #[test]
@@ -613,7 +634,7 @@ mod tests {
         let manager = TopScoreDocCollectorManager::new(5, None, i32::MAX);
         let result = manager.reduce(vec![]).unwrap();
         assert_eq!(result.total_hits.value, 0);
-        assert!(result.score_docs.is_empty());
+        assert_is_empty!(result.score_docs);
     }
 
     #[test]

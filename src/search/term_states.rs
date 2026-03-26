@@ -7,6 +7,7 @@
 //! trie navigation and block scanning when the same term is looked up multiple times
 //! across segments.
 
+use std::fmt;
 use std::io;
 
 use crate::codecs::lucene103::postings_format::IntBlockTermState;
@@ -24,6 +25,16 @@ pub struct TermStates {
     doc_freq: i32,
     /// Accumulated total term frequency across all segments.
     total_term_freq: i64,
+}
+
+impl fmt::Debug for TermStates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TermStates")
+            .field("doc_freq", &self.doc_freq)
+            .field("total_term_freq", &self.total_term_freq)
+            .field("num_segments", &self.states.len())
+            .finish()
+    }
 }
 
 impl TermStates {
@@ -184,8 +195,7 @@ mod tests {
 
         // Single segment index — leaf 0 should have the state
         let state = ts.get(0);
-        assert!(state.is_some());
-        let state = state.unwrap();
+        let state = assert_some!(state);
         assert_eq!(state.doc_freq, 2);
     }
 

@@ -286,6 +286,7 @@ static LENGTH_TABLE: [f32; 256] = {
 
 /// BM25 Similarity. Introduced in Stephen E. Robertson, Steve Walker, Susan Jones,
 /// Micheline Hancock-Beaulieu, and Mike Gatford. Okapi at TREC-3.
+#[derive(Debug)]
 pub struct BM25Similarity {
     k1: f32,
     b: f32,

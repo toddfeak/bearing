@@ -5,6 +5,7 @@
 //! Provides `ConjunctionDISI` for iterating the intersection of multiple `DocIdSetIterator`s,
 //! and `intersect_iterators` as the public entry point.
 
+use std::fmt;
 use std::io;
 
 use super::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
@@ -71,6 +72,15 @@ pub(crate) struct ConjunctionDISI {
     lead1: Box<dyn DocIdSetIterator>,
     lead2: Box<dyn DocIdSetIterator>,
     others: Vec<Box<dyn DocIdSetIterator>>,
+}
+
+impl fmt::Debug for ConjunctionDISI {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConjunctionDISI")
+            .field("doc_id", &self.lead1.doc_id())
+            .field("num_iterators", &(2 + self.others.len()))
+            .finish()
+    }
 }
 
 impl ConjunctionDISI {
@@ -187,6 +197,16 @@ pub(crate) struct ConjunctionScorer {
     /// Cached lead cost (from `required[0]`). Needed because `DocIdSetIterator::cost(&self)`
     /// can't call `Scorer::iterator(&mut self)`.
     lead_cost: i64,
+}
+
+impl fmt::Debug for ConjunctionScorer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConjunctionScorer")
+            .field("doc_id", &self.required[0].doc_id())
+            .field("num_required", &self.required.len())
+            .field("num_scoring", &self.scorers.len())
+            .finish()
+    }
 }
 
 impl ConjunctionScorer {
@@ -355,6 +375,7 @@ mod tests {
     use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
 
     /// DocIdSetIterator over a fixed sorted list of doc IDs.
+    #[derive(Debug)]
     struct VecDocIdSetIterator {
         docs: Vec<i32>,
         index: usize,
@@ -497,6 +518,7 @@ mod tests {
     use crate::search::scorable::Scorable;
 
     /// Mock Scorer backed by a fixed list of (doc, score) pairs.
+    #[derive(Debug)]
     struct MockScorer {
         iter: VecDocIdSetIterator,
         scores: Vec<f32>,

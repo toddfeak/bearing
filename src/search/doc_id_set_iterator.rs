@@ -113,6 +113,7 @@ pub fn range(min_doc: i32, max_doc: i32) -> RangeDocIdSetIterator {
 }
 
 /// A `DocIdSetIterator` over a contiguous range of doc IDs.
+#[derive(Debug)]
 pub struct RangeDocIdSetIterator {
     min_doc: i32,
     max_doc: i32,

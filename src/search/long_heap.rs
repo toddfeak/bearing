@@ -10,6 +10,7 @@ use std::collections::BinaryHeap;
 /// Push and pop require O(log n). This heap provides unbounded growth via [`push`](Self::push),
 /// and bounded-size insertion based on its nominal `max_size` via
 /// [`insert_with_overflow`](Self::insert_with_overflow).
+#[derive(Debug)]
 pub struct LongHeap {
     max_size: usize,
     heap: BinaryHeap<Reverse<i64>>,

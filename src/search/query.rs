@@ -3,6 +3,7 @@
 //! Query execution types: `Query`, `Weight`, `ScorerSupplier`, `BulkScorer`, and
 //! `BatchScoreBulkScorer`.
 
+use std::fmt;
 use std::io;
 use std::rc::Rc;
 
@@ -17,7 +18,7 @@ use crate::index::directory_reader::LeafReaderContext;
 // ---------------------------------------------------------------------------
 
 /// Trait for all query types.
-pub trait Query {
+pub trait Query: fmt::Debug {
     /// Expert: Constructs an appropriate `Weight` implementation for this query.
     ///
     /// `score_mode` indicates how the produced scorers will be consumed.
@@ -47,7 +48,7 @@ pub trait Query {
 /// Only queries that have a more optimized means of scoring across a range of documents
 /// need to override this. Otherwise, a default implementation is wrapped around the `Scorer`
 /// returned by `Weight::scorer`.
-pub trait BulkScorer {
+pub trait BulkScorer: fmt::Debug {
     /// Collects matching documents in a range and returns an estimation of the next matching
     /// document which is on or after `max`.
     ///
@@ -65,7 +66,7 @@ pub trait BulkScorer {
 
 /// A supplier of `Scorer`. This allows getting an estimate of the cost before building the
 /// `Scorer`.
-pub trait ScorerSupplier {
+pub trait ScorerSupplier: fmt::Debug {
     /// Get the `Scorer`. This may not return `None` and must be called at most once.
     ///
     /// `lead_cost` can be interpreted as an upper bound of the number of times that
@@ -102,7 +103,7 @@ pub trait ScorerSupplier {
 ///
 /// `IndexSearcher` dependent state of the query should reside in the `Weight`.
 /// `LeafReader` dependent state should reside in the `Scorer`.
-pub trait Weight {
+pub trait Weight: fmt::Debug {
     /// Get a `ScorerSupplier`, which allows knowing the cost of the `Scorer` before building
     /// it. Returns `None` if no documents match.
     fn scorer_supplier(
@@ -152,6 +153,12 @@ pub trait Weight {
 /// specialized one.
 pub struct DefaultBulkScorer {
     scorer: Box<dyn Scorer>,
+}
+
+impl fmt::Debug for DefaultBulkScorer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DefaultBulkScorer").finish()
+    }
 }
 
 impl DefaultBulkScorer {
@@ -273,6 +280,14 @@ pub struct DefaultScorerSupplier {
     cost: i64,
 }
 
+impl fmt::Debug for DefaultScorerSupplier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DefaultScorerSupplier")
+            .field("cost", &self.cost)
+            .finish()
+    }
+}
+
 impl DefaultScorerSupplier {
     /// Creates a new `DefaultScorerSupplier` wrapping the given scorer.
     pub fn new(scorer: Box<dyn Scorer>, cost: i64) -> Self {
@@ -307,6 +322,12 @@ impl ScorerSupplier for DefaultScorerSupplier {
 pub struct BatchScoreBulkScorer {
     scorer: Box<dyn Scorer>,
     buffer: DocAndFloatFeatureBuffer,
+}
+
+impl fmt::Debug for BatchScoreBulkScorer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BatchScoreBulkScorer").finish()
+    }
 }
 
 impl BatchScoreBulkScorer {
@@ -403,8 +424,10 @@ mod tests {
     use super::*;
     use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
     use crate::search::scorable::Scorable;
+    use assertables::*;
 
     /// DocIdSetIterator over a fixed list of doc IDs.
+    #[derive(Debug)]
     struct MockScorerIterator {
         docs: Vec<i32>,
         index: usize,
@@ -443,6 +466,7 @@ mod tests {
 
     /// We need Scorer to delegate to an iterator. Since Scorer::iterator() returns
     /// &mut dyn DocIdSetIterator, MockScorer needs to own an iterator.
+    #[derive(Debug)]
     struct FullMockScorer {
         iter: MockScorerIterator,
         scores: Vec<f32>,
@@ -494,7 +518,7 @@ mod tests {
         let mut supplier = DefaultScorerSupplier::new(Box::new(scorer), 3);
         assert_eq!(supplier.cost(), 3);
         let s = supplier.get(100);
-        assert!(s.is_ok());
+        assert_ok!(s);
     }
 
     #[test]
@@ -503,7 +527,7 @@ mod tests {
         let mut supplier = DefaultScorerSupplier::new(Box::new(scorer), 1);
         supplier.get(100).unwrap();
         let result = supplier.get(100);
-        assert!(result.is_err());
+        assert_err!(result);
     }
 
     #[test]
@@ -511,12 +535,13 @@ mod tests {
         let scorer = FullMockScorer::new(vec![0, 1, 2], vec![1.0, 2.0, 3.0]);
         let mut supplier = DefaultScorerSupplier::new(Box::new(scorer), 3);
         let bs = supplier.bulk_scorer();
-        assert!(bs.is_ok());
+        assert_ok!(bs);
     }
 
     // -- DefaultBulkScorer tests --
 
     /// Simple leaf collector that records doc IDs.
+    #[derive(Debug)]
     struct DocCollector {
         docs: Vec<i32>,
     }
@@ -568,12 +593,13 @@ mod tests {
 
         bulk.score(&mut collector, 0, 5).unwrap();
 
-        assert!(collector.docs.is_empty());
+        assert_is_empty!(collector.docs);
     }
 
     // -- BatchScoreBulkScorer tests --
 
     /// Leaf collector that records (doc, score) pairs via ScoreContext.
+    #[derive(Debug)]
     struct ScoreCollector {
         docs: Vec<i32>,
         scores: Vec<f32>,
@@ -640,7 +666,7 @@ mod tests {
 
         bulk.score(&mut collector, 0, 5).unwrap();
 
-        assert!(collector.docs.is_empty());
+        assert_is_empty!(collector.docs);
     }
 
     #[test]
@@ -649,6 +675,7 @@ mod tests {
         let mut bulk = BatchScoreBulkScorer::new(Box::new(scorer));
 
         // Collector that sets min_competitive_score to 1.0 after first collect
+        #[derive(Debug)]
         struct FilteringCollector {
             docs: Vec<i32>,
             score_context: Option<Rc<ScoreContext>>,

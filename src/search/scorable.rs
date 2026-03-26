@@ -2,6 +2,7 @@
 
 //! Allows access to the score of a Query.
 
+use std::fmt;
 use std::io;
 
 /// A child Scorer and its relationship to its parent. The meaning of the relationship
@@ -11,6 +12,14 @@ pub struct ChildScorable<'a> {
     pub child: &'a dyn Scorable,
     /// An arbitrary string relating this scorer to the parent.
     pub relationship: String,
+}
+
+impl fmt::Debug for ChildScorable<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChildScorable")
+            .field("relationship", &self.relationship)
+            .finish()
+    }
 }
 
 /// Allows access to the score of a Query.
@@ -45,6 +54,7 @@ pub trait Scorable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assertables::*;
 
     struct TestScorable {
         current_score: f32,
@@ -78,6 +88,6 @@ mod tests {
     fn test_default_get_children() {
         let s = TestScorable { current_score: 1.0 };
         let children = s.get_children().unwrap();
-        assert!(children.is_empty());
+        assert_is_empty!(children);
     }
 }

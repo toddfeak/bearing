@@ -19,6 +19,7 @@
 //! println!("Segment has {} documents", reader.max_doc());
 //! ```
 
+use std::fmt;
 use std::io;
 
 use log::debug;
@@ -57,6 +58,15 @@ pub struct SegmentReader {
     points_reader: Option<PointsReader>,
     terms_reader: Option<BlockTreeTermsReader>,
     postings_reader: Option<PostingsReader>,
+}
+
+impl fmt::Debug for SegmentReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SegmentReader")
+            .field("segment_name", &self.segment_name)
+            .field("max_doc", &self.max_doc)
+            .finish()
+    }
 }
 
 impl SegmentReader {

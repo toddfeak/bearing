@@ -2,6 +2,7 @@
 
 //! `IndexSearcher` implements search over a `DirectoryReader`.
 
+use std::fmt;
 use std::io;
 
 use crate::index::directory_reader::{DirectoryReader, LeafReaderContext};
@@ -28,6 +29,15 @@ const TOTAL_HITS_THRESHOLD: i32 = 1000;
 pub struct IndexSearcher<'a> {
     reader: &'a DirectoryReader,
     similarity: Box<dyn Similarity>,
+}
+
+impl fmt::Debug for IndexSearcher<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexSearcher")
+            .field("max_doc", &self.reader.max_doc())
+            .field("num_segments", &self.reader.leaves().len())
+            .finish()
+    }
 }
 
 impl<'a> IndexSearcher<'a> {
@@ -251,7 +261,7 @@ mod tests {
         let top_docs = searcher.search(&query, 10).unwrap();
 
         assert_eq!(top_docs.total_hits.value, 0);
-        assert!(top_docs.score_docs.is_empty());
+        assert_is_empty!(top_docs.score_docs);
     }
 
     #[test]
@@ -288,8 +298,7 @@ mod tests {
         let searcher = IndexSearcher::new(&reader);
         let stats = searcher.collection_statistics("content").unwrap();
 
-        assert!(stats.is_some(), "field 'content' should have stats");
-        let stats = stats.unwrap();
+        let stats = assert_some!(stats);
         assert_eq!(stats.max_doc(), 3);
         assert_gt!(stats.doc_count(), 0);
         assert_gt!(stats.sum_doc_freq(), 0);
@@ -301,7 +310,7 @@ mod tests {
         let (_dir, reader) = build_test_index();
         let searcher = IndexSearcher::new(&reader);
         let stats = searcher.collection_statistics("no_such_field").unwrap();
-        assert!(stats.is_none());
+        assert_none!(stats);
     }
 
     #[test]
@@ -317,8 +326,8 @@ mod tests {
         let query_rare = TermQuery::new("content", b"peace");
         let top_rare = searcher.search(&query_rare, 10).unwrap();
 
-        assert!(!top_common.score_docs.is_empty());
-        assert!(!top_rare.score_docs.is_empty());
+        assert_not_empty!(top_common.score_docs);
+        assert_not_empty!(top_rare.score_docs);
         assert_gt!(
             top_rare.score_docs[0].score,
             top_common.score_docs[0].score,

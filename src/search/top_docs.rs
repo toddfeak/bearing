@@ -115,6 +115,7 @@ impl fmt::Display for TotalHits {
 // ---------------------------------------------------------------------------
 
 /// Represents hits returned by `IndexSearcher::search`.
+#[derive(Debug)]
 pub struct TopDocs {
     /// The total number of hits for the query.
     pub total_hits: TotalHits,
@@ -139,6 +140,7 @@ impl TopDocs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assertables::*;
 
     // -- TotalHits tests --
 
@@ -214,6 +216,6 @@ mod tests {
         let total_hits = TotalHits::new(0, Relation::EqualTo);
         let top_docs = TopDocs::new(total_hits, vec![]);
         assert_eq!(top_docs.total_hits.value, 0);
-        assert!(top_docs.score_docs.is_empty());
+        assert_is_empty!(top_docs.score_docs);
     }
 }
