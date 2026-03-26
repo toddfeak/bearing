@@ -57,6 +57,8 @@ pub struct FieldInfo {
     pub(crate) store_payloads: bool,
     index_options: IndexOptions,
     doc_values_type: DocValuesType,
+    /// Doc values skip index type: 0 = NONE, 1 = RANGE.
+    pub(crate) doc_values_skip_index_type: u8,
     pub(crate) dv_gen: i64,
     attributes: HashMap<String, String>,
     point_config: PointDimensionConfig,
@@ -83,6 +85,7 @@ impl FieldInfo {
             store_payloads: false,
             index_options,
             doc_values_type,
+            doc_values_skip_index_type: 0,
             dv_gen: -1,
             attributes: HashMap::new(),
             point_config,

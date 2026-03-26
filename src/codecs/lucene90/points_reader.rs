@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Points/BKD metadata reader for the Lucene90 points format.
+//! Points/BKD reader for the Lucene90 points format.
 //!
-//! Reads `.kdm` (metadata) and validates `.kdi` (index) and `.kdd` (data) files
-//! written by [`super::points::write`]. Metadata is read eagerly during construction;
-//! tree and leaf data are not accessed.
+//! Reads `.kdm` (metadata), `.kdi` (index), and `.kdd` (data) files written by
+//! [`super::points::write`]. Metadata is read eagerly from `.kdm`; tree and
+//! leaf data in `.kdi`/`.kdd` are available via retained file handles.
 
 use std::io;
 
@@ -17,15 +17,9 @@ use crate::codecs::lucene90::points::{
 };
 use crate::index::{FieldInfos, index_file_names};
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory};
+use crate::store::{DataInput, Directory, IndexInput};
 
-/// Per-field BKD tree metadata.
-///
-/// Stores statistics read eagerly from `.kdm`. When lazy tree reads are added,
-/// this struct will also hold:
-/// - `num_dims`, `num_index_dims`, `bytes_per_dim` — BKD config (also in FieldInfos)
-/// - `min_packed_value`, `max_packed_value` — per-dimension bounds
-/// - `num_index_bytes`, `data_start_fp`, `index_start_fp` — file pointers
+/// Per-field BKD tree metadata read eagerly from `.kdm`.
 #[derive(Clone)]
 struct BkdEntry {
     num_leaves: u32,
@@ -35,17 +29,27 @@ struct BkdEntry {
 
 /// Reads points/BKD metadata for a segment.
 ///
-/// Opens `.kdm`, `.kdi`, and `.kdd` files during construction. Per-field BKD
-/// metadata is read eagerly from `.kdm`; tree and leaf data in `.kdi`/`.kdd`
-/// are not accessed. Matches the constructor pattern of Java's
-/// `Lucene90PointsReader` + `BKDReader`.
+/// Constructor matches the lifecycle of Java's `Lucene90PointsReader`:
+/// opens `.kdi` and `.kdd` first (keeps handles), then reads `.kdm` metadata,
+/// then validates file lengths.
 pub struct PointsReader {
     /// Per-field BKD metadata indexed by field number. `None` for fields without points.
     entries: Box<[Option<BkdEntry>]>,
+    /// Open handle to the `.kdi` index file.
+    #[expect(dead_code)]
+    index_in: Box<dyn IndexInput>,
+    /// Open handle to the `.kdd` data file.
+    #[expect(dead_code)]
+    data_in: Box<dyn IndexInput>,
 }
 
 impl PointsReader {
-    /// Opens points files (`.kdm`, `.kdi`, `.kdd`) for the given segment.
+    /// Opens points files (`.kdi`, `.kdd`, `.kdm`) for the given segment.
+    ///
+    /// 1. Open and validate `.kdi` (index) — keep handle
+    /// 2. Open and validate `.kdd` (data) — keep handle
+    /// 3. Open `.kdm` (meta) with checksum — read all per-field entries
+    /// 4. Validate file lengths via `retrieve_checksum_with_length`
     pub fn open(
         directory: &dyn Directory,
         segment_name: &str,
@@ -53,12 +57,39 @@ impl PointsReader {
         segment_id: &[u8; codec_util::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // Open .kdm (metadata) with checksum validation
+        // 1. Open .kdi (index) — keep handle
+        let kdi_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
+        let mut index_in = directory.open_input(&kdi_name)?;
+        codec_util::check_index_header(
+            index_in.as_mut(),
+            INDEX_CODEC,
+            FORMAT_VERSION,
+            FORMAT_VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+        codec_util::retrieve_checksum(index_in.as_mut())?;
+
+        // 2. Open .kdd (data) — keep handle
+        let kdd_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
+        let mut data_in = directory.open_input(&kdd_name)?;
+        codec_util::check_index_header(
+            data_in.as_mut(),
+            DATA_CODEC,
+            FORMAT_VERSION,
+            FORMAT_VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+        codec_util::retrieve_checksum(data_in.as_mut())?;
+
+        // 3. Open .kdm (meta) with checksum — read entries, then close
         let kdm_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
         let meta_input = directory.open_input(&kdm_name)?;
         let mut meta_in = ChecksumIndexInput::new(meta_input);
-
         codec_util::check_index_header(
             &mut meta_in,
             META_CODEC,
@@ -70,43 +101,25 @@ impl PointsReader {
 
         let entries = read_fields(&mut meta_in, field_infos)?;
 
-        // index and data file lengths (for future integrity checks)
-        let _index_length = meta_in.read_le_long()?;
-        let _data_length = meta_in.read_le_long()?;
+        let index_length = meta_in.read_le_long()?;
+        let data_length = meta_in.read_le_long()?;
 
         codec_util::check_footer(&mut meta_in)?;
 
-        // Validate .kdi and .kdd headers
-        let kdi_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let mut kdi = directory.open_input(&kdi_name)?;
-        codec_util::check_index_header(
-            kdi.as_mut(),
-            INDEX_CODEC,
-            FORMAT_VERSION,
-            FORMAT_VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
-
-        let kdd_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
-        let mut kdd = directory.open_input(&kdd_name)?;
-        codec_util::check_index_header(
-            kdd.as_mut(),
-            DATA_CODEC,
-            FORMAT_VERSION,
-            FORMAT_VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
+        // 4. Validate file lengths
+        codec_util::retrieve_checksum_with_length(index_in.as_mut(), index_length)?;
+        codec_util::retrieve_checksum_with_length(data_in.as_mut(), data_length)?;
 
         debug!(
             "points_reader: opened {} entries for segment {segment_name}",
             entries.iter().filter(|e| e.is_some()).count()
         );
 
-        Ok(Self { entries })
+        Ok(Self {
+            entries,
+            index_in,
+            data_in,
+        })
     }
 
     /// Returns the total number of indexed points for a field.
@@ -143,6 +156,11 @@ fn read_fields(
         if field_number == -1 {
             break;
         }
+        if field_number < 0 {
+            return Err(io::Error::other(format!(
+                "Illegal field number: {field_number}"
+            )));
+        }
 
         let field_number = field_number as u32;
         let _info = field_infos
@@ -158,7 +176,6 @@ fn read_fields(
 
 /// Reads a single BKD metadata entry (one per point field).
 fn read_bkd_entry(meta: &mut dyn DataInput) -> io::Result<BkdEntry> {
-    // BKD simple header (not index header)
     codec_util::check_header(meta, BKD_CODEC, BKD_VERSION, BKD_VERSION)?;
 
     let _num_dims = meta.read_vint()? as u32;
@@ -252,7 +269,6 @@ mod tests {
 
     #[test]
     fn test_1d_int_field() {
-        // 3 docs with 4-byte int points
         let fi = make_point_field("size", 0, 1, 1, 4);
         let field_infos = FieldInfos::new(vec![fi]);
 
@@ -273,14 +289,13 @@ mod tests {
 
     #[test]
     fn test_2d_latlon_field() {
-        // 2 docs with 2D 4-byte points (like LatLonPoint)
         let fi = make_point_field("location", 0, 2, 2, 4);
         let field_infos = FieldInfos::new(vec![fi]);
 
         let mut per_field = HashMap::new();
         let mut point1 = Vec::new();
-        point1.extend_from_slice(&10i32.to_be_bytes()); // lat
-        point1.extend_from_slice(&20i32.to_be_bytes()); // lon
+        point1.extend_from_slice(&10i32.to_be_bytes());
+        point1.extend_from_slice(&20i32.to_be_bytes());
         let mut point2 = Vec::new();
         point2.extend_from_slice(&30i32.to_be_bytes());
         point2.extend_from_slice(&40i32.to_be_bytes());
@@ -344,7 +359,6 @@ mod tests {
 
     #[test]
     fn test_8byte_long_field() {
-        // 8-byte points (LongField)
         let fi = make_point_field("modified", 0, 1, 1, 8);
         let field_infos = FieldInfos::new(vec![fi]);
 
@@ -361,5 +375,35 @@ mod tests {
         assert_eq!(reader.point_count(0), Some(2));
         assert_eq!(reader.doc_count(0), Some(2));
         assert_eq!(reader.num_leaves(0), Some(1));
+    }
+
+    #[test]
+    fn test_truncated_data_file_detected() {
+        let fi = make_point_field("size", 0, 1, 1, 4);
+        let field_infos = FieldInfos::new(vec![fi]);
+
+        let segment_id = [0u8; 16];
+        let dir = test_directory();
+        let mut per_field = HashMap::new();
+        per_field.insert(
+            "size".to_string(),
+            make_point_data(vec![(0, 42i32.to_be_bytes().to_vec())]),
+        );
+        points::write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 1).unwrap();
+
+        // Truncate the .kdd file
+        let mut mem_dir = MemoryDirectory::new();
+        let guard = dir.lock().unwrap();
+        for name in guard.list_all().unwrap() {
+            let data = guard.read_file(&name).unwrap();
+            if name.ends_with(".kdd") {
+                mem_dir.write_file(&name, &data[..data.len() - 4]).unwrap();
+            } else {
+                mem_dir.write_file(&name, &data).unwrap();
+            }
+        }
+
+        let result = PointsReader::open(&mem_dir, "_0", "", &segment_id, &field_infos);
+        assert!(result.is_err(), "should detect truncated .kdd");
     }
 }

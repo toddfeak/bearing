@@ -166,8 +166,8 @@ pub fn read(
         // Doc values type
         let doc_values_type = byte_to_doc_values_type(checksum_input.read_byte()?)?;
 
-        // Doc values skip index type (FORMAT >= 2) — read and discard
-        let _dv_skip_index_type = checksum_input.read_byte()?;
+        // Doc values skip index type (FORMAT >= 2): 0 = NONE, 1 = RANGE
+        let dv_skip_index_type = checksum_input.read_byte()?;
 
         // Doc values gen
         let dv_gen = checksum_input.read_le_long()?;
@@ -208,6 +208,7 @@ pub fn read(
         fi.store_payloads = store_payloads;
         fi.soft_deletes_field = soft_deletes_field;
         fi.is_parent_field = is_parent_field;
+        fi.doc_values_skip_index_type = dv_skip_index_type;
         fi.dv_gen = dv_gen;
         for (k, v) in attributes {
             fi.put_attribute(k, v);

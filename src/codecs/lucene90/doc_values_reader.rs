@@ -95,6 +95,8 @@ impl DocValuesReader {
             )));
         }
 
+        codec_util::retrieve_checksum(data.as_mut())?;
+
         debug!(
             "doc_values_reader: opened {} entries for segment {segment_name}",
             entries.iter().filter(|e| e.is_some()).count()
@@ -135,11 +137,16 @@ fn read_fields(
         }
 
         let field_number = field_number as u32;
-        let _info = field_infos
+        let info = field_infos
             .field_info_by_number(field_number)
             .ok_or_else(|| io::Error::other(format!("invalid field number: {field_number}")))?;
 
         let type_byte = meta.read_byte()?;
+
+        // Skip-index metadata must be read BEFORE type-specific metadata
+        if info.doc_values_skip_index_type != 0 {
+            read_doc_values_skipper_meta(meta)?;
+        }
 
         let entry = match type_byte {
             NUMERIC => read_numeric(meta)?,
@@ -158,6 +165,21 @@ fn read_fields(
     }
 
     Ok(entries.into_boxed_slice())
+}
+
+/// Reads doc values skipper metadata to keep the stream in sync.
+///
+/// Java stores these values in a `DocValuesSkipperEntry` for use by
+/// `getDocValuesSkipper()`. We read and discard them for now since skip
+/// index queries are not yet implemented.
+fn read_doc_values_skipper_meta(meta: &mut dyn DataInput) -> io::Result<()> {
+    meta.read_le_long()?; // offset
+    meta.read_le_long()?; // length
+    meta.read_le_long()?; // maxValue
+    meta.read_le_long()?; // minValue
+    meta.read_le_int()?; // docCount
+    meta.read_le_int()?; // maxDocId
+    Ok(())
 }
 
 /// Skips the docs-with-field block written by `write_values()`.
