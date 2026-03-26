@@ -75,13 +75,9 @@ impl DirectoryReader {
     /// any segment file is missing or corrupt.
     pub fn open(directory: &dyn Directory) -> io::Result<Self> {
         let files = directory.list_all()?;
-        let segments_file = files
-            .iter()
-            .filter(|f| f.starts_with("segments_"))
-            .max()
-            .ok_or_else(|| io::Error::other("no segments_N file found in directory"))?;
+        let segments_file = segment_infos::get_last_commit_segments_file_name(&files)?;
 
-        let infos = segment_infos::read(directory, segments_file)?;
+        let infos = segment_infos::read(directory, &segments_file)?;
 
         let mut segments = Vec::with_capacity(infos.segments.len());
         let mut doc_base = 0i32;

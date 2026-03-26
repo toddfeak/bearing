@@ -194,18 +194,54 @@ pub struct SegmentInfosRead {
     pub user_data: HashMap<String, String>,
 }
 
+/// Parses the generation number from a `segments_N` filename.
+///
+/// Ported from `SegmentInfos.generationFromSegmentsFileName`.
+///
+/// - `"segments"` → generation 0
+/// - `"segments_1"` → generation 1
+/// - `"segments_a"` → generation 10 (base-36)
+/// - `"segments_10"` → generation 36
+pub fn generation_from_segments_file_name(file_name: &str) -> io::Result<i64> {
+    if file_name == "segments" {
+        return Ok(0);
+    }
+    let suffix = file_name.strip_prefix("segments_").ok_or_else(|| {
+        io::Error::other(format!("fileName \"{file_name}\" is not a segments file"))
+    })?;
+    i64::from_str_radix(suffix, 36)
+        .map_err(|e| io::Error::other(format!("invalid generation in {file_name}: {e}")))
+}
+
+/// Returns the `segments_N` filename for the most recent commit generation.
+///
+/// Ported from `SegmentInfos.getLastCommitSegmentsFileName`.
+/// Parses each `segments_N` generation as base-36 and picks the numeric max.
+pub fn get_last_commit_segments_file_name(files: &[String]) -> io::Result<String> {
+    let mut max_generation: i64 = -1;
+    for file in files {
+        if file.starts_with("segments_") {
+            let generation = generation_from_segments_file_name(file)?;
+            if generation > max_generation {
+                max_generation = generation;
+            }
+        }
+    }
+    if max_generation == -1 {
+        return Err(io::Error::other("no segments_N file found in directory"));
+    }
+    let suffix = index_file_names::radix36(max_generation as u64);
+    Ok(format!("segments_{suffix}"))
+}
+
 /// Reads a `segments_N` file from `directory`.
 ///
 /// Returns only the data stored in the `segments_N` file. Does NOT read
 /// per-segment `.si` or `.fnm` files — the caller should use the codec name
 /// from each [`SegmentEntry`] to dispatch to the appropriate format readers.
 pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<SegmentInfosRead> {
-    // Parse generation from filename
-    let gen_suffix = segment_file_name.strip_prefix("segments_").ok_or_else(|| {
-        io::Error::other(format!("invalid segments filename: {segment_file_name}"))
-    })?;
-    let generation = i64::from_str_radix(gen_suffix, 36)
-        .map_err(|e| io::Error::other(format!("invalid generation in {segment_file_name}: {e}")))?;
+    let generation = generation_from_segments_file_name(segment_file_name)?;
+    let expected_suffix = index_file_names::radix36(generation as u64);
 
     let input = directory.open_input(segment_file_name)?;
     let mut input = ChecksumIndexInput::new(input);
@@ -223,9 +259,9 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
     let mut suffix_bytes = vec![0u8; suffix_len];
     input.read_bytes(&mut suffix_bytes)?;
     let suffix = String::from_utf8(suffix_bytes).map_err(|e| io::Error::other(e.to_string()))?;
-    if suffix != gen_suffix {
+    if suffix != expected_suffix {
         return Err(io::Error::other(format!(
-            "segments suffix mismatch: expected {gen_suffix:?}, got {suffix:?}"
+            "segments suffix mismatch: expected {expected_suffix:?}, got {suffix:?}"
         )));
     }
 
@@ -620,5 +656,109 @@ mod tests {
         assert_eq!(file.data[r.pos + 7], 0x08);
         let ver = r.read_be_long();
         assert_eq!(ver, 0x0102030405060708);
+    }
+
+    // --- generation_from_segments_file_name tests ---
+
+    #[test]
+    fn test_generation_bare_segments() {
+        assert_eq!(generation_from_segments_file_name("segments").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_generation_single_digit() {
+        assert_eq!(generation_from_segments_file_name("segments_1").unwrap(), 1);
+        assert_eq!(generation_from_segments_file_name("segments_9").unwrap(), 9);
+    }
+
+    #[test]
+    fn test_generation_base36_letters() {
+        assert_eq!(
+            generation_from_segments_file_name("segments_a").unwrap(),
+            10
+        );
+        assert_eq!(
+            generation_from_segments_file_name("segments_z").unwrap(),
+            35
+        );
+    }
+
+    #[test]
+    fn test_generation_base36_multi_char() {
+        assert_eq!(
+            generation_from_segments_file_name("segments_10").unwrap(),
+            36
+        );
+        assert_eq!(
+            generation_from_segments_file_name("segments_1a").unwrap(),
+            46
+        );
+    }
+
+    #[test]
+    fn test_generation_invalid_filename() {
+        assert!(generation_from_segments_file_name("_0.cfs").is_err());
+        assert!(generation_from_segments_file_name("not_segments").is_err());
+    }
+
+    // --- get_last_commit_segments_file_name tests ---
+
+    #[test]
+    fn test_last_commit_single_file() {
+        let files = vec!["segments_1".to_string()];
+        assert_eq!(
+            get_last_commit_segments_file_name(&files).unwrap(),
+            "segments_1"
+        );
+    }
+
+    #[test]
+    fn test_last_commit_numeric_max_not_lexicographic() {
+        // segments_10 = gen 36, segments_z = gen 35
+        // Lexicographic would pick segments_z; numeric picks segments_10
+        let files = vec!["segments_z".to_string(), "segments_10".to_string()];
+        assert_eq!(
+            get_last_commit_segments_file_name(&files).unwrap(),
+            "segments_10"
+        );
+    }
+
+    #[test]
+    fn test_last_commit_ignores_non_segments() {
+        let files = vec![
+            "_0.cfs".to_string(),
+            "_0.si".to_string(),
+            "segments_3".to_string(),
+            "write.lock".to_string(),
+        ];
+        assert_eq!(
+            get_last_commit_segments_file_name(&files).unwrap(),
+            "segments_3"
+        );
+    }
+
+    #[test]
+    fn test_last_commit_no_segments_files() {
+        let files = vec!["_0.cfs".to_string(), "write.lock".to_string()];
+        assert!(get_last_commit_segments_file_name(&files).is_err());
+    }
+
+    #[test]
+    fn test_last_commit_empty() {
+        let files: Vec<String> = vec![];
+        assert!(get_last_commit_segments_file_name(&files).is_err());
+    }
+
+    #[test]
+    fn test_last_commit_multiple_generations() {
+        let files = vec![
+            "segments_1".to_string(),
+            "segments_5".to_string(),
+            "segments_3".to_string(),
+        ];
+        assert_eq!(
+            get_last_commit_segments_file_name(&files).unwrap(),
+            "segments_5"
+        );
     }
 }

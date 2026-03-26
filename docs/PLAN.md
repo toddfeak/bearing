@@ -2,14 +2,19 @@
 
 ## Performance Summary
 
-Benchmark: 2000 docs, 149 MB corpus, release build.
+**Indexing** (2000 docs, 149 MB corpus, release build):
 
 | Metric | Rust | Java (Lucene 10.3.2) | Ratio |
 |---|---|---|---|
 | 1 thread | 1.36s | 2.72s | **2.0x faster** |
 | 12 threads | 0.61s | 2.72s | **4.4x faster** |
 
-Rust single-threaded indexing is 2x faster than Java. With 12 threads, it scales to 4.4x faster (Java's IndexWriter was benchmarked single-threaded as the baseline).
+**Querying** (2000 docs, 60M corpus, 2000 single-term queries):
+
+| Metric | Rust | Java (Lucene 10.3.2) | Ratio |
+|---|---|---|---|
+| Avg query time | 18 µs | 89 µs | **4.9x faster** |
+| Peak RSS | 8.6 MB | 102 MB | **12x less memory** |
 
 ---
 
@@ -82,21 +87,40 @@ First query path: given a field name and term, find all matching doc IDs.
 
 ## Phase 2 — Search
 
-### 5. Search Infrastructure
-- Frequency decoding in `BlockDocIterator` (prerequisite for scoring)
-- Public iterator traits for terms, postings, doc values
-
-Query execution:
+### 5. Search Infrastructure (done)
+- Frequency decoding in `BlockPostingsEnum` with impacts and skip-level navigation
 - `IndexSearcher` — entry point, holds a `DirectoryReader`
-- `Query` / `Weight` / `Scorer` / `BulkScorer` abstractions
-- `Collector` / `TopDocs` — result gathering
-- Basic similarity/scoring (BM25)
-
-**Testable:** Once readers exist, even a basic TermQuery can be tested end-to-end.
+- `Query` / `Weight` / `Scorer` / `BulkScorer` / `ScorerSupplier` abstractions
+- `Collector` / `LeafCollector` / `TopScoreDocCollector` — result gathering with `ScoreContext`
+- `BM25Similarity` with `SimScorer` / `BulkSimScorer`
+- `MmapDirectory` for zero-copy index reads (matches Java's default `MMapDirectory`)
+- `NumericDocValues` trait for lazy norms access
 
 ### 6. Core Query Types
-Start with the essentials:
-- `TermQuery` (single term lookup)
+#### TermQuery (done)
+Single-term lookup with BM25 scoring. Produces byte-identical results to Java Lucene.
+
+- `TermStates` — caches per-leaf `IntBlockTermState` during `create_weight`, reused in `scorer_supplier` (no duplicate trie I/O)
+- `TermWeight` — stores `SimScorer` once (created from aggregated cross-segment stats, cloned per-leaf)
+- `TermScorer` — lazy norms via `NumericDocValues` (only reads norms for scored docs, not entire segment)
+- `ImpactsDISI` logic inlined for `TopScores` competitive skipping via `MaxScoreCache`
+- `BatchScoreBulkScorer` for batch scoring with `nextDocsAndScores`
+
+**Query performance (2000 docs, 60M corpus, 2000 queries):**
+
+| Metric | Rust | Java | Ratio |
+|---|---|---|---|
+| Avg query time | 18 µs | 89 µs | **4.9x faster** |
+| Peak RSS | 8.6 MB | 102 MB | **12x less memory** |
+
+**Query performance (5000 docs, 192M corpus, 5000 queries):**
+
+| Metric | Rust | Java | Ratio |
+|---|---|---|---|
+| Avg query time | 23 µs | 48 µs | **2.0x faster** |
+| Peak RSS | 21 MB | 103 MB | **5x less memory** |
+
+#### BooleanQuery (next)
 - `BooleanQuery` (AND/OR/NOT composition)
 - Then expand: phrase, range, wildcard, etc.
 

@@ -35,7 +35,7 @@ use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
 use crate::codecs::lucene103::postings_reader::PostingsReader;
-use crate::index::FieldInfos;
+use crate::index::{FieldInfos, SegmentInfo};
 use crate::store::Directory;
 
 /// Reads all data for a single segment of a Lucene index.
@@ -79,15 +79,9 @@ impl SegmentReader {
 
         let reader = if si.is_compound_file {
             let compound_dir = CompoundDirectory::open(directory, segment_name, segment_id)?;
-            Self::open_from_directory(
-                directory,
-                &compound_dir,
-                segment_name,
-                segment_id,
-                si.max_doc,
-            )?
+            Self::open_from_directory(&compound_dir, &si)?
         } else {
-            Self::open_from_directory(directory, directory, segment_name, segment_id, si.max_doc)?
+            Self::open_from_directory(directory, &si)?
         };
 
         debug!(
@@ -100,55 +94,75 @@ impl SegmentReader {
     }
 
     /// Opens all codec readers from a specific directory (compound or raw).
-    ///
-    /// `parent_dir` is used to read segment info (which lives outside compound files).
-    /// `dir` is used for all other codec files (may be a CompoundDirectory).
-    fn open_from_directory(
-        parent_dir: &dyn Directory,
-        dir: &dyn Directory,
-        segment_name: &str,
-        segment_id: &[u8; codec_util::ID_LENGTH],
-        max_doc: i32,
-    ) -> io::Result<Self> {
-        let si = segment_info_format::read(parent_dir, segment_name, segment_id)?;
-        let field_infos = field_infos_format::read(dir, &si, "")?;
+    fn open_from_directory(dir: &dyn Directory, si: &SegmentInfo) -> io::Result<Self> {
+        let field_infos = field_infos_format::read(dir, si, "")?;
+        let segment_name = &si.name;
+        let segment_id = &si.id;
+        let max_doc = si.max_doc;
 
-        let postings_suffix = derive_suffix(&field_infos, "PerFieldPostingsFormat");
-        let dv_suffix = derive_suffix(&field_infos, "PerFieldDocValuesFormat");
-
-        let stored_fields_reader = StoredFieldsReader::open(dir, segment_name, "", segment_id).ok();
+        let stored_fields_reader =
+            Some(StoredFieldsReader::open(dir, segment_name, "", segment_id)?);
 
         let norms_reader = if field_infos.has_norms() {
-            NormsReader::open(dir, segment_name, "", segment_id, &field_infos, max_doc)
-                .ok()
-                .map(RefCell::new)
+            Some(RefCell::new(NormsReader::open(
+                dir,
+                segment_name,
+                "",
+                segment_id,
+                &field_infos,
+                max_doc,
+            )?))
         } else {
             None
         };
 
-        let doc_values_reader = dv_suffix.as_deref().and_then(|s| {
-            DocValuesReader::open(dir, segment_name, s, segment_id, &field_infos).ok()
-        });
+        let doc_values_reader = if field_infos.has_doc_values() {
+            let suffix =
+                derive_suffix(&field_infos, "PerFieldDocValuesFormat").ok_or_else(|| {
+                    io::Error::other("segment has doc values but no PerFieldDocValuesFormat suffix")
+                })?;
+            Some(DocValuesReader::open(
+                dir,
+                segment_name,
+                &suffix,
+                segment_id,
+                &field_infos,
+            )?)
+        } else {
+            None
+        };
 
         let term_vectors_reader = if field_infos.has_vectors() {
-            TermVectorsReader::open(dir, segment_name, "", segment_id).ok()
+            Some(TermVectorsReader::open(dir, segment_name, "", segment_id)?)
         } else {
             None
         };
 
         let points_reader = if field_infos.has_point_values() {
-            PointsReader::open(dir, segment_name, "", segment_id, &field_infos).ok()
+            Some(PointsReader::open(
+                dir,
+                segment_name,
+                "",
+                segment_id,
+                &field_infos,
+            )?)
         } else {
             None
         };
 
-        let terms_reader = postings_suffix.as_deref().and_then(|s| {
-            BlockTreeTermsReader::open(dir, segment_name, s, segment_id, &field_infos).ok()
-        });
-
-        let postings_reader = postings_suffix.as_deref().and_then(|s| {
-            PostingsReader::open(dir, segment_name, s, segment_id, &field_infos).ok()
-        });
+        let (terms_reader, postings_reader) = if field_infos.has_postings() {
+            let suffix =
+                derive_suffix(&field_infos, "PerFieldPostingsFormat").ok_or_else(|| {
+                    io::Error::other("segment has postings but no PerFieldPostingsFormat suffix")
+                })?;
+            let terms =
+                BlockTreeTermsReader::open(dir, segment_name, &suffix, segment_id, &field_infos)?;
+            let postings =
+                PostingsReader::open(dir, segment_name, &suffix, segment_id, &field_infos)?;
+            (Some(terms), Some(postings))
+        } else {
+            (None, None)
+        };
 
         Ok(Self {
             segment_name: segment_name.to_string(),
@@ -560,5 +574,54 @@ mod tests {
         assert_eq!(docs[0], 0);
         assert_eq!(docs[1], 2);
         assert_eq!(docs[99], 198);
+    }
+
+    #[test]
+    fn test_missing_stored_fields_file_is_error() {
+        // Write a valid index, then remove a stored fields file
+        let (dir, name, id) = write_test_index(false);
+        let mut mem_dir = MemoryDirectory::new();
+
+        // Copy all files except .fdt (stored fields data)
+        for filename in dir.list_all().unwrap() {
+            if !filename.ends_with(".fdt") {
+                let data = dir.read_file(&filename).unwrap();
+                mem_dir.write_file(&filename, &data).unwrap();
+            }
+        }
+
+        let result = SegmentReader::open(&mem_dir, &name, &id);
+        assert!(
+            result.is_err(),
+            "expected error when stored fields file is missing"
+        );
+    }
+
+    #[test]
+    fn test_segment_without_norms_has_no_norms_reader() {
+        // KeywordField has omit_norms=true, no TextField => no norms
+        let config = IndexWriterConfig::new().set_use_compound_file(false);
+        let writer = IndexWriter::with_config(config);
+
+        let mut doc = Document::new();
+        doc.add(document::keyword_field("id", "abc"));
+        writer.add_document(doc).unwrap();
+
+        let result = writer.commit().unwrap();
+        let seg_files = result.into_segment_files().unwrap();
+        let mut mem_dir = MemoryDirectory::new();
+        for sf in &seg_files {
+            mem_dir.write_file(&sf.name, &sf.data).unwrap();
+        }
+        let files = mem_dir.list_all().unwrap();
+        let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
+        let infos = crate::index::segment_infos::read(&mem_dir, segments_file).unwrap();
+        let seg = &infos.segments[0];
+
+        let reader = SegmentReader::open(&mem_dir, &seg.name, &seg.id).unwrap();
+        assert!(
+            reader.norms_reader().is_none(),
+            "segment without norms should have no norms reader"
+        );
     }
 }
