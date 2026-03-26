@@ -2,7 +2,10 @@
 
 //! Search types for query execution, scoring, and result collection.
 
+pub mod boolean_query;
+pub mod boolean_weight;
 pub mod collector;
+pub mod conjunction;
 pub mod doc_id_set_iterator;
 pub mod index_searcher;
 pub mod long_heap;
@@ -15,6 +18,7 @@ pub mod term_states;
 pub mod top_docs;
 pub mod top_score_doc_collector;
 
+pub use boolean_query::{BooleanClause, BooleanQuery, Occur};
 pub use collector::{
     Collector, CollectorManager, DocAndFloatFeatureBuffer, DocIdStream, LeafCollector,
     RangeDocIdStream, ScoreContext, ScoreMode, SimpleScorable,

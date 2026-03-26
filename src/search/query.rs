@@ -28,6 +28,14 @@ pub trait Query {
         score_mode: ScoreMode,
         boost: f32,
     ) -> io::Result<Box<dyn Weight>>;
+
+    /// Expert: Called to re-write queries into primitive queries. Returns `None` if this
+    /// query does not need rewriting.
+    ///
+    /// // TODO: implement query rewriting
+    fn rewrite(&self, _searcher: &IndexSearcher) -> io::Result<Option<Box<dyn Query>>> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,31 +206,51 @@ impl BulkScorer for DefaultBulkScorer {
         collector.set_scorer(Rc::clone(&score_context))?;
         let competitive_iterator = collector.competitive_iterator();
 
-        let iterator = self.scorer.iterator();
-
-        if iterator.doc_id() < min {
-            if iterator.doc_id() == min - 1 {
-                iterator.next_doc()?;
+        // Advance to min. Each borrow of self.scorer.iterator() is temporary so we can
+        // also call self.scorer.score() in the loop below.
+        if self.scorer.iterator().doc_id() < min {
+            if self.scorer.iterator().doc_id() == min - 1 {
+                self.scorer.iterator().next_doc()?;
             } else {
-                iterator.advance(min)?;
+                self.scorer.iterator().advance(min)?;
             }
         }
 
         match competitive_iterator {
             None => {
-                Self::score_iterator(collector, iterator, max)?;
+                // Score documents in [min, max) writing each score into the ScoreContext
+                // before calling collect. We can't use a static method here because we need
+                // access to both self.scorer.iterator() and self.scorer.score() in the loop,
+                // and holding an iterator borrow would prevent calling score().
+                while self.scorer.doc_id() < max {
+                    score_context.score.set(self.scorer.score()?);
+                    collector.collect(self.scorer.doc_id())?;
+                    self.scorer.iterator().next_doc()?;
+                }
             }
             Some(mut ci) => {
                 let ci_doc = ci.doc_id();
                 let effective_min = if ci_doc > min { ci_doc.min(max) } else { min };
-                if iterator.doc_id() < effective_min {
-                    iterator.advance(effective_min)?;
+                if self.scorer.iterator().doc_id() < effective_min {
+                    self.scorer.iterator().advance(effective_min)?;
                 }
-                Self::score_competitive_iterator(collector, iterator, ci.as_mut(), max)?;
+                while self.scorer.doc_id() < max {
+                    debug_assert!(ci.doc_id() <= self.scorer.doc_id());
+                    if ci.doc_id() < self.scorer.doc_id() {
+                        let competitive_next = ci.advance(self.scorer.doc_id())?;
+                        if competitive_next != self.scorer.doc_id() {
+                            self.scorer.iterator().advance(competitive_next)?;
+                            continue;
+                        }
+                    }
+                    score_context.score.set(self.scorer.score()?);
+                    collector.collect(self.scorer.doc_id())?;
+                    self.scorer.iterator().next_doc()?;
+                }
             }
         }
 
-        Ok(iterator.doc_id())
+        Ok(self.scorer.doc_id())
     }
 
     fn cost(&self) -> i64 {

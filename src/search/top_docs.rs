@@ -10,6 +10,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Holds one hit in `TopDocs`.
+#[derive(Debug)]
 pub struct ScoreDoc {
     /// A hit document's number.
     pub doc: i32,

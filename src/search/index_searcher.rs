@@ -106,6 +106,14 @@ impl<'a> IndexSearcher<'a> {
         manager.reduce(vec![collector])
     }
 
+    /// Rewrites the given query, returning the rewritten form. Returns the original query
+    /// if no rewriting is needed.
+    ///
+    /// // TODO: implement the iterative rewriting loop
+    pub fn rewrite(&self, query: Box<dyn Query>) -> io::Result<Box<dyn Query>> {
+        Ok(query)
+    }
+
     /// Creates a `Weight` for the given query.
     pub fn create_weight(
         &self,
