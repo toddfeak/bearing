@@ -212,6 +212,77 @@ pub fn check_footer(input: &mut ChecksumIndexInput) -> io::Result<()> {
     Ok(())
 }
 
+/// Returns (but does not validate) the checksum previously written by
+/// [`write_footer`]. Seeks to the footer, validates the footer magic and
+/// algorithm, and reads the stored CRC value.
+///
+/// This does NOT verify the CRC against the file data — use
+/// [`check_footer`] with a [`ChecksumIndexInput`] for full validation.
+pub fn retrieve_checksum(input: &mut dyn IndexInput) -> io::Result<i64> {
+    let len = input.length();
+    if len < FOOTER_LENGTH as u64 {
+        return Err(io::Error::other(format!(
+            "misplaced codec footer (file truncated?): length={len} but footerLength=={FOOTER_LENGTH}"
+        )));
+    }
+    input.seek(len - FOOTER_LENGTH as u64)?;
+    validate_footer(input)?;
+    read_crc(input)
+}
+
+/// Returns (but does not validate) the checksum, also verifying the file
+/// length matches `expected_length`.
+pub fn retrieve_checksum_with_length(
+    input: &mut dyn IndexInput,
+    expected_length: i64,
+) -> io::Result<i64> {
+    if expected_length < FOOTER_LENGTH as i64 {
+        return Err(io::Error::other(
+            "expectedLength cannot be less than the footer length",
+        ));
+    }
+    let actual = input.length() as i64;
+    if actual < expected_length {
+        return Err(io::Error::other(format!(
+            "truncated file: length={actual} but expectedLength=={expected_length}"
+        )));
+    } else if actual > expected_length {
+        return Err(io::Error::other(format!(
+            "file too long: length={actual} but expectedLength=={expected_length}"
+        )));
+    }
+    retrieve_checksum(input)
+}
+
+/// Validates footer magic and algorithm without checking CRC.
+fn validate_footer(input: &mut dyn IndexInput) -> io::Result<()> {
+    let magic = input.read_be_int()?;
+    if magic != FOOTER_MAGIC {
+        return Err(io::Error::other(format!(
+            "codec footer mismatch (file truncated?): actual footer=0x{:08X} vs expected footer=0x{:08X}",
+            magic as u32, FOOTER_MAGIC as u32
+        )));
+    }
+    let algorithm_id = input.read_be_int()?;
+    if algorithm_id != 0 {
+        return Err(io::Error::other(format!(
+            "codec footer mismatch: unknown algorithmID: {algorithm_id}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reads the CRC long from the current position.
+fn read_crc(input: &mut dyn IndexInput) -> io::Result<i64> {
+    let checksum = input.read_be_long()?;
+    if (checksum as u64) & 0xFFFF_FFFF_0000_0000 != 0 {
+        return Err(io::Error::other(format!(
+            "illegal CRC-32 checksum: {checksum}"
+        )));
+    }
+    Ok(checksum)
+}
+
 /// Computes the CRC32 checksum of an entire file.
 ///
 /// Seeks to the start, reads all bytes through a [`ChecksumIndexInput`],
@@ -536,5 +607,54 @@ mod tests {
         );
 
         assert_eq!(written_crc, checksum_before_crc);
+    }
+
+    // --- retrieve_checksum tests ---
+
+    fn make_valid_file() -> Vec<u8> {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        write_index_header(&mut out, "TestCodec", 1, &[0u8; 16], "").unwrap();
+        out.write_bytes(b"payload").unwrap();
+        write_footer(&mut out).unwrap();
+        out.into_inner().data
+    }
+
+    #[test]
+    fn test_retrieve_checksum_valid() {
+        let data = make_valid_file();
+        let mut input = ByteSliceIndexInput::new("test".into(), data);
+        let crc = retrieve_checksum(&mut input).unwrap();
+        assert_ge!(crc, 0);
+    }
+
+    #[test]
+    fn test_retrieve_checksum_truncated() {
+        let mut input = ByteSliceIndexInput::new("test".into(), vec![0u8; 4]);
+        assert!(retrieve_checksum(&mut input).is_err());
+    }
+
+    #[test]
+    fn test_retrieve_checksum_with_length_valid() {
+        let data = make_valid_file();
+        let expected_length = data.len() as i64;
+        let mut input = ByteSliceIndexInput::new("test".into(), data);
+        let crc = retrieve_checksum_with_length(&mut input, expected_length).unwrap();
+        assert_ge!(crc, 0);
+    }
+
+    #[test]
+    fn test_retrieve_checksum_with_length_too_short() {
+        let data = make_valid_file();
+        let mut input = ByteSliceIndexInput::new("test".into(), data.clone());
+        let result = retrieve_checksum_with_length(&mut input, data.len() as i64 + 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retrieve_checksum_with_length_too_long() {
+        let data = make_valid_file();
+        let mut input = ByteSliceIndexInput::new("test".into(), data);
+        let result = retrieve_checksum_with_length(&mut input, FOOTER_LENGTH as i64 + 1);
+        assert!(result.is_err());
     }
 }
