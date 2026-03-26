@@ -11,6 +11,7 @@ pub mod scorable;
 pub mod scorer;
 pub mod similarity;
 pub mod term_query;
+pub mod term_states;
 pub mod top_docs;
 pub mod top_score_doc_collector;
 
@@ -28,5 +29,6 @@ pub use similarity::{
     BM25Similarity, BulkSimScorer, CollectionStatistics, SimScorer, Similarity, TermStatistics,
 };
 pub use term_query::TermQuery;
+pub use term_states::TermStates;
 pub use top_docs::{Relation, ScoreDoc, TopDocs, TotalHits};
 pub use top_score_doc_collector::{TopScoreDocCollector, TopScoreDocCollectorManager};

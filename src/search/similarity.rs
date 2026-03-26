@@ -201,6 +201,9 @@ pub trait SimScorer {
     /// Score must not decrease when `freq` increases. Score must not increase when the
     /// unsigned `norm` increases.
     fn score(&self, freq: f32, norm: i64) -> f32;
+
+    /// Returns a boxed clone of this scorer.
+    fn box_clone(&self) -> Box<dyn SimScorer>;
 }
 
 /// Specialization of `SimScorer` for bulk-computation of scores.
@@ -412,6 +415,13 @@ impl SimScorer for BM25Scorer {
         let norm_inverse = self.cache[(encoded_norm as u8) as usize];
         self.do_score(freq, norm_inverse)
     }
+
+    fn box_clone(&self) -> Box<dyn SimScorer> {
+        Box::new(BM25Scorer {
+            weight: self.weight,
+            cache: self.cache,
+        })
+    }
 }
 
 /// BM25 bulk scorer that pre-decodes norms for vectorization.
@@ -591,6 +601,10 @@ mod tests {
         fn score(&self, _freq: f32, _norm: i64) -> f32 {
             self.value
         }
+
+        fn box_clone(&self) -> Box<dyn SimScorer> {
+            Box::new(ConstantSimScorer { value: self.value })
+        }
     }
 
     #[test]
@@ -617,6 +631,10 @@ mod tests {
         impl SimScorer for LinearSimScorer {
             fn score(&self, freq: f32, _norm: i64) -> f32 {
                 freq * 2.0
+            }
+
+            fn box_clone(&self) -> Box<dyn SimScorer> {
+                Box::new(LinearSimScorer)
             }
         }
 

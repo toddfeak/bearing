@@ -14,7 +14,8 @@ use crate::search::query::{
 };
 use crate::search::scorable::Scorable;
 use crate::search::scorer::Scorer;
-use crate::search::similarity::{CollectionStatistics, SimScorer, Similarity, TermStatistics};
+use crate::search::similarity::{CollectionStatistics, SimScorer, TermStatistics};
+use crate::search::term_states::TermStates;
 use crate::util::BytesRef;
 
 // ---------------------------------------------------------------------------
@@ -56,55 +57,22 @@ impl Query for TermQuery {
         score_mode: ScoreMode,
         boost: f32,
     ) -> io::Result<Box<dyn Weight>> {
-        // Aggregate doc_freq and total_term_freq across all segments
-        let mut total_doc_freq: i64 = 0;
-        let mut total_ttf: i64 = 0;
-        if score_mode.needs_scores() {
-            for leaf in searcher.get_reader().leaves() {
-                let reader = &leaf.reader;
-                let field_info = match reader.field_infos().field_info_by_name(&self.field) {
-                    Some(fi) => fi,
-                    None => continue,
-                };
-                let terms_reader = match reader.terms_reader() {
-                    Some(tr) => tr,
-                    None => continue,
-                };
-                let field_reader = match terms_reader.field_reader(field_info.number()) {
-                    Some(fr) => fr,
-                    None => continue,
-                };
-                let trie = field_reader.new_trie_reader()?;
-                let trie_result = match trie.seek_to_block(&self.term)? {
-                    Some(r) => r,
-                    None => continue,
-                };
-                let index_input = field_reader.index_input()?;
-                let term_state = crate::codecs::lucene103::segment_terms_enum::seek_exact(
-                    terms_reader.terms_in(),
-                    &trie_result,
-                    &self.term,
-                    field_info.index_options(),
-                    &*index_input,
-                )?;
-                if let Some(state) = term_state {
-                    total_doc_freq += state.doc_freq as i64;
-                    let ttf = if state.total_term_freq > 0 {
-                        state.total_term_freq
-                    } else {
-                        state.doc_freq as i64
-                    };
-                    total_ttf += ttf;
-                }
-            }
-        }
+        // Java: TermStates.build(searcher, term, scoreMode.needsScores())
+        let term_states = TermStates::build(searcher, &self.field, &self.term)?;
+
+        // Java: TermWeight constructor (L57-94)
+        let similarity = searcher.get_similarity();
 
         let collection_stats;
         let term_stats;
         if score_mode.needs_scores() {
             collection_stats = searcher.collection_statistics(&self.field)?;
-            term_stats = if total_doc_freq > 0 {
-                Some(searcher.term_statistics(&self.term, total_doc_freq, total_ttf)?)
+            term_stats = if term_states.doc_freq() > 0 {
+                Some(searcher.term_statistics(
+                    &self.term,
+                    term_states.doc_freq() as i64,
+                    term_states.total_term_freq(),
+                )?)
             } else {
                 None
             };
@@ -114,14 +82,24 @@ impl Query for TermQuery {
             term_stats = Some(TermStatistics::new(BytesRef::new(self.term.clone()), 1, 1));
         }
 
+        // Java: L75-94 — create simScorer once, or null if term doesn't exist
+        let sim_scorer = match (&collection_stats, &term_stats) {
+            (Some(cs), Some(ts)) if score_mode.needs_scores() => {
+                Some(similarity.scorer(boost, cs, std::slice::from_ref(ts)))
+            }
+            (Some(cs), Some(ts)) => {
+                // Not scoring — assign a dummy scorer to avoid unnecessary allocations
+                Some(similarity.scorer(boost, cs, std::slice::from_ref(ts)))
+            }
+            _ => None,
+        };
+
         Ok(Box::new(TermWeight {
             field: self.field.clone(),
             term: self.term.clone(),
-            similarity: searcher.get_similarity().box_clone(),
+            sim_scorer,
+            term_states,
             score_mode,
-            boost,
-            collection_stats,
-            term_stats,
         }))
     }
 }
@@ -132,17 +110,16 @@ impl Query for TermQuery {
 
 /// Expert: Calculate query weights and build scorers for a `TermQuery`.
 ///
-/// Holds the field, term, similarity, score mode, boost, and pre-computed aggregated
-/// statistics. The `SimScorer` is created once in `create_weight` from aggregated stats
-/// and reused per-leaf.
+/// Holds the field, term, a single pre-computed `SimScorer`, cached per-leaf term states,
+/// and score mode. The `SimScorer` is created once in `create_weight` from aggregated
+/// stats and cloned per-leaf.
 pub struct TermWeight {
     field: String,
+    #[expect(dead_code)]
     term: Vec<u8>,
-    similarity: Box<dyn Similarity>,
+    sim_scorer: Option<Box<dyn SimScorer>>,
+    term_states: TermStates,
     score_mode: ScoreMode,
-    boost: f32,
-    collection_stats: Option<CollectionStatistics>,
-    term_stats: Option<TermStatistics>,
 }
 
 impl Weight for TermWeight {
@@ -150,61 +127,22 @@ impl Weight for TermWeight {
         &self,
         context: &LeafReaderContext,
     ) -> io::Result<Option<Box<dyn ScorerSupplier>>> {
+        // Java: termStates.get(context) — use cached state, no trie navigation
+        let state = match self.term_states.get(context.ord) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
         let reader = &context.reader;
 
-        // Look up the field info
+        // Look up the field info (needed for index_options and norms check)
         let field_info = match reader.field_infos().field_info_by_name(&self.field) {
             Some(fi) => fi,
             None => return Ok(None),
         };
 
-        // Get terms reader to access field-level statistics
-        let terms_reader = match reader.terms_reader() {
-            Some(tr) => tr,
-            None => return Ok(None),
-        };
-
-        let field_reader = match terms_reader.field_reader(field_info.number()) {
-            Some(fr) => fr,
-            None => return Ok(None),
-        };
-
-        // Navigate the trie to find the term and get IntBlockTermState
-        let trie = field_reader.new_trie_reader()?;
-        let trie_result = match trie.seek_to_block(&self.term)? {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        let index_input = field_reader.index_input()?;
-        let term_state = crate::codecs::lucene103::segment_terms_enum::seek_exact(
-            terms_reader.terms_in(),
-            &trie_result,
-            &self.term,
-            field_info.index_options(),
-            &*index_input,
-        )?;
-
-        let Some(state) = term_state else {
-            return Ok(None);
-        };
-
-        // Create SimScorer from the aggregated stats computed in create_weight.
-        // Java stores the SimScorer once on TermWeight. We recreate per-leaf from the same
-        // aggregated stats — cheap, and produces identical IDF across all segments.
-        let sim_scorer = match (&self.collection_stats, &self.term_stats) {
-            (Some(cs), Some(ts)) => {
-                self.similarity
-                    .scorer(self.boost, cs, std::slice::from_ref(ts))
-            }
-            _ => {
-                // term_stats is None means the term doesn't exist at all — but we found a
-                // per-segment term_state, which shouldn't happen. Use fake stats as fallback.
-                let fake_coll = CollectionStatistics::new(self.field.clone(), 1, 1, 1, 1);
-                let fake_term = TermStatistics::new(BytesRef::new(self.term.clone()), 1, 1);
-                self.similarity.scorer(self.boost, &fake_coll, &[fake_term])
-            }
-        };
+        // Clone the SimScorer created in create_weight
+        let sim_scorer = self.sim_scorer.as_ref().map(|s| s.box_clone());
 
         // Build postings enum — use impacts mode for TopScores
         let postings_reader = match reader.postings_reader() {
@@ -252,7 +190,7 @@ impl Weight for TermWeight {
 
         Ok(Some(Box::new(TermScorerSupplier {
             postings_enum: Some(postings_enum),
-            sim_scorer: Some(sim_scorer),
+            sim_scorer,
             norms,
             doc_freq: state.doc_freq,
             score_mode: self.score_mode,

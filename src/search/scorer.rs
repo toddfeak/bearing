@@ -484,6 +484,10 @@ mod tests {
         fn score(&self, freq: f32, norm: i64) -> f32 {
             freq / norm.max(1) as f32
         }
+
+        fn box_clone(&self) -> Box<dyn crate::search::similarity::SimScorer> {
+            Box::new(TestSimScorer)
+        }
     }
 
     #[test]
