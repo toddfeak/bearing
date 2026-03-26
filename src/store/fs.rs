@@ -373,6 +373,34 @@ impl crate::store::RandomAccessInput for FSIndexInput {
         Ok(buf[0])
     }
 
+    fn read_le_short_at(&self, pos: u64) -> io::Result<i16> {
+        if pos + 2 > self.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("read_le_short_at({pos}) past end (len={})", self.len),
+            ));
+        }
+        let mut file = File::open(&self.path)?;
+        file.seek(io::SeekFrom::Start(self.offset + pos))?;
+        let mut buf = [0u8; 2];
+        file.read_exact(&mut buf)?;
+        Ok(i16::from_le_bytes(buf))
+    }
+
+    fn read_le_int_at(&self, pos: u64) -> io::Result<i32> {
+        if pos + 4 > self.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("read_le_int_at({pos}) past end (len={})", self.len),
+            ));
+        }
+        let mut file = File::open(&self.path)?;
+        file.seek(io::SeekFrom::Start(self.offset + pos))?;
+        let mut buf = [0u8; 4];
+        file.read_exact(&mut buf)?;
+        Ok(i32::from_le_bytes(buf))
+    }
+
     fn read_le_long_at(&self, pos: u64) -> io::Result<i64> {
         if pos + 8 > self.len {
             return Err(io::Error::new(

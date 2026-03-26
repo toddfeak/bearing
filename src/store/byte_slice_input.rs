@@ -138,6 +138,30 @@ impl RandomAccessInput for ByteSliceIndexInput {
         Ok(self.data[abs])
     }
 
+    fn read_le_short_at(&self, pos: u64) -> io::Result<i16> {
+        let abs = self.offset + pos as usize;
+        if pos as usize + 2 > self.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("read_le_short_at({pos}) past end (len={})", self.len),
+            ));
+        }
+        let bytes: [u8; 2] = self.data[abs..abs + 2].try_into().unwrap();
+        Ok(i16::from_le_bytes(bytes))
+    }
+
+    fn read_le_int_at(&self, pos: u64) -> io::Result<i32> {
+        let abs = self.offset + pos as usize;
+        if pos as usize + 4 > self.len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("read_le_int_at({pos}) past end (len={})", self.len),
+            ));
+        }
+        let bytes: [u8; 4] = self.data[abs..abs + 4].try_into().unwrap();
+        Ok(i32::from_le_bytes(bytes))
+    }
+
     fn read_le_long_at(&self, pos: u64) -> io::Result<i64> {
         let abs = self.offset + pos as usize;
         if pos as usize + 8 > self.len {

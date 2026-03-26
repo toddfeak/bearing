@@ -224,6 +224,24 @@ impl RandomAccessInput for MmapRandomAccessInput {
         Ok(self.mmap[self.abs_pos(pos)])
     }
 
+    fn read_le_short_at(&self, pos: u64) -> io::Result<i16> {
+        if pos + 2 > self.len {
+            return Err(io::Error::other("read_le_short_at past end"));
+        }
+        let p = self.abs_pos(pos);
+        let bytes: [u8; 2] = self.mmap[p..p + 2].try_into().unwrap();
+        Ok(i16::from_le_bytes(bytes))
+    }
+
+    fn read_le_int_at(&self, pos: u64) -> io::Result<i32> {
+        if pos + 4 > self.len {
+            return Err(io::Error::other("read_le_int_at past end"));
+        }
+        let p = self.abs_pos(pos);
+        let bytes: [u8; 4] = self.mmap[p..p + 4].try_into().unwrap();
+        Ok(i32::from_le_bytes(bytes))
+    }
+
     fn read_le_long_at(&self, pos: u64) -> io::Result<i64> {
         if pos + 8 > self.len {
             return Err(io::Error::other("read_le_long_at past end"));

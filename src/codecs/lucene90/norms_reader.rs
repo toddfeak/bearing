@@ -15,9 +15,10 @@ use crate::codecs::lucene90::indexed_disi::IndexedDISI;
 use crate::codecs::lucene90::norms::{
     DATA_CODEC, DATA_EXTENSION, META_CODEC, META_EXTENSION, VERSION,
 };
+use crate::index::numeric_doc_values::NumericDocValues;
 use crate::index::{FieldInfos, index_file_names};
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::{DataInput, Directory, IndexInput, RandomAccessInput};
 
 /// Per-field norms metadata entry read from `.nvm`.
 #[derive(Clone)]
@@ -205,11 +206,162 @@ impl NormsReader {
         Ok(Some(value))
     }
 
+    /// Returns a [`NumericDocValues`] for the given field, or `None` if the field
+    /// has no norms (EMPTY pattern or no entry).
+    ///
+    /// For dense norms (all docs have a value), the returned iterator does a single
+    /// random-access read per `long_value()` call — no seeking. For sparse norms,
+    /// it wraps an [`IndexedDISI`] for presence checks.
+    pub fn get_norms(&self, field_number: u32) -> io::Result<Option<Box<dyn NumericDocValues>>> {
+        let entry = match self.entry(field_number) {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+
+        if entry.docs_with_field_offset == -2 {
+            // EMPTY: no documents have norms for this field
+            return Ok(None);
+        } else if entry.docs_with_field_offset == -1 {
+            // DENSE: every document has a norm
+            if entry.bytes_per_norm == 0 {
+                return Ok(Some(Box::new(DenseNormsIterator {
+                    doc: -1,
+                    max_doc: self.max_doc,
+                    slice: None,
+                    bytes_per_norm: 0,
+                    constant_value: entry.norms_offset,
+                })));
+            }
+            let data_length = entry.num_docs_with_field as u64 * entry.bytes_per_norm as u64;
+            let slice_input =
+                self.data
+                    .slice("norms data", entry.norms_offset as u64, data_length)?;
+            let slice = slice_input.random_access()?;
+            return Ok(Some(Box::new(DenseNormsIterator {
+                doc: -1,
+                max_doc: self.max_doc,
+                slice: Some(slice),
+                bytes_per_norm: entry.bytes_per_norm,
+                constant_value: 0,
+            })));
+        }
+
+        // SPARSE: use IndexedDISI to check presence and get ordinal
+        let disi = IndexedDISI::new(
+            self.data.as_ref(),
+            entry.docs_with_field_offset,
+            entry.docs_with_field_length,
+            entry.jump_table_entry_count,
+            entry.dense_rank_power,
+            entry.num_docs_with_field as i64,
+        )?;
+
+        if entry.bytes_per_norm == 0 {
+            return Ok(Some(Box::new(SparseNormsIterator {
+                disi,
+                slice: None,
+                bytes_per_norm: 0,
+                constant_value: entry.norms_offset,
+            })));
+        }
+        let data_length = entry.num_docs_with_field as u64 * entry.bytes_per_norm as u64;
+        let slice_input = self
+            .data
+            .slice("norms data", entry.norms_offset as u64, data_length)?;
+        let slice = slice_input.random_access()?;
+        Ok(Some(Box::new(SparseNormsIterator {
+            disi,
+            slice: Some(slice),
+            bytes_per_norm: entry.bytes_per_norm,
+            constant_value: 0,
+        })))
+    }
+
     /// Returns the norms entry for a field number, or `None` if absent.
     fn entry(&self, field_number: u32) -> Option<&NormsEntry> {
         self.entries
             .get(field_number as usize)
             .and_then(|opt| opt.as_ref())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DenseNormsIterator — all documents have a norm value
+// ---------------------------------------------------------------------------
+
+/// Dense norms iterator where every document has a norm value.
+///
+/// For `bytes_per_norm > 0`, reads values via random access into the `.nvd`
+/// data slice. For `bytes_per_norm == 0`, returns a constant value.
+struct DenseNormsIterator {
+    doc: i32,
+    #[expect(dead_code)]
+    max_doc: i32,
+    slice: Option<Box<dyn RandomAccessInput>>,
+    bytes_per_norm: u8,
+    constant_value: i64,
+}
+
+impl NumericDocValues for DenseNormsIterator {
+    fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        self.doc = target;
+        Ok(true)
+    }
+
+    fn long_value(&self) -> io::Result<i64> {
+        if self.bytes_per_norm == 0 {
+            return Ok(self.constant_value);
+        }
+        let slice = self.slice.as_ref().unwrap();
+        match self.bytes_per_norm {
+            1 => Ok(slice.read_byte_at(self.doc as u64)? as i8 as i64),
+            2 => Ok(slice.read_le_short_at((self.doc as u64) << 1)? as i64),
+            4 => Ok(slice.read_le_int_at((self.doc as u64) << 2)? as i64),
+            8 => slice.read_le_long_at((self.doc as u64) << 3),
+            _ => Err(io::Error::other(format!(
+                "invalid bytes_per_norm: {}",
+                self.bytes_per_norm
+            ))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SparseNormsIterator — only some documents have a norm value
+// ---------------------------------------------------------------------------
+
+/// Sparse norms iterator backed by an [`IndexedDISI`].
+///
+/// `advance_exact` delegates to the DISI to check document presence.
+/// `long_value` reads from the data slice at the DISI's ordinal index.
+struct SparseNormsIterator {
+    disi: IndexedDISI,
+    slice: Option<Box<dyn RandomAccessInput>>,
+    bytes_per_norm: u8,
+    constant_value: i64,
+}
+
+impl NumericDocValues for SparseNormsIterator {
+    fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        self.disi.advance_exact(target)
+    }
+
+    fn long_value(&self) -> io::Result<i64> {
+        if self.bytes_per_norm == 0 {
+            return Ok(self.constant_value);
+        }
+        let index = self.disi.index() as u64;
+        let slice = self.slice.as_ref().unwrap();
+        match self.bytes_per_norm {
+            1 => Ok(slice.read_byte_at(index)? as i8 as i64),
+            2 => Ok(slice.read_le_short_at(index << 1)? as i64),
+            4 => Ok(slice.read_le_int_at(index << 2)? as i64),
+            8 => slice.read_le_long_at(index << 3),
+            _ => Err(io::Error::other(format!(
+                "invalid bytes_per_norm: {}",
+                self.bytes_per_norm
+            ))),
+        }
     }
 }
 

@@ -321,6 +321,12 @@ pub trait RandomAccessInput: Send {
     /// Reads a single byte at the given absolute position.
     fn read_byte_at(&self, pos: u64) -> io::Result<u8>;
 
+    /// Reads a 2-byte little-endian short at the given absolute position.
+    fn read_le_short_at(&self, pos: u64) -> io::Result<i16>;
+
+    /// Reads a 4-byte little-endian int at the given absolute position.
+    fn read_le_int_at(&self, pos: u64) -> io::Result<i32>;
+
     /// Reads an 8-byte little-endian long at the given absolute position.
     fn read_le_long_at(&self, pos: u64) -> io::Result<i64>;
 }

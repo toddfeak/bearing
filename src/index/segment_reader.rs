@@ -195,6 +195,23 @@ impl SegmentReader {
         self.norms_reader.as_ref()
     }
 
+    /// Returns a lazy [`NumericDocValues`](crate::index::numeric_doc_values::NumericDocValues) for the given field's norms, or `None`
+    /// if no norms exist for this field.
+    ///
+    /// Matches Java's `LeafReader.getNormValues(String field)`.
+    pub fn get_norm_values(
+        &self,
+        field_number: u32,
+    ) -> io::Result<Option<Box<dyn crate::index::numeric_doc_values::NumericDocValues>>> {
+        match &self.norms_reader {
+            Some(nr) => {
+                let reader = nr.borrow();
+                reader.get_norms(field_number)
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Returns a norm value for the given field and document.
     ///
     /// Returns `Ok(1)` if no norms reader exists or the field has no norms.

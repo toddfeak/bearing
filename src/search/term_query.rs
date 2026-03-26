@@ -6,6 +6,7 @@ use std::io;
 
 use crate::codecs::lucene103::postings_reader::BlockPostingsEnum;
 use crate::index::directory_reader::LeafReaderContext;
+use crate::index::numeric_doc_values::NumericDocValues;
 use crate::search::collector::{DocAndFloatFeatureBuffer, ScoreMode};
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
 use crate::search::index_searcher::IndexSearcher;
@@ -174,16 +175,9 @@ impl Weight for TermWeight {
             )?
         };
 
-        // Load norms for this field. SegmentReader::get_norm uses RefCell for interior
-        // mutability, allowing us to read norms from an immutable reference.
-        let norms: Option<Box<[i64]>> = if field_info.has_norms() {
-            let max_doc = reader.max_doc();
-            let field_num = field_info.number();
-            let mut norm_values = vec![1i64; max_doc as usize];
-            for doc_id in 0..max_doc {
-                norm_values[doc_id as usize] = reader.get_norm(field_num, doc_id)?;
-            }
-            Some(norm_values.into_boxed_slice())
+        // Java: norms = context.reader().getNormValues(term.field())
+        let norms = if self.score_mode.needs_scores() {
+            reader.get_norm_values(field_info.number())?
         } else {
             None
         };
@@ -207,7 +201,7 @@ impl Weight for TermWeight {
 struct TermScorerSupplier {
     postings_enum: Option<BlockPostingsEnum>,
     sim_scorer: Option<Box<dyn SimScorer>>,
-    norms: Option<Box<[i64]>>,
+    norms: Option<Box<dyn NumericDocValues>>,
     doc_freq: i32,
     score_mode: ScoreMode,
     top_level_scoring_clause: bool,
@@ -267,7 +261,7 @@ pub struct TermScorer {
     postings_enum: BlockPostingsEnum,
     sim_scorer: Box<dyn SimScorer>,
     max_score_cache: crate::search::scorer::MaxScoreCache,
-    norms: Option<Box<[i64]>>,
+    norms: Option<Box<dyn NumericDocValues>>,
     norm_values: Vec<i64>,
     // ImpactsDISI state (inlined — see Java ImpactsDISI)
     min_competitive_score: f32,
@@ -281,7 +275,7 @@ impl TermScorer {
     fn new(
         postings_enum: BlockPostingsEnum,
         sim_scorer: Box<dyn SimScorer>,
-        norms: Option<Box<[i64]>>,
+        norms: Option<Box<dyn NumericDocValues>>,
         _score_mode: ScoreMode,
         top_level_scoring_clause: bool,
     ) -> Self {
@@ -302,14 +296,6 @@ impl TermScorer {
     /// Returns term frequency in the current document.
     pub fn freq(&mut self) -> io::Result<i32> {
         self.postings_enum.freq()
-    }
-
-    /// Look up the norm value for a document ID.
-    fn norm_value(&self, doc_id: i32) -> i64 {
-        match &self.norms {
-            Some(norms) if (doc_id as usize) < norms.len() => norms[doc_id as usize],
-            _ => 1,
-        }
     }
 
     // -- ImpactsDISI logic inlined (from Java ImpactsDISI) --
@@ -380,14 +366,25 @@ impl TermScorer {
 
 impl Scorable for TermScorer {
     fn score(&mut self) -> io::Result<f32> {
+        // Java TermScorer.score() L96-105
         let freq = self.postings_enum.freq()? as f32;
         let doc_id = self.postings_enum.doc_id();
-        let norm = self.norm_value(doc_id);
+        let mut norm = 1i64;
+        if let Some(ref mut norms) = self.norms
+            && norms.advance_exact(doc_id)?
+        {
+            norm = norms.long_value()?;
+        }
         Ok(self.sim_scorer.score(freq, norm))
     }
 
     fn smoothing_score(&mut self, doc_id: i32) -> io::Result<f32> {
-        let norm = self.norm_value(doc_id);
+        let mut norm = 1i64;
+        if let Some(ref mut norms) = self.norms
+            && norms.advance_exact(doc_id)?
+        {
+            norm = norms.long_value()?;
+        }
         Ok(self.sim_scorer.score(0.0, norm))
     }
 
@@ -456,21 +453,20 @@ impl Scorer for TermScorer {
         }
         buffer.size = size;
 
-        // Fill norm values for the batch
+        // Fill norm values for the batch — Java TermScorer.nextDocsAndScores L134-173
         if self.norm_values.len() < size {
             self.norm_values.resize(size, 1);
             if self.norms.is_none() {
                 self.norm_values.fill(1);
             }
         }
-        if let Some(ref norms) = self.norms {
+        if let Some(ref mut norms) = self.norms {
             for i in 0..size {
-                let doc_id = buffer.docs[i] as usize;
-                self.norm_values[i] = if doc_id < norms.len() {
-                    norms[doc_id]
+                if norms.advance_exact(buffer.docs[i])? {
+                    self.norm_values[i] = norms.long_value()?;
                 } else {
-                    1
-                };
+                    self.norm_values[i] = 1;
+                }
             }
         }
 

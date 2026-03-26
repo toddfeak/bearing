@@ -20,6 +20,7 @@ pub use index_writer_config::IndexWriterConfig;
 pub use segment_infos::{SegmentEntry, SegmentInfosRead};
 pub mod directory_reader;
 pub(crate) mod indexing_chain;
+pub mod numeric_doc_values;
 pub mod segment_infos;
 pub mod segment_reader;
 
