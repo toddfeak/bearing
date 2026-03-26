@@ -8,6 +8,7 @@ use crate::codecs::lucene103::postings_reader::BlockPostingsEnum;
 use crate::index::directory_reader::LeafReaderContext;
 use crate::search::collector::{DocAndFloatFeatureBuffer, ScoreMode};
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
+use crate::search::index_searcher::IndexSearcher;
 use crate::search::query::{
     BatchScoreBulkScorer, BulkScorer, DefaultBulkScorer, Query, ScorerSupplier, Weight,
 };
@@ -51,16 +52,76 @@ impl TermQuery {
 impl Query for TermQuery {
     fn create_weight(
         &self,
-        similarity: &dyn Similarity,
+        searcher: &IndexSearcher,
         score_mode: ScoreMode,
         boost: f32,
     ) -> io::Result<Box<dyn Weight>> {
+        // Aggregate doc_freq and total_term_freq across all segments
+        let mut total_doc_freq: i64 = 0;
+        let mut total_ttf: i64 = 0;
+        if score_mode.needs_scores() {
+            for leaf in searcher.get_reader().leaves() {
+                let reader = &leaf.reader;
+                let field_info = match reader.field_infos().field_info_by_name(&self.field) {
+                    Some(fi) => fi,
+                    None => continue,
+                };
+                let terms_reader = match reader.terms_reader() {
+                    Some(tr) => tr,
+                    None => continue,
+                };
+                let field_reader = match terms_reader.field_reader(field_info.number()) {
+                    Some(fr) => fr,
+                    None => continue,
+                };
+                let trie = field_reader.new_trie_reader()?;
+                let trie_result = match trie.seek_to_block(&self.term)? {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let index_input = field_reader.index_input()?;
+                let term_state = crate::codecs::lucene103::segment_terms_enum::seek_exact(
+                    terms_reader.terms_in(),
+                    &trie_result,
+                    &self.term,
+                    field_info.index_options(),
+                    &*index_input,
+                )?;
+                if let Some(state) = term_state {
+                    total_doc_freq += state.doc_freq as i64;
+                    let ttf = if state.total_term_freq > 0 {
+                        state.total_term_freq
+                    } else {
+                        state.doc_freq as i64
+                    };
+                    total_ttf += ttf;
+                }
+            }
+        }
+
+        let collection_stats;
+        let term_stats;
+        if score_mode.needs_scores() {
+            collection_stats = searcher.collection_statistics(&self.field)?;
+            term_stats = if total_doc_freq > 0 {
+                Some(searcher.term_statistics(&self.term, total_doc_freq, total_ttf)?)
+            } else {
+                None
+            };
+        } else {
+            // We do not need actual stats, use fake stats with docFreq=maxDoc=ttf=1
+            collection_stats = Some(CollectionStatistics::new(self.field.clone(), 1, 1, 1, 1));
+            term_stats = Some(TermStatistics::new(BytesRef::new(self.term.clone()), 1, 1));
+        }
+
         Ok(Box::new(TermWeight {
             field: self.field.clone(),
             term: self.term.clone(),
-            similarity: similarity.box_clone(),
+            similarity: searcher.get_similarity().box_clone(),
             score_mode,
             boost,
+            collection_stats,
+            term_stats,
         }))
     }
 }
@@ -71,15 +132,17 @@ impl Query for TermQuery {
 
 /// Expert: Calculate query weights and build scorers for a `TermQuery`.
 ///
-/// Holds the field, term, similarity, score mode, and boost. The `SimScorer` is created
-/// per-leaf in `scorer_supplier` using per-segment statistics. When `IndexSearcher` is
-/// available (Tier 7), statistics will be aggregated across segments first.
+/// Holds the field, term, similarity, score mode, boost, and pre-computed aggregated
+/// statistics. The `SimScorer` is created once in `create_weight` from aggregated stats
+/// and reused per-leaf.
 pub struct TermWeight {
     field: String,
     term: Vec<u8>,
     similarity: Box<dyn Similarity>,
     score_mode: ScoreMode,
     boost: f32,
+    collection_stats: Option<CollectionStatistics>,
+    term_stats: Option<TermStatistics>,
 }
 
 impl Weight for TermWeight {
@@ -126,31 +189,21 @@ impl Weight for TermWeight {
             return Ok(None);
         };
 
-        // Build SimScorer from collection and term statistics
-        let doc_freq = state.doc_freq as i64;
-        let total_term_freq = if state.total_term_freq > 0 {
-            state.total_term_freq
-        } else {
-            doc_freq
-        };
-
-        let sim_scorer = if self.score_mode.needs_scores() {
-            let collection_stats = CollectionStatistics::new(
-                self.field.clone(),
-                reader.max_doc() as i64,
-                field_reader.doc_count as i64,
-                field_reader.sum_total_term_freq,
-                field_reader.sum_doc_freq,
-            );
-            let term_stats =
-                TermStatistics::new(BytesRef::new(self.term.clone()), doc_freq, total_term_freq);
-            self.similarity
-                .scorer(self.boost, &collection_stats, &[term_stats])
-        } else {
-            // Use fake stats for non-scoring mode
-            let fake_coll = CollectionStatistics::new(self.field.clone(), 1, 1, 1, 1);
-            let fake_term = TermStatistics::new(BytesRef::new(self.term.clone()), 1, 1);
-            self.similarity.scorer(self.boost, &fake_coll, &[fake_term])
+        // Create SimScorer from the aggregated stats computed in create_weight.
+        // Java stores the SimScorer once on TermWeight. We recreate per-leaf from the same
+        // aggregated stats — cheap, and produces identical IDF across all segments.
+        let sim_scorer = match (&self.collection_stats, &self.term_stats) {
+            (Some(cs), Some(ts)) => {
+                self.similarity
+                    .scorer(self.boost, cs, std::slice::from_ref(ts))
+            }
+            _ => {
+                // term_stats is None means the term doesn't exist at all — but we found a
+                // per-segment term_state, which shouldn't happen. Use fake stats as fallback.
+                let fake_coll = CollectionStatistics::new(self.field.clone(), 1, 1, 1, 1);
+                let fake_term = TermStatistics::new(BytesRef::new(self.term.clone()), 1, 1);
+                self.similarity.scorer(self.boost, &fake_coll, &[fake_term])
+            }
         };
 
         // Build postings enum — use impacts mode for TopScores
@@ -160,11 +213,27 @@ impl Weight for TermWeight {
         };
 
         let index_has_freq = field_info.index_options().has_freqs();
+        let index_has_pos = field_info.index_options().has_positions();
+        let index_has_offsets = field_info.index_options()
+            >= crate::document::IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
+        let index_has_offsets_or_payloads = index_has_offsets || field_info.has_payloads();
         let needs_freq = self.score_mode.needs_scores();
         let postings_enum = if self.score_mode == ScoreMode::TopScores {
-            postings_reader.impacts(&state, index_has_freq, needs_freq)?
+            postings_reader.impacts(
+                &state,
+                index_has_freq,
+                index_has_pos,
+                index_has_offsets_or_payloads,
+                needs_freq,
+            )?
         } else {
-            postings_reader.postings(&state, index_has_freq, needs_freq)?
+            postings_reader.postings(
+                &state,
+                index_has_freq,
+                index_has_pos,
+                index_has_offsets_or_payloads,
+                needs_freq,
+            )?
         };
 
         // Load norms for this field. SegmentReader::get_norm uses RefCell for interior
@@ -491,7 +560,6 @@ mod tests {
     use crate::index::directory_reader::DirectoryReader;
     use crate::index::{IndexWriter, IndexWriterConfig};
     use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
-    use crate::search::similarity::BM25Similarity;
     use crate::store::{Directory, MemoryDirectory};
 
     fn build_test_index() -> (Box<dyn crate::store::Directory>, DirectoryReader) {
@@ -533,9 +601,10 @@ mod tests {
 
     #[test]
     fn test_term_query_create_weight() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
         let q = TermQuery::new("content", b"hello");
-        let sim = BM25Similarity::default();
-        let weight = q.create_weight(&sim, ScoreMode::Complete, 1.0);
+        let weight = q.create_weight(&searcher, ScoreMode::Complete, 1.0);
         assert!(weight.is_ok());
     }
 
@@ -544,9 +613,11 @@ mod tests {
     #[test]
     fn test_term_scorer_iterates_matching_docs() {
         let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
         let q = TermQuery::new("content", b"hello");
-        let sim = BM25Similarity::default();
-        let weight = q.create_weight(&sim, ScoreMode::Complete, 1.0).unwrap();
+        let weight = q
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
+            .unwrap();
 
         let leaf = &reader.leaves()[0];
         let supplier = weight.scorer_supplier(leaf).unwrap();
@@ -567,9 +638,11 @@ mod tests {
     #[test]
     fn test_term_scorer_scores_are_positive() {
         let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
         let q = TermQuery::new("content", b"hello");
-        let sim = BM25Similarity::default();
-        let weight = q.create_weight(&sim, ScoreMode::Complete, 1.0).unwrap();
+        let weight = q
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
+            .unwrap();
 
         let leaf = &reader.leaves()[0];
         let mut scorer = weight
@@ -591,12 +664,12 @@ mod tests {
     #[test]
     fn test_term_scorer_rare_term_scores_higher() {
         let (_dir, reader) = build_test_index();
-        let sim = BM25Similarity::default();
+        let searcher = IndexSearcher::new(&reader);
 
         // "world" is in 2 of 3 docs
         let q_common = TermQuery::new("content", b"world");
         let weight_common = q_common
-            .create_weight(&sim, ScoreMode::Complete, 1.0)
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
             .unwrap();
         let leaf = &reader.leaves()[0];
         let mut scorer_common = weight_common
@@ -611,7 +684,7 @@ mod tests {
         // "peace" is in 1 of 3 docs — rarer term should have higher IDF
         let q_rare = TermQuery::new("content", b"peace");
         let weight_rare = q_rare
-            .create_weight(&sim, ScoreMode::Complete, 1.0)
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
             .unwrap();
         let mut scorer_rare = weight_rare
             .scorer_supplier(leaf)
@@ -631,9 +704,11 @@ mod tests {
     #[test]
     fn test_term_scorer_nonexistent_term() {
         let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
         let q = TermQuery::new("content", b"nonexistent");
-        let sim = BM25Similarity::default();
-        let weight = q.create_weight(&sim, ScoreMode::Complete, 1.0).unwrap();
+        let weight = q
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
+            .unwrap();
 
         let leaf = &reader.leaves()[0];
         let supplier = weight.scorer_supplier(leaf).unwrap();
@@ -643,9 +718,11 @@ mod tests {
     #[test]
     fn test_term_scorer_nonexistent_field() {
         let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
         let q = TermQuery::new("no_such_field", b"hello");
-        let sim = BM25Similarity::default();
-        let weight = q.create_weight(&sim, ScoreMode::Complete, 1.0).unwrap();
+        let weight = q
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
+            .unwrap();
 
         let leaf = &reader.leaves()[0];
         let supplier = weight.scorer_supplier(leaf).unwrap();
@@ -655,11 +732,13 @@ mod tests {
     #[test]
     fn test_term_scorer_boost_scales_score() {
         let (_dir, reader) = build_test_index();
-        let sim = BM25Similarity::default();
+        let searcher = IndexSearcher::new(&reader);
         let leaf = &reader.leaves()[0];
 
         let q1 = TermQuery::new("content", b"hello");
-        let weight1 = q1.create_weight(&sim, ScoreMode::Complete, 1.0).unwrap();
+        let weight1 = q1
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
+            .unwrap();
         let mut scorer1 = weight1
             .scorer_supplier(leaf)
             .unwrap()
@@ -670,7 +749,9 @@ mod tests {
         let score1 = scorer1.score().unwrap();
 
         let q2 = TermQuery::new("content", b"hello");
-        let weight2 = q2.create_weight(&sim, ScoreMode::Complete, 2.0).unwrap();
+        let weight2 = q2
+            .create_weight(&searcher, ScoreMode::Complete, 2.0)
+            .unwrap();
         let mut scorer2 = weight2
             .scorer_supplier(leaf)
             .unwrap()
@@ -691,9 +772,11 @@ mod tests {
     #[test]
     fn test_batch_score_bulk_scorer_collects_docs() {
         let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
         let q = TermQuery::new("content", b"hello");
-        let sim = BM25Similarity::default();
-        let weight = q.create_weight(&sim, ScoreMode::Complete, 1.0).unwrap();
+        let weight = q
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
+            .unwrap();
 
         let leaf = &reader.leaves()[0];
         let scorer = weight
@@ -731,9 +814,11 @@ mod tests {
     #[test]
     fn test_batch_score_bulk_scorer_respects_range() {
         let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
         let q = TermQuery::new("content", b"world");
-        let sim = BM25Similarity::default();
-        let weight = q.create_weight(&sim, ScoreMode::Complete, 1.0).unwrap();
+        let weight = q
+            .create_weight(&searcher, ScoreMode::Complete, 1.0)
+            .unwrap();
 
         let leaf = &reader.leaves()[0];
         let scorer = weight

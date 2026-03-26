@@ -8,27 +8,23 @@ use std::rc::Rc;
 
 use super::collector::{DocAndFloatFeatureBuffer, LeafCollector, ScoreContext, ScoreMode};
 use super::doc_id_set_iterator::DocIdSetIterator;
+use super::index_searcher::IndexSearcher;
 use super::scorer::Scorer;
 use crate::index::directory_reader::LeafReaderContext;
-use crate::search::similarity::Similarity;
 
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
 
 /// Trait for all query types.
-///
-/// Since `IndexSearcher` is not yet available, `create_weight` takes a `&dyn Similarity`
-/// directly. This will be changed to take `IndexSearcher` when that type is ported (Tier 7).
 pub trait Query {
     /// Expert: Constructs an appropriate `Weight` implementation for this query.
     ///
     /// `score_mode` indicates how the produced scorers will be consumed.
     /// `boost` is the boost propagated by parent queries.
-    /// `similarity` is used for scoring — will be replaced by `IndexSearcher` parameter later.
     fn create_weight(
         &self,
-        similarity: &dyn Similarity,
+        searcher: &IndexSearcher,
         score_mode: ScoreMode,
         boost: f32,
     ) -> io::Result<Box<dyn Weight>>;

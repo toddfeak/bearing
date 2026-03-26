@@ -160,12 +160,16 @@ impl PostingsReader {
         &self,
         term_state: &postings_format::IntBlockTermState,
         index_has_freq: bool,
+        index_has_pos: bool,
+        index_has_offsets_or_payloads: bool,
         needs_freq: bool,
     ) -> io::Result<BlockPostingsEnum> {
         BlockPostingsEnum::new(
             &*self.doc_in,
             term_state,
             index_has_freq,
+            index_has_pos,
+            index_has_offsets_or_payloads,
             needs_freq,
             false, // needsImpacts
             self.max_num_impacts_at_level0,
@@ -180,12 +184,16 @@ impl PostingsReader {
         &self,
         term_state: &postings_format::IntBlockTermState,
         index_has_freq: bool,
+        index_has_pos: bool,
+        index_has_offsets_or_payloads: bool,
         needs_freq: bool,
     ) -> io::Result<BlockPostingsEnum> {
         BlockPostingsEnum::new(
             &*self.doc_in,
             term_state,
             index_has_freq,
+            index_has_pos,
+            index_has_offsets_or_payloads,
             needs_freq,
             true, // needsImpacts
             self.max_num_impacts_at_level0,
@@ -295,6 +303,8 @@ pub struct BlockPostingsEnum {
 
     // Index flags
     index_has_freq: bool,
+    index_has_pos: bool,
+    index_has_offsets_or_payloads: bool,
     needs_freq: bool,
     needs_impacts: bool,
     needs_docs_and_freqs_only: bool,
@@ -320,6 +330,8 @@ impl BlockPostingsEnum {
         doc_in: &dyn IndexInput,
         term_state: &postings_format::IntBlockTermState,
         index_has_freq: bool,
+        index_has_pos: bool,
+        index_has_offsets_or_payloads: bool,
         needs_freq: bool,
         needs_impacts: bool,
         max_num_impacts_at_level0: i32,
@@ -374,6 +386,8 @@ impl BlockPostingsEnum {
             freq_buffer,
             freq_fp: -1,
             index_has_freq,
+            index_has_pos,
+            index_has_offsets_or_payloads,
             needs_freq,
             needs_impacts,
             needs_docs_and_freqs_only,
@@ -608,7 +622,15 @@ impl BlockPostingsEnum {
                 } else {
                     self.doc_in.skip_bytes(num_impact_bytes as u64)?;
                 }
-                // Skip pos data — positions not supported yet
+
+                if self.index_has_pos {
+                    self.doc_in.read_vlong()?; // level0PosEndFP delta
+                    self.doc_in.read_byte()?; // level0BlockPosUpto
+                    if self.index_has_offsets_or_payloads {
+                        self.doc_in.read_vlong()?; // level0PayEndFP delta
+                        self.doc_in.read_vint()?; // level0BlockPayUpto
+                    }
+                }
             }
             self.refill_full_block()?;
         } else {
@@ -1168,7 +1190,7 @@ mod tests {
         assert_eq!(state.singleton_doc_id, 42);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, vec![42]);
     }
@@ -1181,7 +1203,7 @@ mod tests {
         assert_eq!(state.singleton_doc_id, -1);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1193,7 +1215,7 @@ mod tests {
         assert_eq!(state.doc_freq, 7);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1206,7 +1228,7 @@ mod tests {
         assert_eq!(state.doc_freq, 128);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1219,7 +1241,7 @@ mod tests {
         assert_eq!(state.doc_freq, 200);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1232,7 +1254,7 @@ mod tests {
         assert_eq!(state.doc_freq, 300);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1241,7 +1263,7 @@ mod tests {
     fn test_exhausted_returns_no_more_docs() {
         let (state, dir) = write_single_term(&[7]).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
 
         assert_eq!(iter.next_doc().unwrap(), 7);
         assert_eq!(iter.next_doc().unwrap(), NO_MORE_DOCS);
@@ -1252,7 +1274,7 @@ mod tests {
     fn test_advance_singleton() {
         let (state, dir) = write_single_term(&[42]).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
 
         assert_eq!(iter.advance(42).unwrap(), 42);
         assert_eq!(iter.next_doc().unwrap(), NO_MORE_DOCS);
@@ -1262,7 +1284,7 @@ mod tests {
     fn test_advance_past_end() {
         let (state, dir) = write_single_term(&[42]).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
 
         assert_eq!(iter.advance(100).unwrap(), NO_MORE_DOCS);
     }
@@ -1272,7 +1294,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..10).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
 
         assert_eq!(iter.advance(5).unwrap(), 5);
         assert_eq!(iter.next_doc().unwrap(), 6);
@@ -1285,7 +1307,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..128).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
 
         assert_eq!(iter.advance(64).unwrap(), 64);
         assert_eq!(iter.advance(127).unwrap(), 127);
@@ -1297,7 +1319,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..300).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
 
         // Advance into second block
         assert_eq!(iter.advance(200).unwrap(), 200);
@@ -1311,7 +1333,7 @@ mod tests {
         let doc_ids = vec![0, 100, 200, 300, 400, 500, 600, 700, 800, 900];
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
 
         assert_eq!(iter.advance(250).unwrap(), 300);
         assert_eq!(iter.advance(600).unwrap(), 600);
@@ -1323,7 +1345,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..50).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let iter = reader.postings(&state, false, false).unwrap();
+        let iter = reader.postings(&state, false, false, false, false).unwrap();
         assert_eq!(iter.cost(), 50);
     }
 
@@ -1378,7 +1400,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..2000).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
 
         assert_eq!(iter.advance(1500).unwrap(), 1500);
         assert_eq!(iter.next_doc().unwrap(), 1501);
@@ -1392,7 +1414,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..300).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.impacts(&state, false, false).unwrap();
+        let mut iter = reader.impacts(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1403,7 +1425,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..500).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false).unwrap();
+        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }

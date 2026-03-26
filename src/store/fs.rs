@@ -283,12 +283,14 @@ impl IndexInput for FSIndexInput {
     }
 
     fn random_access(&self) -> io::Result<Box<dyn crate::store::RandomAccessInput>> {
-        Ok(Box::new(FSIndexInput::new(
+        let mut input = FSIndexInput::new(
             format!("{} [random]", self.name),
             BufReader::new(File::open(&self.path)?),
             self.len,
             self.path.clone(),
-        )))
+        );
+        input.offset = self.offset;
+        Ok(Box::new(input))
     }
 }
 
@@ -592,6 +594,46 @@ mod tests {
         assert_eq!(inner.read_byte().unwrap(), 50);
         assert_eq!(inner.read_byte().unwrap(), 60);
         assert!(inner.read_byte().is_err());
+    }
+
+    #[test]
+    fn test_fs_random_access_on_slice_preserves_offset() {
+        let dir_path = temp_dir("ra_slice_offset");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
+            .unwrap();
+
+        let input = dir.open_input("test.bin").unwrap();
+        // Slice covering bytes [2..6) = [30, 40, 50, 60]
+        let sliced = input.slice("slice", 2, 4).unwrap();
+        let ra = sliced.random_access().unwrap();
+
+        // random_access reads must be relative to the slice, not the file
+        assert_eq!(ra.read_byte_at(0).unwrap(), 30);
+        assert_eq!(ra.read_byte_at(1).unwrap(), 40);
+        assert_eq!(ra.read_byte_at(2).unwrap(), 50);
+        assert_eq!(ra.read_byte_at(3).unwrap(), 60);
+    }
+
+    #[test]
+    fn test_fs_random_access_on_nested_slice_preserves_offset() {
+        let dir_path = temp_dir("ra_nested_offset");
+        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
+            .unwrap();
+
+        let input = dir.open_input("test.bin").unwrap();
+        let outer = input.slice("outer", 1, 6).unwrap(); // [20..70]
+        let inner = outer.slice("inner", 2, 3).unwrap(); // [40, 50, 60]
+        let ra = inner.random_access().unwrap();
+
+        assert_eq!(ra.read_byte_at(0).unwrap(), 40);
+        assert_eq!(ra.read_byte_at(1).unwrap(), 50);
+        assert_eq!(ra.read_byte_at(2).unwrap(), 60);
     }
 
     #[test]

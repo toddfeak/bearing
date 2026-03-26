@@ -394,7 +394,7 @@ fn strategy_lookup(
     min_label: u8,
 ) -> io::Result<i32> {
     match strategy_code {
-        STRATEGY_BITS => bits_lookup(target_label, access, strategy_fp, min_label),
+        STRATEGY_BITS => bits_lookup(target_label, access, strategy_fp, strategy_bytes, min_label),
         STRATEGY_ARRAY => {
             array_lookup(target_label, access, strategy_fp, strategy_bytes, min_label)
         }
@@ -412,26 +412,28 @@ fn bits_lookup(
     target_label: u8,
     access: &dyn RandomAccessInput,
     strategy_fp: i64,
+    strategy_bytes: u32,
     min_label: u8,
 ) -> io::Result<i32> {
-    let delta = (target_label - min_label) as u32;
-    let byte_idx = delta / 8;
-    let bit_idx = delta % 8;
-    let byte = access.read_byte_at((strategy_fp + byte_idx as i64) as u64)?;
-    if (byte >> bit_idx) & 1 == 0 {
+    let bit_index = (target_label - min_label) as u32;
+    if bit_index >= strategy_bytes * 8 {
         return Ok(-1);
     }
-    // Count set bits before this position to get the child index
-    // Position = popcount of all bits before this one
-    let mut position = 0i32;
-    for i in 0..byte_idx {
-        let b = access.read_byte_at((strategy_fp + i as i64) as u64)?;
-        position += b.count_ones() as i32;
+    let word_index = (bit_index >> 6) as i64;
+    let word_fp = strategy_fp + (word_index << 3);
+    let word = access.read_le_long_at(word_fp as u64)? as u64;
+    let mask = 1u64 << bit_index;
+    if word & mask == 0 {
+        return Ok(-1);
     }
-    // Add bits in the same byte before bit_idx
-    let mask = (1u8 << bit_idx) - 1;
-    position += (byte & mask).count_ones() as i32;
-    Ok(position)
+    let mut pos = 0i32;
+    let mut fp = strategy_fp;
+    while fp < word_fp {
+        pos += (access.read_le_long_at(fp as u64)? as u64).count_ones() as i32;
+        fp += 8;
+    }
+    pos += (word & (mask - 1)).count_ones() as i32;
+    Ok(pos)
 }
 
 /// Array strategy: sorted array of child labels (excluding min_label).
@@ -934,5 +936,50 @@ mod tests {
         let mut child = Node::new();
         // 'a' < 'm' (min_children_label)
         assert!(!trie.lookup_child(b'a', root, &mut child).unwrap());
+    }
+
+    #[test]
+    fn test_bits_lookup_beyond_strategy_bytes() {
+        // Regression: BITS strategy with strategy_bytes=3 covers labels 'a'-'x'
+        // (delta 0-23). Looking up 'y' (delta 24) must return not-found, not
+        // read past the strategy data into child delta FP bytes.
+        let mut terms_data: Vec<(String, Vec<i32>)> = Vec::new();
+        // Create terms under prefixes "ba" through "bx" (24 letters) to get a
+        // BITS node with ~3 strategy bytes, then seek for "by..." which is
+        // beyond the covered range.
+        for label in b'a'..=b'x' {
+            for i in 0..50 {
+                let term = format!("b{}{i:04}", label as char);
+                terms_data.push((term, vec![((label - b'a') as i32) * 50 + i]));
+            }
+        }
+        let terms: Vec<(&str, &[i32])> = terms_data
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_slice()))
+            .collect();
+
+        let (dir, fi, id) = write_terms(terms).unwrap();
+        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+
+        // "by0000" has prefix "by" where 'y' is beyond the BITS range
+        let result = trie.seek_to_block(b"by0000").unwrap();
+        // Should find the "b" block (depth 1), not a garbage FP at depth 2
+        if let Some(r) = &result {
+            assert!(
+                r.output_fp < 1_000_000,
+                "output_fp looks like garbage: {}",
+                r.output_fp
+            );
+        }
+
+        // "bz0000" also beyond range
+        let result = trie.seek_to_block(b"bz0000").unwrap();
+        if let Some(r) = &result {
+            assert!(
+                r.output_fp < 1_000_000,
+                "output_fp looks like garbage: {}",
+                r.output_fp
+            );
+        }
     }
 }

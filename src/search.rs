@@ -4,6 +4,7 @@
 
 pub mod collector;
 pub mod doc_id_set_iterator;
+pub mod index_searcher;
 pub mod long_heap;
 pub mod query;
 pub mod scorable;
@@ -18,6 +19,7 @@ pub use collector::{
     RangeDocIdStream, ScoreContext, ScoreMode, SimpleScorable,
 };
 pub use doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
+pub use index_searcher::IndexSearcher;
 pub use long_heap::LongHeap;
 pub use query::{BatchScoreBulkScorer, BulkScorer, Query, ScorerSupplier, Weight};
 pub use scorable::Scorable;

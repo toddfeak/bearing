@@ -291,7 +291,17 @@ impl SegmentReader {
 
         // Create a doc ID iterator from the term state
         let index_has_freq = field_info.index_options().has_freqs();
-        let iter = postings_reader.postings(&state, index_has_freq, false)?;
+        let index_has_pos = field_info.index_options().has_positions();
+        let index_has_offsets = field_info.index_options()
+            >= crate::document::IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
+        let index_has_offsets_or_payloads = index_has_offsets || field_info.has_payloads();
+        let iter = postings_reader.postings(
+            &state,
+            index_has_freq,
+            index_has_pos,
+            index_has_offsets_or_payloads,
+            false,
+        )?;
         Ok(Some(iter))
     }
 }

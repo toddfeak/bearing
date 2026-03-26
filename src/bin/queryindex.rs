@@ -7,14 +7,14 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
-// use std::panic;
+use std::panic;
 use std::path::Path;
 use std::process;
 use std::time::Instant;
 
 use bearing::index::directory_reader::DirectoryReader;
-// use bearing::search::index_searcher::IndexSearcher;
-// use bearing::search::term_query::TermQuery;
+use bearing::search::index_searcher::IndexSearcher;
+use bearing::search::term_query::TermQuery;
 use bearing::store::FSDirectory;
 
 fn main() {
@@ -62,42 +62,36 @@ fn main() {
         .collect();
 
     let dir = FSDirectory::open(Path::new(&index_path)).expect("Failed to open index directory");
-    let _reader = DirectoryReader::open(&dir).expect("Failed to open DirectoryReader");
-    // let searcher = IndexSearcher::new(reader);
+    let reader = DirectoryReader::open(&dir).expect("Failed to open DirectoryReader");
+    let searcher = IndexSearcher::new(&reader);
 
     // Collect results in memory — no I/O during timed section
     let mut results: Vec<String> = Vec::with_capacity(words.len());
-    let errors = 0;
+    let mut errors = 0;
 
     let start = Instant::now();
 
     for word in &words {
-        // TODO: restore once search framework is rebuilt
-        // let query = TermQuery::new("contents", word.as_bytes());
-        // let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        //     searcher.search_top_docs(&query, 10)
-        // }));
-        // match result {
-        //     Ok(Ok(top_docs)) => {
-        //         let mut line = String::new();
-        //         write!(line, "{:<20} hits={:<6}", word, top_docs.total_hits.value).unwrap();
-        //         for sd in &top_docs.score_docs {
-        //             write!(line, "  doc={:<5} score={:.4}", sd.doc, sd.score).unwrap();
-        //         }
-        //         results.push(line);
-        //     }
-        //     Ok(Err(e)) => {
-        //         results.push(format!("{:<20} ERROR: {}", word, e));
-        //         errors += 1;
-        //     }
-        //     Err(_) => {
-        //         results.push(format!("{:<20} PANIC", word));
-        //         errors += 1;
-        //     }
-        // }
-        let mut line = String::new();
-        write!(line, "{:<20} TODO", word).unwrap();
-        results.push(line);
+        let query = TermQuery::new("contents", word.as_bytes());
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| searcher.search(&query, 10)));
+        match result {
+            Ok(Ok(top_docs)) => {
+                let mut line = String::new();
+                write!(line, "{:<20} hits={:<6}", word, top_docs.total_hits.value).unwrap();
+                for sd in &top_docs.score_docs {
+                    write!(line, "  doc={:<5} score={:.4}", sd.doc, sd.score).unwrap();
+                }
+                results.push(line);
+            }
+            Ok(Err(e)) => {
+                results.push(format!("{:<20} ERROR: {}", word, e));
+                errors += 1;
+            }
+            Err(_) => {
+                results.push(format!("{:<20} PANIC", word));
+                errors += 1;
+            }
+        }
     }
 
     let elapsed = start.elapsed();
