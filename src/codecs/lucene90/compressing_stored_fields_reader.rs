@@ -113,7 +113,7 @@ pub struct StoredField {
 
 /// Cached state for the most recently loaded block.
 ///
-/// Mirrors Java's `BlockState` in `Lucene90CompressingStoredFieldsReader`.
+/// Mirrors Java's `BlockState` in `Lucene90CompressingCompressingStoredFieldsReader`.
 /// Caches block metadata and decompressed data so that consecutive reads
 /// within the same block skip seeking, metadata parsing, and decompression.
 struct BlockState {
@@ -163,14 +163,14 @@ impl BlockState {
 /// access to stored field values. Caches the most recently loaded block
 /// so that consecutive reads within the same chunk avoid redundant I/O
 /// and decompression.
-pub struct StoredFieldsReader {
+pub struct CompressingStoredFieldsReader {
     fields_stream: Box<dyn IndexInput>,
     index_reader: FieldsIndexReader,
     chunk_size: i32,
     state: BlockState,
 }
 
-impl StoredFieldsReader {
+impl CompressingStoredFieldsReader {
     /// Opens a stored fields reader for the given segment.
     pub fn open(
         directory: &dyn Directory,
@@ -658,7 +658,7 @@ mod tests {
     use crate::store::{Directory, MemoryDirectory};
     use assertables::*;
 
-    /// Write a simple index and read stored fields back via StoredFieldsReader.
+    /// Write a simple index and read stored fields back via CompressingStoredFieldsReader.
     fn write_and_read_stored(docs: Vec<Document>) -> (Box<dyn Directory>, Vec<Vec<StoredField>>) {
         let num_docs = docs.len();
         let config = IndexWriterConfig::new().set_use_compound_file(false);
@@ -683,7 +683,8 @@ mod tests {
         let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let mut reader = StoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+        let mut reader =
+            CompressingStoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
 
         let mut results = Vec::new();
         for doc_id in 0..num_docs {
@@ -1068,7 +1069,8 @@ mod tests {
         let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let mut reader = StoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+        let mut reader =
+            CompressingStoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
 
         // First read loads the block
         let fields0 = reader.document(0).unwrap();
@@ -1120,7 +1122,8 @@ mod tests {
         let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let mut reader = StoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+        let mut reader =
+            CompressingStoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
 
         // Read all docs and verify values — this exercises cache invalidation
         // as docs should span multiple blocks

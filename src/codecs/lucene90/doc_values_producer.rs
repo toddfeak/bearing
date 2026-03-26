@@ -41,14 +41,14 @@ struct DocValuesEntry {
 /// Opens `.dvm` and `.dvd` files during construction. All metadata is read
 /// eagerly from `.dvm`; the `.dvd` data file handle is kept open for future
 /// lazy value reads.
-pub struct DocValuesReader {
+pub struct DocValuesProducer {
     /// Per-field metadata indexed by field number. `None` for fields without doc values.
     entries: Box<[Option<DocValuesEntry>]>,
     /// Open handle to the `.dvd` data file for lazy value reads.
     data: Box<dyn IndexInput>,
 }
 
-impl DocValuesReader {
+impl DocValuesProducer {
     /// Opens doc values files (`.dvm`, `.dvd`) for the given segment.
     pub fn open(
         directory: &dyn Directory,
@@ -403,7 +403,7 @@ mod tests {
         per_field: &HashMap<String, PerFieldData>,
         num_docs: i32,
         suffix: &str,
-    ) -> DocValuesReader {
+    ) -> DocValuesProducer {
         let segment_id = [0u8; 16];
         let dir = test_directory();
         doc_values::write(
@@ -417,7 +417,7 @@ mod tests {
         )
         .unwrap();
         let guard = dir.lock().unwrap();
-        DocValuesReader::open(guard.as_ref(), "_0", suffix, &segment_id, field_infos).unwrap()
+        DocValuesProducer::open(guard.as_ref(), "_0", suffix, &segment_id, field_infos).unwrap()
     }
 
     #[test]

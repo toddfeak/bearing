@@ -45,7 +45,7 @@ struct NormsEntry {
 /// Opens `.nvm` and `.nvd` files during construction. Metadata entries are read
 /// eagerly and stored as an immutable slice; the `.nvd` data file handle is kept
 /// open for lazy value reads via [`get`](Self::get).
-pub struct NormsReader {
+pub struct NormsProducer {
     /// Per-field metadata indexed by field number. `None` for fields without norms.
     entries: Box<[Option<NormsEntry>]>,
     /// Maximum document ID + 1 for this segment.
@@ -54,7 +54,7 @@ pub struct NormsReader {
     data: Box<dyn IndexInput>,
 }
 
-impl NormsReader {
+impl NormsProducer {
     /// Opens norms files (`.nvm`, `.nvd`) for the given segment.
     ///
     /// Reads all metadata eagerly from `.nvm`; the `.nvd` data file is opened but
@@ -462,7 +462,7 @@ mod tests {
         field_infos: &FieldInfos,
         per_field: &HashMap<String, PerFieldData>,
         num_docs: i32,
-    ) -> NormsReader {
+    ) -> NormsProducer {
         let segment_id = [0u8; 16];
         let dir = test_directory();
         norms::write(
@@ -476,7 +476,7 @@ mod tests {
         )
         .unwrap();
         let guard = dir.lock().unwrap();
-        NormsReader::open(guard.as_ref(), "_0", "", &segment_id, field_infos, num_docs).unwrap()
+        NormsProducer::open(guard.as_ref(), "_0", "", &segment_id, field_infos, num_docs).unwrap()
     }
 
     // Ported from org.apache.lucene.codecs.lucene90.TestLucene90NormsFormat

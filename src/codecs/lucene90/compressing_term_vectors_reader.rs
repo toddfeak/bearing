@@ -11,7 +11,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::codecs::lucene90::stored_fields_reader::FieldsIndexReader;
+use crate::codecs::lucene90::compressing_stored_fields_reader::FieldsIndexReader;
 use crate::codecs::lucene90::term_vectors::{
     DATA_CODEC, INDEX_CODEC_IDX, INDEX_CODEC_META, INDEX_EXTENSION, META_EXTENSION,
     VECTORS_EXTENSION, VERSION,
@@ -25,7 +25,7 @@ use crate::store::{DataInput, Directory, IndexInput};
 /// Opens `.tvd` first (keeps handle),
 /// reads metadata from `.tvm`, creates chunk index from `.tvx`, validates
 /// dirty chunk invariants.
-pub struct TermVectorsReader {
+pub struct CompressingTermVectorsReader {
     /// Open handle to the `.tvd` data file.
     #[expect(dead_code)]
     vectors_stream: Box<dyn IndexInput>,
@@ -51,10 +51,10 @@ pub struct TermVectorsReader {
     num_dirty_docs: i64,
 }
 
-impl TermVectorsReader {
+impl CompressingTermVectorsReader {
     /// Opens term vectors files for the given segment.
     ///
-    /// Follows Java's `Lucene90CompressingTermVectorsReader` constructor order:
+    /// Follows Java's `Lucene90CompressingCompressingTermVectorsReader` constructor order:
     /// 1. Open `.tvd` (data) — keep handle
     /// 2. Open `.tvm` (meta) with checksum — read metadata
     /// 3. `FieldsIndexReader` opens `.tvx` internally
@@ -195,12 +195,12 @@ mod tests {
         }
     }
 
-    fn write_and_read(tv_docs: &[TermVectorDoc], num_docs: i32) -> TermVectorsReader {
+    fn write_and_read(tv_docs: &[TermVectorDoc], num_docs: i32) -> CompressingTermVectorsReader {
         let segment_id = [0u8; 16];
         let dir = test_directory();
         term_vectors::write(&dir, "_0", "", &segment_id, tv_docs, num_docs).unwrap();
         let guard = dir.lock().unwrap();
-        TermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id).unwrap()
+        CompressingTermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id).unwrap()
     }
 
     #[test]
