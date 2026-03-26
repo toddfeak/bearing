@@ -234,30 +234,6 @@ impl SegmentReader {
         }
     }
 
-    /// Returns a norm value for the given field and document.
-    ///
-    /// Returns `Ok(1)` if no norms reader exists or the field has no norms.
-    pub fn get_norm(&self, field_number: u32, doc_id: i32) -> io::Result<i64> {
-        let field_info = match self.field_infos.field_info_by_number(field_number) {
-            Some(fi) => fi,
-            None => return Ok(1),
-        };
-        match &self.norms_reader {
-            Some(nr) => {
-                let mut norms = match nr.get_norms(field_info)? {
-                    Some(n) => n,
-                    None => return Ok(1),
-                };
-                if norms.advance_exact(doc_id)? {
-                    Ok(norms.long_value()?)
-                } else {
-                    Ok(1)
-                }
-            }
-            None => Ok(1),
-        }
-    }
-
     /// Returns the doc values reader, or `None` if no fields have doc values.
     pub fn doc_values_reader(&self) -> Option<&DocValuesProducer> {
         self.doc_values_reader.as_ref()
@@ -271,11 +247,6 @@ impl SegmentReader {
     /// Returns the points/BKD reader, or `None` if no fields have point values.
     pub fn points_reader(&self) -> Option<&PointsReader> {
         self.points_reader.as_ref()
-    }
-
-    /// Returns the block tree terms reader, or `None` if no fields are indexed.
-    pub fn terms_reader(&self) -> Option<&BlockTreeTermsReader> {
-        self.terms_reader.as_ref()
     }
 
     /// Returns the postings reader, or `None` if no fields are indexed.
@@ -293,54 +264,6 @@ impl SegmentReader {
             .as_ref()?
             .terms(field, &self.field_infos)?;
         Some(fr as &dyn Terms)
-    }
-
-    /// Returns a doc ID iterator for documents containing the given term.
-    ///
-    /// Combines term seeking via [`Terms::iterator()`](crate::index::terms::Terms::iterator) and postings creation into a
-    /// single call. Returns `None` if the field doesn't exist, isn't indexed,
-    /// or the term is not found.
-    pub fn postings(
-        &self,
-        field: &str,
-        term: &[u8],
-    ) -> io::Result<Option<crate::codecs::lucene103::postings_reader::BlockPostingsEnum>> {
-        let field_info = match self.field_infos.field_info_by_name(field) {
-            Some(fi) => fi,
-            None => return Ok(None),
-        };
-
-        let terms = match self.terms(field) {
-            Some(t) => t,
-            None => return Ok(None),
-        };
-
-        let postings_reader = match self.postings_reader.as_ref() {
-            Some(pr) => pr,
-            None => return Ok(None),
-        };
-
-        let mut terms_enum = terms.iterator()?;
-        if !terms_enum.seek_exact(term)? {
-            return Ok(None);
-        }
-
-        let state = terms_enum.term_state()?;
-
-        // Create a doc ID iterator from the term state
-        let index_has_freq = field_info.index_options().has_freqs();
-        let index_has_pos = field_info.index_options().has_positions();
-        let index_has_offsets = field_info.index_options()
-            >= crate::document::IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
-        let index_has_offsets_or_payloads = index_has_offsets || field_info.has_payloads();
-        let iter = postings_reader.postings(
-            &state,
-            index_has_freq,
-            index_has_pos,
-            index_has_offsets_or_payloads,
-            false,
-        )?;
-        Ok(Some(iter))
     }
 }
 
@@ -402,7 +325,7 @@ mod tests {
         assert_eq!(reader.max_doc(), 2);
         assert_eq!(reader.segment_name(), &name);
         assert_not_empty!(reader.field_infos());
-        assert!(reader.terms_reader().is_some());
+        assert!(reader.terms("content").is_some());
         assert!(reader.postings_reader().is_some());
     }
 
@@ -412,7 +335,7 @@ mod tests {
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
         assert_eq!(reader.max_doc(), 2);
-        assert!(reader.terms_reader().is_some());
+        assert!(reader.terms("content").is_some());
         assert!(reader.postings_reader().is_some());
     }
 
@@ -431,15 +354,10 @@ mod tests {
         let (dir, name, id) = write_test_index(false);
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
-        // "content" is a TextField with norms
-        let field_number = reader
-            .field_infos()
-            .field_info_by_name("content")
-            .unwrap()
-            .number();
-
-        let norm = reader.get_norm(field_number, 0).unwrap();
-        assert_ne!(norm, 0);
+        // "content" is a TextField with norms — access via get_norm_values
+        let mut norms = reader.get_norm_values("content").unwrap().unwrap();
+        assert!(norms.advance_exact(0).unwrap());
+        assert_ne!(norms.long_value().unwrap(), 0);
     }
 
     #[test]
@@ -451,6 +369,45 @@ mod tests {
         assert_some!(fi.field_info_by_name("content"));
         assert_some!(fi.field_info_by_name("path"));
         assert!(fi.has_postings());
+    }
+
+    /// Test helper: seek a term and create a postings iterator, following the
+    /// same path production code uses (Terms → TermsEnum → PostingsReader).
+    fn seek_postings(
+        reader: &SegmentReader,
+        field: &str,
+        term: &[u8],
+    ) -> io::Result<Option<crate::codecs::lucene103::postings_reader::BlockPostingsEnum>> {
+        let field_info = match reader.field_infos().field_info_by_name(field) {
+            Some(fi) => fi,
+            None => return Ok(None),
+        };
+        let terms = match reader.terms(field) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let postings_reader = match reader.postings_reader() {
+            Some(pr) => pr,
+            None => return Ok(None),
+        };
+        let mut terms_enum = terms.iterator()?;
+        if !terms_enum.seek_exact(term)? {
+            return Ok(None);
+        }
+        let state = terms_enum.term_state()?;
+        let index_has_freq = field_info.index_options().has_freqs();
+        let index_has_pos = field_info.index_options().has_positions();
+        let index_has_offsets = field_info.index_options()
+            >= crate::document::IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
+        let index_has_offsets_or_payloads = index_has_offsets || field_info.has_payloads();
+        let iter = postings_reader.postings(
+            &state,
+            index_has_freq,
+            index_has_pos,
+            index_has_offsets_or_payloads,
+            false,
+        )?;
+        Ok(Some(iter))
     }
 
     fn collect_docs(
@@ -474,7 +431,9 @@ mod tests {
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
         // "world" appears in both docs (doc 0: "hello world", doc 1: "goodbye world")
-        let mut iter = reader.postings("content", b"world").unwrap().unwrap();
+        let mut iter = seek_postings(&reader, "content", b"world")
+            .unwrap()
+            .unwrap();
         let docs = collect_docs(&mut iter);
         assert_eq!(docs, vec![0, 1]);
     }
@@ -485,12 +444,16 @@ mod tests {
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
         // "hello" appears only in doc 0
-        let mut iter = reader.postings("content", b"hello").unwrap().unwrap();
+        let mut iter = seek_postings(&reader, "content", b"hello")
+            .unwrap()
+            .unwrap();
         let docs = collect_docs(&mut iter);
         assert_eq!(docs, vec![0]);
 
         // "goodbye" appears only in doc 1
-        let mut iter = reader.postings("content", b"goodbye").unwrap().unwrap();
+        let mut iter = seek_postings(&reader, "content", b"goodbye")
+            .unwrap()
+            .unwrap();
         let docs = collect_docs(&mut iter);
         assert_eq!(docs, vec![1]);
     }
@@ -500,7 +463,7 @@ mod tests {
         let (dir, name, id) = write_test_index(false);
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
-        let result = reader.postings("content", b"nonexistent").unwrap();
+        let result = seek_postings(&reader, "content", b"nonexistent").unwrap();
         assert!(result.is_none());
     }
 
@@ -509,7 +472,7 @@ mod tests {
         let (dir, name, id) = write_test_index(false);
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
-        let result = reader.postings("no_such_field", b"hello").unwrap();
+        let result = seek_postings(&reader, "no_such_field", b"hello").unwrap();
         assert!(result.is_none());
     }
 
@@ -519,11 +482,15 @@ mod tests {
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
         // StringField "path" stores exact values as single tokens
-        let mut iter = reader.postings("path", b"/test.txt").unwrap().unwrap();
+        let mut iter = seek_postings(&reader, "path", b"/test.txt")
+            .unwrap()
+            .unwrap();
         let docs = collect_docs(&mut iter);
         assert_eq!(docs, vec![0]);
 
-        let mut iter = reader.postings("path", b"/other.txt").unwrap().unwrap();
+        let mut iter = seek_postings(&reader, "path", b"/other.txt")
+            .unwrap()
+            .unwrap();
         let docs = collect_docs(&mut iter);
         assert_eq!(docs, vec![1]);
     }
@@ -533,7 +500,9 @@ mod tests {
         let (dir, name, id) = write_test_index(true);
         let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
-        let mut iter = reader.postings("content", b"world").unwrap().unwrap();
+        let mut iter = seek_postings(&reader, "content", b"world")
+            .unwrap()
+            .unwrap();
         let docs = collect_docs(&mut iter);
         assert_eq!(docs, vec![0, 1]);
     }
@@ -568,14 +537,16 @@ mod tests {
         let reader = SegmentReader::open(dir.as_ref(), &seg.name, &seg.id).unwrap();
 
         // "common" should be in all 200 docs
-        let mut iter = reader.postings("content", b"common").unwrap().unwrap();
+        let mut iter = seek_postings(&reader, "content", b"common")
+            .unwrap()
+            .unwrap();
         let docs = collect_docs(&mut iter);
         assert_len_eq_x!(&docs, 200);
         assert_eq!(docs[0], 0);
         assert_eq!(docs[199], 199);
 
         // "even" should be in 100 docs (0, 2, 4, ..., 198)
-        let mut iter = reader.postings("content", b"even").unwrap().unwrap();
+        let mut iter = seek_postings(&reader, "content", b"even").unwrap().unwrap();
         let docs = collect_docs(&mut iter);
         assert_len_eq_x!(&docs, 100);
         assert_eq!(docs[0], 0);
