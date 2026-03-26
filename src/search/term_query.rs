@@ -177,7 +177,7 @@ impl Weight for TermWeight {
 
         // Java: norms = context.reader().getNormValues(term.field())
         let norms = if self.score_mode.needs_scores() {
-            reader.get_norm_values(field_info.number())?
+            reader.get_norm_values(&self.field)?
         } else {
             None
         };

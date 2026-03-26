@@ -44,7 +44,7 @@ struct NormsEntry {
 ///
 /// Opens `.nvm` and `.nvd` files during construction. Metadata entries are read
 /// eagerly and stored as an immutable slice; the `.nvd` data file handle is kept
-/// open for lazy value reads via [`get`](Self::get).
+/// open for lazy value reads via [`get_norms`](Self::get_norms).
 pub struct NormsProducer {
     /// Per-field metadata indexed by field number. `None` for fields without norms.
     entries: Box<[Option<NormsEntry>]>,
@@ -58,7 +58,7 @@ impl NormsProducer {
     /// Opens norms files (`.nvm`, `.nvd`) for the given segment.
     ///
     /// Reads all metadata eagerly from `.nvm`; the `.nvd` data file is opened but
-    /// no data is read until [`get`](Self::get) is called.
+    /// no data is read until [`get_norms`](Self::get_norms) is called.
     pub fn open(
         directory: &dyn Directory,
         segment_name: &str,
@@ -105,6 +105,8 @@ impl NormsProducer {
             )));
         }
 
+        codec_util::retrieve_checksum(data.as_mut())?;
+
         debug!(
             "norms_reader: opened {} entries for segment {segment_name}",
             entries.len()
@@ -124,96 +126,17 @@ impl NormsProducer {
         self.entry(field_number).map(|e| e.num_docs_with_field)
     }
 
-    /// Returns the norm value for a document.
-    ///
-    /// Returns `Ok(None)` if the field has no norms entry (EMPTY pattern) or if
-    /// the document doesn't have a norm for this field (SPARSE pattern, doc not in DISI).
-    pub fn get(&mut self, field_number: u32, doc_id: i32) -> io::Result<Option<i64>> {
-        if doc_id < 0 || doc_id >= self.max_doc {
-            return Err(io::Error::other(format!(
-                "doc_id {doc_id} out of range [0, {})",
-                self.max_doc
-            )));
-        }
-
-        let entry = match self.entry(field_number) {
-            Some(e) => e,
-            None => return Ok(None),
-        };
-
-        if entry.docs_with_field_offset == -2 {
-            return Ok(None);
-        }
-
-        // Copy what we need before borrowing &mut self for data reads
-        let norms_offset = entry.norms_offset;
-        let bytes_per_norm = entry.bytes_per_norm;
-        let docs_with_field_offset = entry.docs_with_field_offset;
-
-        if docs_with_field_offset == -1 {
-            // ALL: every document has a norm
-            if bytes_per_norm == 0 {
-                return Ok(Some(norms_offset));
-            }
-            return self.read_norm_value(norms_offset, bytes_per_norm, doc_id as i64);
-        }
-
-        // SPARSE: use IndexedDISI to check presence and get ordinal
-        let docs_with_field_length = entry.docs_with_field_length;
-        let jump_table_entry_count = entry.jump_table_entry_count;
-        let dense_rank_power = entry.dense_rank_power;
-        let num_docs_with_field = entry.num_docs_with_field;
-
-        let mut disi = IndexedDISI::new(
-            self.data.as_ref(),
-            docs_with_field_offset,
-            docs_with_field_length,
-            jump_table_entry_count,
-            dense_rank_power,
-            num_docs_with_field as i64,
-        )?;
-
-        if !disi.advance_exact(doc_id)? {
-            return Ok(None);
-        }
-
-        if bytes_per_norm == 0 {
-            return Ok(Some(norms_offset));
-        }
-        self.read_norm_value(norms_offset, bytes_per_norm, disi.index() as i64)
-    }
-
-    /// Reads a single norm value from the data file at the given position.
-    fn read_norm_value(
-        &mut self,
-        base_offset: i64,
-        bytes_per_norm: u8,
-        index: i64,
-    ) -> io::Result<Option<i64>> {
-        let offset = base_offset as u64 + (index as u64) * (bytes_per_norm as u64);
-        self.data.seek(offset)?;
-        let value = match bytes_per_norm {
-            1 => self.data.read_byte()? as i8 as i64,
-            2 => self.data.read_le_short()? as i64,
-            4 => self.data.read_le_int()? as i64,
-            8 => self.data.read_le_long()?,
-            _ => {
-                return Err(io::Error::other(format!(
-                    "invalid bytes_per_norm: {bytes_per_norm}"
-                )));
-            }
-        };
-        Ok(Some(value))
-    }
-
     /// Returns a [`NumericDocValues`] for the given field, or `None` if the field
     /// has no norms (EMPTY pattern or no entry).
     ///
     /// For dense norms (all docs have a value), the returned iterator does a single
     /// random-access read per `long_value()` call — no seeking. For sparse norms,
     /// it wraps an [`IndexedDISI`] for presence checks.
-    pub fn get_norms(&self, field_number: u32) -> io::Result<Option<Box<dyn NumericDocValues>>> {
-        let entry = match self.entry(field_number) {
+    pub fn get_norms(
+        &self,
+        field_info: &crate::index::FieldInfo,
+    ) -> io::Result<Option<Box<dyn NumericDocValues>>> {
+        let entry = match self.entry(field_info.number()) {
             Some(e) => e,
             None => return Ok(None),
         };
@@ -479,6 +402,19 @@ mod tests {
         NormsProducer::open(guard.as_ref(), "_0", "", &segment_id, field_infos, num_docs).unwrap()
     }
 
+    /// Helper: get a single norm value using get_norms + advance_exact + long_value.
+    fn get_norm(reader: &NormsProducer, fi: &FieldInfo, doc_id: i32) -> io::Result<Option<i64>> {
+        let mut norms = match reader.get_norms(fi)? {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        if norms.advance_exact(doc_id)? {
+            Ok(Some(norms.long_value()?))
+        } else {
+            Ok(None)
+        }
+    }
+
     // Ported from org.apache.lucene.codecs.lucene90.TestLucene90NormsFormat
 
     #[test]
@@ -493,13 +429,14 @@ mod tests {
             make_per_field_data(vec![42, 42, 42], vec![0, 1, 2]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 3);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 3);
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
 
         // All docs return the constant value
         for doc in 0..3 {
-            assert_eq!(reader.get(0, doc).unwrap(), Some(42), "doc {doc}");
+            assert_eq!(get_norm(&reader, fi, doc).unwrap(), Some(42), "doc {doc}");
         }
     }
 
@@ -515,12 +452,13 @@ mod tests {
             make_per_field_data(vec![12, 8, 10], vec![0, 1, 2]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 3);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 3);
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
-        assert_eq!(reader.get(0, 0).unwrap(), Some(12));
-        assert_eq!(reader.get(0, 1).unwrap(), Some(8));
-        assert_eq!(reader.get(0, 2).unwrap(), Some(10));
+        assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(12));
+        assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(8));
+        assert_eq!(get_norm(&reader, fi, 2).unwrap(), Some(10));
     }
 
     #[test]
@@ -535,11 +473,12 @@ mod tests {
             make_per_field_data(vec![1000, -500, 32000], vec![0, 1, 2]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 3);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 3);
 
-        assert_eq!(reader.get(0, 0).unwrap(), Some(1000));
-        assert_eq!(reader.get(0, 1).unwrap(), Some(-500));
-        assert_eq!(reader.get(0, 2).unwrap(), Some(32000));
+        assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(1000));
+        assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-500));
+        assert_eq!(get_norm(&reader, fi, 2).unwrap(), Some(32000));
     }
 
     #[test]
@@ -554,10 +493,11 @@ mod tests {
             make_per_field_data(vec![100_000, -100_000], vec![0, 1]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 2);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 2);
 
-        assert_eq!(reader.get(0, 0).unwrap(), Some(100_000));
-        assert_eq!(reader.get(0, 1).unwrap(), Some(-100_000));
+        assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(100_000));
+        assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-100_000));
     }
 
     #[test]
@@ -572,10 +512,11 @@ mod tests {
             make_per_field_data(vec![i64::MAX, i64::MIN], vec![0, 1]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 2);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 2);
 
-        assert_eq!(reader.get(0, 0).unwrap(), Some(i64::MAX));
-        assert_eq!(reader.get(0, 1).unwrap(), Some(i64::MIN));
+        assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(i64::MAX));
+        assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(i64::MIN));
     }
 
     #[test]
@@ -587,11 +528,12 @@ mod tests {
         let mut per_field = HashMap::new();
         per_field.insert("contents".to_string(), make_per_field_data(vec![], vec![]));
 
-        let mut reader = write_and_read(&field_infos, &per_field, 3);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 3);
 
         assert_eq!(reader.num_docs_with_field(0), Some(0));
-        assert_none!(reader.get(0, 0).unwrap());
-        assert_none!(reader.get(0, 1).unwrap());
+        assert_none!(get_norm(&reader, fi, 0).unwrap());
+        assert_none!(get_norm(&reader, fi, 1).unwrap());
     }
 
     #[test]
@@ -606,14 +548,15 @@ mod tests {
             make_per_field_data(vec![12, 8], vec![1, 3]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 5);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 5);
 
         assert_eq!(reader.num_docs_with_field(0), Some(2));
-        assert_none!(reader.get(0, 0).unwrap());
-        assert_eq!(reader.get(0, 1).unwrap(), Some(12));
-        assert_none!(reader.get(0, 2).unwrap());
-        assert_eq!(reader.get(0, 3).unwrap(), Some(8));
-        assert_none!(reader.get(0, 4).unwrap());
+        assert_none!(get_norm(&reader, fi, 0).unwrap());
+        assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(12));
+        assert_none!(get_norm(&reader, fi, 2).unwrap());
+        assert_eq!(get_norm(&reader, fi, 3).unwrap(), Some(8));
+        assert_none!(get_norm(&reader, fi, 4).unwrap());
     }
 
     #[test]
@@ -628,14 +571,15 @@ mod tests {
             make_per_field_data(vec![42, 42, 42], vec![0, 2, 4]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 5);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 5);
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
-        assert_eq!(reader.get(0, 0).unwrap(), Some(42));
-        assert_none!(reader.get(0, 1).unwrap());
-        assert_eq!(reader.get(0, 2).unwrap(), Some(42));
-        assert_none!(reader.get(0, 3).unwrap());
-        assert_eq!(reader.get(0, 4).unwrap(), Some(42));
+        assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(42));
+        assert_none!(get_norm(&reader, fi, 1).unwrap());
+        assert_eq!(get_norm(&reader, fi, 2).unwrap(), Some(42));
+        assert_none!(get_norm(&reader, fi, 3).unwrap());
+        assert_eq!(get_norm(&reader, fi, 4).unwrap(), Some(42));
     }
 
     #[test]
@@ -655,19 +599,21 @@ mod tests {
             make_per_field_data(vec![10, 20], vec![0, 2]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 3);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let fi1 = field_infos.field_info_by_number(1).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 3);
 
         // alpha: ALL constant
         assert_eq!(reader.num_docs_with_field(0), Some(3));
-        assert_eq!(reader.get(0, 0).unwrap(), Some(5));
-        assert_eq!(reader.get(0, 1).unwrap(), Some(5));
-        assert_eq!(reader.get(0, 2).unwrap(), Some(5));
+        assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(5));
+        assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(5));
+        assert_eq!(get_norm(&reader, fi, 2).unwrap(), Some(5));
 
         // beta: SPARSE variable
         assert_eq!(reader.num_docs_with_field(1), Some(2));
-        assert_eq!(reader.get(1, 0).unwrap(), Some(10));
-        assert_none!(reader.get(1, 1).unwrap());
-        assert_eq!(reader.get(1, 2).unwrap(), Some(20));
+        assert_eq!(get_norm(&reader, fi1, 0).unwrap(), Some(10));
+        assert_none!(get_norm(&reader, fi1, 1).unwrap());
+        assert_eq!(get_norm(&reader, fi1, 2).unwrap(), Some(20));
     }
 
     #[test]
@@ -681,10 +627,9 @@ mod tests {
             make_per_field_data(vec![10], vec![0]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 1);
+        let reader = write_and_read(&field_infos, &per_field, 1);
 
         assert_none!(reader.num_docs_with_field(99));
-        assert_none!(reader.get(99, 0).unwrap());
     }
 
     #[test]
@@ -699,11 +644,12 @@ mod tests {
             make_per_field_data(vec![-128, -1, 0, 127], vec![0, 1, 2, 3]),
         );
 
-        let mut reader = write_and_read(&field_infos, &per_field, 4);
+        let fi = field_infos.field_info_by_number(0).unwrap();
+        let reader = write_and_read(&field_infos, &per_field, 4);
 
-        assert_eq!(reader.get(0, 0).unwrap(), Some(-128));
-        assert_eq!(reader.get(0, 1).unwrap(), Some(-1));
-        assert_eq!(reader.get(0, 2).unwrap(), Some(0));
-        assert_eq!(reader.get(0, 3).unwrap(), Some(127));
+        assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(-128));
+        assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-1));
+        assert_eq!(get_norm(&reader, fi, 2).unwrap(), Some(0));
+        assert_eq!(get_norm(&reader, fi, 3).unwrap(), Some(127));
     }
 }

@@ -19,7 +19,6 @@
 //! println!("Segment has {} documents", reader.max_doc());
 //! ```
 
-use std::cell::RefCell;
 use std::io;
 
 use log::debug;
@@ -52,7 +51,7 @@ pub struct SegmentReader {
     field_infos: FieldInfos,
     max_doc: i32,
     stored_fields_reader: Option<CompressingStoredFieldsReader>,
-    norms_reader: Option<RefCell<NormsProducer>>,
+    norms_reader: Option<NormsProducer>,
     doc_values_reader: Option<DocValuesProducer>,
     term_vectors_reader: Option<CompressingTermVectorsReader>,
     points_reader: Option<PointsReader>,
@@ -109,14 +108,14 @@ impl SegmentReader {
         )?);
 
         let norms_reader = if field_infos.has_norms() {
-            Some(RefCell::new(NormsProducer::open(
+            Some(NormsProducer::open(
                 dir,
                 segment_name,
                 "",
                 segment_id,
                 &field_infos,
                 max_doc,
-            )?))
+            )?)
         } else {
             None
         };
@@ -205,17 +204,15 @@ impl SegmentReader {
 
     /// Returns a mutable reference to the stored fields reader.
     ///
-    /// Required for reading stored field values, which involves seeking and
-    /// decompression. Returns `None` if the segment has no stored fields.
-    pub fn stored_fields_reader(&mut self) -> Option<&mut CompressingStoredFieldsReader> {
+    /// Matches Java's `CodecReader.getFieldsReader()`.
+    pub fn get_fields_reader(&mut self) -> Option<&mut CompressingStoredFieldsReader> {
         self.stored_fields_reader.as_mut()
     }
 
-    /// Returns a reference to the norms reader `RefCell`, or `None` if no fields have norms.
+    /// Returns a reference to the norms producer, or `None` if no fields have norms.
     ///
-    /// Use `borrow()` for metadata queries or `borrow_mut()` for reading individual
-    /// norm values (which involves seeking in the data file).
-    pub fn norms_reader(&self) -> Option<&RefCell<NormsProducer>> {
+    /// Matches Java's `CodecReader.getNormsReader()`.
+    pub fn norms_reader(&self) -> Option<&NormsProducer> {
         self.norms_reader.as_ref()
     }
 
@@ -225,13 +222,14 @@ impl SegmentReader {
     /// Matches Java's `LeafReader.getNormValues(String field)`.
     pub fn get_norm_values(
         &self,
-        field_number: u32,
+        field: &str,
     ) -> io::Result<Option<Box<dyn crate::index::numeric_doc_values::NumericDocValues>>> {
+        let field_info = match self.field_infos.field_info_by_name(field) {
+            Some(fi) => fi,
+            None => return Ok(None),
+        };
         match &self.norms_reader {
-            Some(nr) => {
-                let reader = nr.borrow();
-                reader.get_norms(field_number)
-            }
+            Some(nr) => nr.get_norms(field_info),
             None => Ok(None),
         }
     }
@@ -240,12 +238,20 @@ impl SegmentReader {
     ///
     /// Returns `Ok(1)` if no norms reader exists or the field has no norms.
     pub fn get_norm(&self, field_number: u32, doc_id: i32) -> io::Result<i64> {
+        let field_info = match self.field_infos.field_info_by_number(field_number) {
+            Some(fi) => fi,
+            None => return Ok(1),
+        };
         match &self.norms_reader {
             Some(nr) => {
-                let mut reader = nr.borrow_mut();
-                match reader.get(field_number, doc_id)? {
-                    Some(n) => Ok(n),
-                    None => Ok(1),
+                let mut norms = match nr.get_norms(field_info)? {
+                    Some(n) => n,
+                    None => return Ok(1),
+                };
+                if norms.advance_exact(doc_id)? {
+                    Ok(norms.long_value()?)
+                } else {
+                    Ok(1)
                 }
             }
             None => Ok(1),
@@ -415,7 +421,7 @@ mod tests {
         let (dir, name, id) = write_test_index(false);
         let mut reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
 
-        let sfr = reader.stored_fields_reader().unwrap();
+        let sfr = reader.get_fields_reader().unwrap();
         let fields = sfr.document(0).unwrap();
         assert!(!fields.is_empty());
     }

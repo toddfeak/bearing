@@ -96,7 +96,7 @@ fn main() {
 
                 let norms_doc_count = seg
                     .norms_reader()
-                    .and_then(|r| r.borrow().num_docs_with_field(fi.number()))
+                    .and_then(|r| r.num_docs_with_field(fi.number()))
                     .unwrap_or(0) as i64;
 
                 let dv_doc_count = seg

@@ -19,6 +19,7 @@ use crate::document::StoredValue;
 use crate::encoding::lz4;
 use crate::encoding::zigzag;
 use crate::index::index_file_names;
+use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{DataInput, Directory, IndexInput};
 
 const STORED_FIELDS_INTS_BLOCK_SIZE: usize = 128;
@@ -172,50 +173,18 @@ pub struct CompressingStoredFieldsReader {
 
 impl CompressingStoredFieldsReader {
     /// Opens a stored fields reader for the given segment.
+    ///
+    /// 1. Open `.fdt` (data) — keep handle
+    /// 2. Open `.fdm` (meta) with checksum — read chunk size, fields index, dirty chunk counts
+    /// 3. Validate dirty chunk invariants
+    /// 4. `retrieve_checksum` on `.fdt`
     pub fn open(
         directory: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
         segment_id: &[u8; 16],
     ) -> io::Result<Self> {
-        // Open .fdm (metadata)
-        let fdm_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let mut meta_input = directory.open_input(&fdm_name)?;
-        codec_util::check_index_header(
-            meta_input.as_mut(),
-            INDEX_CODEC_NAME_META,
-            FDM_VERSION,
-            FDM_VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
-
-        let chunk_size = meta_input.read_vint()?;
-
-        // Open .fdx (index) — opened twice: once for header validation, once for data
-        let fdx_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let fdx_input = directory.open_input(&fdx_name)?;
-        let mut fdx_check = directory.open_input(&fdx_name)?;
-        codec_util::check_index_header(
-            fdx_check.as_mut(),
-            INDEX_CODEC_NAME_IDX,
-            FDX_VERSION,
-            FDX_VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
-
-        // Read the fields index (needs meta_input + fdx_input)
-        let index_reader = FieldsIndexReader::open(meta_input.as_mut(), fdx_input.as_ref())?;
-
-        // Read remaining metadata
-        let _num_chunks = meta_input.read_vlong()?;
-        let _num_dirty_chunks = meta_input.read_vlong()?;
-        let _num_dirty_docs = meta_input.read_vlong()?;
-
-        // Open .fdt (field data)
+        // 1. Open .fdt (field data) — keep handle
         let fdt_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, FIELDS_EXTENSION);
         let mut fdt_input = directory.open_input(&fdt_name)?;
@@ -227,7 +196,66 @@ impl CompressingStoredFieldsReader {
             segment_id,
             segment_suffix,
         )?;
-        // Skip past the header
+
+        // 2. Open .fdm (metadata) with checksum
+        let fdm_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
+        let fdm_input = directory.open_input(&fdm_name)?;
+        let mut meta_in = ChecksumIndexInput::new(fdm_input);
+        codec_util::check_index_header(
+            &mut meta_in,
+            INDEX_CODEC_NAME_META,
+            FDM_VERSION,
+            FDM_VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        let chunk_size = meta_in.read_vint()?;
+
+        // Validate .fdt footer structure
+        codec_util::retrieve_checksum(fdt_input.as_mut())?;
+
+        // Open .fdx (index) and validate header
+        let fdx_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
+        let mut fdx_input = directory.open_input(&fdx_name)?;
+        codec_util::check_index_header(
+            fdx_input.as_mut(),
+            INDEX_CODEC_NAME_IDX,
+            FDX_VERSION,
+            FDX_VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        // Read the fields index (needs meta_in + fdx_input)
+        let index_reader = FieldsIndexReader::open(&mut meta_in, fdx_input.as_ref())?;
+
+        // Read and validate dirty chunk counts
+        let num_chunks = meta_in.read_vlong()?;
+        let num_dirty_chunks = meta_in.read_vlong()?;
+        let num_dirty_docs = meta_in.read_vlong()?;
+
+        if num_dirty_chunks > num_chunks {
+            return Err(io::Error::other(format!(
+                "invalid numDirtyChunks: dirty={num_dirty_chunks} total={num_chunks}"
+            )));
+        }
+        if (num_dirty_chunks == 0) != (num_dirty_docs == 0) {
+            return Err(io::Error::other(format!(
+                "dirty chunks/docs mismatch: dirtyChunks={num_dirty_chunks} dirtyDocs={num_dirty_docs}"
+            )));
+        }
+        if num_dirty_docs < num_dirty_chunks {
+            return Err(io::Error::other(format!(
+                "numDirtyDocs < numDirtyChunks: dirtyDocs={num_dirty_docs} dirtyChunks={num_dirty_chunks}"
+            )));
+        }
+
+        codec_util::check_footer(&mut meta_in)?;
+
+        // Position .fdt past the header for reading
         fdt_input.seek(header_len as u64)?;
 
         Ok(Self {
@@ -240,8 +268,10 @@ impl CompressingStoredFieldsReader {
 
     /// Reads all stored fields for the given document.
     ///
-    /// If the document is in the currently cached block, returns its fields
-    /// directly from the cache. Otherwise, loads and caches the new block first.
+    /// **TODO: Replace with visitor pattern before production use.** Java's
+    /// equivalent is `document(int docID, StoredFieldVisitor visitor)` which
+    /// allows selective field loading and early termination. This method
+    /// eagerly decodes all fields. Currently only used in tests.
     pub fn document(&mut self, doc_id: u32) -> io::Result<Vec<StoredField>> {
         if !self.state.contains(doc_id) {
             self.reset_state(doc_id)?;

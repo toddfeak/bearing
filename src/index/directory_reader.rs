@@ -235,7 +235,7 @@ mod tests {
 
         // Access stored fields through the hierarchy
         let leaf = &mut reader.segments[0];
-        let sfr = leaf.reader.stored_fields_reader().unwrap();
+        let sfr = leaf.reader.get_fields_reader().unwrap();
         let fields = sfr.document(0).unwrap();
         assert!(!fields.is_empty());
     }
