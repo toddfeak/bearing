@@ -14,6 +14,7 @@ use super::collector::ScoreMode;
 use super::conjunction::ConjunctionScorer;
 use super::index_searcher::IndexSearcher;
 use super::query::{BulkScorer, DefaultBulkScorer, ScorerSupplier, Weight};
+use super::req_excl_bulk_scorer::ReqExclBulkScorer;
 use super::scorer::Scorer;
 use super::scorer_util;
 use crate::index::directory_reader::LeafReaderContext;
@@ -321,9 +322,14 @@ impl BooleanScorerSupplier {
 
         if prohibited.is_empty() {
             Ok(Some(positive_scorer))
+        } else if prohibited.len() == 1 {
+            let prohibited_scorer = prohibited.remove(0);
+            Ok(Some(Box::new(ReqExclBulkScorer::new(
+                positive_scorer,
+                prohibited_scorer,
+            ))))
         } else {
-            // ReqExclBulkScorer not yet implemented
-            todo!("MUST_NOT bulk scorer exclusion not yet implemented")
+            todo!("multiple MUST_NOT not yet implemented")
         }
     }
 

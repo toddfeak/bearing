@@ -337,6 +337,118 @@ fn test_boolean_should_memory_performance() {
 }
 
 // -------------------------------------------------------------------------
+// MUST_NOT queries — exclusion
+// Cross-validated against Java Lucene 10.3.2. Same index setup as SHOULD tests.
+// Java queries via QueryParser: `+word1 -word2` and `word1 word2 -word3`.
+// -------------------------------------------------------------------------
+
+/// Helper to build a MUST + single MUST_NOT boolean query.
+fn must_must_not_query(field: &str, must_term: &[u8], not_term: &[u8]) -> BooleanQuery {
+    let mut builder = BooleanQuery::builder();
+    builder.add_query(Box::new(TermQuery::new(field, must_term)), Occur::Must);
+    builder.add_query(Box::new(TermQuery::new(field, not_term)), Occur::MustNot);
+    builder.build()
+}
+
+// -------------------------------------------------------------------------
+// MUST_NOT Query 1: +distributed -security → 6 hits
+// Java results:
+//   doc=13  score=0.4596379
+//   doc=2   score=0.4214391
+//   doc=7   score=0.4214391
+//   doc=8   score=0.4214391
+//   doc=0   score=0.3891023
+//   doc=6   score=0.3650910
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_must_not_distributed_security() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+    let query = must_must_not_query("contents", b"distributed", b"security");
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 6);
+    assert_eq!(top_docs.score_docs.len(), 6);
+
+    let expected = [
+        (13, 0.4596379_f32),
+        (2, 0.4214391),
+        (7, 0.4214391),
+        (8, 0.4214391),
+        (0, 0.3891023),
+        (6, 0.365091),
+    ];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// MUST_NOT Query 2: +memory -quantum → 2 hits
+// Java results:
+//   doc=8   score=0.7110608
+//   doc=0   score=0.6565015
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_must_not_memory_quantum() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+    let query = must_must_not_query("contents", b"memory", b"quantum");
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 2);
+    assert_eq!(top_docs.score_docs.len(), 2);
+
+    let expected = [(8, 0.7110608_f32), (0, 0.6565015)];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// MUST_NOT Query 3: algorithms data -systems → 3 hits (SHOULD + MUST_NOT)
+// Java results:
+//   doc=14  score=0.8000477
+//   doc=5   score=0.2621497
+//   doc=1   score=0.2506270
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_must_not_algorithms_data_minus_systems() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+
+    let mut builder = BooleanQuery::builder();
+    builder.add_query(
+        Box::new(TermQuery::new("contents", b"algorithms")),
+        Occur::Should,
+    );
+    builder.add_query(Box::new(TermQuery::new("contents", b"data")), Occur::Should);
+    builder.add_query(
+        Box::new(TermQuery::new("contents", b"systems")),
+        Occur::MustNot,
+    );
+    let query = builder.build();
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 3);
+    assert_eq!(top_docs.score_docs.len(), 3);
+
+    let expected = [(14, 0.8000477_f32), (5, 0.2621497), (1, 0.250627)];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
 // Conjunction scoring pruning: verify that BooleanQuery conjunctions interact
 // correctly with the totalHits threshold (TOTAL_HITS_THRESHOLD = 1000).
 //

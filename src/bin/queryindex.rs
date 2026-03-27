@@ -1,9 +1,10 @@
 // Query a Bearing-readable index with a list of query strings and report per-query timing.
 //
 // Each line in the queries file is a query in Lucene standard syntax:
-//   - bare word:       algorithms        (TermQuery)
-//   - boolean MUST:    +algorithms +data  (BooleanQuery with MUST clauses)
-//   - boolean SHOULD:  algorithms data    (BooleanQuery with SHOULD clauses)
+//   - bare word:         algorithms         (TermQuery)
+//   - boolean MUST:      +algorithms +data  (BooleanQuery with MUST clauses)
+//   - boolean SHOULD:    algorithms data    (BooleanQuery with SHOULD clauses)
+//   - boolean MUST_NOT:  +algorithms -data  (BooleanQuery with MUST and MUST_NOT clauses)
 //
 // Usage:
 //   cargo run --release --bin queryindex -- -index <DIR> -queries <FILE> [-output <FILE>]
@@ -28,19 +29,35 @@ use bearing::store::FSDirectory;
 /// Parses a query string in Lucene standard syntax into a Query.
 ///
 /// Supported formats:
-///   - `word`           → TermQuery on the given field
-///   - `+word1 +word2`  → BooleanQuery with MUST clauses
-///   - `word1 word2`    → BooleanQuery with SHOULD clauses
+///   - `word`              → TermQuery on the given field
+///   - `+word1 +word2`     → BooleanQuery with MUST clauses
+///   - `+word1 -word2`     → BooleanQuery with MUST and MUST_NOT clauses
+///   - `word1 word2`       → BooleanQuery with SHOULD clauses
+///   - `word1 word2 -word3` → BooleanQuery with SHOULD and MUST_NOT clauses
 fn parse_query(query_str: &str, field: &str) -> Box<dyn Query> {
     let tokens: Vec<&str> = query_str.split_whitespace().collect();
 
-    if tokens.iter().any(|t| t.starts_with('+')) {
+    let has_plus = tokens.iter().any(|t| t.starts_with('+'));
+    let has_minus = tokens.iter().any(|t| t.starts_with('-'));
+
+    if has_plus || has_minus {
         let mut builder = BooleanQuery::builder();
         for token in &tokens {
             if let Some(term) = token.strip_prefix('+') {
                 builder.add_query(
                     Box::new(TermQuery::new(field, term.as_bytes())),
                     Occur::Must,
+                );
+            } else if let Some(term) = token.strip_prefix('-') {
+                builder.add_query(
+                    Box::new(TermQuery::new(field, term.as_bytes())),
+                    Occur::MustNot,
+                );
+            } else {
+                // Bare word in a mixed query → SHOULD (matches QueryParser behavior)
+                builder.add_query(
+                    Box::new(TermQuery::new(field, token.as_bytes())),
+                    Occur::Should,
                 );
             }
         }

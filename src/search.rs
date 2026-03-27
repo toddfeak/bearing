@@ -13,6 +13,7 @@ pub mod doc_id_set_iterator;
 pub mod index_searcher;
 pub mod long_heap;
 pub mod query;
+pub mod req_excl_bulk_scorer;
 pub mod scorable;
 pub mod scorer;
 pub mod scorer_util;

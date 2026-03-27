@@ -114,10 +114,17 @@ Pure SHOULD queries. Window-based bulk scoring in 4096-doc batches with priority
 | Avg query time | 48 µs | 92 µs | **1.9x faster** |
 | Peak RSS | 23 MB | 103 MB | **4.5x less memory** |
 
-#### BooleanQuery — Next
-- Mixed conjunction-disjunction (MUST + SHOULD)
-- MUST_NOT exclusion
-- Then expand: phrase, range, wildcard, etc.
+#### BooleanQuery — Single MUST_NOT
+Exclude documents matching a single prohibited term.
+
+#### BooleanQuery — Multi MUST_NOT
+Exclude documents matching any of multiple prohibited terms.
+
+#### BooleanQuery — Mixed MUST + SHOULD
+MUST clauses required, SHOULD clauses boost score.
+
+#### Beyond Boolean
+Phrase, range, wildcard, etc.
 
 ## Phase 3 — Index Lifecycle (unblocked by read path)
 
