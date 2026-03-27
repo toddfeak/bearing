@@ -1,16 +1,17 @@
 [package]
 name = "bearing"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 edition = "2024"
 description = "A Rust port of Apache Lucene"
 license = "Apache-2.0"
+documentation = "https://docs.rs/bearing"
 repository = "https://github.com/toddfeak/bearing"
 homepage = "https://github.com/toddfeak/bearing"
 readme = "README.md"
 keywords = ["lucene", "search", "indexing", "full-text-search"]
 categories = ["text-processing"]
 rust-version = "1.88"
-exclude = ["reference/", "testdata/", "tests/", ".claude/", "docs/"]
+include = ["/src/", "/tests/*.rs", "/Cargo.toml", "/LICENSE", "/NOTICE", "/README.md", "/CONTRIBUTING.md"]
 
 [lib]
 path = "src/lib.rs"
@@ -35,3 +36,7 @@ path = "src/bin/indexfiles.rs"
 [[bin]]
 name = "generate_summary"
 path = "src/bin/generate_summary.rs"
+
+[[bin]]
+name = "queryindex"
+path = "src/bin/queryindex.rs"

@@ -1,92 +1,66 @@
 # Bearing
 
+[![Crates.io](https://img.shields.io/crates/v/bearing)](https://crates.io/crates/bearing)
+[![Docs](https://img.shields.io/docsrs/bearing)](https://docs.rs/bearing/)
 [![CI](https://github.com/toddfeak/bearing/actions/workflows/ci.yml/badge.svg)](https://github.com/toddfeak/bearing/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-orange.svg)](https://blog.rust-lang.org/)
 
-A Rust port of Apache Lucene.
+A Rust port of Apache Lucene - the full-text search library.
+
+## Status
+
+Bearing is in **alpha**. The API will change.
+
+- **Indexing**: Multi-threaded `IndexWriter` with fourteen field types, five doc values types, term vectors, and sparse fields
+- **Querying**: TermQuery and BooleanQuery (MUST, SHOULD, MUST_NOT, and mixed) with BM25 scoring
+- **Codec**: Lucene103 — indexes are readable by Java Lucene and vice versa
+- **Correctness**: Query results are cross-validated against Java Lucene across multiple corpus sizes
+
+## API Documentation
+
+Full API documentation is available on [docs.rs](https://docs.rs/bearing/).
 
 ## About
 
+Bearing is a port of [Apache Lucene 10.3.2](https://lucene.apache.org/) to Rust. It writes and reads Lucene-compatible indexes using the Lucene103 codec, producing byte-identical results to the Java implementation.
+
 This project exists at the intersection of learning and building. It's an exercise in learning Rust and exploring AI-assisted development with Claude Code, while producing something that might actually be useful. The code is AI-generated and a work in progress — it won't be perfect, and it moves at its own pace. This is a personal project: no pull requests, no issue tracker, no collaborators. If it interests you, fork it and make it your own.
+
+## Quick Start
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+bearing = "0.1.0-alpha.2"
+```
+
+```rust
+use bearing::index::{IndexWriter, IndexWriterConfig};
+use bearing::document::{self, Document};
+use bearing::search::*;
+
+// Index a document
+let writer = IndexWriter::new();
+let mut doc = Document::new();
+doc.add(document::text_field("title", "hello world"));
+writer.add_document(doc).unwrap();
+let result = writer.commit().unwrap();
+
+// Search (after opening the index)
+// let searcher = IndexSearcher::new(&reader);
+// let query = TermQuery::new("title", b"hello");
+// let results = searcher.search(&query, 10).unwrap();
+```
 
 ## Why "Bearing"?
 
 The name is a play on words. A bearing gives direction — fitting for a search library. Bearings also carry load — as this project aims to do for indexing workloads. And of course, bearings are made of steel, which isn't too far from Rust.
 
-## Status
-
-- Target: Apache Lucene 10.3.2, Lucene103 codec
-- Indexing: multi-threaded `IndexWriter` with fourteen field types, five doc values types, term vectors, sparse fields
-- Querying: TermQuery, BooleanQuery (MUST, SHOULD, MUST_NOT, and mixed), BM25 scoring — identical results to Java Lucene
-- Java Lucene VerifyIndex validates indexes; query results cross-validated against Java
-
-## Performance
-
-**Indexing** (2,000 docs, 149 MB):
-
-| | Lucene (1 thread) | Lucene (12 threads) | Bearing (1 thread) | Bearing (12 threads) |
-|---|---|---|---|---|
-| **Indexing time** | 2,672 ms | 1,512 ms | 1,284 ms | 586 ms |
-| **Peak RSS** | 275 MB | 252 MB | 54 MB | 58 MB |
-| **Speedup vs Lucene** | — | — | 2.1x | 2.6x |
-| **Memory savings** | — | — | 5.1x | 4.3x |
-
-**Querying** (2,000 docs, 60 MB, all boolean query types with 2 terms or less):
-
-| Metric | Lucene | Bearing | Ratio |
-|---|---|---|---|
-| Avg query time | 126 µs | 39 µs | **3.2x faster** |
-| Peak RSS | 101 MB | 10 MB | **10x less memory** |
-
-## Build
-
-    cargo build
-    cargo test
-    cargo clippy
-
-## Reference Source
-
-Download the reference sources (Apache Lucene 10.3.2 and Assertables). This is primarily for Claude Code:
-
-    ./reference/download-references.sh
-
-Requires internet access. Not required for building or testing.
-
-## Test Data
-
-`testdata/docs/` has 4 small files for quick tests. `testdata/impact-docs/` has 150 documents for impact/feature testing. Generate a larger corpus for benchmarking:
-
-    python3 testdata/gen_docs.py -n 2000    # generates to /tmp/perf-docs/
-
-## E2E Tests
-
-Roundtrip tests: Bearing writes indexes, Java Lucene reads and validates them.
-
-    ./tests/e2e_all.sh              # run all e2e tests
-    ./tests/e2e_indexfiles.sh       # basic indexing roundtrip
-    ./tests/e2e_doc_values.sh       # doc values byte-level comparison
-    ./tests/e2e_verify_impacts.sh   # feature field / impact encoding
-    ./tests/e2e_verify_tim_compression.sh  # terms dictionary compression
-
-Requires Java 21+. Gradle handles the Lucene dependency automatically.
-
-## Performance Comparison
-
-Compare indexing speed and correctness between Java Lucene and Rust:
-
-    ./tests/compare_java_rust.sh -release --threads 12
-    ./tests/compare_java_rust.sh -docs /tmp/perf-docs -release
-
-| Flag | Default | Description |
-|---|---|---|
-| `-docs DIR` | `testdata/docs` | Documents directory |
-| `-release` | debug | Build Rust in release mode |
-| `--threads N` | `12` | Thread count for multi-threaded Rust run |
-
 ## Roadmap
 
-See [PLAN.md](docs/PLAN.md).
+See [PLAN.md](docs/PLAN.md) for detailed progress and next steps.
 
 ## License
 

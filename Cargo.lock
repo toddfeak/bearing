@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "bearing"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 dependencies = [
  "assertables",
  "fixedbitset",

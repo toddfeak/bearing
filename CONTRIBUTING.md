@@ -39,6 +39,43 @@ When porting a feature, locate the corresponding Java source under `reference/lu
 
 Bearing uses very limited runtime dependencies and we strive to avoid adding more. At the same time, try not to reimplement common libraries.
 
+## Test Data
+
+`testdata/docs/` has 4 small files for quick tests. `testdata/impact-docs/` has 150 documents for impact/feature testing. Generate a larger corpus for benchmarking:
+
+```bash
+python3 testdata/gen_docs.py -n 2000    # generates to /tmp/perf-docs/
+```
+
+## E2E Tests
+
+Roundtrip tests: Bearing writes indexes, Java Lucene reads and validates them.
+
+```bash
+./tests/e2e_all.sh              # run all e2e tests
+./tests/e2e_indexfiles.sh       # basic indexing roundtrip
+./tests/e2e_doc_values.sh       # doc values byte-level comparison
+./tests/e2e_verify_impacts.sh   # feature field / impact encoding
+./tests/e2e_verify_tim_compression.sh  # terms dictionary compression
+```
+
+Requires Java 21+. Gradle handles the Lucene dependency automatically.
+
+## Performance Comparison
+
+Compare indexing speed and correctness between Java Lucene and Rust:
+
+```bash
+./tests/compare_index_perf.sh -release --threads 12
+./tests/compare_index_perf.sh -docs /tmp/perf-docs -release
+```
+
+Compare query performance across Java and Rust on the same index:
+
+```bash
+./tests/compare_query_perf.sh -docs /tmp/gutenberg-small-2000
+```
+
 ## If PRs Open in the Future
 
 Contributions would need to:
@@ -47,4 +84,3 @@ Contributions would need to:
 - Pass `cargo clippy -- -D warnings` (no lint warnings)
 - Be formatted with `cargo fmt`
 - Include tests for new functionality
-- Reference the Java Lucene source class when porting (e.g., `// Ported from org.apache.lucene.codecs.TestCodecUtil`)
