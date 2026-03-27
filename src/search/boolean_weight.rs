@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 
+use super::block_max_conjunction::BlockMaxConjunctionBulkScorer;
 use super::boolean_query::{BooleanClause, Occur};
 use super::collector::ScoreMode;
 use super::conjunction::ConjunctionScorer;
@@ -143,6 +144,7 @@ impl Weight for BooleanWeight {
             scorers,
             self.score_mode,
             min_should_match,
+            context.reader.max_doc(),
         )?)))
     }
 }
@@ -155,6 +157,7 @@ struct BooleanScorerSupplier {
     subs: HashMap<Occur, Vec<Box<dyn ScorerSupplier>>>,
     score_mode: ScoreMode,
     min_should_match: i32,
+    max_doc: i32,
     cost: Cell<i64>,
     top_level_scoring_clause: bool,
 }
@@ -173,6 +176,7 @@ impl BooleanScorerSupplier {
         subs: HashMap<Occur, Vec<Box<dyn ScorerSupplier>>>,
         score_mode: ScoreMode,
         min_should_match: i32,
+        max_doc: i32,
     ) -> io::Result<Self> {
         if min_should_match < 0 {
             return Err(io::Error::other(format!(
@@ -203,6 +207,7 @@ impl BooleanScorerSupplier {
             subs,
             score_mode,
             min_should_match,
+            max_doc,
             cost: Cell::new(-1),
             top_level_scoring_clause: false,
         })
@@ -336,11 +341,27 @@ impl BooleanScorerSupplier {
             required_scoring.push(ss.get(lead_cost)?);
         }
 
-        // (TOP_SCORES with multiple scoring scorers) — not yet implemented, fall through.
+        // Java lines 387-397: TOP_SCORES with multiple scoring scorers and no two-phase
+        // iterators → use BlockMaxConjunctionBulkScorer for dynamic pruning.
+        // Note: We don't have twoPhaseIterator in Rust yet, so the two-phase check is
+        // trivially true (our TermQuery scorers never have two-phase iterators).
+        if self.score_mode == ScoreMode::TopScores && required_scoring.len() > 1 {
+            // Java wraps filter scorers as ConstantScoreScorer(0f) here.
+            // We don't have ConstantScoreScorer yet — assert no filters for now.
+            if !required_no_scoring.is_empty() {
+                todo!(
+                    "ConstantScoreScorer wrapping for FILTER clauses in BlockMaxConjunctionBulkScorer"
+                );
+            }
+            return Ok(Some(Box::new(BlockMaxConjunctionBulkScorer::new(
+                self.max_doc,
+                required_scoring,
+            ))));
+        }
 
-        // — not yet implemented, fall through.
-
-        // — not yet implemented, fall through.
+        // Java lines 399-411: non-TOP_SCORES paths (ConjunctionBulkScorer,
+        // DenseConjunctionBulkScorer) — not yet implemented, fall through to
+        // DefaultBulkScorer wrapping a ConjunctionScorer.
 
         let conjunction_scorer: Box<dyn Scorer>;
         if required_no_scoring.len() + required_scoring.len() == 1 {

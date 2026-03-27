@@ -190,3 +190,76 @@ fn test_boolean_must_nonexistent_terms() {
     assert_eq!(top_docs.total_hits.value, 0);
     assert_is_empty!(top_docs.score_docs);
 }
+
+// -------------------------------------------------------------------------
+// Conjunction scoring pruning: verify that BooleanQuery conjunctions interact
+// correctly with the totalHits threshold (TOTAL_HITS_THRESHOLD = 1000).
+//
+// Java's BooleanScorerSupplier uses BlockMaxConjunctionBulkScorer for
+// TOP_SCORES mode conjunctions with 2+ scoring clauses. This scorer prunes
+// non-competitive docs via setMinCompetitiveScore, which means fewer docs
+// reach the collector and totalHits is a lower bound (< actual match count).
+//
+// For TermQuery, BatchScoreBulkScorer already does this pruning correctly.
+// This test verifies that BooleanQuery conjunctions prune the same way.
+// -------------------------------------------------------------------------
+
+/// Builds an in-memory index with `doc_count` documents, each containing
+/// the given terms in a "content" text field.
+fn build_large_index(doc_count: usize, terms: &[&str]) -> (Box<dyn Directory>, DirectoryReader) {
+    let config = IndexWriterConfig::new().set_use_compound_file(false);
+    let writer = IndexWriter::with_config(config);
+
+    for i in 0..doc_count {
+        let mut doc = Document::new();
+        // Each doc gets the common terms plus filler words to vary document length,
+        // which produces varying BM25 scores across docs.
+        let filler_count = (i % 20) + 1;
+        let filler: String = (0..filler_count)
+            .map(|j| format!("word{}", j))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = format!("{} {}", terms.join(" "), filler);
+        doc.add(document::text_field("content", &text));
+        writer.add_document(doc).unwrap();
+    }
+
+    let result = writer.commit().unwrap();
+    let seg_files = result.into_segment_files().unwrap();
+
+    let mut mem_dir = MemoryDirectory::new();
+    for sf in &seg_files {
+        mem_dir.write_file(&sf.name, &sf.data).unwrap();
+    }
+    let dir = Box::new(mem_dir) as Box<dyn Directory>;
+    let reader = DirectoryReader::open(dir.as_ref()).unwrap();
+    (dir, reader)
+}
+
+#[test]
+fn test_boolean_conjunction_pruning_matches_term_query() {
+    let doc_count = 1500;
+    let (_dir, reader) = build_large_index(doc_count, &["alpha", "beta"]);
+    let searcher = IndexSearcher::new(&reader);
+
+    // TermQuery with default threshold (1000): should prune via BatchScoreBulkScorer,
+    // giving totalHits < doc_count.
+    let term_query = TermQuery::new("content", b"alpha");
+    let term_result = searcher.search(&term_query, 10).unwrap();
+    assert_lt!(
+        term_result.total_hits.value,
+        doc_count as i64,
+        "TermQuery should prune non-competitive docs when totalHits > threshold"
+    );
+
+    // BooleanQuery +alpha +beta with default threshold: should also prune via
+    // BlockMaxConjunctionBulkScorer, giving totalHits < doc_count.
+    // Currently FAILS because Rust uses DefaultBulkScorer which counts every doc.
+    let bool_query = must_must_query("content", b"alpha", b"beta");
+    let bool_result = searcher.search(&bool_query, 10).unwrap();
+    assert_lt!(
+        bool_result.total_hits.value,
+        doc_count as i64,
+        "BooleanQuery conjunction should prune non-competitive docs like TermQuery does"
+    );
+}

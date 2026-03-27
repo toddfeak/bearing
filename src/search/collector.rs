@@ -320,7 +320,6 @@ impl Scorable for SimpleScorable {
 
 /// Wrapper around parallel arrays storing doc IDs and their corresponding features, stored as
 /// `f32`. These features may be anything, but are typically a term frequency or a score.
-#[derive(Debug)]
 pub struct DocAndFloatFeatureBuffer {
     /// Doc IDs.
     pub docs: Vec<i32>,
@@ -328,6 +327,15 @@ pub struct DocAndFloatFeatureBuffer {
     pub features: Vec<f32>,
     /// Number of valid entries in the doc ID and float-valued feature arrays.
     pub size: usize,
+}
+
+impl fmt::Debug for DocAndFloatFeatureBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DocAndFloatFeatureBuffer")
+            .field("size", &self.size)
+            .field("capacity", &self.docs.len())
+            .finish()
+    }
 }
 
 impl DocAndFloatFeatureBuffer {
@@ -351,6 +359,76 @@ impl DocAndFloatFeatureBuffer {
 }
 
 impl Default for DocAndFloatFeatureBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DocAndScoreAccBuffer
+// ---------------------------------------------------------------------------
+
+/// Wrapper around parallel arrays storing doc IDs and their corresponding score accumulators,
+/// stored as `f64` for precision during multi-clause score accumulation.
+pub struct DocAndScoreAccBuffer {
+    /// Doc IDs.
+    pub docs: Vec<i32>,
+    /// Scores (double-precision accumulators).
+    pub scores: Vec<f64>,
+    /// Number of valid entries in the doc ID and score arrays.
+    pub size: usize,
+}
+
+impl fmt::Debug for DocAndScoreAccBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DocAndScoreAccBuffer")
+            .field("size", &self.size)
+            .field("capacity", &self.docs.len())
+            .finish()
+    }
+}
+
+impl DocAndScoreAccBuffer {
+    /// Sole constructor.
+    pub fn new() -> Self {
+        Self {
+            docs: Vec::new(),
+            scores: Vec::new(),
+            size: 0,
+        }
+    }
+
+    /// Grow both arrays to ensure that they can store at least the given number of entries.
+    /// Existing content may be discarded.
+    pub fn grow_no_copy(&mut self, min_size: usize) {
+        if self.docs.len() < min_size {
+            self.docs.resize(min_size, 0);
+            self.scores = vec![0.0; self.docs.len()];
+        }
+    }
+
+    /// Grow both arrays to ensure that they can store at least the given number of entries.
+    /// Existing content is preserved.
+    pub fn grow(&mut self, min_size: usize) {
+        if self.docs.len() < min_size {
+            self.docs.resize(min_size, 0);
+            self.scores.resize(self.docs.len(), 0.0);
+        }
+    }
+
+    /// Copy content from the given `DocAndFloatFeatureBuffer`, expanding float scores to
+    /// doubles.
+    pub fn copy_from(&mut self, buffer: &DocAndFloatFeatureBuffer) {
+        self.grow_no_copy(buffer.size);
+        self.docs[..buffer.size].copy_from_slice(&buffer.docs[..buffer.size]);
+        for i in 0..buffer.size {
+            self.scores[i] = buffer.features[i] as f64;
+        }
+        self.size = buffer.size;
+    }
+}
+
+impl Default for DocAndScoreAccBuffer {
     fn default() -> Self {
         Self::new()
     }
@@ -475,5 +553,60 @@ mod tests {
         let old_len = buf.docs.len();
         buf.grow_no_copy(64);
         assert_eq!(buf.docs.len(), old_len);
+    }
+
+    // -- DocAndScoreAccBuffer tests --
+
+    #[test]
+    fn test_score_acc_buffer_new() {
+        let buf = DocAndScoreAccBuffer::new();
+        assert_eq!(buf.size, 0);
+        assert_is_empty!(buf.docs);
+        assert_is_empty!(buf.scores);
+    }
+
+    #[test]
+    fn test_score_acc_buffer_grow_no_copy() {
+        let mut buf = DocAndScoreAccBuffer::new();
+        buf.grow_no_copy(128);
+        assert_ge!(buf.docs.len(), 128);
+        assert_ge!(buf.scores.len(), 128);
+    }
+
+    #[test]
+    fn test_score_acc_buffer_grow_preserves() {
+        let mut buf = DocAndScoreAccBuffer::new();
+        buf.grow(4);
+        buf.docs[0] = 42;
+        buf.scores[0] = 1.5;
+        buf.size = 1;
+        buf.grow(128);
+        assert_ge!(buf.docs.len(), 128);
+        assert_eq!(buf.docs[0], 42);
+        assert_in_delta!(buf.scores[0], 1.5, 1e-10);
+    }
+
+    #[test]
+    fn test_score_acc_buffer_copy_from() {
+        let mut float_buf = DocAndFloatFeatureBuffer::new();
+        float_buf.grow_no_copy(3);
+        float_buf.docs[0] = 10;
+        float_buf.docs[1] = 20;
+        float_buf.docs[2] = 30;
+        float_buf.features[0] = 1.5;
+        float_buf.features[1] = 2.5;
+        float_buf.features[2] = 3.5;
+        float_buf.size = 3;
+
+        let mut acc_buf = DocAndScoreAccBuffer::new();
+        acc_buf.copy_from(&float_buf);
+
+        assert_eq!(acc_buf.size, 3);
+        assert_eq!(acc_buf.docs[0], 10);
+        assert_eq!(acc_buf.docs[1], 20);
+        assert_eq!(acc_buf.docs[2], 30);
+        assert_in_delta!(acc_buf.scores[0], 1.5, 1e-10);
+        assert_in_delta!(acc_buf.scores[1], 2.5, 1e-10);
+        assert_in_delta!(acc_buf.scores[2], 3.5, 1e-10);
     }
 }

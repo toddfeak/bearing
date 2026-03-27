@@ -2,6 +2,7 @@
 
 //! Search types for query execution, scoring, and result collection.
 
+pub mod block_max_conjunction;
 pub mod boolean_query;
 pub mod boolean_weight;
 pub mod collector;
@@ -12,6 +13,7 @@ pub mod long_heap;
 pub mod query;
 pub mod scorable;
 pub mod scorer;
+pub mod scorer_util;
 pub mod similarity;
 pub mod term_query;
 pub mod term_states;
