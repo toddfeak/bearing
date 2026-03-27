@@ -137,9 +137,15 @@ def gen_boolean_must_query(words, rng):
     w1, w2 = rng.sample(words, 2)
     return f'+{w1} +{w2}'
 
+def gen_boolean_should_query(words, rng):
+    \"\"\"Double SHOULD boolean query: word1 word2\"\"\"
+    w1, w2 = rng.sample(words, 2)
+    return f'{w1} {w2}'
+
 generators = [
-    (gen_term_query,          0.7),
-    (gen_boolean_must_query,  0.3),
+    (gen_term_query,            0.50),
+    (gen_boolean_must_query,    0.25),
+    (gen_boolean_should_query,  0.25),
 ]
 
 # Build cumulative weights for weighted selection
@@ -161,9 +167,10 @@ with open('$QUERIES_FILE', 'w') as f:
     for q in queries:
         f.write(q + '\n')
 
-term_count = sum(1 for q in queries if not q.startswith('+'))
-bool_count = len(queries) - term_count
-print(f'  {len(queries)} queries generated ({term_count} term, {bool_count} boolean)')
+term_count = sum(1 for q in queries if ' ' not in q)
+must_count = sum(1 for q in queries if q.startswith('+'))
+should_count = sum(1 for q in queries if ' ' in q and not q.startswith('+'))
+print(f'  {len(queries)} queries generated ({term_count} term, {must_count} MUST, {should_count} SHOULD)')
 "
 echo ""
 

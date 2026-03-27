@@ -18,19 +18,26 @@ The name is a play on words. A bearing gives direction — fitting for a search 
 
 - Target: Apache Lucene 10.3.2, Lucene103 codec
 - Indexing: multi-threaded `IndexWriter` with fourteen field types, five doc values types, term vectors, sparse fields
-- Next phase: read path and querying (also unblocks merging, deletes, and round trip testing)
-- Java Lucene VerifyIndex validates output
+- Querying: TermQuery, BooleanQuery (conjunction and disjunction), BM25 scoring — identical results to Java Lucene
+- Java Lucene VerifyIndex validates indexes; query results cross-validated against Java
 
 ## Performance
 
-Benchmark indexing 2,000 synthetic documents (149 MB) on Linux:
+**Indexing** (2,000 docs, 149 MB):
 
-| | Java (1 thread) | Java (12 threads) | Bearing (1 thread) | Bearing (12 threads) |
+| | Lucene (1 thread) | Lucene (12 threads) | Bearing (1 thread) | Bearing (12 threads) |
 |---|---|---|---|---|
 | **Indexing time** | 2,672 ms | 1,512 ms | 1,284 ms | 586 ms |
 | **Peak RSS** | 275 MB | 252 MB | 54 MB | 58 MB |
-| **Speedup vs Java** | — | — | 2.1x | 2.6x |
+| **Speedup vs Lucene** | — | — | 2.1x | 2.6x |
 | **Memory savings** | — | — | 5.1x | 4.3x |
+
+**Querying** (2,000 docs, 60 MB, mixed term/MUST/SHOULD queries):
+
+| Metric | Lucene | Bearing | Ratio |
+|---|---|---|---|
+| Avg query time | 81 µs | 16 µs | **4.8x faster** |
+| Peak RSS | 102 MB | 7.9 MB | **13x less memory** |
 
 ## Build
 

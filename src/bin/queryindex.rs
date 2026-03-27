@@ -1,8 +1,9 @@
 // Query a Bearing-readable index with a list of query strings and report per-query timing.
 //
 // Each line in the queries file is a query in Lucene standard syntax:
-//   - bare word:       algorithms     (TermQuery)
+//   - bare word:       algorithms        (TermQuery)
 //   - boolean MUST:    +algorithms +data  (BooleanQuery with MUST clauses)
+//   - boolean SHOULD:  algorithms data    (BooleanQuery with SHOULD clauses)
 //
 // Usage:
 //   cargo run --release --bin queryindex -- -index <DIR> -queries <FILE> [-output <FILE>]
@@ -29,6 +30,7 @@ use bearing::store::FSDirectory;
 /// Supported formats:
 ///   - `word`           → TermQuery on the given field
 ///   - `+word1 +word2`  → BooleanQuery with MUST clauses
+///   - `word1 word2`    → BooleanQuery with SHOULD clauses
 fn parse_query(query_str: &str, field: &str) -> Box<dyn Query> {
     let tokens: Vec<&str> = query_str.split_whitespace().collect();
 
@@ -41,6 +43,15 @@ fn parse_query(query_str: &str, field: &str) -> Box<dyn Query> {
                     Occur::Must,
                 );
             }
+        }
+        Box::new(builder.build())
+    } else if tokens.len() > 1 {
+        let mut builder = BooleanQuery::builder();
+        for token in &tokens {
+            builder.add_query(
+                Box::new(TermQuery::new(field, token.as_bytes())),
+                Occur::Should,
+            );
         }
         Box::new(builder.build())
     } else {

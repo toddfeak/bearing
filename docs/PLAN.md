@@ -4,17 +4,17 @@
 
 **Indexing** (2000 docs, 149 MB corpus, release build):
 
-| Metric | Rust | Java (Lucene 10.3.2) | Ratio |
+| Metric | Bearing | Lucene 10.3.2 | Ratio |
 |---|---|---|---|
 | 1 thread | 1.36s | 2.72s | **2.0x faster** |
 | 12 threads | 0.61s | 2.72s | **4.4x faster** |
 
-**Querying** (2000 docs, 60M corpus, 2000 single-term queries):
+**Querying** (2000 docs, 60M corpus, 2000 queries — term, MUST, SHOULD mix):
 
-| Metric | Rust | Java (Lucene 10.3.2) | Ratio |
+| Metric | Bearing | Lucene 10.3.2 | Ratio |
 |---|---|---|---|
-| Avg query time | 18 µs | 89 µs | **4.9x faster** |
-| Peak RSS | 8.6 MB | 102 MB | **12x less memory** |
+| Avg query time | 16 µs | 81 µs | **4.8x faster** |
+| Peak RSS | 7.9 MB | 102 MB | **13x less memory** |
 
 ---
 
@@ -88,52 +88,36 @@ First query path: given a field name and term, find all matching doc IDs.
 ## Phase 2 — Search
 
 ### 5. Search Infrastructure (done)
-- Frequency decoding in `BlockPostingsEnum` with impacts and skip-level navigation
-- `IndexSearcher` — entry point, holds a `DirectoryReader`
-- `Query` / `Weight` / `Scorer` / `BulkScorer` / `ScorerSupplier` abstractions
-- `Collector` / `LeafCollector` / `TopScoreDocCollector` — result gathering with `ScoreContext`
-- `BM25Similarity` with `SimScorer` / `BulkSimScorer`
-- `MmapDirectory` for zero-copy index reads (matches Java's default `MMapDirectory`)
-- `NumericDocValues` trait for lazy norms access
+Query/Weight/Scorer/BulkScorer abstractions, BM25 similarity, collectors, MmapDirectory for zero-copy reads, lazy norms access, Terms/TermsEnum reader abstractions.
 
 ### 6. Core Query Types
 #### TermQuery (done)
-Single-term lookup with BM25 scoring. Produces byte-identical results to Java Lucene.
+Single-term BM25 scoring with competitive skipping via impacts. Byte-identical results to Java Lucene.
 
-- `TermStates` — caches per-leaf `IntBlockTermState` during `create_weight`, reused in `scorer_supplier` (no duplicate trie I/O)
-- `TermWeight` — stores `SimScorer` once (created from aggregated cross-segment stats, cloned per-leaf)
-- `TermScorer` — lazy norms via `NumericDocValues` (only reads norms for scored docs, not entire segment)
-- `ImpactsDISI` logic inlined for `TopScores` competitive skipping via `MaxScoreCache`
-- `BatchScoreBulkScorer` for batch scoring with `nextDocsAndScores`
+#### BooleanQuery — Conjunction (done)
+Pure MUST/FILTER queries. Dynamic pruning via block-max conjunction scoring.
 
-**Query performance (2000 docs, 60M corpus, 2000 queries):**
+#### BooleanQuery — Disjunction (done)
+Pure SHOULD queries. Window-based bulk scoring in 4096-doc batches with priority queues and bitset replay. Cross-validated against Java Lucene across multiple corpus sizes.
 
-| Metric | Rust | Java | Ratio |
+**Query performance (2000 docs, 60M corpus, 2000 queries — term, MUST, SHOULD mix):**
+
+| Metric | Bearing | Lucene | Ratio |
 |---|---|---|---|
-| Avg query time | 18 µs | 89 µs | **4.9x faster** |
-| Peak RSS | 8.6 MB | 102 MB | **12x less memory** |
+| Avg query time | 16 µs | 81 µs | **4.8x faster** |
+| Peak RSS | 7.9 MB | 102 MB | **13x less memory** |
 
-**Query performance (5000 docs, 192M corpus, 5000 queries):**
+**Query performance (5000 docs, 192M corpus, 5000 queries — term, MUST, SHOULD mix):**
 
-| Metric | Rust | Java | Ratio |
+| Metric | Bearing | Lucene | Ratio |
 |---|---|---|---|
-| Avg query time | 23 µs | 48 µs | **2.0x faster** |
-| Peak RSS | 21 MB | 103 MB | **5x less memory** |
+| Avg query time | 48 µs | 92 µs | **1.9x faster** |
+| Peak RSS | 23 MB | 103 MB | **4.5x less memory** |
 
-#### Reader Abstractions for Query Path (done)
-- `Terms` trait and `TermsEnum` trait (`src/index/terms.rs`) — ported from Java's `org.apache.lucene.index`
-- `FieldReader` implements `Terms` — stat methods, `has_freqs/positions/offsets/payloads`, `iterator()`
-- `SegmentTermsEnum` implements `TermsEnum` — seek, term state, doc freq, total term freq
-- `SegmentReader::terms(field)` matching `LeafReader.terms(String)`
-- `BlockTreeTermsReader::terms(field_name)` matching `FieldsProducer.terms(String)`
-- `TermStates::build()` and `IndexSearcher::collection_statistics()` refactored to use Terms/TermsEnum
-- TrieReader 8-byte leaf node fix
-
-#### BooleanQuery (next)
-- `BooleanQuery` (AND/OR/NOT composition)
+#### BooleanQuery — Next
+- Mixed conjunction-disjunction (MUST + SHOULD)
+- MUST_NOT exclusion
 - Then expand: phrase, range, wildcard, etc.
-
-**Testable:** Index docs, search, verify correct doc IDs returned.
 
 ## Phase 3 — Index Lifecycle (unblocked by read path)
 
