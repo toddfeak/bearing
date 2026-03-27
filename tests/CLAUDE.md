@@ -45,7 +45,7 @@ python3 testdata/gen_golden_docs.py
 | `VerifyImpacts` | Checks competitive impact data in `.doc` skip blocks for proper norms |
 | `IndexAllFields` | Indexes documents with all field types (baseline for cross-validation) |
 | `GenerateIndexSummary` | Reads an index and emits a JSON summary of structure and aggregate statistics |
-| `QueryIndex` | Queries an index with a word list, reports timing, optionally writes results to file |
+| `QueryIndex` | Queries an index with a queries file (Lucene syntax), reports timing, optionally writes results to file |
 
 ### Running Java utilities
 
@@ -96,14 +96,14 @@ Compare query speed between Java Lucene and Rust on the same index:
 ./tests/compare_query_perf.sh -docs /tmp/gutenberg-small-2000  # 2000 docs, 2000 queries
 ```
 
-Builds a Java index, generates one query word per document, queries with both Java and
-Rust, verifies results match (ignoring `totalHits` differences from early termination),
-and reports average query time.
+Builds a Java index, generates a mix of term and boolean queries, queries with both Java
+and Rust, verifies results match exactly (including totalHits and scores), and reports
+average query time.
 
 | Flag | Default | Description |
 |---|---|---|
 | `-docs DIR` | *(required)* | Documents directory |
-| `--threads N` | `1` | Thread count for indexing |
+| `--threads N` | `12` | Thread count for indexing |
 
 ## CLI Reference
 

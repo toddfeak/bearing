@@ -1,7 +1,11 @@
-// Query a Bearing-readable index with a list of words and report per-query timing.
+// Query a Bearing-readable index with a list of query strings and report per-query timing.
+//
+// Each line in the queries file is a query in Lucene standard syntax:
+//   - bare word:       algorithms     (TermQuery)
+//   - boolean MUST:    +algorithms +data  (BooleanQuery with MUST clauses)
 //
 // Usage:
-//   cargo run --release --bin queryindex -- -index <DIR> -words <FILE> [-output <FILE>]
+//   cargo run --release --bin queryindex -- -index <DIR> -queries <FILE> [-output <FILE>]
 
 use std::env;
 use std::fmt::Write as _;
@@ -14,14 +18,41 @@ use std::time::Instant;
 
 use bearing::index::directory_reader::DirectoryReader;
 use bearing::search::index_searcher::IndexSearcher;
+use bearing::search::query::Query;
 use bearing::search::term_query::TermQuery;
+use bearing::search::top_score_doc_collector::TopScoreDocCollectorManager;
+use bearing::search::{BooleanQuery, Occur};
 use bearing::store::FSDirectory;
+
+/// Parses a query string in Lucene standard syntax into a Query.
+///
+/// Supported formats:
+///   - `word`           → TermQuery on the given field
+///   - `+word1 +word2`  → BooleanQuery with MUST clauses
+fn parse_query(query_str: &str, field: &str) -> Box<dyn Query> {
+    let tokens: Vec<&str> = query_str.split_whitespace().collect();
+
+    if tokens.iter().any(|t| t.starts_with('+')) {
+        let mut builder = BooleanQuery::builder();
+        for token in &tokens {
+            if let Some(term) = token.strip_prefix('+') {
+                builder.add_query(
+                    Box::new(TermQuery::new(field, term.as_bytes())),
+                    Occur::Must,
+                );
+            }
+        }
+        Box::new(builder.build())
+    } else {
+        Box::new(TermQuery::new(field, tokens[0].as_bytes()))
+    }
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     let mut index_path = String::new();
-    let mut words_path = String::new();
+    let mut queries_path = String::new();
     let mut output_path = String::new();
 
     let mut i = 1;
@@ -31,9 +62,9 @@ fn main() {
                 i += 1;
                 index_path = args[i].clone();
             }
-            "-words" => {
+            "-queries" => {
                 i += 1;
-                words_path = args[i].clone();
+                queries_path = args[i].clone();
             }
             "-output" => {
                 i += 1;
@@ -47,15 +78,15 @@ fn main() {
         i += 1;
     }
 
-    if index_path.is_empty() || words_path.is_empty() {
+    if index_path.is_empty() || queries_path.is_empty() {
         eprintln!(
-            "Usage: queryindex -index <INDEX_DIR> -words <WORDS_FILE> [-output <RESULTS_FILE>]"
+            "Usage: queryindex -index <INDEX_DIR> -queries <QUERIES_FILE> [-output <RESULTS_FILE>]"
         );
         process::exit(1);
     }
 
-    let words_content = fs::read_to_string(&words_path).expect("Failed to read words file");
-    let words: Vec<&str> = words_content
+    let queries_content = fs::read_to_string(&queries_path).expect("Failed to read queries file");
+    let queries: Vec<&str> = queries_content
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
@@ -66,29 +97,37 @@ fn main() {
     let searcher = IndexSearcher::new(&reader);
 
     // Collect results in memory — no I/O during timed section
-    let mut results: Vec<String> = Vec::with_capacity(words.len());
+    let mut results: Vec<String> = Vec::with_capacity(queries.len());
     let mut errors = 0;
 
     let start = Instant::now();
 
-    for word in &words {
-        let query = TermQuery::new("contents", word.as_bytes());
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| searcher.search(&query, 10)));
+    for query_str in &queries {
+        let query = parse_query(query_str, "contents");
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let manager = TopScoreDocCollectorManager::new(10, None, i32::MAX);
+            searcher.search_with_collector_manager(query.as_ref(), &manager)
+        }));
         match result {
             Ok(Ok(top_docs)) => {
                 let mut line = String::new();
-                write!(line, "{:<20} hits={:<6}", word, top_docs.total_hits.value).unwrap();
+                write!(
+                    line,
+                    "{:<30} hits={:<6}",
+                    query_str, top_docs.total_hits.value
+                )
+                .unwrap();
                 for sd in &top_docs.score_docs {
                     write!(line, "  doc={:<5} score={:.4}", sd.doc, sd.score).unwrap();
                 }
                 results.push(line);
             }
             Ok(Err(e)) => {
-                results.push(format!("{:<20} ERROR: {}", word, e));
+                results.push(format!("{:<30} ERROR: {}", query_str, e));
                 errors += 1;
             }
             Err(_) => {
-                results.push(format!("{:<20} PANIC", word));
+                results.push(format!("{:<30} PANIC", query_str));
                 errors += 1;
             }
         }
@@ -110,11 +149,11 @@ fn main() {
 
     // Timing always goes to stdout
     println!(
-        "Queried {} words in {elapsed:.2?} ({errors} errors)",
-        words.len()
+        "Queried {} queries in {elapsed:.2?} ({errors} errors)",
+        queries.len()
     );
     println!(
         "Average: {:.2} µs/query",
-        elapsed.as_micros() as f64 / words.len() as f64
+        elapsed.as_micros() as f64 / queries.len() as f64
     );
 }

@@ -9,6 +9,7 @@ repositories {
 
 dependencies {
     implementation("org.apache.lucene:lucene-core:10.3.2")
+    implementation("org.apache.lucene:lucene-queryparser:10.3.2")
 }
 
 java {
@@ -56,9 +57,9 @@ tasks.register<JavaExec>("queryIndex") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass = "QueryIndex"
     val indexDir = project.findProperty("indexDir") as? String
-    val wordsFile = project.findProperty("wordsFile") as? String
+    val queriesFile = project.findProperty("queriesFile") as? String
     val outputFile = project.findProperty("outputFile") as? String
-    args = listOfNotNull(indexDir, wordsFile, outputFile)
+    args = listOfNotNull(indexDir, queriesFile, outputFile)
 }
 
 // Generic task: run any main class without registering a dedicated task.
