@@ -15,6 +15,7 @@ use super::conjunction::ConjunctionScorer;
 use super::index_searcher::IndexSearcher;
 use super::query::{BulkScorer, DefaultBulkScorer, ScorerSupplier, Weight};
 use super::req_excl_bulk_scorer::ReqExclBulkScorer;
+use super::req_opt_sum_scorer::ReqOptSumScorer;
 use super::scorer::Scorer;
 use super::scorer_util;
 use crate::index::directory_reader::LeafReaderContext;
@@ -266,11 +267,39 @@ impl BooleanScorerSupplier {
 
         // pure disjunction
         if self.subs[&Occur::Filter].is_empty() && self.subs[&Occur::Must].is_empty() {
-            todo!("pure disjunction not yet implemented")
+            let should_suppliers = self.subs.remove(&Occur::Should).unwrap_or_default();
+            let must_not_suppliers = self.subs.remove(&Occur::MustNot).unwrap_or_default();
+            let opt_scorer = Self::opt(should_suppliers, self.min_should_match, lead_cost)?;
+            return Self::excl(opt_scorer, must_not_suppliers, lead_cost);
         }
 
         // conjunction-disjunction mix
-        todo!("conjunction-disjunction mix not yet implemented")
+        if self.min_should_match > 0 {
+            todo!("conjunction-disjunction mix with minShouldMatch > 0 not yet implemented")
+        }
+
+        let filter_suppliers = self.subs.remove(&Occur::Filter).unwrap_or_default();
+        let must_suppliers = self.subs.remove(&Occur::Must).unwrap_or_default();
+        let must_not_suppliers = self.subs.remove(&Occur::MustNot).unwrap_or_default();
+        let should_suppliers = self.subs.remove(&Occur::Should).unwrap_or_default();
+
+        let req_scorer = Self::excl(
+            Self::req(
+                filter_suppliers,
+                must_suppliers,
+                lead_cost,
+                false,
+                self.score_mode,
+            )?,
+            must_not_suppliers,
+            lead_cost,
+        )?;
+        let opt_scorer = Self::opt(should_suppliers, self.min_should_match, lead_cost)?;
+        Ok(Box::new(ReqOptSumScorer::new(
+            req_scorer,
+            opt_scorer,
+            self.score_mode,
+        )?))
     }
 
     fn boolean_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer>>> {
@@ -501,6 +530,23 @@ impl BooleanScorerSupplier {
             let _ = lead_cost;
             let _ = prohibited.drain(..);
             todo!("MUST_NOT exclusion not yet implemented")
+        }
+    }
+
+    /// Creates a Scorer for the optional (SHOULD) clauses.
+    ///
+    /// For a single clause, returns the scorer directly. For multiple clauses,
+    /// requires DisjunctionSumScorer (not yet implemented).
+    fn opt(
+        mut optional: Vec<Box<dyn ScorerSupplier>>,
+        min_should_match: i32,
+        lead_cost: i64,
+    ) -> io::Result<Box<dyn Scorer>> {
+        if optional.len() == 1 {
+            optional.remove(0).get(lead_cost)
+        } else {
+            let _ = min_should_match;
+            todo!("DisjunctionSumScorer for multiple SHOULD clauses not yet implemented")
         }
     }
 }

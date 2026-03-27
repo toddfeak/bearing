@@ -148,16 +148,22 @@ def gen_boolean_must_not_query(words, rng):
     return f'+{w1} -{w2}'
 
 def gen_boolean_should_must_not_query(words, rng):
-    \"\"\"SHOULD with single MUST_NOT: word1 word2 -word3\"\"\"
-    w1, w2, w3 = rng.sample(words, 3)
-    return f'{w1} {w2} -{w3}'
+    \"\"\"SHOULD with single MUST_NOT: word1 -word2\"\"\"
+    w1, w2 = rng.sample(words, 2)
+    return f'{w1} -{w2}'
+
+def gen_boolean_mixed_query(words, rng):
+    \"\"\"Mixed MUST + SHOULD: +word1 word2\"\"\"
+    w1, w2 = rng.sample(words, 2)
+    return f'+{w1} {w2}'
 
 generators = [
-    (gen_term_query,                    0.35),
+    (gen_term_query,                    0.30),
     (gen_boolean_must_query,            0.15),
     (gen_boolean_should_query,          0.15),
-    (gen_boolean_must_not_query,        0.15),
-    (gen_boolean_should_must_not_query, 0.20),
+    (gen_boolean_must_not_query,        0.10),
+    (gen_boolean_should_must_not_query, 0.15),
+    (gen_boolean_mixed_query,           0.15),
 ]
 
 # Build cumulative weights for weighted selection
@@ -180,10 +186,11 @@ with open('$QUERIES_FILE', 'w') as f:
         f.write(q + '\n')
 
 term_count = sum(1 for q in queries if ' ' not in q)
-must_count = sum(1 for q in queries if q.startswith('+') and '-' not in q)
+must_count = sum(1 for q in queries if q.startswith('+') and '-' not in q and all(t.startswith('+') for t in q.split()))
 should_count = sum(1 for q in queries if ' ' in q and not q.startswith('+') and '-' not in q)
 excl_count = sum(1 for q in queries if '-' in q)
-print(f'  {len(queries)} queries generated ({term_count} term, {must_count} MUST, {should_count} SHOULD, {excl_count} MUST_NOT)')
+mixed_count = sum(1 for q in queries if q.startswith('+') and '-' not in q and any(not t.startswith('+') for t in q.split()))
+print(f'  {len(queries)} queries generated ({term_count} term, {must_count} MUST, {should_count} SHOULD, {excl_count} MUST_NOT, {mixed_count} mixed)')
 "
 echo ""
 

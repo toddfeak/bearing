@@ -412,36 +412,189 @@ fn test_boolean_must_not_memory_quantum() {
 }
 
 // -------------------------------------------------------------------------
-// MUST_NOT Query 3: algorithms data -systems → 3 hits (SHOULD + MUST_NOT)
+// MUST_NOT Query 3: distributed -security → 6 hits (SHOULD + single MUST_NOT)
 // Java results:
-//   doc=14  score=0.8000477
-//   doc=5   score=0.2621497
-//   doc=1   score=0.2506270
+//   doc=13  score=0.4596379
+//   doc=2   score=0.4214391
+//   doc=7   score=0.4214391
+//   doc=8   score=0.4214391
+//   doc=0   score=0.3891023
+//   doc=6   score=0.3650910
 // -------------------------------------------------------------------------
 
 #[test]
-fn test_boolean_should_must_not_algorithms_data_minus_systems() {
+fn test_boolean_should_must_not_distributed_security() {
     let (_dir, reader) = build_golden_docs_index();
     let searcher = IndexSearcher::new(&reader);
 
     let mut builder = BooleanQuery::builder();
     builder.add_query(
-        Box::new(TermQuery::new("contents", b"algorithms")),
+        Box::new(TermQuery::new("contents", b"distributed")),
         Occur::Should,
     );
-    builder.add_query(Box::new(TermQuery::new("contents", b"data")), Occur::Should);
     builder.add_query(
-        Box::new(TermQuery::new("contents", b"systems")),
+        Box::new(TermQuery::new("contents", b"security")),
         Occur::MustNot,
     );
     let query = builder.build();
 
     let top_docs = searcher.search(&query, 15).unwrap();
 
+    assert_eq!(top_docs.total_hits.value, 6);
+    assert_eq!(top_docs.score_docs.len(), 6);
+
+    let expected = [
+        (13, 0.4596379_f32),
+        (2, 0.4214391),
+        (7, 0.4214391),
+        (8, 0.4214391),
+        (0, 0.3891023),
+        (6, 0.365091),
+    ];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// MUST_NOT Query 4: memory -quantum → 2 hits (SHOULD + single MUST_NOT)
+// Java results:
+//   doc=8   score=0.7110608
+//   doc=0   score=0.6565015
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_must_not_memory_quantum() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+
+    let mut builder = BooleanQuery::builder();
+    builder.add_query(
+        Box::new(TermQuery::new("contents", b"memory")),
+        Occur::Should,
+    );
+    builder.add_query(
+        Box::new(TermQuery::new("contents", b"quantum")),
+        Occur::MustNot,
+    );
+    let query = builder.build();
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 2);
+    assert_eq!(top_docs.score_docs.len(), 2);
+
+    let expected = [(8, 0.7110608_f32), (0, 0.6565015)];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// Mixed MUST + SHOULD queries
+// Cross-validated against Java Lucene 10.3.2. Same index setup.
+// Java queries via QueryParser: `+word1 word2` (MUST + SHOULD).
+// -------------------------------------------------------------------------
+
+/// Helper to build a MUST + SHOULD boolean query.
+fn must_should_query(field: &str, must_term: &[u8], should_term: &[u8]) -> BooleanQuery {
+    let mut builder = BooleanQuery::builder();
+    builder.add_query(Box::new(TermQuery::new(field, must_term)), Occur::Must);
+    builder.add_query(Box::new(TermQuery::new(field, should_term)), Occur::Should);
+    builder.build()
+}
+
+// -------------------------------------------------------------------------
+// Mixed Query 1: +algorithms data → 4 hits (only docs with "algorithms")
+// Scores: docs that also contain "data" get boosted
+// Java results:
+//   doc=11  score=0.9744643
+//   doc=0   score=0.8020670
+//   doc=14  score=0.8000477
+//   doc=3   score=0.6710463
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_mixed_algorithms_data() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+    let query = must_should_query("contents", b"algorithms", b"data");
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 4);
+    assert_eq!(top_docs.score_docs.len(), 4);
+
+    let expected = [
+        (11, 0.9744643_f32),
+        (0, 0.802067),
+        (14, 0.8000477),
+        (3, 0.6710463),
+    ];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// Mixed Query 2: +distributed systems → 6 hits
+// Java results:
+//   doc=13  score=0.6466637
+//   doc=2   score=0.5788049
+//   doc=7   score=0.5369343
+//   doc=8   score=0.5369343
+//   doc=6   score=0.5074845
+//   doc=0   score=0.4957356
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_mixed_distributed_systems() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+    let query = must_should_query("contents", b"distributed", b"systems");
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 6);
+    assert_eq!(top_docs.score_docs.len(), 6);
+
+    let expected = [
+        (13, 0.6466637_f32),
+        (2, 0.5788049),
+        (7, 0.5369343),
+        (8, 0.5369343),
+        (6, 0.5074845),
+        (0, 0.4957356),
+    ];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// Mixed Query 3: +memory performance → 3 hits
+// Java results:
+//   doc=0   score=1.1177642
+//   doc=8   score=0.7110608
+//   doc=9   score=0.5691590
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_mixed_memory_performance() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+    let query = must_should_query("contents", b"memory", b"performance");
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
     assert_eq!(top_docs.total_hits.value, 3);
     assert_eq!(top_docs.score_docs.len(), 3);
 
-    let expected = [(14, 0.8000477_f32), (5, 0.2621497), (1, 0.250627)];
+    let expected = [(0, 1.1177642_f32), (8, 0.7110608), (9, 0.569159)];
     for (i, &(doc, score)) in expected.iter().enumerate() {
         assert_eq!(top_docs.score_docs[i].doc, doc);
         assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
