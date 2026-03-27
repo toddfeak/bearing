@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io;
 
+use fixedbitset::FixedBitSet;
 use mem_dbg::MemSize;
 
 use crate::analysis::{Analyzer, TokenRef};
@@ -15,6 +16,7 @@ use crate::util::byte_block_pool::{
     ByteBlockPool, ByteSlicePool, ByteSliceReader, ByteSliceWriter, DirectAllocator,
     FIRST_LEVEL_SIZE,
 };
+use crate::util::packed_long_values::{COMPACT, DeltaPackedBuilder, PackedLongValues};
 
 /// Lightweight summary of a field's metadata, extracted from FieldInfo.
 /// Used to avoid cloning the full FieldInfo (which contains a HashMap) on every field visit.
@@ -378,6 +380,11 @@ impl PostingsArray {
     pub fn len(&self) -> usize {
         self.term_count
     }
+
+    /// Returns true if this array contains no terms.
+    pub fn is_empty(&self) -> bool {
+        self.term_count == 0
+    }
 }
 
 /// Reusable buffer for decoded posting data, used at flush time.
@@ -398,6 +405,12 @@ pub struct PostingsBuffer {
     pub total_term_freq: i64,
     /// Number of documents containing this term.
     pub doc_freq: i32,
+}
+
+impl Default for PostingsBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PostingsBuffer {
@@ -469,6 +482,12 @@ pub struct PerFieldData {
     pub points: Vec<(i32, Vec<u8>)>,
 }
 
+impl Default for PerFieldData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerFieldData {
     /// Creates a new empty `PerFieldData`.
     pub fn new() -> Self {
@@ -499,7 +518,7 @@ impl PerFieldData {
             return meta.term_id();
         }
         // Initialize PostingsArray config on first term
-        if self.postings.len() == 0 {
+        if self.postings.is_empty() {
             self.postings = PostingsArray::new(
                 has_freqs,
                 has_positions,
@@ -841,9 +860,7 @@ impl IndexingChain {
             let per_field = if let Some(pf) = self.per_field.get_mut(field.name()) {
                 pf
             } else {
-                self.per_field
-                    .entry(field.name().to_string())
-                    .or_insert_with(PerFieldData::new)
+                self.per_field.entry(field.name().to_string()).or_default()
             };
 
             // Process indexed field (postings + optional term vectors)
@@ -1247,6 +1264,471 @@ fn int_to_byte4(i: i32) -> u8 {
         i as u8
     } else {
         (NUM_FREE_VALUES + long_to_int4(i as i64 - NUM_FREE_VALUES as i64) as u32) as u8
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DocsWithFieldSet — tracks which docs have a value for a field
+// ---------------------------------------------------------------------------
+
+/// Accumulator for documents that have a value for a field.
+///
+/// Optimized for the common case where all documents have a value.
+/// Defers `FixedBitSet` allocation until a gap is detected.
+#[derive(Debug)]
+pub struct DocsWithFieldSet {
+    set: Option<FixedBitSet>,
+    cardinality: i32,
+    last_doc_id: i32,
+}
+
+impl DocsWithFieldSet {
+    /// Creates an empty `DocsWithFieldSet`.
+    pub fn new() -> Self {
+        Self {
+            set: None,
+            cardinality: 0,
+            last_doc_id: -1,
+        }
+    }
+
+    /// Adds a document to the set.
+    ///
+    /// # Panics
+    /// Panics if `doc_id` is not greater than the last added doc ID.
+    pub fn add(&mut self, doc_id: i32) {
+        if doc_id <= self.last_doc_id {
+            panic!(
+                "Out of order doc ids: last={}, next={}",
+                self.last_doc_id, doc_id
+            );
+        }
+        if let Some(ref mut set) = self.set {
+            ensure_capacity(set, doc_id as usize);
+            set.set(doc_id as usize, true);
+        } else if doc_id != self.cardinality {
+            // migrate to a sparse encoding using a bit set
+            let mut new_set = FixedBitSet::with_capacity(doc_id as usize + 1);
+            new_set.insert_range(0..self.cardinality as usize);
+            new_set.set(doc_id as usize, true);
+            self.set = Some(new_set);
+        }
+        self.last_doc_id = doc_id;
+        self.cardinality += 1;
+    }
+
+    /// Returns an iterator over the doc IDs in this set.
+    pub fn iterator(&self) -> DocIdIterator<'_> {
+        if let Some(set) = &self.set {
+            DocIdIterator::Sparse(Box::new(set.ones().map(|i| i as i32)))
+        } else {
+            DocIdIterator::Dense(0..self.cardinality)
+        }
+    }
+
+    /// Returns the number of documents in this set.
+    pub fn cardinality(&self) -> i32 {
+        self.cardinality
+    }
+
+    /// Returns whether this set is dense (all docs 0..cardinality have values).
+    pub fn is_dense(&self) -> bool {
+        self.set.is_none()
+    }
+
+    /// Returns the estimated RAM usage of this structure in bytes.
+    pub fn ram_bytes_used(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.set.as_ref().map_or(0, |s| {
+                s.len().div_ceil(8) + std::mem::size_of::<FixedBitSet>()
+            })
+    }
+}
+
+impl Default for DocsWithFieldSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Ensures the `FixedBitSet` has capacity for the given doc ID.
+fn ensure_capacity(set: &mut FixedBitSet, doc_id: usize) {
+    if doc_id >= set.len() {
+        set.grow(doc_id + 1);
+    }
+}
+
+/// Iterator over doc IDs, either dense (0..N) or sparse (set bits).
+pub enum DocIdIterator<'a> {
+    /// All docs from 0..count have a value.
+    Dense(std::ops::Range<i32>),
+    /// Sparse — iterates set bits in a `FixedBitSet`.
+    Sparse(Box<dyn Iterator<Item = i32> + 'a>),
+}
+
+impl Iterator for DocIdIterator<'_> {
+    type Item = i32;
+
+    fn next(&mut self) -> Option<i32> {
+        match self {
+            DocIdIterator::Dense(range) => range.next(),
+            DocIdIterator::Sparse(iter) => iter.next(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NormValuesWriter — buffers norm values using delta-packed storage
+// ---------------------------------------------------------------------------
+
+/// Buffers pending norm values (one long per doc), then provides them at flush.
+#[derive(Debug)]
+pub struct NormValuesWriter {
+    docs_with_field: DocsWithFieldSet,
+    pending: Option<DeltaPackedBuilder>,
+    last_doc_id: i32,
+}
+
+impl NormValuesWriter {
+    /// Creates a new `NormValuesWriter`.
+    pub fn new() -> Self {
+        Self {
+            docs_with_field: DocsWithFieldSet::new(),
+            pending: Some(DeltaPackedBuilder::with_default_page_size(COMPACT)),
+            last_doc_id: -1,
+        }
+    }
+
+    /// Adds a norm value for the given document.
+    ///
+    /// # Panics
+    /// Panics if `doc_id` is not greater than the last added doc ID.
+    pub fn add_value(&mut self, doc_id: i32, value: i64) {
+        if doc_id <= self.last_doc_id {
+            panic!(
+                "Norm appears more than once in this document (doc_id={}, last={})",
+                doc_id, self.last_doc_id
+            );
+        }
+
+        self.pending.as_mut().expect("already built").add(value);
+        self.docs_with_field.add(doc_id);
+
+        self.last_doc_id = doc_id;
+    }
+
+    /// Returns the number of documents with norms.
+    pub fn num_docs_with_value(&self) -> i32 {
+        self.docs_with_field.cardinality()
+    }
+
+    /// Returns whether the docs with field are dense (all docs 0..N).
+    pub fn is_dense(&self) -> bool {
+        self.docs_with_field.is_dense()
+    }
+
+    /// Builds the packed values and returns them along with the doc ID iterator.
+    ///
+    /// This is a destructive operation — the builder is consumed.
+    pub fn finish(mut self) -> NormValues {
+        let builder = self.pending.take().expect("already built");
+        NormValues {
+            values: builder.build(),
+            docs_with_field: self.docs_with_field,
+        }
+    }
+
+    /// Returns the estimated RAM usage in bytes.
+    pub fn ram_bytes_used(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.pending.as_ref().map_or(0, |p| p.ram_bytes_used())
+            + self.docs_with_field.ram_bytes_used()
+    }
+}
+
+impl Default for NormValuesWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Finished norm values ready for flushing.
+pub struct NormValues {
+    /// The packed norm values.
+    pub values: PackedLongValues,
+    /// The set of doc IDs that have norms.
+    pub docs_with_field: DocsWithFieldSet,
+}
+
+impl std::fmt::Debug for NormValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NormValues")
+            .field("size", &self.values.size())
+            .field("cardinality", &self.docs_with_field.cardinality())
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NumericDocValuesWriter — buffers numeric doc values using delta-packed storage
+// ---------------------------------------------------------------------------
+
+/// Buffers pending numeric doc values (one long per doc), then provides them at flush.
+#[derive(Debug)]
+pub struct NumericDocValuesWriter {
+    docs_with_field: DocsWithFieldSet,
+    pending: Option<DeltaPackedBuilder>,
+    last_doc_id: i32,
+}
+
+impl NumericDocValuesWriter {
+    /// Creates a new `NumericDocValuesWriter`.
+    pub fn new() -> Self {
+        Self {
+            docs_with_field: DocsWithFieldSet::new(),
+            pending: Some(DeltaPackedBuilder::with_default_page_size(COMPACT)),
+            last_doc_id: -1,
+        }
+    }
+
+    /// Adds a numeric doc value for the given document.
+    ///
+    /// # Panics
+    /// Panics if `doc_id` is not greater than the last added doc ID.
+    pub fn add_value(&mut self, doc_id: i32, value: i64) {
+        if doc_id <= self.last_doc_id {
+            panic!(
+                "DocValuesField appears more than once in this document (doc_id={}, last={})",
+                doc_id, self.last_doc_id
+            );
+        }
+
+        self.pending.as_mut().expect("already built").add(value);
+        self.docs_with_field.add(doc_id);
+
+        self.last_doc_id = doc_id;
+    }
+
+    /// Returns the number of documents with values.
+    pub fn num_docs_with_value(&self) -> i32 {
+        self.docs_with_field.cardinality()
+    }
+
+    /// Returns whether the docs with field are dense (all docs 0..N).
+    pub fn is_dense(&self) -> bool {
+        self.docs_with_field.is_dense()
+    }
+
+    /// Builds the packed values and returns them along with the doc ID set.
+    ///
+    /// This is a destructive operation — the builder is consumed.
+    pub fn finish(mut self) -> NumericDocValuesResult {
+        let builder = self.pending.take().expect("already built");
+        NumericDocValuesResult {
+            values: builder.build(),
+            docs_with_field: self.docs_with_field,
+        }
+    }
+
+    /// Returns the estimated RAM usage in bytes.
+    pub fn ram_bytes_used(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.pending.as_ref().map_or(0, |p| p.ram_bytes_used())
+            + self.docs_with_field.ram_bytes_used()
+    }
+}
+
+impl Default for NumericDocValuesWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Finished numeric doc values ready for flushing.
+pub struct NumericDocValuesResult {
+    /// The packed values.
+    pub values: PackedLongValues,
+    /// The set of doc IDs that have values.
+    pub docs_with_field: DocsWithFieldSet,
+}
+
+impl std::fmt::Debug for NumericDocValuesResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NumericDocValuesResult")
+            .field("size", &self.values.size())
+            .field("cardinality", &self.docs_with_field.cardinality())
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ParallelPostingsArray / FreqProxPostingsArray — per-term posting metadata
+// ---------------------------------------------------------------------------
+
+/// Bytes per posting in the base array (3 ints = 12 bytes).
+pub const BYTES_PER_POSTING: usize = 3 * std::mem::size_of::<i32>();
+
+/// Base struct-of-arrays for per-term posting metadata.
+///
+/// Each array is indexed by term ID. The arrays grow together via [`grow`](Self::grow).
+#[derive(Debug)]
+pub struct ParallelPostingsArray {
+    /// Maps term ID to the term's text start in the `BytesRefHash` pool.
+    pub text_starts: Vec<i32>,
+    /// Maps term ID to the current stream address offset.
+    pub address_offset: Vec<i32>,
+    /// Maps term ID to the stream start offset in the byte pool.
+    pub byte_starts: Vec<i32>,
+}
+
+impl ParallelPostingsArray {
+    /// Creates a new array with the given initial capacity.
+    pub fn new(size: usize) -> Self {
+        Self {
+            text_starts: vec![0; size],
+            address_offset: vec![0; size],
+            byte_starts: vec![0; size],
+        }
+    }
+
+    /// Returns the current capacity.
+    pub fn size(&self) -> usize {
+        self.text_starts.len()
+    }
+
+    /// Returns bytes per posting (for grow size calculation).
+    pub fn bytes_per_posting(&self) -> usize {
+        BYTES_PER_POSTING
+    }
+
+    /// Grows the arrays to accommodate at least one more entry.
+    /// Returns a new array with data copied from `self`.
+    pub fn grow(&self) -> Self {
+        let new_size = oversize(self.size() + 1, self.bytes_per_posting());
+        let mut new_array = Self::new(new_size);
+        self.copy_to(&mut new_array, self.size());
+        new_array
+    }
+
+    /// Copies `num_to_copy` elements from `self` into `to_array`.
+    pub fn copy_to(&self, to_array: &mut ParallelPostingsArray, num_to_copy: usize) {
+        to_array.text_starts[..num_to_copy].copy_from_slice(&self.text_starts[..num_to_copy]);
+        to_array.address_offset[..num_to_copy].copy_from_slice(&self.address_offset[..num_to_copy]);
+        to_array.byte_starts[..num_to_copy].copy_from_slice(&self.byte_starts[..num_to_copy]);
+    }
+}
+
+/// Extended postings array with frequency and proximity fields.
+///
+/// Adds per-term tracking for document IDs, frequencies, positions,
+/// and offsets on top of the base [`ParallelPostingsArray`].
+#[derive(Debug)]
+pub struct FreqProxPostingsArray {
+    /// Base arrays (text starts, address offsets, byte starts).
+    pub base: ParallelPostingsArray,
+    /// Term frequency in the current document (only if `has_freq`).
+    pub term_freqs: Option<Vec<i32>>,
+    /// Last doc ID where each term occurred.
+    pub last_doc_ids: Vec<i32>,
+    /// Encoded doc code for the prior document.
+    pub last_doc_codes: Vec<i32>,
+    /// Last position where each term occurred (only if `has_prox`).
+    pub last_positions: Option<Vec<i32>>,
+    /// Last end offset where each term occurred (only if `has_offsets`).
+    pub last_offsets: Option<Vec<i32>>,
+}
+
+impl FreqProxPostingsArray {
+    /// Creates a new array with the given capacity and feature flags.
+    pub fn new(size: usize, write_freqs: bool, write_prox: bool, write_offsets: bool) -> Self {
+        let term_freqs = if write_freqs {
+            Some(vec![0; size])
+        } else {
+            None
+        };
+        let last_positions = if write_prox {
+            Some(vec![0; size])
+        } else {
+            assert!(!write_offsets);
+            None
+        };
+        let last_offsets = if write_offsets {
+            Some(vec![0; size])
+        } else {
+            None
+        };
+        Self {
+            base: ParallelPostingsArray::new(size),
+            term_freqs,
+            last_doc_ids: vec![0; size],
+            last_doc_codes: vec![0; size],
+            last_positions,
+            last_offsets,
+        }
+    }
+
+    /// Returns the current capacity.
+    pub fn size(&self) -> usize {
+        self.base.size()
+    }
+
+    /// Returns bytes per posting (base + extended fields).
+    pub fn bytes_per_posting(&self) -> usize {
+        let mut bytes = self.base.bytes_per_posting();
+        // lastDocIDs + lastDocCodes always present
+        bytes += 2 * std::mem::size_of::<i32>();
+        if self.term_freqs.is_some() {
+            bytes += std::mem::size_of::<i32>();
+        }
+        if self.last_positions.is_some() {
+            bytes += std::mem::size_of::<i32>();
+        }
+        if self.last_offsets.is_some() {
+            bytes += std::mem::size_of::<i32>();
+        }
+        bytes
+    }
+
+    /// Grows the arrays to accommodate at least one more entry.
+    pub fn grow(&self) -> Self {
+        let new_size = oversize(self.size() + 1, self.bytes_per_posting());
+        let mut new_array = Self::new(
+            new_size,
+            self.term_freqs.is_some(),
+            self.last_positions.is_some(),
+            self.last_offsets.is_some(),
+        );
+        self.copy_to(&mut new_array, self.size());
+        new_array
+    }
+
+    /// Copies `num_to_copy` elements from `self` into `to_array`.
+    pub fn copy_to(&self, to_array: &mut FreqProxPostingsArray, num_to_copy: usize) {
+        self.base.copy_to(&mut to_array.base, num_to_copy);
+
+        to_array.last_doc_ids[..num_to_copy].copy_from_slice(&self.last_doc_ids[..num_to_copy]);
+        to_array.last_doc_codes[..num_to_copy].copy_from_slice(&self.last_doc_codes[..num_to_copy]);
+        if let (Some(from), Some(to)) = (&self.last_positions, &mut to_array.last_positions) {
+            to[..num_to_copy].copy_from_slice(&from[..num_to_copy]);
+        }
+        if let (Some(from), Some(to)) = (&self.last_offsets, &mut to_array.last_offsets) {
+            to[..num_to_copy].copy_from_slice(&from[..num_to_copy]);
+        }
+        if let (Some(from), Some(to)) = (&self.term_freqs, &mut to_array.term_freqs) {
+            to[..num_to_copy].copy_from_slice(&from[..num_to_copy]);
+        }
+    }
+}
+
+/// Computes a grow size matching Java's `ArrayUtil.oversize`.
+fn oversize(min_size: usize, bytes_per_posting: usize) -> usize {
+    let extra = min_size >> 3;
+    let new_size = min_size + extra;
+    let remainder = new_size % bytes_per_posting;
+    if remainder != 0 {
+        new_size + bytes_per_posting - remainder
+    } else {
+        new_size
     }
 }
 
@@ -2316,5 +2798,248 @@ mod tests {
                 tv as f64 / no_tv as f64
             );
         }
+    }
+
+    // --- DocsWithFieldSet tests ---
+
+    #[test]
+    fn test_dwfs_dense_all_docs_sequential() {
+        let mut set = DocsWithFieldSet::new();
+        for i in 0..100 {
+            set.add(i);
+        }
+        assert_eq!(set.cardinality(), 100);
+        assert!(set.is_dense());
+
+        let docs: Vec<i32> = set.iterator().collect();
+        assert_len_eq_x!(&docs, 100);
+        for (i, &doc) in docs.iter().enumerate() {
+            assert_eq!(doc, i as i32);
+        }
+    }
+
+    #[test]
+    fn test_dwfs_sparse_with_gap() {
+        let mut set = DocsWithFieldSet::new();
+        set.add(0);
+        set.add(1);
+        set.add(3);
+        set.add(4);
+
+        assert_eq!(set.cardinality(), 4);
+        assert!(!set.is_dense());
+        assert_eq!(set.iterator().collect::<Vec<_>>(), vec![0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn test_dwfs_sparse_first_doc_nonzero() {
+        let mut set = DocsWithFieldSet::new();
+        set.add(5);
+        set.add(10);
+        set.add(15);
+        assert_eq!(set.iterator().collect::<Vec<_>>(), vec![5, 10, 15]);
+    }
+
+    #[test]
+    fn test_dwfs_empty() {
+        let set = DocsWithFieldSet::new();
+        assert_eq!(set.cardinality(), 0);
+        assert!(set.iterator().collect::<Vec<i32>>().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "Out of order doc ids")]
+    fn test_dwfs_out_of_order_panics() {
+        let mut set = DocsWithFieldSet::new();
+        set.add(5);
+        set.add(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Out of order doc ids")]
+    fn test_dwfs_duplicate_panics() {
+        let mut set = DocsWithFieldSet::new();
+        set.add(0);
+        set.add(0);
+    }
+
+    #[test]
+    fn test_dwfs_dense_to_sparse_transition() {
+        let mut set = DocsWithFieldSet::new();
+        set.add(0);
+        set.add(1);
+        set.add(2);
+        assert!(set.is_dense());
+        set.add(5);
+        assert!(!set.is_dense());
+        set.add(6);
+        set.add(10);
+        assert_eq!(set.iterator().collect::<Vec<_>>(), vec![0, 1, 2, 5, 6, 10]);
+    }
+
+    // --- NormValuesWriter tests ---
+
+    #[test]
+    fn test_norm_writer_add_and_finish() {
+        let mut writer = NormValuesWriter::new();
+        writer.add_value(0, 10);
+        writer.add_value(1, 20);
+        writer.add_value(2, 30);
+
+        assert_eq!(writer.num_docs_with_value(), 3);
+        assert!(writer.is_dense());
+
+        let norms = writer.finish();
+        let values: Vec<i64> = norms.values.iterator().collect();
+        assert_eq!(values, vec![10, 20, 30]);
+        assert_eq!(
+            norms.docs_with_field.iterator().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_norm_writer_sparse() {
+        let mut writer = NormValuesWriter::new();
+        writer.add_value(0, 5);
+        writer.add_value(3, 15);
+        writer.add_value(7, 25);
+        assert!(!writer.is_dense());
+
+        let norms = writer.finish();
+        assert_eq!(norms.values.iterator().collect::<Vec<_>>(), vec![5, 15, 25]);
+        assert_eq!(
+            norms.docs_with_field.iterator().collect::<Vec<_>>(),
+            vec![0, 3, 7]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Norm appears more than once")]
+    fn test_norm_writer_duplicate_panics() {
+        let mut writer = NormValuesWriter::new();
+        writer.add_value(0, 10);
+        writer.add_value(0, 20);
+    }
+
+    #[test]
+    fn test_norm_writer_ram_bytes_used() {
+        let mut writer = NormValuesWriter::new();
+        let initial = writer.ram_bytes_used();
+        assert_gt!(initial, 0);
+        for i in 0..1000 {
+            writer.add_value(i, i as i64);
+        }
+        assert_gt!(writer.ram_bytes_used(), initial);
+    }
+
+    // --- NumericDocValuesWriter tests ---
+
+    #[test]
+    fn test_numeric_dv_writer_add_and_finish() {
+        let mut writer = NumericDocValuesWriter::new();
+        writer.add_value(0, 100);
+        writer.add_value(1, 200);
+        writer.add_value(2, 300);
+
+        let dv = writer.finish();
+        assert_eq!(
+            dv.values.iterator().collect::<Vec<_>>(),
+            vec![100, 200, 300]
+        );
+        assert_eq!(
+            dv.docs_with_field.iterator().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_numeric_dv_writer_sparse() {
+        let mut writer = NumericDocValuesWriter::new();
+        writer.add_value(0, 1000);
+        writer.add_value(5, 2000);
+        writer.add_value(10, 3000);
+
+        let dv = writer.finish();
+        assert_eq!(
+            dv.values.iterator().collect::<Vec<_>>(),
+            vec![1000, 2000, 3000]
+        );
+        assert_eq!(
+            dv.docs_with_field.iterator().collect::<Vec<_>>(),
+            vec![0, 5, 10]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "DocValuesField appears more than once")]
+    fn test_numeric_dv_writer_duplicate_panics() {
+        let mut writer = NumericDocValuesWriter::new();
+        writer.add_value(0, 10);
+        writer.add_value(0, 20);
+    }
+
+    // --- ParallelPostingsArray tests ---
+
+    #[test]
+    fn test_parallel_postings_array_new() {
+        let arr = ParallelPostingsArray::new(10);
+        assert_eq!(arr.size(), 10);
+        assert_len_eq_x!(&arr.text_starts, 10);
+    }
+
+    #[test]
+    fn test_parallel_postings_array_grow() {
+        let mut arr = ParallelPostingsArray::new(4);
+        arr.text_starts[0] = 100;
+        arr.address_offset[1] = 200;
+        arr.byte_starts[2] = 300;
+
+        let grown = arr.grow();
+        assert_gt!(grown.size(), 4);
+        assert_eq!(grown.text_starts[0], 100);
+        assert_eq!(grown.address_offset[1], 200);
+        assert_eq!(grown.byte_starts[2], 300);
+    }
+
+    #[test]
+    fn test_freq_prox_postings_array_features() {
+        let full = FreqProxPostingsArray::new(8, true, true, true);
+        assert!(full.term_freqs.is_some());
+        assert!(full.last_positions.is_some());
+        assert!(full.last_offsets.is_some());
+
+        let minimal = FreqProxPostingsArray::new(8, false, false, false);
+        assert!(minimal.term_freqs.is_none());
+        assert!(minimal.last_positions.is_none());
+        assert!(minimal.last_offsets.is_none());
+    }
+
+    #[test]
+    fn test_freq_prox_postings_array_grow() {
+        let mut arr = FreqProxPostingsArray::new(4, true, true, false);
+        arr.base.text_starts[0] = 10;
+        arr.last_doc_ids[1] = 42;
+        arr.term_freqs.as_mut().unwrap()[2] = 7;
+        arr.last_positions.as_mut().unwrap()[3] = 99;
+
+        let grown = arr.grow();
+        assert_gt!(grown.size(), 4);
+        assert_eq!(grown.base.text_starts[0], 10);
+        assert_eq!(grown.last_doc_ids[1], 42);
+        assert_eq!(grown.term_freqs.as_ref().unwrap()[2], 7);
+        assert_eq!(grown.last_positions.as_ref().unwrap()[3], 99);
+    }
+
+    #[test]
+    fn test_bytes_per_posting_values() {
+        let base = ParallelPostingsArray::new(1);
+        assert_eq!(base.bytes_per_posting(), 12);
+
+        let full = FreqProxPostingsArray::new(1, true, true, true);
+        assert_eq!(full.bytes_per_posting(), 32);
+
+        let minimal = FreqProxPostingsArray::new(1, false, false, false);
+        assert_eq!(minimal.bytes_per_posting(), 20);
     }
 }

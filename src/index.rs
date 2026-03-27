@@ -14,12 +14,13 @@ pub(crate) mod index_writer;
 pub(crate) mod index_writer_config;
 pub(crate) mod segment_worker;
 pub(crate) mod segment_worker_pool;
+pub mod stored_fields_consumer;
 
 pub use index_writer::{CommitResult, IndexWriter};
 pub use index_writer_config::IndexWriterConfig;
 pub use segment_infos::{SegmentEntry, SegmentInfosRead};
 pub mod directory_reader;
-pub(crate) mod indexing_chain;
+pub mod indexing_chain;
 pub mod numeric_doc_values;
 pub mod segment_infos;
 pub mod segment_reader;

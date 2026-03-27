@@ -5,7 +5,10 @@
 use mem_dbg::MemSize;
 
 pub mod byte_block_pool;
+pub mod bytes_ref_hash;
+pub mod int_block_pool;
 pub mod math_util;
+pub mod packed_long_values;
 pub mod small_float;
 pub(crate) mod string_helper;
 

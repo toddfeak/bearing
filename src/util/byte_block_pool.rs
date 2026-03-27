@@ -14,13 +14,13 @@ use std::rc::Rc;
 use mem_dbg::MemSize;
 
 /// Shift to convert a global byte offset to a buffer index.
-const BYTE_BLOCK_SHIFT: usize = 15;
+pub(crate) const BYTE_BLOCK_SHIFT: usize = 15;
 
 /// Size of each buffer in the pool (32 KB).
-const BYTE_BLOCK_SIZE: usize = 1 << BYTE_BLOCK_SHIFT;
+pub(crate) const BYTE_BLOCK_SIZE: usize = 1 << BYTE_BLOCK_SHIFT;
 
 /// Mask to extract position within a buffer from a global offset.
-const BYTE_BLOCK_MASK: usize = BYTE_BLOCK_SIZE - 1;
+pub(crate) const BYTE_BLOCK_MASK: usize = BYTE_BLOCK_SIZE - 1;
 
 // ---------------------------------------------------------------------------
 // Allocator trait + implementations
@@ -162,14 +162,14 @@ impl Allocator for RecyclingByteBlockAllocator {
 #[derive(Debug, MemSize)]
 pub struct ByteBlockPool<A: Allocator> {
     /// Allocated buffers.
-    buffers: Vec<Vec<u8>>,
+    pub(crate) buffers: Vec<Vec<u8>>,
     /// Index of the current head buffer, or -1 if no buffer allocated yet.
     buffer_upto: i32,
     /// Write position within the current head buffer.
-    byte_upto: usize,
+    pub(crate) byte_upto: usize,
     /// Global byte offset of the start of the current head buffer.
     /// Equal to `buffer_upto * BYTE_BLOCK_SIZE` (or negative before first allocation).
-    byte_offset: i32,
+    pub(crate) byte_offset: i32,
     allocator: A,
 }
 
@@ -303,6 +303,16 @@ impl<A: Allocator> ByteBlockPool<A> {
     /// Number of allocated buffers in the pool.
     pub fn num_buffers(&self) -> usize {
         self.buffers.len()
+    }
+
+    /// Returns a mutable reference to the current head buffer.
+    pub fn current_buffer_mut(&mut self) -> &mut [u8] {
+        &mut self.buffers[self.buffer_upto as usize]
+    }
+
+    /// Returns the estimated RAM usage in bytes.
+    pub fn ram_bytes_used(&self) -> usize {
+        std::mem::size_of::<Self>() + self.buffers.iter().map(|b| b.capacity()).sum::<usize>()
     }
 }
 
