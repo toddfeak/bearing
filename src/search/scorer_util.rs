@@ -2,6 +2,7 @@
 
 //! Utility functions for scorer-related operations.
 
+use std::collections::BinaryHeap;
 use std::io;
 
 use super::collector::DocAndScoreAccBuffer;
@@ -31,6 +32,29 @@ pub fn min_required_score(
         min_required_score -= subtraction;
     }
     min_required_score
+}
+
+/// Computes the estimated cost of a disjunction with `min_should_match`.
+///
+/// The cost is the sum of the `(num_scorers - min_should_match + 1)` least costly scorers.
+pub fn cost_with_min_should_match(costs: &[i64], num_scorers: usize, min_should_match: i32) -> i64 {
+    // Keep the (num_scorers - minShouldMatch + 1) least costly scorers using a max-heap
+    // of bounded size. Java uses a PriorityQueue with reversed lessThan (a > b) so the
+    // top is the largest, and insertWithOverflow evicts the top (largest) when over capacity.
+    // Rust's BinaryHeap is a max-heap natively, so we just pop when over capacity.
+    let capacity = num_scorers as i64 - min_should_match as i64 + 1;
+    if capacity <= 0 {
+        return 0;
+    }
+    let capacity = capacity as usize;
+    let mut pq = BinaryHeap::with_capacity(capacity + 1);
+    for &cost in costs {
+        pq.push(cost);
+        if pq.len() > capacity {
+            pq.pop(); // evict the largest
+        }
+    }
+    pq.into_iter().sum()
 }
 
 /// Filters competitive hits from the provided `DocAndScoreAccBuffer`.
@@ -186,6 +210,45 @@ mod tests {
         // When max_remaining_score is 0, min_required_score should be close to min_competitive
         let result = min_required_score(0.0, 1.0, 3);
         assert_gt!(result, 0.0);
+    }
+
+    #[test]
+    fn test_cost_with_min_should_match_msm_1() {
+        // msm=1, 3 scorers: capacity = 3-1+1 = 3, keeps all -> sum = 60
+        let costs = vec![10, 20, 30];
+        let result = cost_with_min_should_match(&costs, 3, 1);
+        assert_eq!(result, 60);
+    }
+
+    #[test]
+    fn test_cost_with_min_should_match_msm_2() {
+        // msm=2, 3 scorers: capacity = 3-2+1 = 2, keeps 2 least costly [10, 20] -> sum = 30
+        let costs = vec![10, 20, 30];
+        let result = cost_with_min_should_match(&costs, 3, 2);
+        assert_eq!(result, 30);
+    }
+
+    #[test]
+    fn test_cost_with_min_should_match_msm_equals_num() {
+        // msm=3, 3 scorers: capacity = 3-3+1 = 1, keeps the least costly [10]
+        let costs = vec![10, 20, 30];
+        let result = cost_with_min_should_match(&costs, 3, 3);
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn test_cost_with_min_should_match_single_scorer() {
+        let costs = vec![42];
+        let result = cost_with_min_should_match(&costs, 1, 1);
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_cost_with_min_should_match_zero_capacity() {
+        // msm > num_scorers: capacity <= 0 -> returns 0
+        let costs = vec![10, 20];
+        let result = cost_with_min_should_match(&costs, 2, 3);
+        assert_eq!(result, 0);
     }
 
     #[test]

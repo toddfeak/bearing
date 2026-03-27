@@ -9,11 +9,13 @@ use std::io;
 
 use super::block_max_conjunction::BlockMaxConjunctionBulkScorer;
 use super::boolean_query::{BooleanClause, Occur};
+use super::boolean_scorer::BooleanScorer;
 use super::collector::ScoreMode;
 use super::conjunction::ConjunctionScorer;
 use super::index_searcher::IndexSearcher;
 use super::query::{BulkScorer, DefaultBulkScorer, ScorerSupplier, Weight};
 use super::scorer::Scorer;
+use super::scorer_util;
 use crate::index::directory_reader::LeafReaderContext;
 
 // ---------------------------------------------------------------------------
@@ -227,9 +229,18 @@ impl BooleanScorerSupplier {
         }
 
         // No required clauses or minShouldMatch > 0: need should cost.
-        // computeShouldCost is not yet implemented (no disjunction support).
-        let should_cost = i64::MAX; // TODO: computeShouldCost()
+        let should_cost = self.compute_should_cost();
         min_required_cost.unwrap_or(i64::MAX).min(should_cost)
+    }
+
+    fn compute_should_cost(&self) -> i64 {
+        let optional_scorers = &self.subs[&Occur::Should];
+        let costs: Vec<i64> = optional_scorers.iter().map(|s| s.cost()).collect();
+        scorer_util::cost_with_min_should_match(
+            &costs,
+            optional_scorers.len(),
+            self.min_should_match,
+        )
     }
 
     fn get_internal(&mut self, lead_cost: i64) -> io::Result<Box<dyn Scorer>> {
@@ -268,8 +279,24 @@ impl BooleanScorerSupplier {
 
         let positive_scorer;
         if num_required_clauses == 0 {
-            // optionalBulkScorer: not yet implemented.
-            return Ok(None);
+            let cost_threshold: i64 = if self.min_should_match <= 1 {
+                // when all clauses are optional, use BooleanScorer aggressively
+                -1
+            } else {
+                // when a minimum number of clauses should match, BooleanScorer is
+                // going to score all windows that have at least minNrShouldMatch
+                // matches in the window
+                (self.max_doc / 3) as i64
+            };
+
+            if self.cost() < cost_threshold {
+                return Ok(None);
+            }
+
+            match self.optional_bulk_scorer()? {
+                Some(s) => positive_scorer = s,
+                None => return Ok(None),
+            }
         } else if num_must_clauses == 0 && num_optional_clauses > 1 && self.min_should_match >= 1 {
             // filteredOptionalBulkScorer: not yet implemented.
             return Ok(None);
@@ -298,6 +325,35 @@ impl BooleanScorerSupplier {
             // ReqExclBulkScorer not yet implemented
             todo!("MUST_NOT bulk scorer exclusion not yet implemented")
         }
+    }
+
+    /// Returns a `BulkScorer` for the optional (SHOULD) clauses only, or `None` if not
+    /// applicable.
+    fn optional_bulk_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer>>> {
+        let should = self.subs.get_mut(&Occur::Should).unwrap();
+        if should.is_empty() {
+            return Ok(None);
+        }
+        // Single SHOULD clause with msm <= 1: delegate directly
+        if should.len() == 1 && self.min_should_match <= 1 {
+            return Ok(Some(should[0].bulk_scorer()?));
+        }
+
+        // TODO: TOP_SCORES + msm <= 1 should use MaxScoreBulkScorer.
+        // Fall through to BooleanScorer for now.
+
+        let should_cost = self.compute_should_cost();
+        let should = self.subs.get_mut(&Occur::Should).unwrap();
+        let mut optional: Vec<Box<dyn Scorer>> = Vec::new();
+        for ss in should {
+            optional.push(ss.get(should_cost)?);
+        }
+
+        Ok(Some(Box::new(BooleanScorer::new(
+            optional,
+            self.min_should_match.max(1),
+            self.score_mode.needs_scores(),
+        )?)))
     }
 
     fn required_bulk_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer>>> {

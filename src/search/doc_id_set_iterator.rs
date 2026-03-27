@@ -2,6 +2,7 @@
 
 //! Defines methods to iterate over a set of non-decreasing doc ids.
 
+use fixedbitset::FixedBitSet;
 use std::io;
 
 /// Sentinel value: when returned by `next_doc()`, `advance()`, or `doc_id()` it means there
@@ -54,6 +55,26 @@ pub trait DocIdSetIterator {
     /// positioned.
     fn doc_id_run_end(&self) -> io::Result<i32> {
         Ok(self.doc_id() + 1)
+    }
+
+    /// Load doc IDs into a bitset. All doc IDs below `up_to` (exclusive) are set in the given
+    /// bit set at position `doc_id - offset`.
+    ///
+    /// The default implementation iterates doc IDs one at a time via `next_doc()`.
+    /// Implementations backed by encoded blocks (e.g. postings) can override for bulk loading.
+    fn fill_bit_set(
+        &mut self,
+        up_to: i32,
+        bit_set: &mut FixedBitSet,
+        offset: i32,
+    ) -> io::Result<()> {
+        debug_assert!(offset <= self.doc_id());
+        let mut doc = self.doc_id();
+        while doc < up_to {
+            bit_set.insert((doc - offset) as usize);
+            doc = self.next_doc()?;
+        }
+        Ok(())
     }
 }
 
@@ -157,6 +178,24 @@ impl DocIdSetIterator for RangeDocIdSetIterator {
 
     fn doc_id_run_end(&self) -> io::Result<i32> {
         Ok(self.max_doc)
+    }
+
+    /// Bulk set for contiguous range: sets bits `[doc - offset, min(up_to, max_doc) - offset)`.
+    fn fill_bit_set(
+        &mut self,
+        up_to: i32,
+        bit_set: &mut FixedBitSet,
+        offset: i32,
+    ) -> io::Result<()> {
+        debug_assert!(offset <= self.doc);
+        let up_to = up_to.min(self.max_doc);
+        if up_to > self.doc {
+            let from = (self.doc - offset) as usize;
+            let to = (up_to - offset) as usize;
+            bit_set.insert_range(from..to);
+            self.advance(up_to)?;
+        }
+        Ok(())
     }
 }
 

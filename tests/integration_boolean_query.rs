@@ -192,6 +192,151 @@ fn test_boolean_must_nonexistent_terms() {
 }
 
 // -------------------------------------------------------------------------
+// SHOULD queries — pure disjunction
+// Cross-validated against Java Lucene 10.3.2. Java index built with sorted
+// filenames, StandardAnalyzer(EMPTY_SET), text_field("contents").
+// Java queries via QueryParser default operator (OR = SHOULD).
+// -------------------------------------------------------------------------
+
+/// Helper to build a two-SHOULD boolean query.
+fn should_should_query(field: &str, term1: &[u8], term2: &[u8]) -> BooleanQuery {
+    let mut builder = BooleanQuery::builder();
+    builder.add_query(Box::new(TermQuery::new(field, term1)), Occur::Should);
+    builder.add_query(Box::new(TermQuery::new(field, term2)), Occur::Should);
+    builder.build()
+}
+
+// -------------------------------------------------------------------------
+// SHOULD Query 1: algorithms data → 10 hits
+// Java results:
+//   doc=11  score=0.9744643
+//   doc=0   score=0.8020670
+//   doc=14  score=0.8000477
+//   doc=3   score=0.6710463
+//   doc=5   score=0.2621497
+//   doc=1   score=0.2506270
+//   doc=10  score=0.2121821
+//   doc=12  score=0.1924969
+//   doc=6   score=0.1707188
+//   doc=9   score=0.1577401
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_algorithms_data() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+    let query = should_should_query("contents", b"algorithms", b"data");
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 10);
+    assert_eq!(top_docs.score_docs.len(), 10);
+
+    let expected = [
+        (11, 0.9744643_f32),
+        (0, 0.802067),
+        (14, 0.8000477),
+        (3, 0.6710463),
+        (5, 0.2621497),
+        (1, 0.250627),
+        (10, 0.2121821),
+        (12, 0.1924969),
+        (6, 0.1707188),
+        (9, 0.1577401),
+    ];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// SHOULD Query 2: distributed systems → 12 hits
+// Java results:
+//   doc=13  score=0.6466637
+//   doc=2   score=0.5788049
+//   doc=7   score=0.5369343
+//   doc=8   score=0.5369343
+//   doc=6   score=0.5074845
+//   doc=0   score=0.4957356
+//   doc=12  score=0.1548606
+//   doc=3   score=0.1403393
+//   doc=4   score=0.1385187
+//   doc=9   score=0.1345176
+//   doc=10  score=0.1243533
+//   doc=11  score=0.0942376
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_distributed_systems() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+    let query = should_should_query("contents", b"distributed", b"systems");
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 12);
+    assert_eq!(top_docs.score_docs.len(), 12);
+
+    let expected = [
+        (13, 0.6466637_f32),
+        (2, 0.5788049),
+        (7, 0.5369343),
+        (8, 0.5369343),
+        (6, 0.5074845),
+        (0, 0.4957356),
+        (12, 0.1548606),
+        (3, 0.1403393),
+        (4, 0.1385187),
+        (9, 0.1345176),
+        (10, 0.1243533),
+        (11, 0.0942376),
+    ];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// SHOULD Query 3: memory performance → 7 hits
+// Java results:
+//   doc=0   score=1.1177642
+//   doc=8   score=0.7110608
+//   doc=1   score=0.6353776
+//   doc=9   score=0.5691590
+//   doc=14  score=0.5055991
+//   doc=2   score=0.4995965
+//   doc=12  score=0.4880089
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_memory_performance() {
+    let (_dir, reader) = build_golden_docs_index();
+    let searcher = IndexSearcher::new(&reader);
+    let query = should_should_query("contents", b"memory", b"performance");
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+
+    assert_eq!(top_docs.total_hits.value, 7);
+    assert_eq!(top_docs.score_docs.len(), 7);
+
+    let expected = [
+        (0, 1.1177642_f32),
+        (8, 0.7110608),
+        (1, 0.6353776),
+        (9, 0.569159),
+        (14, 0.5055991),
+        (2, 0.4995965),
+        (12, 0.4880089),
+    ];
+    for (i, &(doc, score)) in expected.iter().enumerate() {
+        assert_eq!(top_docs.score_docs[i].doc, doc);
+        assert_in_delta!(top_docs.score_docs[i].score, score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
 // Conjunction scoring pruning: verify that BooleanQuery conjunctions interact
 // correctly with the totalHits threshold (TOTAL_HITS_THRESHOLD = 1000).
 //

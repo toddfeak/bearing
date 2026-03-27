@@ -16,6 +16,7 @@ exclude = ["reference/", "testdata/", "tests/", ".claude/", "docs/"]
 path = "src/lib.rs"
 
 [dependencies]
+fixedbitset = "0.5"
 log = "0.4"
 mem_dbg = "0.4"
 memmap2 = "0.9.10"
