@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2]
+
+### Added
+
+- **Read path**: `DirectoryReader`, `SegmentReader`, `MmapDirectory` for reading Lucene indexes
+- **TermQuery**: Single-term BM25 scoring with competitive skipping via impacts
+- **BooleanQuery**: All 1-2 term combinations — MUST, SHOULD, MUST_NOT, and mixed
+  - `BooleanScorer` for pure disjunction (window-based bulk scoring)
+  - `BlockMaxConjunctionBulkScorer` for conjunction with dynamic pruning
+  - `ReqExclBulkScorer` for MUST_NOT exclusion
+  - `ReqOptSumScorer` for mixed MUST+SHOULD with TOP_SCORES competitive skipping
+- `IndexSearcher` with `TopScoreDocCollector` for top-k result collection
+- `BM25Similarity` with `SimScorer` / `BulkSimScorer`
+- Codec readers: postings, stored fields, doc values, norms, term vectors, points, compound files
+- `Terms` / `TermsEnum` traits for term dictionary navigation
+- `DocIdSetIterator` trait with `fill_bit_set` for bulk bitset loading
+
+## [0.1.0-alpha.1]
+
 ### Added
 
 - Multi-threaded `IndexWriter` with SegmentWorker pool and configurable flush policies

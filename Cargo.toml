@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["lucene", "search", "indexing", "full-text-search"]
 categories = ["text-processing"]
 rust-version = "1.88"
-include = ["/src/", "/tests/*.rs", "/Cargo.toml", "/LICENSE", "/NOTICE", "/README.md", "/CONTRIBUTING.md"]
+include = ["/src/", "/tests/*.rs", "/Cargo.toml", "/LICENSE", "/NOTICE", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md"]
 
 [lib]
 path = "src/lib.rs"
