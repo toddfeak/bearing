@@ -18,7 +18,7 @@ The name is a play on words. A bearing gives direction — fitting for a search 
 
 - Target: Apache Lucene 10.3.2, Lucene103 codec
 - Indexing: multi-threaded `IndexWriter` with fourteen field types, five doc values types, term vectors, sparse fields
-- Querying: TermQuery, BooleanQuery (conjunction and disjunction), BM25 scoring — identical results to Java Lucene
+- Querying: TermQuery, BooleanQuery (MUST, SHOULD, MUST_NOT, and mixed), BM25 scoring — identical results to Java Lucene
 - Java Lucene VerifyIndex validates indexes; query results cross-validated against Java
 
 ## Performance
@@ -32,12 +32,12 @@ The name is a play on words. A bearing gives direction — fitting for a search 
 | **Speedup vs Lucene** | — | — | 2.1x | 2.6x |
 | **Memory savings** | — | — | 5.1x | 4.3x |
 
-**Querying** (2,000 docs, 60 MB, mixed term/MUST/SHOULD queries):
+**Querying** (2,000 docs, 60 MB, all boolean query types with 2 terms or less):
 
 | Metric | Lucene | Bearing | Ratio |
 |---|---|---|---|
-| Avg query time | 81 µs | 16 µs | **4.8x faster** |
-| Peak RSS | 102 MB | 7.9 MB | **13x less memory** |
+| Avg query time | 126 µs | 39 µs | **3.2x faster** |
+| Peak RSS | 101 MB | 10 MB | **10x less memory** |
 
 ## Build
 

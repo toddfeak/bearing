@@ -9,12 +9,12 @@
 | 1 thread | 1.36s | 2.72s | **2.0x faster** |
 | 12 threads | 0.61s | 2.72s | **4.4x faster** |
 
-**Querying** (2000 docs, 60M corpus, 2000 queries — term, MUST, SHOULD mix):
+**Querying** (2000 docs, 60M corpus, 2000 queries — all boolean query types with 2 terms or less):
 
 | Metric | Bearing | Lucene 10.3.2 | Ratio |
 |---|---|---|---|
-| Avg query time | 16 µs | 81 µs | **4.8x faster** |
-| Peak RSS | 7.9 MB | 102 MB | **13x less memory** |
+| Avg query time | 39 µs | 126 µs | **3.2x faster** |
+| Peak RSS | 10 MB | 101 MB | **10x less memory** |
 
 ---
 
@@ -94,34 +94,27 @@ Query/Weight/Scorer/BulkScorer abstractions, BM25 similarity, collectors, MmapDi
 #### TermQuery (done)
 Single-term BM25 scoring with competitive skipping via impacts. Byte-identical results to Java Lucene.
 
-#### BooleanQuery — Conjunction (done)
-Pure MUST/FILTER queries. Dynamic pruning via block-max conjunction scoring.
+#### BooleanQuery — All 1-2 term combinations (done)
+All valid boolean query structures with up to 2 terms: pure MUST, pure SHOULD, MUST+MUST_NOT, SHOULD+MUST_NOT, and mixed MUST+SHOULD. Includes dynamic pruning for conjunction, window-based bulk scoring for disjunction, exclusion filtering, and TOP_SCORES competitive skipping for mixed queries. Cross-validated against Java Lucene across multiple corpus sizes.
 
-#### BooleanQuery — Disjunction (done)
-Pure SHOULD queries. Window-based bulk scoring in 4096-doc batches with priority queues and bitset replay. Cross-validated against Java Lucene across multiple corpus sizes.
-
-**Query performance (2000 docs, 60M corpus, 2000 queries — term, MUST, SHOULD mix):**
+**Query performance (2000 docs, 60M corpus, 2000 queries — all query types):**
 
 | Metric | Bearing | Lucene | Ratio |
 |---|---|---|---|
-| Avg query time | 16 µs | 81 µs | **4.8x faster** |
-| Peak RSS | 7.9 MB | 102 MB | **13x less memory** |
+| Avg query time | 39 µs | 126 µs | **3.2x faster** |
+| Peak RSS | 10 MB | 101 MB | **10x less memory** |
 
-**Query performance (5000 docs, 192M corpus, 5000 queries — term, MUST, SHOULD mix):**
+**Query performance (5000 docs, 192M corpus, 5000 queries — all query types):**
 
 | Metric | Bearing | Lucene | Ratio |
 |---|---|---|---|
-| Avg query time | 48 µs | 92 µs | **1.9x faster** |
+| Avg query time | 47 µs | 92 µs | **1.9x faster** |
 | Peak RSS | 23 MB | 103 MB | **4.5x less memory** |
 
-#### BooleanQuery — Single MUST_NOT
-Exclude documents matching a single prohibited term.
-
-#### BooleanQuery — Multi MUST_NOT
-Exclude documents matching any of multiple prohibited terms.
-
-#### BooleanQuery — Mixed MUST + SHOULD
-MUST clauses required, SHOULD clauses boost score.
+#### BooleanQuery — 3+ term queries
+- Multiple SHOULD in mixed queries (`+required word1 word2`)
+- Multiple MUST_NOT (`+word1 -word2 -word3`)
+- minShouldMatch > 0 with conjunction
 
 #### Beyond Boolean
 Phrase, range, wildcard, etc.
