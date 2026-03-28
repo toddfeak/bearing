@@ -3,6 +3,7 @@
 
 pub mod codec_util;
 pub mod competitive_impact;
+pub mod fields_writer;
 pub mod lucene103;
 pub mod lucene90;
 pub mod lucene94;

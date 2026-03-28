@@ -9,12 +9,14 @@
 
 pub(crate) mod flush_control;
 pub(crate) mod flush_policy;
+pub mod freq_prox_fields;
 pub(crate) mod index_file_names;
 pub(crate) mod index_writer;
 pub(crate) mod index_writer_config;
 pub(crate) mod segment_worker;
 pub(crate) mod segment_worker_pool;
 pub mod stored_fields_consumer;
+pub mod terms_hash_per_field;
 
 pub use index_writer::{CommitResult, IndexWriter};
 pub use index_writer_config::IndexWriterConfig;

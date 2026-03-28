@@ -32,11 +32,15 @@ pub struct BytesRefHash {
 }
 
 impl BytesRefHash {
-    /// Creates a new `BytesRefHash` with the given initial capacity.
+    /// Creates a new `BytesRefHash` with the given pool and initial capacity.
+    ///
+    /// The `BytesRefHash` takes ownership of the pool and uses it to store
+    /// length-prefixed term bytes. In Java, this pool is the shared `termBytePool`
+    /// passed from `TermsHash`.
     ///
     /// # Panics
     /// Panics if `capacity` is not a positive power of two.
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(pool: ByteBlockPool<DirectAllocator>, capacity: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than 0");
         assert!(
             capacity.is_power_of_two(),
@@ -45,7 +49,7 @@ impl BytesRefHash {
         let hash_size = capacity;
         let hash_mask = (hash_size - 1) as i32;
         Self {
-            pool: ByteBlockPool::new(DirectAllocator),
+            pool,
             bytes_start: Vec::new(),
             hash_size,
             hash_half_size: hash_size >> 1,
@@ -57,9 +61,16 @@ impl BytesRefHash {
         }
     }
 
-    /// Creates a new `BytesRefHash` with the default capacity (16).
+    /// Creates a new `BytesRefHash` with the given pool and default capacity (16).
+    pub fn with_pool(pool: ByteBlockPool<DirectAllocator>) -> Self {
+        Self::new(pool, DEFAULT_CAPACITY)
+    }
+
+    /// Creates a new `BytesRefHash` that creates its own pool.
     pub fn with_default_capacity() -> Self {
-        Self::new(DEFAULT_CAPACITY)
+        let mut pool = ByteBlockPool::new(DirectAllocator);
+        pool.next_buffer();
+        Self::new(pool, DEFAULT_CAPACITY)
     }
 
     /// Returns the number of unique byte sequences in this hash.
@@ -165,6 +176,11 @@ impl BytesRefHash {
             return;
         }
         self.ids.fill(-1);
+    }
+
+    /// Returns a reference to the underlying byte pool (the `termBytePool`).
+    pub fn pool(&self) -> &ByteBlockPool<DirectAllocator> {
+        &self.pool
     }
 
     /// Returns the estimated RAM usage in bytes.
