@@ -154,7 +154,7 @@ impl DirectMonotonicWriter {
 
             let mut min = i64::MAX;
             for (i, val) in buffer.iter_mut().enumerate().take(count) {
-                let expected = (avg_inc_f as f64 * i as f64) as i64;
+                let expected = (avg_inc_f * i as f32) as i64;
                 *val -= expected;
                 min = min.min(*val);
             }
@@ -693,5 +693,50 @@ mod tests {
         #[rustfmt::skip]
         let expected: &[u8] = &[0x01];
         assert_eq!(out.bytes(), expected);
+    }
+
+    #[test]
+    fn test_direct_monotonic_f32_precision() {
+        // Regression test: DirectMonotonicWriter must compute expected values
+        // using f32 arithmetic (matching Java's float*float), not f64.
+        //
+        // With values [0, 258, 535, 791]:
+        //   avgInc as f32 = 263.6666564941406
+        //   f32(avgInc) * f32(3) rounds to 791.0  → expected[3] = 791
+        //   f64(avgInc) * f64(3) = 790.9999...    → expected[3] = 790 (WRONG)
+        //
+        // The incorrect f64 path produces a different delta for value[3],
+        // which corrupts the packed output and makes Java's reader fail.
+        let mut dm = DirectMonotonicWriter::new(16);
+        dm.add(0);
+        dm.add(258);
+        dm.add(535);
+        dm.add(791);
+
+        let mut meta = MemoryIndexOutput::new("meta".to_string());
+        let mut data = MemoryIndexOutput::new("data".to_string());
+        dm.finish(&mut meta, &mut data).unwrap();
+
+        // The meta should contain: min(i64), avgInc bits(i32), offset(i64), bitsReq(u8)
+        let meta_bytes = meta.bytes().to_vec();
+        // min = -5 (i64 LE)
+        assert_eq!(
+            i64::from_le_bytes(meta_bytes[0..8].try_into().unwrap()),
+            -5,
+            "min should be -5"
+        );
+
+        // The data should contain the packed deltas [5, 0, 13, 5] at 4 bits each.
+        // With f32 precision: deltas = [5, 0, 13, 5] (value 3: 791-791=0, +5=5)
+        // With f64 precision: deltas = [5, 0, 13, 6] (value 3: 791-790=1, +5=6)  WRONG
+        //
+        // Packed at 4 bits LE: byte0 = 5|(0<<4) = 0x05, byte1 = 13|(5<<4) = 0x5d
+        let data_bytes = data.bytes();
+        assert_eq!(data_bytes.len(), 2, "4 values at 4 bits = 2 bytes");
+        assert_eq!(data_bytes[0], 0x05, "byte 0: deltas[0]=5, deltas[1]=0");
+        assert_eq!(
+            data_bytes[1], 0x5d,
+            "byte 1: deltas[2]=13, deltas[3]=5 (f32 precision required)"
+        );
     }
 }
