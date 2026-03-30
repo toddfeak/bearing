@@ -2,6 +2,7 @@
 
 pub mod analyzer;
 pub mod channel;
+pub(crate) mod codecs;
 pub mod config;
 pub mod consumer;
 pub mod coordinator;

@@ -18,6 +18,15 @@ pub(crate) fn radix_fmt(n: u64) -> String {
     String::from_utf8(buf).expect("base-36 digits are ASCII")
 }
 
+/// Builds a segment file name from segment name, suffix, and extension.
+pub(crate) fn segment_file_name(segment_name: &str, segment_suffix: &str, ext: &str) -> String {
+    if segment_suffix.is_empty() {
+        format!("{segment_name}.{ext}")
+    } else {
+        format!("{segment_name}_{segment_suffix}.{ext}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
