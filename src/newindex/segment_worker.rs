@@ -7,6 +7,7 @@ use crate::newindex::consumer::FieldConsumer;
 
 use crate::newindex::document::Document;
 use crate::newindex::field_info_registry::FieldInfoRegistry;
+use crate::newindex::pools::Pools;
 use crate::newindex::segment::{FlushedSegment, SegmentId};
 
 /// Per-thread worker that accumulates documents into a single segment.
@@ -94,7 +95,8 @@ pub struct SegmentWorker {
     doc_count: i32,
     /// Reusable buffer for token text, avoids per-token allocation.
     token_buf: String,
-    // TODO: pools
+    /// Shared accumulation space passed to consumers sequentially.
+    pools: Pools,
 }
 
 impl SegmentWorker {
@@ -111,6 +113,7 @@ impl SegmentWorker {
             analyzer,
             doc_count: 0,
             token_buf: String::new(),
+            pools: Pools::new(),
         }
     }
 
@@ -131,7 +134,7 @@ impl SegmentWorker {
 
             // 2a. Every consumer sees the field metadata
             for consumer in &mut self.field_consumers {
-                consumer.add_field(field_id, field)?;
+                consumer.add_field(field_id, field, &mut self.pools)?;
             }
 
             // 2b. Tokenized fields: run the analyzer once, stream tokens
@@ -155,7 +158,12 @@ impl SegmentWorker {
                     self.analyzer.reset();
                     while let Some(token) = self.analyzer.next_token(&mut reader, &mut token_buf)? {
                         for &i in &interested {
-                            self.field_consumers[i].add_token(field_id, field, &token)?;
+                            self.field_consumers[i].add_token(
+                                field_id,
+                                field,
+                                &token,
+                                &mut self.pools,
+                            )?;
                         }
                     }
 
@@ -166,7 +174,7 @@ impl SegmentWorker {
 
         // 3. Finish document — notify all field consumers
         for consumer in &mut self.field_consumers {
-            consumer.finish_document(doc_id)?;
+            consumer.finish_document(doc_id, &mut self.pools)?;
         }
 
         self.doc_count += 1;
@@ -210,7 +218,7 @@ impl SegmentWorker {
     pub fn flush(mut self) -> io::Result<FlushedSegment> {
         let mut file_names = Vec::new();
         for consumer in &mut self.field_consumers {
-            file_names.extend(consumer.flush()?);
+            file_names.extend(consumer.flush(&self.pools)?);
         }
         Ok(FlushedSegment {
             segment_id: self.segment_id,

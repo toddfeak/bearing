@@ -10,6 +10,7 @@ pub mod document;
 pub mod field;
 pub mod field_info_registry;
 pub mod id_generator;
+pub mod pools;
 pub mod segment;
 pub mod segment_infos;
 pub mod segment_worker;

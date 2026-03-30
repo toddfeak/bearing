@@ -4,6 +4,7 @@ use std::io;
 
 use crate::newindex::analyzer::Token;
 use crate::newindex::field::Field;
+use crate::newindex::pools::Pools;
 
 /// Lifecycle trait for processing document data during indexing.
 ///
@@ -15,16 +16,22 @@ use crate::newindex::field::Field;
 /// This trait is the core of the indexing pipeline. All data flows
 /// through these lifecycle methods.
 ///
+/// # Shared pools
+///
+/// Methods that accumulate data receive `&mut Pools` — the shared
+/// accumulation space owned by the worker. Only one consumer borrows
+/// the pools at a time; the worker passes them sequentially.
+///
 /// # Call sequence per document
 ///
 /// ```text
 /// start_document(doc_id)
 ///   for each field:
-///     add_field(field_id, field)
+///     add_field(field_id, field, &mut pools)
 ///     if tokenized and wants_tokens(field_id, field):
 ///       for each token from analyzer:
-///         add_token(field_id, field, token)
-/// finish_document(doc_id)
+///         add_token(field_id, field, token, &mut pools)
+/// finish_document(doc_id, &mut pools)
 /// ```
 ///
 /// # Flush
@@ -41,7 +48,7 @@ pub trait FieldConsumer {
     /// this field is relevant and processes it accordingly.
     ///
     /// Called once per field, before any tokens for that field.
-    fn add_field(&mut self, field_id: u32, field: &Field) -> io::Result<()>;
+    fn add_field(&mut self, field_id: u32, field: &Field, pools: &mut Pools) -> io::Result<()>;
 
     /// Whether this consumer wants to receive tokens for the given field.
     ///
@@ -55,13 +62,21 @@ pub trait FieldConsumer {
     ///
     /// The field reference is provided so the consumer has full context
     /// without needing to track "current field" state.
-    fn add_token(&mut self, field_id: u32, field: &Field, token: &Token<'_>) -> io::Result<()>;
+    fn add_token(
+        &mut self,
+        field_id: u32,
+        field: &Field,
+        token: &Token<'_>,
+        pools: &mut Pools,
+    ) -> io::Result<()>;
 
     /// The current document is complete. FieldConsumers may finalize
     /// per-document state (e.g., flush term vectors, store norms).
-    fn finish_document(&mut self, doc_id: i32) -> io::Result<()>;
+    fn finish_document(&mut self, doc_id: i32, pools: &mut Pools) -> io::Result<()>;
 
     /// Write all accumulated data to segment files.
+    /// Pools are borrowed immutably — consumers read accumulated data
+    /// but do not modify it.
     /// Returns the names of the files written.
-    fn flush(&mut self) -> io::Result<Vec<String>>;
+    fn flush(&mut self, pools: &Pools) -> io::Result<Vec<String>>;
 }
