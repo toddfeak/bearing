@@ -5,6 +5,7 @@ use std::io;
 use crate::newindex::analyzer::Token;
 use crate::newindex::field::Field;
 use crate::newindex::segment_accumulator::SegmentAccumulator;
+use crate::newindex::segment_context::SegmentContext;
 
 /// Indicates whether a consumer wants to receive tokens for a field.
 ///
@@ -124,8 +125,15 @@ pub trait FieldConsumer {
     ) -> io::Result<()>;
 
     /// Write all accumulated data to segment files.
+    ///
+    /// `context` provides the directory, segment name, and segment ID
+    /// needed to create correctly named and headered codec files.
     /// The accumulator is borrowed immutably — consumers read
     /// accumulated data but do not modify it.
     /// Returns the names of the files written.
-    fn flush(&mut self, accumulator: &SegmentAccumulator) -> io::Result<Vec<String>>;
+    fn flush(
+        &mut self,
+        context: &SegmentContext,
+        accumulator: &SegmentAccumulator,
+    ) -> io::Result<Vec<String>>;
 }

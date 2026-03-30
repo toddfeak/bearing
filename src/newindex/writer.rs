@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use crate::newindex::config::IndexWriterConfig;
 use crate::newindex::coordinator::{IndexCoordinator, WorkerFactory};
-use crate::newindex::directory::Directory;
 use crate::newindex::document::Document;
 use crate::newindex::id_generator::IdGenerator;
 use crate::newindex::segment::FlushedSegment;
+use crate::store::SharedDirectory;
 
 /// Manages the indexing pipeline: accepts documents, coordinates worker
 /// threads, and flushes segments to the directory.
@@ -22,7 +22,7 @@ impl IndexWriter {
     /// directory, ID generator, and worker factory.
     pub fn new(
         config: IndexWriterConfig,
-        directory: Arc<dyn Directory>,
+        directory: Arc<SharedDirectory>,
         id_generator: Box<dyn IdGenerator>,
         worker_factory: Arc<dyn WorkerFactory>,
     ) -> Self {

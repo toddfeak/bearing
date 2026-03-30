@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use crate::newindex::channel::{self, Sender};
 use crate::newindex::config::IndexWriterConfig;
-use crate::newindex::directory::Directory;
 use crate::newindex::document::Document;
 use crate::newindex::id_generator::IdGenerator;
 use crate::newindex::index_file_names::radix_fmt;
 use crate::newindex::segment::{FlushedSegment, SegmentId};
+use crate::newindex::segment_context::SegmentContext;
 use crate::newindex::segment_infos::SegmentInfos;
 use crate::newindex::segment_worker::SegmentWorker;
+use crate::store::SharedDirectory;
 
 /// Creates [`SegmentWorker`] instances for worker threads.
 ///
@@ -23,9 +24,11 @@ use crate::newindex::segment_worker::SegmentWorker;
 /// flushed in order, and some consumers depend on files written by
 /// earlier consumers during flush. Implementations must ensure the
 /// consumer list is correctly ordered to satisfy these dependencies.
+// LOCKED
 pub trait WorkerFactory: Send + Sync {
-    /// Creates a new `SegmentWorker` for the given segment identity.
-    fn create_worker(&self, segment_id: SegmentId) -> SegmentWorker;
+    /// Creates a new `SegmentWorker` and its flush-time `SegmentContext`
+    /// for the given segment identity.
+    fn create_worker(&self, segment_id: SegmentId) -> (SegmentWorker, SegmentContext);
 }
 
 /// Manages the worker thread pool and document processing pipeline.
@@ -77,7 +80,7 @@ pub struct IndexCoordinator {
     /// Generates random bytes for segment IDs.
     id_generator: Box<dyn IdGenerator>,
     /// Shared directory for writing segment infos at commit time.
-    directory: Arc<dyn Directory>,
+    directory: Arc<SharedDirectory>,
     /// Tracks committed segments and writes `segments_N`.
     segment_infos: SegmentInfos,
 }
@@ -87,7 +90,7 @@ impl IndexCoordinator {
     pub fn new(
         config: &IndexWriterConfig,
         mut id_generator: Box<dyn IdGenerator>,
-        directory: Arc<dyn Directory>,
+        directory: Arc<SharedDirectory>,
         worker_factory: Arc<dyn WorkerFactory>,
     ) -> Self {
         let queue_capacity = config.num_threads * 2;
@@ -108,13 +111,13 @@ impl IndexCoordinator {
 
             let handle = std::thread::spawn(move || -> io::Result<Vec<FlushedSegment>> {
                 let mut segments = Vec::new();
-                let mut worker = factory.create_worker(segment_id);
+                let (mut worker, context) = factory.create_worker(segment_id);
 
                 while let Some(doc) = rx.recv() {
                     worker.add_document(doc)?;
 
                     if worker.should_flush(max_buffered_docs) {
-                        segments.push(worker.flush()?);
+                        segments.push(worker.flush(&context)?);
                         // TODO: create replacement worker with new segment ID
                         // For now, this only works when should_flush stays false
                         // (single flush at shutdown).
@@ -123,7 +126,7 @@ impl IndexCoordinator {
                 }
 
                 // Channel closed — flush remaining buffered data
-                let flushed = worker.flush()?;
+                let flushed = worker.flush(&context)?;
                 if flushed.doc_count > 0 {
                     segments.push(flushed);
                 }
@@ -185,7 +188,7 @@ impl IndexCoordinator {
             for segment in &all_segments {
                 self.segment_infos.add(segment.clone());
             }
-            self.segment_infos.commit(self.directory.as_ref())?;
+            self.segment_infos.commit(&self.directory)?;
         }
 
         Ok(all_segments)
