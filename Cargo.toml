@@ -17,6 +17,7 @@ include = ["/src/", "/tests/*.rs", "/Cargo.toml", "/LICENSE", "/NOTICE", "/READM
 path = "src/lib.rs"
 
 [dependencies]
+crossbeam-channel = "0.5"
 fixedbitset = "0.5"
 log = "0.4"
 mem_dbg = "0.4"

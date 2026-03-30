@@ -1,23 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io;
+use std::sync::Arc;
 
 use crate::newindex::config::IndexWriterConfig;
+use crate::newindex::coordinator::{IndexCoordinator, WorkerFactory};
 use crate::newindex::directory::Directory;
 use crate::newindex::document::Document;
+use crate::newindex::id_generator::IdGenerator;
+use crate::newindex::segment::FlushedSegment;
 
 /// Manages the indexing pipeline: accepts documents, coordinates worker
 /// threads, and flushes segments to the directory.
 // LOCKED
 pub struct IndexWriter {
-    config: IndexWriterConfig,
-    directory: Box<dyn Directory>,
+    coordinator: IndexCoordinator,
 }
 
 impl IndexWriter {
-    /// Creates a new `IndexWriter` with the given configuration and directory.
-    pub fn new(config: IndexWriterConfig, directory: Box<dyn Directory>) -> Self {
-        Self { config, directory }
+    /// Creates a new `IndexWriter` with the given configuration,
+    /// directory, ID generator, and worker factory.
+    pub fn new(
+        config: IndexWriterConfig,
+        directory: Arc<dyn Directory>,
+        id_generator: Box<dyn IdGenerator>,
+        worker_factory: Arc<dyn WorkerFactory>,
+    ) -> Self {
+        let coordinator = IndexCoordinator::new(&config, id_generator, directory, worker_factory);
+        Self { coordinator }
     }
 
     /// Adds a document to the index.
@@ -26,14 +36,12 @@ impl IndexWriter {
     /// processing. This method is safe to call from any thread.
     pub fn add_document(&self, doc: Document) -> io::Result<()> {
         log::debug!("add_document: {} fields", doc.fields().len());
-        todo!("hand off to index coordinator")
+        self.coordinator.add_document(doc)
     }
 
-    /// Commits all pending changes, making them durable and visible to readers.
-    ///
-    /// Signals the index coordinator to flush any remaining buffered data, then
-    /// writes the segments file to the directory.
-    pub fn commit(self) -> io::Result<()> {
-        todo!("drain index coordinator, write segments file")
+    /// Commits all pending changes: flushes remaining segments and
+    /// writes the `segments_N` commit point.
+    pub fn commit(self) -> io::Result<Vec<FlushedSegment>> {
+        self.coordinator.shutdown()
     }
 }

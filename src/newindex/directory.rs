@@ -7,7 +7,7 @@ use std::io::{self, Write};
 /// A flat file store — no subdirectories. Files are created, written
 /// sequentially, and synced to stable storage.
 // LOCKED
-pub trait Directory {
+pub trait Directory: Send + Sync {
     /// Creates a new, empty file and returns a writer for appending data.
     fn create_output(&self, name: &str) -> io::Result<Box<dyn IndexOutput>>;
 

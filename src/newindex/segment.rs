@@ -14,7 +14,7 @@ pub struct SegmentId {
 ///
 /// Returned by `SegmentWorker::flush()` and collected by the coordinator
 /// for writing the segments file at commit time.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FlushedSegment {
     /// Which segment this is.
     pub segment_id: SegmentId,

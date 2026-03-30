@@ -4,8 +4,18 @@
 ///
 /// Reusable across fields that share the same configuration.
 // LOCKED
+#[derive(Debug, Clone, Default)]
+pub struct FieldType {
+    /// Whether the field's value is stored verbatim for retrieval.
+    pub stored: bool,
+}
+
+/// The value carried by a field.
 #[derive(Debug, Clone)]
-pub struct FieldType {}
+pub enum FieldValue {
+    /// A UTF-8 string value.
+    String(String),
+}
 
 /// An immutable field within a document.
 ///
@@ -15,6 +25,7 @@ pub struct FieldType {}
 pub struct Field {
     name: String,
     field_type: FieldType,
+    value: FieldValue,
 }
 
 impl Field {
@@ -27,6 +38,11 @@ impl Field {
     pub fn field_type(&self) -> &FieldType {
         &self.field_type
     }
+
+    /// Returns the field value.
+    pub fn value(&self) -> &FieldValue {
+        &self.value
+    }
 }
 
 /// Builds a [`Field`].
@@ -34,6 +50,7 @@ impl Field {
 pub struct FieldBuilder {
     name: String,
     field_type: Option<FieldType>,
+    value: Option<FieldValue>,
 }
 
 impl FieldBuilder {
@@ -42,6 +59,7 @@ impl FieldBuilder {
         Self {
             name: name.into(),
             field_type: None,
+            value: None,
         }
     }
 
@@ -51,13 +69,20 @@ impl FieldBuilder {
         self
     }
 
+    /// Sets the field value to a string.
+    pub fn string_value(mut self, value: impl Into<String>) -> Self {
+        self.value = Some(FieldValue::String(value.into()));
+        self
+    }
+
     /// Consumes the builder and produces an immutable [`Field`].
     ///
-    /// Panics if `field_type` was not set.
+    /// Panics if `field_type` or value was not set.
     pub fn build(self) -> Field {
         Field {
             name: self.name,
             field_type: self.field_type.expect("field_type is required"),
+            value: self.value.expect("value is required"),
         }
     }
 }

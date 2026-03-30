@@ -1,12 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io;
+use std::sync::Arc;
 
 use crate::newindex::channel::{self, Sender};
 use crate::newindex::config::IndexWriterConfig;
+use crate::newindex::directory::Directory;
 use crate::newindex::document::Document;
 use crate::newindex::id_generator::IdGenerator;
-use crate::newindex::segment::SegmentId;
+use crate::newindex::segment::{FlushedSegment, SegmentId};
+use crate::newindex::segment_infos::SegmentInfos;
+use crate::newindex::segment_worker::SegmentWorker;
+
+/// Creates [`SegmentWorker`] instances for worker threads.
+///
+/// Called once per thread at startup, and again after each mid-stream
+/// flush to create a replacement worker. Implementations encapsulate
+/// knowledge of which consumers and analyzer to use.
+pub trait WorkerFactory: Send + Sync {
+    /// Creates a new `SegmentWorker` for the given segment identity.
+    fn create_worker(&self, segment_id: SegmentId) -> SegmentWorker;
+}
 
 /// Manages the worker thread pool and document processing pipeline.
 ///
@@ -49,30 +63,66 @@ use crate::newindex::segment::SegmentId;
 // LOCKED
 pub struct IndexCoordinator {
     sender: Sender,
-    workers: Vec<std::thread::JoinHandle<io::Result<()>>>,
+    workers: Vec<std::thread::JoinHandle<io::Result<Vec<FlushedSegment>>>>,
     /// Counter for assigning unique segment names. Incremented each
     /// time a new SegmentWorker is created. Only accessed by the
     /// coordinator — no locking needed.
     next_segment_num: u64,
     /// Generates random bytes for segment IDs.
     id_generator: Box<dyn IdGenerator>,
+    /// Shared directory for writing segment infos at commit time.
+    directory: Arc<dyn Directory>,
+    /// Tracks committed segments and writes `segments_N`.
+    segment_infos: SegmentInfos,
 }
 
 impl IndexCoordinator {
     /// Creates a new coordinator, spawning worker threads.
-    pub fn new(config: &IndexWriterConfig) -> Self {
+    pub fn new(
+        config: &IndexWriterConfig,
+        mut id_generator: Box<dyn IdGenerator>,
+        directory: Arc<dyn Directory>,
+        worker_factory: Arc<dyn WorkerFactory>,
+    ) -> Self {
         let queue_capacity = config.num_threads * 2;
         let (sender, receiver) = channel::bounded(queue_capacity);
+        let max_buffered_docs = config.max_buffered_docs;
 
         let mut workers = Vec::with_capacity(config.num_threads);
+        let mut next_segment_num: u64 = 0;
+
         for _ in 0..config.num_threads {
-            // Each worker thread owns a Receiver and a SegmentWorker.
-            // It loops on recv(), processing documents until the
-            // channel closes, flushing and replacing the worker when
-            // thresholds are hit.
-            let handle = std::thread::spawn(move || -> io::Result<()> {
-                // TODO: create SegmentWorker, loop recv/process/flush
-                Ok(())
+            let rx = receiver.clone();
+            let factory = Arc::clone(&worker_factory);
+            let segment_id = SegmentId {
+                name: format!("_{}", radix_fmt(next_segment_num)),
+                id: id_generator.next_id(),
+            };
+            next_segment_num += 1;
+
+            let handle = std::thread::spawn(move || -> io::Result<Vec<FlushedSegment>> {
+                let mut segments = Vec::new();
+                let mut worker = factory.create_worker(segment_id);
+
+                while let Some(doc) = rx.recv() {
+                    worker.add_document(doc)?;
+
+                    if worker.should_flush(max_buffered_docs) {
+                        segments.push(worker.flush()?);
+                        // TODO: create replacement worker with new segment ID
+                        // For now, this only works when should_flush stays false
+                        // (single flush at shutdown).
+                        unreachable!("mid-stream flush not yet supported");
+                    }
+                }
+
+                // Channel closed — flush remaining buffered data
+                let flushed = worker.flush()?;
+                if flushed.doc_count > 0 {
+                    segments.push(flushed);
+                }
+
+                Ok(segments)
             });
             workers.push(handle);
         }
@@ -80,12 +130,15 @@ impl IndexCoordinator {
         Self {
             sender,
             workers,
-            next_segment_num: 0,
-            id_generator: todo!("inject via constructor"),
+            next_segment_num,
+            id_generator,
+            directory,
+            segment_infos: SegmentInfos::new(),
         }
     }
 
     /// Assigns a unique segment identity for a new SegmentWorker.
+    #[expect(dead_code)]
     fn next_segment_id(&mut self) -> SegmentId {
         let name = format!("_{}", radix_fmt(self.next_segment_num));
         self.next_segment_num += 1;
@@ -101,28 +154,39 @@ impl IndexCoordinator {
     }
 
     /// Shuts down the coordinator: closes the channel, waits for all
-    /// workers to drain remaining documents and flush their final segments.
+    /// workers to drain remaining documents and flush their final segments,
+    /// then writes the `segments_N` commit point.
     ///
-    /// Returns the first error from any worker thread, or Ok if all
-    /// workers completed successfully.
-    pub fn shutdown(self) -> io::Result<()> {
+    /// Returns all flushed segments, or the first error from any worker.
+    pub fn shutdown(mut self) -> io::Result<Vec<FlushedSegment>> {
         // Dropping the sender closes the channel, signaling workers to
         // exit their recv loop. Each worker flushes its remaining data
         // before the thread exits.
-        // (Explicit drop is intentional — must happen before join.
-        // Clippy warns because the placeholder Sender has no Drop impl.)
-        let _sender = self.sender;
+        drop(self.sender);
+
+        let mut all_segments = Vec::new();
         for handle in self.workers {
             match handle.join() {
-                Ok(result) => result?,
+                Ok(result) => all_segments.extend(result?),
                 Err(_) => return Err(io::Error::other("worker thread panicked")),
             }
         }
-        Ok(())
+
+        // TODO: compound file packaging would go here
+
+        // Write the commit point
+        if !all_segments.is_empty() {
+            for segment in &all_segments {
+                self.segment_infos.add(segment.clone());
+            }
+            self.segment_infos.commit(self.directory.as_ref())?;
+        }
+
+        Ok(all_segments)
     }
 }
 
-/// Formats a number as a base-36 string.
+/// Formats a number as a base-36 string (lowercase).
 fn radix_fmt(_n: u64) -> String {
     todo!()
 }
