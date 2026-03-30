@@ -8,6 +8,7 @@ use crate::newindex::config::IndexWriterConfig;
 use crate::newindex::directory::Directory;
 use crate::newindex::document::Document;
 use crate::newindex::id_generator::IdGenerator;
+use crate::newindex::index_file_names::radix_fmt;
 use crate::newindex::segment::{FlushedSegment, SegmentId};
 use crate::newindex::segment_infos::SegmentInfos;
 use crate::newindex::segment_worker::SegmentWorker;
@@ -189,9 +190,4 @@ impl IndexCoordinator {
 
         Ok(all_segments)
     }
-}
-
-/// Formats a number as a base-36 string (lowercase).
-fn radix_fmt(_n: u64) -> String {
-    todo!()
 }
