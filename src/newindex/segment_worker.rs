@@ -7,14 +7,14 @@ use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 
 use crate::newindex::document::Document;
 use crate::newindex::field_info_registry::FieldInfoRegistry;
-use crate::newindex::pools::Pools;
 use crate::newindex::segment::{FlushedSegment, SegmentId};
+use crate::newindex::segment_accumulator::SegmentAccumulator;
 
 /// Per-thread worker that accumulates documents into a single segment.
 ///
 /// Owns all per-segment state. Processes documents sequentially — no
-/// concurrency within a worker. Shared resources (pools, codec writers)
-/// are passed as `&mut` to each processing step in sequence.
+/// concurrency within a worker. Shared resources (accumulator, codec
+/// writers) are passed as `&mut` to each processing step in sequence.
 ///
 /// A worker is disposable — it is consumed by `flush()` and the
 /// coordinator creates a fresh one for the next segment.
@@ -23,7 +23,7 @@ use crate::newindex::segment::{FlushedSegment, SegmentId};
 ///
 /// ## Construction
 /// - Created by the coordinator with a segment name/ID and directory access.
-/// - Allocates empty pools and a fresh FieldInfoRegistry.
+/// - Allocates an empty segment accumulator and a fresh FieldInfoRegistry.
 /// - Creates the set of field consumers (postings, stored fields, norms, etc.).
 /// - No files are opened yet.
 ///
@@ -40,15 +40,15 @@ use crate::newindex::segment::{FlushedSegment, SegmentId};
 ///     - Register the field in FieldInfoRegistry (get_or_register).
 ///     - Call `start_field(field)` on each field consumer. The consumer
 ///       prepares its per-field state for incoming data.
-///     - If the field is tokenized: ask each field consumer `wants_tokens(field)`
-///       to build a filtered list. Run the analyzer to produce a token
-///       stream from the field's value (string or Reader). For each token,
-///       call `add_token(field, token)` on only the field consumers that opted in.
+///     - If the field is tokenized: the consumer's `start_field` return
+///       value determines whether it receives tokens. Run the analyzer
+///       to produce a token stream from the field's value. For each token,
+///       call `add_token(field, token)` on only the consumers that opted in.
 ///     - Call `finish_field(field)` on each field consumer. The consumer
 ///       finalizes per-field per-document state (e.g., record final term
 ///       frequency, compute norm value).
-///     - Each field consumer borrows &mut pools for the duration of that
-///       field, then releases. No overlapping borrows.
+///     - Each field consumer borrows &mut accumulator for the duration
+///       of that field, then releases. No overlapping borrows.
 ///
 /// ### 3. Finish document
 /// - Call `finish_document(doc_id)` on each field consumer.
@@ -64,17 +64,23 @@ use crate::newindex::segment::{FlushedSegment, SegmentId};
 ///   that it needs to flush, or the coordinator detects it.
 ///
 /// ## Segment flush (`flush`)
-/// - Call `flush()` on each field consumer to write accumulated data to
-///   codec files via the directory.
-/// - Codec writers borrow &pools (immutable) to read accumulated data.
-/// - After writing, report segment metadata back to the coordinator.
+/// 1. Call `flush()` on each field consumer in order to write accumulated
+///    data to codec files via the directory. Codec writers borrow
+///    &accumulator (immutable) to read accumulated data. Consumer order
+///    matters — some consumers read files written by earlier consumers.
+/// 2. Write the segment info (`.si`) file containing segment identity,
+///    codec version, document count, and the list of files produced by
+///    all consumers.
+/// 3. Return `FlushedSegment` metadata to the coordinator.
 /// - The worker is consumed — all state is dropped.
 ///
 /// ## Reset (via disposal)
-/// - There is no in-place reset. Flushing consumes the worker: pools,
-///   field consumers, the registry, and all accumulated state are dropped.
-/// - The index coordinator creates a fresh `SegmentWorker` with new pools,
-///   a new `FieldInfoRegistry`, and new field consumer instances.
+/// - There is no in-place reset. Flushing consumes the worker: the
+///   accumulator, field consumers, registry, and all accumulated state
+///   are dropped.
+/// - The index coordinator creates a fresh `SegmentWorker` with a new
+///   accumulator, a new `FieldInfoRegistry`, and new field consumer
+///   instances.
 /// - This avoids the class of bugs where stale state leaks across
 ///   segments (e.g., pool data from a previous segment corrupting
 ///   the next one).
@@ -82,7 +88,7 @@ use crate::newindex::segment::{FlushedSegment, SegmentId};
 /// # Ownership summary
 ///
 /// The worker owns:
-/// - Byte/int pools (shared across field consumers within a document)
+/// - SegmentAccumulator (shared data pools and cross-consumer metadata)
 /// - FieldInfoRegistry (per-segment field metadata)
 /// - Field consumers (each manages its own per-field accumulators)
 ///
@@ -98,8 +104,8 @@ pub struct SegmentWorker {
     doc_count: i32,
     /// Reusable buffer for token text, avoids per-token allocation.
     token_buf: String,
-    /// Shared accumulation space passed to consumers sequentially.
-    pools: Pools,
+    /// Shared state passed to consumers sequentially.
+    accumulator: SegmentAccumulator,
 }
 
 impl SegmentWorker {
@@ -116,7 +122,7 @@ impl SegmentWorker {
             analyzer,
             doc_count: 0,
             token_buf: String::new(),
-            pools: Pools::new(),
+            accumulator: SegmentAccumulator::new(),
         }
     }
 
@@ -139,7 +145,7 @@ impl SegmentWorker {
             //     and declares whether it wants tokens.
             let mut interested = Vec::new();
             for (i, consumer) in self.field_consumers.iter_mut().enumerate() {
-                let interest = consumer.start_field(field_id, field, &mut self.pools)?;
+                let interest = consumer.start_field(field_id, field, &mut self.accumulator)?;
                 if interest == TokenInterest::WantsTokens {
                     interested.push(i);
                 }
@@ -160,7 +166,7 @@ impl SegmentWorker {
                             field_id,
                             field,
                             &token,
-                            &mut self.pools,
+                            &mut self.accumulator,
                         )?;
                     }
                 }
@@ -170,13 +176,13 @@ impl SegmentWorker {
 
             // 2c. Finish field — every consumer finalizes per-field state
             for consumer in &mut self.field_consumers {
-                consumer.finish_field(field_id, field, &mut self.pools)?;
+                consumer.finish_field(field_id, field, &mut self.accumulator)?;
             }
         }
 
         // 3. Finish document — notify all field consumers
         for consumer in &mut self.field_consumers {
-            consumer.finish_document(doc_id, &mut self.pools)?;
+            consumer.finish_document(doc_id, &mut self.accumulator)?;
         }
 
         self.doc_count += 1;
@@ -210,7 +216,7 @@ impl SegmentWorker {
 
     /// Returns the estimated RAM bytes used by this worker's accumulators.
     pub fn ram_bytes_used(&self) -> usize {
-        // TODO: sum across field consumers and pools
+        // TODO: sum across field consumers and accumulator
         0
     }
 
@@ -220,7 +226,7 @@ impl SegmentWorker {
     pub fn flush(mut self) -> io::Result<FlushedSegment> {
         let mut file_names = Vec::new();
         for consumer in &mut self.field_consumers {
-            file_names.extend(consumer.flush(&self.pools)?);
+            file_names.extend(consumer.flush(&self.accumulator)?);
         }
         Ok(FlushedSegment {
             segment_id: self.segment_id,

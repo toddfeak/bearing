@@ -4,7 +4,7 @@ use std::io;
 
 use crate::newindex::analyzer::Token;
 use crate::newindex::field::Field;
-use crate::newindex::pools::Pools;
+use crate::newindex::segment_accumulator::SegmentAccumulator;
 
 /// Indicates whether a consumer wants to receive tokens for a field.
 ///
@@ -28,23 +28,26 @@ pub enum TokenInterest {
 /// This trait is the core of the indexing pipeline. All data flows
 /// through these lifecycle methods.
 ///
-/// # Shared pools
+/// # Segment accumulator
 ///
-/// Methods that accumulate data receive `&mut Pools` — the shared
-/// accumulation space owned by the worker. Only one consumer borrows
-/// the pools at a time; the worker passes them sequentially.
+/// Methods that accumulate data receive `&mut SegmentAccumulator` —
+/// the shared state owned by the worker. This includes memory pools
+/// for data accumulation and cross-consumer metadata (e.g., field
+/// properties discovered during processing). Only one consumer
+/// borrows the accumulator at a time; the worker passes it
+/// sequentially.
 ///
 /// # Call sequence per document
 ///
 /// ```text
 /// start_document(doc_id)
 ///   for each field:
-///     interest = start_field(field_id, field, &mut pools)
+///     interest = start_field(field_id, field, &mut accumulator)
 ///     if tokenized and interest == WantsTokens:
 ///       for each token from analyzer:
-///         add_token(field_id, field, token, &mut pools)
-///     finish_field(field_id, field, &mut pools)
-/// finish_document(doc_id, &mut pools)
+///         add_token(field_id, field, token, &mut accumulator)
+///     finish_field(field_id, field, &mut accumulator)
+/// finish_document(doc_id, &mut accumulator)
 /// ```
 ///
 /// # Flush
@@ -75,7 +78,7 @@ pub trait FieldConsumer {
         &mut self,
         field_id: u32,
         field: &Field,
-        pools: &mut Pools,
+        accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest>;
 
     /// A single token from a tokenized field. Only called on consumers
@@ -88,7 +91,7 @@ pub trait FieldConsumer {
         field_id: u32,
         field: &Field,
         token: &Token<'_>,
-        pools: &mut Pools,
+        accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()>;
 
     /// A field is complete within the current document.
@@ -100,15 +103,29 @@ pub trait FieldConsumer {
     /// the last term seen. A norms consumer would compute the field's
     /// norm value from accumulated statistics (token count, unique
     /// terms, field length, etc.).
-    fn finish_field(&mut self, field_id: u32, field: &Field, pools: &mut Pools) -> io::Result<()>;
+    ///
+    /// Consumers that discover field properties during processing
+    /// (e.g., detecting payloads in a token stream) should record
+    /// those properties in the accumulator here so they are available
+    /// to other consumers at flush time.
+    fn finish_field(
+        &mut self,
+        field_id: u32,
+        field: &Field,
+        accumulator: &mut SegmentAccumulator,
+    ) -> io::Result<()>;
 
     /// The current document is complete. FieldConsumers may finalize
     /// per-document state (e.g., flush term vectors, store norms).
-    fn finish_document(&mut self, doc_id: i32, pools: &mut Pools) -> io::Result<()>;
+    fn finish_document(
+        &mut self,
+        doc_id: i32,
+        accumulator: &mut SegmentAccumulator,
+    ) -> io::Result<()>;
 
     /// Write all accumulated data to segment files.
-    /// Pools are borrowed immutably — consumers read accumulated data
-    /// but do not modify it.
+    /// The accumulator is borrowed immutably — consumers read
+    /// accumulated data but do not modify it.
     /// Returns the names of the files written.
-    fn flush(&mut self, pools: &Pools) -> io::Result<Vec<String>>;
+    fn flush(&mut self, accumulator: &SegmentAccumulator) -> io::Result<Vec<String>>;
 }

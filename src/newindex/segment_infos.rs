@@ -35,7 +35,7 @@ impl SegmentInfos {
     /// The file is written to a temp name and atomically renamed.
     pub fn commit(&mut self, _directory: &dyn Directory) -> io::Result<String> {
         self.generation += 1;
-        let file_name = format!("segments_{}", self.generation);
+        // let file_name = format!("segments_{}", self.generation);
         // TODO: write segment list to temp file, sync, rename to file_name
         todo!()
     }
