@@ -3,7 +3,7 @@
 use std::io;
 
 use crate::newindex::analyzer::Analyzer;
-use crate::newindex::consumer::FieldConsumer;
+use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 
 use crate::newindex::document::Document;
 use crate::newindex::field_info_registry::FieldInfoRegistry;
@@ -38,12 +38,15 @@ use crate::newindex::segment::{FlushedSegment, SegmentId};
 /// - Iterate the document's fields sequentially.
 /// - For each field:
 ///     - Register the field in FieldInfoRegistry (get_or_register).
-///     - Call `add_field(field)` on each field consumer. The consumer decides
-///       whether this field is relevant and processes it or ignores it.
+///     - Call `start_field(field)` on each field consumer. The consumer
+///       prepares its per-field state for incoming data.
 ///     - If the field is tokenized: ask each field consumer `wants_tokens(field)`
 ///       to build a filtered list. Run the analyzer to produce a token
 ///       stream from the field's value (string or Reader). For each token,
 ///       call `add_token(field, token)` on only the field consumers that opted in.
+///     - Call `finish_field(field)` on each field consumer. The consumer
+///       finalizes per-field per-document state (e.g., record final term
+///       frequency, compute norm value).
 ///     - Each field consumer borrows &mut pools for the duration of that
 ///       field, then releases. No overlapping borrows.
 ///
@@ -132,43 +135,42 @@ impl SegmentWorker {
                 .registry
                 .get_or_register(field.name(), field.field_type())?;
 
-            // 2a. Every consumer sees the field metadata
-            for consumer in &mut self.field_consumers {
-                consumer.add_field(field_id, field, &mut self.pools)?;
+            // 2a. Start field — every consumer prepares for this field
+            //     and declares whether it wants tokens.
+            let mut interested = Vec::new();
+            for (i, consumer) in self.field_consumers.iter_mut().enumerate() {
+                let interest = consumer.start_field(field_id, field, &mut self.pools)?;
+                if interest == TokenInterest::WantsTokens {
+                    interested.push(i);
+                }
             }
 
             // 2b. Tokenized fields: run the analyzer once, stream tokens
-            //     to only the field consumers that want them.
+            //     to only the field consumers that opted in.
             // TODO: check field.field_type().tokenized()
-            {
-                // Build filtered index list of field consumers that want tokens
-                let interested: Vec<usize> = self
-                    .field_consumers
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| c.wants_tokens(field_id, field))
-                    .map(|(i, _)| i)
-                    .collect();
+            if !interested.is_empty() {
+                // TODO: get reader from field value (string or Reader)
+                let mut reader: &[u8] = b"";
+                let mut token_buf = std::mem::take(&mut self.token_buf);
 
-                if !interested.is_empty() {
-                    // TODO: get reader from field value (string or Reader)
-                    let mut reader: &[u8] = b"";
-                    let mut token_buf = std::mem::take(&mut self.token_buf);
-
-                    self.analyzer.reset();
-                    while let Some(token) = self.analyzer.next_token(&mut reader, &mut token_buf)? {
-                        for &i in &interested {
-                            self.field_consumers[i].add_token(
-                                field_id,
-                                field,
-                                &token,
-                                &mut self.pools,
-                            )?;
-                        }
+                self.analyzer.reset();
+                while let Some(token) = self.analyzer.next_token(&mut reader, &mut token_buf)? {
+                    for &i in &interested {
+                        self.field_consumers[i].add_token(
+                            field_id,
+                            field,
+                            &token,
+                            &mut self.pools,
+                        )?;
                     }
-
-                    self.token_buf = token_buf;
                 }
+
+                self.token_buf = token_buf;
+            }
+
+            // 2c. Finish field — every consumer finalizes per-field state
+            for consumer in &mut self.field_consumers {
+                consumer.finish_field(field_id, field, &mut self.pools)?;
             }
         }
 

@@ -17,6 +17,11 @@ use crate::newindex::segment_worker::SegmentWorker;
 /// Called once per thread at startup, and again after each mid-stream
 /// flush to create a replacement worker. Implementations encapsulate
 /// knowledge of which consumers and analyzer to use.
+///
+/// The order of consumers in the worker matters — consumers are
+/// flushed in order, and some consumers depend on files written by
+/// earlier consumers during flush. Implementations must ensure the
+/// consumer list is correctly ordered to satisfy these dependencies.
 pub trait WorkerFactory: Send + Sync {
     /// Creates a new `SegmentWorker` for the given segment identity.
     fn create_worker(&self, segment_id: SegmentId) -> SegmentWorker;
