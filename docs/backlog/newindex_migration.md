@@ -14,6 +14,12 @@ The new pipeline uses Lucene as a reference in two ways:
 
 The architecture, data flow, ownership model, and trait hierarchy are original to this project. The porting rules in the top-level `CLAUDE.md` do not apply to `src/newindex/`.
 
+## Design Principles
+
+- **Build for the next phase, not just the current one.** Each phase's implementation must support the requirements of the following phase without rework. Don't build throwaway scaffolding that will be replaced one or two phases later. If a design decision will block the next phase, solve it now.
+- **The coordinator controls worker lifecycle.** The coordinator owns segment identity assignment and worker creation. Worker threads execute policy set by the coordinator — they do not run autonomously. This is required for future flush control (RAM-based triggering, stall control under memory pressure). The `WorkerSource` is the coordinator's delegate for thread-safe worker creation.
+- **Keep threading simple.** Use the minimum coordination needed. Shared mutable state should be behind a `Mutex` on rare paths (e.g., worker creation on flush), not on the per-document hot path. No management threads, no complex channel topologies.
+
 ## Constraints
 
 - **Do not modify `src/index/`** — the current indexing path must continue to work throughout migration. All existing tests and e2e scripts must keep passing.
@@ -46,17 +52,17 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - `WorkerFactory::create_worker` returns `(SegmentWorker, SegmentContext)`
 - Codec writers copied into `newindex/codecs/` with local types instead of importing from `src/index`
 - `IndexWriter::new` simplified to 2 parameters (config + directory), factory/id-gen are internal
+- Coordinator lifecycle reworked: worker threads use a shared `WorkerSource` for initial and replacement worker creation. Thread loop extracted into a named function. Mid-stream flush creates a replacement worker via `WorkerSource::create_worker()` — no management threads or complex coordination needed.
 
 ### Phase 1: Multi-Segment and Multi-Thread
 
-Still using only stored fields and field infos consumers. Prove that the coordinator, channel, and worker lifecycle handle multiple segments and concurrent threads correctly.
+Still using only stored fields and field infos consumers. Prove that the worker lifecycle handles multiple segments and concurrent threads correctly. The coordinator already supports mid-stream flush and worker replacement — this phase validates it with tests.
 
 **Work:**
-- Mid-stream flush: replace the `unreachable!()` in the coordinator's worker thread loop with actual worker replacement
-- Segment ID assignment for replacement workers — the thread needs to mint new `SegmentId`s. Currently the coordinator's `IdGenerator` and segment counter are not accessible from inside the thread. Design decision: share them via `Arc` or have the `WorkerFactory` own ID generation.
-- `WorkerFactory::create_worker` already returns `(SegmentWorker, SegmentContext)`, so replacement workers get a fresh context automatically
 - `max_buffered_docs` triggering mid-stream flush → worker consumed, replacement created, thread continues
 - Multiple worker threads producing independent segments
+- Integration tests for multi-segment (single thread) and multi-thread configurations
+- Update demo binary with `--max-buffered-docs` and `--threads` CLI flags
 - E2e validation: Java `CheckIndex` reads a multi-segment index with multiple stored-field-only segments
 
 **Validates:** Worker disposal and replacement, channel distribution across threads, coordinator collecting segments from multiple workers.

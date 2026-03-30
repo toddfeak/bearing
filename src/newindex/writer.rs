@@ -7,7 +7,7 @@ use crate::newindex::config::IndexWriterConfig;
 use crate::newindex::coordinator::IndexCoordinator;
 use crate::newindex::default_worker_factory::DefaultWorkerFactory;
 use crate::newindex::document::Document;
-use crate::newindex::random_id_generator::RandomIdGenerator;
+use crate::newindex::id_generator::RandomIdGenerator;
 use crate::newindex::segment::FlushedSegment;
 use crate::store::{Directory, SharedDirectory};
 
