@@ -43,6 +43,7 @@ pub mod codecs;
 pub mod document;
 pub mod encoding;
 pub mod index;
+pub mod newindex;
 pub mod search;
 pub mod store;
 #[cfg(test)]
