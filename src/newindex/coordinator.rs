@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 
+use log::debug;
+
+use crate::codecs::lucene90;
 use crate::newindex::channel::{self, Receiver, Sender};
+use crate::newindex::codecs::segment_info;
 use crate::newindex::config::IndexWriterConfig;
 use crate::newindex::document::Document;
 use crate::newindex::id_generator::IdGenerator;
-use crate::newindex::index_file_names::radix_fmt;
+use crate::newindex::index_file_names::{self, radix_fmt};
 use crate::newindex::segment::{FlushedSegment, SegmentId};
 use crate::newindex::segment_context::SegmentContext;
 use crate::newindex::segment_infos::SegmentInfos;
 use crate::newindex::segment_worker::SegmentWorker;
-use crate::store::SharedDirectory;
+use crate::store::{self, SharedDirectory};
 
 /// Creates [`SegmentWorker`] instances for worker threads.
 ///
@@ -108,6 +113,99 @@ fn worker_thread_loop(
     Ok(segments)
 }
 
+/// Packages a flushed segment's files into compound format (.cfs/.cfe).
+///
+/// Reads sub-files from the directory, builds the compound file via the
+/// existing codec writer, rewrites the .si with `is_compound_file: true`,
+/// deletes the originals, and updates the segment's file list.
+fn package_compound_segment(
+    segment: &mut FlushedSegment,
+    directory: &Arc<SharedDirectory>,
+) -> io::Result<()> {
+    let seg_name = &segment.segment_id.name;
+    let si_name = index_file_names::segment_file_name(seg_name, "", "si");
+    let cfs_name = index_file_names::segment_file_name(seg_name, "", "cfs");
+    let cfe_name = index_file_names::segment_file_name(seg_name, "", "cfe");
+
+    // Collect sub-files (everything except .si) for compound packaging
+    let sub_file_names: Vec<&String> = segment
+        .file_names
+        .iter()
+        .filter(|f| !f.ends_with(".si"))
+        .collect();
+
+    {
+        let mut dir = directory.lock().unwrap();
+
+        // Read sub-files into SegmentFile structs
+        let sub_files: Vec<store::SegmentFile> = sub_file_names
+            .iter()
+            .map(|name| {
+                let data = dir.read_file(name)?;
+                Ok(store::SegmentFile {
+                    name: (*name).clone(),
+                    data,
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
+        // Build compound file
+        let mut cfs_out = store::memory::MemoryIndexOutput::new(cfs_name.clone());
+        let cfe = lucene90::compound::write_to(
+            seg_name,
+            &segment.segment_id.id,
+            &sub_files,
+            &mut cfs_out,
+        )?;
+        dir.write_file(&cfs_name, cfs_out.bytes())?;
+        dir.write_file(&cfe.name, &cfe.data)?;
+
+        // Delete original sub-files
+        for name in &sub_file_names {
+            dir.delete_file(name)?;
+        }
+    }
+
+    // Rewrite .si with is_compound_file = true
+    let compound_files = vec![si_name.clone(), cfs_name.clone(), cfe_name.clone()];
+
+    let mut diagnostics = HashMap::new();
+    diagnostics.insert("source".to_string(), "flush".to_string());
+    diagnostics.insert("os.name".to_string(), std::env::consts::OS.to_string());
+    diagnostics.insert("os.arch".to_string(), std::env::consts::ARCH.to_string());
+
+    let mut attributes = HashMap::new();
+    attributes.insert(
+        "Lucene90StoredFieldsFormat.mode".to_string(),
+        "BEST_SPEED".to_string(),
+    );
+
+    let si = segment_info::SegmentInfo {
+        name: seg_name.clone(),
+        max_doc: segment.doc_count,
+        is_compound_file: true,
+        id: segment.segment_id.id,
+        diagnostics,
+        attributes,
+        has_blocks: false,
+    };
+
+    // Delete old .si before rewriting
+    directory.lock().unwrap().delete_file(&si_name)?;
+    segment_info::write(directory, &si, &compound_files)?;
+
+    debug!(
+        "compound: packaged {} ({} sub-files → .cfs/.cfe)",
+        seg_name,
+        sub_file_names.len()
+    );
+
+    // Update segment's file list
+    segment.file_names = compound_files;
+
+    Ok(())
+}
+
 /// Manages the worker thread pool and document processing pipeline.
 ///
 /// Owns the bounded channel and worker threads. Documents are sent to
@@ -116,7 +214,7 @@ fn worker_thread_loop(
 ///
 /// # Worker lifecycle
 ///
-/// Each thread pulls a worker from the shared [`WorkerSource`].
+/// Each thread pulls a worker from the shared `WorkerSource`.
 /// The thread loop is:
 ///
 /// ```text
@@ -151,6 +249,8 @@ fn worker_thread_loop(
 pub struct IndexCoordinator {
     sender: Sender,
     workers: Vec<std::thread::JoinHandle<io::Result<Vec<FlushedSegment>>>>,
+    /// Whether to package segment files into compound format (.cfs/.cfe).
+    use_compound_file: bool,
     /// Shared directory for writing segment infos at commit time.
     directory: Arc<SharedDirectory>,
     /// Tracks committed segments and writes `segments_N`.
@@ -184,6 +284,7 @@ impl IndexCoordinator {
         Self {
             sender,
             workers,
+            use_compound_file: config.use_compound_file,
             directory,
             segment_infos: SegmentInfos::new(),
         }
@@ -213,7 +314,12 @@ impl IndexCoordinator {
             }
         }
 
-        // TODO: compound file packaging would go here
+        // Package segments into compound files if configured
+        if self.use_compound_file {
+            for segment in &mut all_segments {
+                package_compound_segment(segment, &self.directory)?;
+            }
+        }
 
         // Write the commit point
         if !all_segments.is_empty() {
@@ -224,5 +330,294 @@ impl IndexCoordinator {
         }
 
         Ok(all_segments)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assertables::*;
+    use std::collections::HashSet;
+
+    use crate::newindex::analyzer::Token;
+    use crate::newindex::consumer::{FieldConsumer, TokenInterest};
+    use crate::newindex::field::Field;
+    use crate::newindex::id_generator::RandomIdGenerator;
+    use crate::newindex::segment_accumulator::SegmentAccumulator;
+    use crate::store::MemoryDirectory;
+
+    /// Deterministic ID generator for reproducible tests.
+    struct SequentialIdGenerator(u8);
+
+    impl IdGenerator for SequentialIdGenerator {
+        fn next_id(&mut self) -> [u8; 16] {
+            let id = [self.0; 16];
+            self.0 += 1;
+            id
+        }
+    }
+
+    /// No-op consumer that returns an empty file list.
+    struct NoOpConsumer;
+
+    impl FieldConsumer for NoOpConsumer {
+        fn start_document(&mut self, _doc_id: i32) -> io::Result<()> {
+            Ok(())
+        }
+        fn start_field(
+            &mut self,
+            _field_id: u32,
+            _field: &Field,
+            _acc: &mut SegmentAccumulator,
+        ) -> io::Result<TokenInterest> {
+            Ok(TokenInterest::NoTokens)
+        }
+        fn add_token(
+            &mut self,
+            _field_id: u32,
+            _field: &Field,
+            _token: &Token<'_>,
+            _acc: &mut SegmentAccumulator,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+        fn finish_field(
+            &mut self,
+            _field_id: u32,
+            _field: &Field,
+            _acc: &mut SegmentAccumulator,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+        fn finish_document(
+            &mut self,
+            _doc_id: i32,
+            _acc: &mut SegmentAccumulator,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+        fn flush(
+            &mut self,
+            _context: &SegmentContext,
+            _acc: &SegmentAccumulator,
+        ) -> io::Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
+
+    /// Factory that creates workers with a no-op consumer.
+    struct NoOpWorkerFactory {
+        directory: Arc<SharedDirectory>,
+    }
+
+    impl WorkerFactory for NoOpWorkerFactory {
+        fn create_worker(&self, segment_id: SegmentId) -> (SegmentWorker, SegmentContext) {
+            let context = SegmentContext {
+                directory: Arc::clone(&self.directory),
+                segment_name: segment_id.name.clone(),
+                segment_id: segment_id.id,
+            };
+            let worker = SegmentWorker::new(
+                segment_id,
+                vec![Box::new(NoOpConsumer)],
+                Box::new(crate::newindex::standard_analyzer::StandardAnalyzer),
+            );
+            (worker, context)
+        }
+    }
+
+    /// Factory that creates workers with real stored fields + field infos
+    /// consumers, producing actual files for compound packaging tests.
+    struct StoredFieldsWorkerFactory {
+        directory: Arc<SharedDirectory>,
+    }
+
+    impl WorkerFactory for StoredFieldsWorkerFactory {
+        fn create_worker(&self, segment_id: SegmentId) -> (SegmentWorker, SegmentContext) {
+            use crate::newindex::field_infos_consumer::FieldInfosConsumer;
+            use crate::newindex::stored_fields_consumer::StoredFieldsConsumer;
+
+            let context = SegmentContext {
+                directory: Arc::clone(&self.directory),
+                segment_name: segment_id.name.clone(),
+                segment_id: segment_id.id,
+            };
+            let consumers: Vec<Box<dyn FieldConsumer>> = vec![
+                Box::new(StoredFieldsConsumer::new()),
+                Box::new(FieldInfosConsumer::new()),
+            ];
+            let worker = SegmentWorker::new(
+                segment_id,
+                consumers,
+                Box::new(crate::newindex::standard_analyzer::StandardAnalyzer),
+            );
+            (worker, context)
+        }
+    }
+
+    // --- WorkerSource tests ---
+
+    #[test]
+    fn worker_source_creates_sequential_segment_names() {
+        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let factory = Arc::new(NoOpWorkerFactory {
+            directory: Arc::clone(&dir),
+        });
+        let source = WorkerSource::new(Box::new(RandomIdGenerator), factory);
+
+        let (_, ctx0) = source.create_worker();
+        let (_, ctx1) = source.create_worker();
+        let (_, ctx2) = source.create_worker();
+
+        assert_eq!(ctx0.segment_name, "_0");
+        assert_eq!(ctx1.segment_name, "_1");
+        assert_eq!(ctx2.segment_name, "_2");
+    }
+
+    #[test]
+    fn worker_source_creates_unique_segment_ids() {
+        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let factory = Arc::new(NoOpWorkerFactory {
+            directory: Arc::clone(&dir),
+        });
+        let source = WorkerSource::new(Box::new(RandomIdGenerator), factory);
+
+        let (_, ctx0) = source.create_worker();
+        let (_, ctx1) = source.create_worker();
+
+        assert_ne!(ctx0.segment_id, ctx1.segment_id);
+    }
+
+    // --- worker_thread_loop tests ---
+
+    fn make_doc() -> Document {
+        use crate::newindex::document::DocumentBuilder;
+        use crate::newindex::field::{FieldBuilder, FieldType};
+        DocumentBuilder::new()
+            .add_field(
+                FieldBuilder::new("f")
+                    .field_type(FieldType { stored: true })
+                    .string_value("v")
+                    .build(),
+            )
+            .build()
+    }
+
+    #[test]
+    fn thread_loop_flushes_on_channel_close() {
+        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let factory: Arc<dyn WorkerFactory> = Arc::new(NoOpWorkerFactory {
+            directory: Arc::clone(&dir),
+        });
+        let source = Arc::new(WorkerSource::new(
+            Box::new(SequentialIdGenerator(0)),
+            factory,
+        ));
+        let (tx, rx) = channel::bounded(4);
+
+        tx.send(make_doc()).unwrap();
+        tx.send(make_doc()).unwrap();
+        drop(tx);
+
+        let segments = worker_thread_loop(rx, source, -1).unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].doc_count, 2);
+    }
+
+    #[test]
+    fn thread_loop_mid_flush_creates_replacement() {
+        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let factory: Arc<dyn WorkerFactory> = Arc::new(NoOpWorkerFactory {
+            directory: Arc::clone(&dir),
+        });
+        let source = Arc::new(WorkerSource::new(
+            Box::new(SequentialIdGenerator(0)),
+            factory,
+        ));
+        let (tx, rx) = channel::bounded(10);
+
+        for _ in 0..7 {
+            tx.send(make_doc()).unwrap();
+        }
+        drop(tx);
+
+        // max_buffered_docs=3 → segments of 3, 3, 1
+        let segments = worker_thread_loop(rx, source, 3).unwrap();
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].doc_count, 3);
+        assert_eq!(segments[1].doc_count, 3);
+        assert_eq!(segments[2].doc_count, 1);
+
+        // Each segment has a unique name
+        let names: HashSet<_> = segments.iter().map(|s| &s.segment_id.name).collect();
+        assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn thread_loop_empty_channel_produces_no_segments() {
+        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let factory: Arc<dyn WorkerFactory> = Arc::new(NoOpWorkerFactory {
+            directory: Arc::clone(&dir),
+        });
+        let source = Arc::new(WorkerSource::new(
+            Box::new(SequentialIdGenerator(0)),
+            factory,
+        ));
+        let (tx, rx) = channel::bounded(4);
+        drop(tx);
+
+        let segments = worker_thread_loop(rx, source, -1).unwrap();
+        assert_is_empty!(segments);
+    }
+
+    // --- package_compound_segment tests ---
+
+    #[test]
+    fn compound_packaging_creates_cfs_cfe() {
+        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let factory: Arc<dyn WorkerFactory> = Arc::new(StoredFieldsWorkerFactory {
+            directory: Arc::clone(&dir),
+        });
+        let source = Arc::new(WorkerSource::new(
+            Box::new(SequentialIdGenerator(0)),
+            factory,
+        ));
+        let (tx, rx) = channel::bounded(4);
+
+        tx.send(make_doc()).unwrap();
+        drop(tx);
+
+        let mut segments = worker_thread_loop(rx, source, -1).unwrap();
+        assert_eq!(segments.len(), 1);
+
+        // Verify sub-files exist before packaging (.fdt, .fdm, .fdx, .fnm, .si)
+        let pre_files = segments[0].file_names.clone();
+        assert_ge!(pre_files.len(), 5);
+
+        package_compound_segment(&mut segments[0], &dir).unwrap();
+
+        // After packaging: .si, .cfs, .cfe
+        assert_eq!(segments[0].file_names.len(), 3);
+        assert_any!(segments[0].file_names.iter(), |f: &String| f
+            .ends_with(".si"));
+        assert_any!(segments[0].file_names.iter(), |f: &String| f
+            .ends_with(".cfs"));
+        assert_any!(segments[0].file_names.iter(), |f: &String| f
+            .ends_with(".cfe"));
+
+        // Original sub-files (except .si) should be deleted
+        let guard = dir.lock().unwrap();
+        for f in &pre_files {
+            if !f.ends_with(".si") {
+                assert!(
+                    guard.read_file(f).is_err(),
+                    "original file {f} should have been deleted"
+                );
+            }
+        }
+
+        // Compound files should exist
+        assert!(guard.read_file("_0.cfs").is_ok());
+        assert!(guard.read_file("_0.cfe").is_ok());
     }
 }

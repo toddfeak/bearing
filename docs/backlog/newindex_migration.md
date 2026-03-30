@@ -54,46 +54,54 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - `IndexWriter::new` simplified to 2 parameters (config + directory), factory/id-gen are internal
 - Coordinator lifecycle reworked: worker threads use a shared `WorkerSource` for initial and replacement worker creation. Thread loop extracted into a named function. Mid-stream flush creates a replacement worker via `WorkerSource::create_worker()` — no management threads or complex coordination needed.
 
-### Phase 1: Multi-Segment and Multi-Thread
+### Phase 1: Multi-Segment and Multi-Thread ✓
 
-Still using only stored fields and field infos consumers. Prove that the worker lifecycle handles multiple segments and concurrent threads correctly. The coordinator already supports mid-stream flush and worker replacement — this phase validates it with tests.
+**Complete.** Validated multi-segment and multi-thread indexing with stored fields only.
 
-**Work:**
-- `max_buffered_docs` triggering mid-stream flush → worker consumed, replacement created, thread continues
+**What was built:**
+- `max_buffered_docs` triggering mid-stream flush → worker consumed, replacement created via `WorkerSource`, thread continues
 - Multiple worker threads producing independent segments
-- Integration tests for multi-segment (single thread) and multi-thread configurations
-- Update demo binary with `--max-buffered-docs` and `--threads` CLI flags
-- E2e validation: Java `CheckIndex` reads a multi-segment index with multiple stored-field-only segments
+- Integration tests for multi-segment (single thread), multi-thread, and combined configurations
+- Demo binary CLI flags: `--max-buffered-docs`, `--threads`, `--doc-count`
+- E2e validation: Java `CheckIndex` on single-segment, multi-segment, multi-thread, and combined indexes
+- Unit tests for `WorkerSource`, `worker_thread_loop`, and `package_compound_segment`
 
-**Validates:** Worker disposal and replacement, channel distribution across threads, coordinator collecting segments from multiple workers.
+### Phase 2: Compound Files ✓
 
-### Phase 2: Compound Files
+**Complete.** Compound file packaging validated with stored fields across single and multi-segment configurations.
 
-Still stored fields only. Add compound file packaging so both formats are proven before adding more complex consumers.
+**What was built:**
+- `package_compound_segment()` in coordinator's `shutdown()` — adapts existing `lucene90::compound::write_to()`
+- `use_compound_file` config plumbed through `IndexCoordinator`
+- Demo binary `--compound` flag
+- Integration tests for compound vs non-compound, compound with multi-segment
+- E2e validation: Java `CheckIndex` on compound single-segment and compound multi-segment indexes
+
+### Phase 3: Tokenization and Norms
+
+Wire the analyzer to actually tokenize text field values and add norms computation. This gets tokens flowing through the pipeline without the heavyweight postings machinery (term hashing, block pools, postings codec).
 
 **Work:**
-- Compound file packaging in the coordinator (after collecting flushed segments, before writing commit point)
-- Adapter to existing compound file writer
-- E2e validation: Java reads both compound and non-compound indexes
+- Analyzer adapter bridging `newindex::Analyzer` to existing `src/analysis/` tokenizers
+- Wire the analyzer into the `SegmentWorker` token loop (replace the `b""` stub)
+- `NormsConsumer` — a `FieldConsumer` that computes norms from token count in `finish_field`, flushes via existing norms codec
+- Field invert state tracked in `SegmentAccumulator` (token count per field)
+- E2e validation: Java reads norms from a Rust-written index
 
-**Validates:** Post-flush file packaging, compound format correctness with the new pipeline.
+**Validates:** Analyzer plumbing, token flow through consumers, norms computation and encoding.
 
-### Phase 3: Text Fields (Postings + Norms)
+### Phase 4: Postings
 
-Add `TextField` support. This exercises the core of the indexing pipeline: tokenization, term accumulation in pools, postings encoding, and norms computation.
+Add the postings pipeline for text fields: term deduplication, frequency/position accumulation, and encoding via the existing postings codec.
 
 **Work:**
 - Populate `SegmentAccumulator` with `ByteBlockPool`, `IntBlockPool`
 - `PostingsConsumer` — a `FieldConsumer` that accumulates terms/postings in pools, flushes via existing postings codec
-- `NormsConsumer` — a `FieldConsumer` that computes norms in `finish_field`, flushes via existing norms codec
-- Analyzer adapter bridging `newindex::Analyzer` to existing `src/analysis/` tokenizers
-- Field invert state tracked in `SegmentAccumulator` (token count, unique terms, etc.)
-- Wire the analyzer into the `SegmentWorker` token loop (replace the `b""` stub)
 - E2e validation: Java reads postings, terms, and norms from a Rust-written index
 
-**Validates:** Token flow through consumers, shared pool accumulation, norms→postings flush ordering.
+**Validates:** Term accumulation in shared pools, postings encoding, norms→postings flush ordering.
 
-### Phase 4: Remaining Field Types
+### Phase 5: Remaining Field Types
 
 Incrementally add consumers for the remaining field types. Each one is a `FieldConsumer` implementation adapting to the existing codec writer.
 
@@ -105,13 +113,13 @@ Incrementally add consumers for the remaining field types. Each one is a `FieldC
 
 Each field type addition gets its own e2e validation pass via `VerifyIndex`.
 
-### Phase 5: RAM-Based Flush Control
+### Phase 6: RAM-Based Flush Control
 
 - RAM-based flush signaling via `SegmentAccumulator` memory tracking
 - Stall control when total RAM exceeds limits
 - E2e validation with RAM-driven flushing
 
-### Phase 6: Feature Parity E2E
+### Phase 7: Feature Parity E2E
 
 Full cross-validation against the existing indexing path.
 
@@ -120,7 +128,7 @@ Full cross-validation against the existing indexing path.
 - Impact verification (`VerifyImpacts`)
 - Performance comparison: new pipeline vs existing pipeline
 
-### Phase 7: Switchover
+### Phase 8: Switchover
 
 Replace the old pipeline with the new one.
 
@@ -141,7 +149,7 @@ During migration, thin adapters bridge `src/newindex/` traits to existing code:
 | `FieldConsumer` (postings) | `Lucene103PostingsWriter` + `BlockTreeTermsWriter` | Consumer driving the existing codec |
 | `FieldConsumer` (norms) | `Lucene90NormsConsumer` | Consumer wrapping the codec |
 
-These adapters exist temporarily. After switchover (Phase 5), the underlying code is updated to align with `newindex` interfaces and the adapters are removed.
+These adapters exist temporarily. After switchover (Phase 8), the underlying code is updated to align with `newindex` interfaces and the adapters are removed.
 
 ## What This Does NOT Cover
 
