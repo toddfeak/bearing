@@ -26,37 +26,38 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 
 ## Phases
 
-### Phase 0: First Real Index
+### Phase 0: First Real Index ✓
 
-Build a minimal index through the new pipeline that Java Lucene can open and read. This is the proof that the architecture produces correct output end-to-end.
+**Complete.** One segment, stored-only fields, validated by Java Lucene's `CheckIndex`.
 
-**Target index:** One segment, stored-only fields. The simplest thing Java's `VerifyIndex` can validate.
+**What was built:**
+- `DirectoryAdapter` bridges `store::Directory` → `newindex::Directory`
+- `RandomIdGenerator`, `FieldInfoRegistry`, `radix_fmt` / `segment_file_name`
+- `newindex/codecs/` sub-package with DEBT copies of stored fields, field infos, segment info, and segments_N writers (no `src/index` imports)
+- `StoredFieldsConsumer`, `FieldInfosConsumer` — both `FieldConsumer` implementations
+- `SegmentContext` — segment identity passed to consumers at flush time (avoids duplicating directory/name/id across consumers)
+- `.si` writing in `SegmentWorker::flush()`, `SegmentInfos::commit()` for `segments_N`
+- `DefaultWorkerFactory`, `StandardAnalyzer` (stub with `todo!`)
+- Simplified `IndexWriter::new(config, directory)` — hides Arc/SharedDirectory/factory wiring
+- Integration tests (`tests/newindex_indexing.rs`), demo binary (`newindex_demo`), e2e script (`e2e_newindex.sh`) with Java `CheckIndex`
 
-**Work:**
-- Adapter for existing `Directory` (`src/store/`) to `newindex::Directory` trait
-- `IdGenerator` implementation (wrap `src/util/string_helper::random_id`)
-- `FieldInfoRegistry` implementation (field number assignment, metadata tracking)
-- `StoredFieldsConsumer` — a `FieldConsumer` that adapts to the existing `Lucene90CompressingStoredFieldsWriter`
-- `FieldInfosConsumer` — a `FieldConsumer` registered last, writes `.fnm` via existing codec
-- Segment info (`.si`) writing in `SegmentWorker::flush()` via existing codec
-- `SegmentInfos::commit()` — writes `segments_N` via existing codec
-- `radix_fmt` implementation (or adapter to existing `index_file_names::radix36`)
-- `WorkerFactory` implementation wiring everything together
-- New binary or integration test that indexes a few documents with stored fields
-- New e2e script: Java `VerifyIndex` reads the index successfully
-- Single-threaded only; no mid-stream flush needed
-
-**Validates:** The full lifecycle works end-to-end — document → channel → worker → consumer → codec → directory → Java-readable index.
+**Design changes from original plan:**
+- `FieldConsumer::flush` takes `&SegmentContext` — segment identity flows at flush time rather than being stored per-consumer
+- `WorkerFactory::create_worker` returns `(SegmentWorker, SegmentContext)`
+- Codec writers copied into `newindex/codecs/` with local types instead of importing from `src/index`
+- `IndexWriter::new` simplified to 2 parameters (config + directory), factory/id-gen are internal
 
 ### Phase 1: Multi-Segment and Multi-Thread
 
 Still using only stored fields and field infos consumers. Prove that the coordinator, channel, and worker lifecycle handle multiple segments and concurrent threads correctly.
 
 **Work:**
-- Mid-stream flush: segment ID assignment for replacement workers (thread needs to mint new IDs from the factory)
+- Mid-stream flush: replace the `unreachable!()` in the coordinator's worker thread loop with actual worker replacement
+- Segment ID assignment for replacement workers — the thread needs to mint new `SegmentId`s. Currently the coordinator's `IdGenerator` and segment counter are not accessible from inside the thread. Design decision: share them via `Arc` or have the `WorkerFactory` own ID generation.
+- `WorkerFactory::create_worker` already returns `(SegmentWorker, SegmentContext)`, so replacement workers get a fresh context automatically
 - `max_buffered_docs` triggering mid-stream flush → worker consumed, replacement created, thread continues
 - Multiple worker threads producing independent segments
-- E2e validation: Java reads a multi-segment index with multiple stored-field-only segments
+- E2e validation: Java `CheckIndex` reads a multi-segment index with multiple stored-field-only segments
 
 **Validates:** Worker disposal and replacement, channel distribution across threads, coordinator collecting segments from multiple workers.
 

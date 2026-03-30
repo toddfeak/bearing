@@ -236,13 +236,22 @@ impl SegmentWorker {
         // 2. Write .si file — must come after consumers so the file list is complete
         let mut diagnostics = HashMap::new();
         diagnostics.insert("source".to_string(), "flush".to_string());
+        diagnostics.insert("os.name".to_string(), std::env::consts::OS.to_string());
+        diagnostics.insert("os.arch".to_string(), std::env::consts::ARCH.to_string());
+
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "Lucene90StoredFieldsFormat.mode".to_string(),
+            "BEST_SPEED".to_string(),
+        );
+
         let si = segment_info::SegmentInfo {
             name: context.segment_name.clone(),
             max_doc: self.doc_count,
             is_compound_file: false,
             id: context.segment_id,
             diagnostics,
-            attributes: HashMap::new(),
+            attributes,
             has_blocks: false,
         };
         let si_name = segment_info::write(&context.directory, &si, &file_names)?;
@@ -259,27 +268,13 @@ impl SegmentWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::analyzer::{Analyzer, Token};
+    use crate::newindex::analyzer::Token;
     use crate::newindex::consumer::FieldConsumer;
     use crate::newindex::field::Field;
     use crate::newindex::segment::SegmentId;
+    use crate::newindex::standard_analyzer::StandardAnalyzer;
     use crate::store::MemoryDirectory;
     use std::sync::Arc;
-
-    /// No-op analyzer that produces no tokens.
-    struct NullAnalyzer;
-
-    impl Analyzer for NullAnalyzer {
-        fn next_token<'b>(
-            &mut self,
-            _reader: &mut dyn std::io::Read,
-            _buf: &'b mut String,
-        ) -> io::Result<Option<Token<'b>>> {
-            Ok(None)
-        }
-
-        fn reset(&mut self) {}
-    }
 
     /// No-op consumer that returns an empty file list.
     struct NoOpConsumer;
@@ -349,7 +344,7 @@ mod tests {
         let worker = SegmentWorker::new(
             segment_id,
             vec![Box::new(NoOpConsumer)],
-            Box::new(NullAnalyzer),
+            Box::new(StandardAnalyzer),
         );
 
         let flushed = worker.flush(&context).unwrap();
@@ -418,7 +413,7 @@ mod tests {
         let worker = SegmentWorker::new(
             segment_id,
             vec![Box::new(FakeConsumer)],
-            Box::new(NullAnalyzer),
+            Box::new(StandardAnalyzer),
         );
 
         let flushed = worker.flush(&context).unwrap();

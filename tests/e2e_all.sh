@@ -127,7 +127,15 @@ else
     fail "VerifyImpacts failed" "VerifyImpacts"
 fi
 
-# --- 6. Golden Summary ---
+# --- 6. Newindex pipeline (stored fields → Java CheckIndex) ---
+run_test "Newindex pipeline E2E"
+if "$SCRIPT_DIR/e2e_newindex.sh" 2>&1; then
+    pass
+else
+    fail "Newindex E2E failed" "NewindexE2E"
+fi
+
+# --- 7. Golden Summary ---
 run_test "Golden index summary"
 if "$SCRIPT_DIR/e2e_golden.sh" 2>&1; then
     pass
