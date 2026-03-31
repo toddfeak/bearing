@@ -55,7 +55,6 @@ impl FieldConsumer for FieldInfosConsumer {
             FieldInfo {
                 name: field.name().to_string(),
                 number: field_id,
-                stored: ft.stored,
                 has_norms: ft.tokenized && !ft.omit_norms,
                 index_options: if ft.tokenized { 3 } else { 0 },
             }

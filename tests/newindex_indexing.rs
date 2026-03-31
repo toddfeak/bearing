@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::stored_field;
+use bearing::newindex::field::{stored_field, text_field};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::MemoryDirectory;
 
@@ -242,5 +242,67 @@ fn compound_with_multi_segment() {
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".cfs"));
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".cfe"));
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".si"));
+    }
+}
+
+// --- Text field (tokenized + norms) tests ---
+
+fn add_text_docs_from_testdata(writer: &IndexWriter) {
+    let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
+    for entry in std::fs::read_dir(&docs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let doc = DocumentBuilder::new()
+            .add_field(stored_field("path", &name))
+            .add_field(text_field("contents", contents))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+}
+
+#[test]
+fn text_fields_produce_norms_files() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    add_text_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Should have stored fields + norms + field infos + segment info
+    assert_any!(files.iter(), |f: &String| f.ends_with(".nvm"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".nvd"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fdt"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fnm"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".si"));
+}
+
+#[test]
+fn text_fields_multi_segment() {
+    let config = IndexWriterConfig {
+        max_buffered_docs: 2,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+
+    add_text_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+
+    // 4 docs with max_buffered_docs=2 → 2 segments
+    assert_eq!(segments.len(), 2);
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 4);
+
+    // Each segment has norms files
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".nvm"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".nvd"));
     }
 }

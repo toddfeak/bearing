@@ -24,7 +24,6 @@ const EXTENSION: &str = "fnm";
 pub(crate) struct FieldInfo {
     pub name: String,
     pub number: u32,
-    pub stored: bool,
     pub has_norms: bool,
     pub index_options: u8,
 }
@@ -64,8 +63,8 @@ pub(crate) fn write(
 
     for fi in &field_infos.fields {
         debug!(
-            "field_infos: field={:?} #{}, stored={}, has_norms={}, index_options={}",
-            fi.name, fi.number, fi.stored, fi.has_norms, fi.index_options
+            "field_infos: field={:?} #{}, has_norms={}, index_options={}",
+            fi.name, fi.number, fi.has_norms, fi.index_options
         );
 
         // Field name
@@ -74,11 +73,11 @@ pub(crate) fn write(
         // Field number
         output.write_vint(fi.number as i32)?;
 
-        // Field bits
+        // Field bits — matches Lucene94FieldInfosFormat constants:
+        //   0x01 = STORE_TERMVECTOR
+        //   0x02 = OMIT_NORMS
+        //   0x04 = STORE_PAYLOADS
         let mut bits: u8 = 0;
-        if fi.stored {
-            bits |= 0b0000_0001; // IS_STORED
-        }
         if !fi.has_norms {
             bits |= 0b0000_0010; // OMIT_NORMS
         }
@@ -130,7 +129,6 @@ mod tests {
         FieldInfo {
             name: name.to_string(),
             number,
-            stored: true,
             has_norms: false,
             index_options: 0,
         }
@@ -140,7 +138,6 @@ mod tests {
         FieldInfo {
             name: name.to_string(),
             number,
-            stored: false,
             has_norms: true,
             index_options: 3, // DocsAndFreqsAndPositions
         }
@@ -199,8 +196,8 @@ mod tests {
         // Header(44) + field_count(1) + name_len(1) + "f"(1) + field_number(1) = 48
         let bits_offset = 48;
 
-        // bits byte: IS_STORED | OMIT_NORMS = 0x03
-        assert_eq!(data[bits_offset], 0b0000_0011);
+        // bits byte: OMIT_NORMS = 0x02 (stored-ness is not in the bits byte)
+        assert_eq!(data[bits_offset], 0b0000_0010);
 
         // index options byte: NONE = 0
         assert_eq!(data[bits_offset + 1], 0);
@@ -233,7 +230,6 @@ mod tests {
         let fields = vec![FieldInfo {
             name: "body".to_string(),
             number: 0,
-            stored: true,
             has_norms: true,
             index_options: 3,
         }];
@@ -244,8 +240,8 @@ mod tests {
 
         let bits_offset = 51;
 
-        // bits byte: IS_STORED only, no OMIT_NORMS = 0x01
-        assert_eq!(data[bits_offset], 0b0000_0001);
+        // bits byte: no flags (has norms, no term vectors, no payloads)
+        assert_eq!(data[bits_offset], 0b0000_0000);
 
         // index options byte: 3
         assert_eq!(data[bits_offset + 1], 3);

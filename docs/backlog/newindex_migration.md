@@ -77,18 +77,22 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - Integration tests for compound vs non-compound, compound with multi-segment
 - E2e validation: Java `CheckIndex` on compound single-segment and compound multi-segment indexes
 
-### Phase 3: Tokenization and Norms
+### Phase 3: Tokenization and Norms ✓
 
-Wire the analyzer to actually tokenize text field values and add norms computation. This gets tokens flowing through the pipeline without the heavyweight postings machinery (term hashing, block pools, postings codec).
+**Complete.** Tokenization and norms validated by Java CheckIndex across single-segment, multi-segment, and multi-thread configurations.
 
-**Work:**
-- Analyzer adapter bridging `newindex::Analyzer` to existing `src/analysis/` tokenizers
-- Wire the analyzer into the `SegmentWorker` token loop (replace the `b""` stub)
-- `NormsConsumer` — a `FieldConsumer` that computes norms from token count in `finish_field`, flushes via existing norms codec
-- Field invert state tracked in `SegmentAccumulator` (token count per field)
-- E2e validation: Java reads norms from a Rust-written index
+**What was built:**
+- `StandardAnalyzer` adapter bridging pull-based `newindex::Analyzer` to push-based `analysis::StandardAnalyzer` via internal buffering
+- `FieldType` extended with `tokenized`, `omit_norms` fields + `STORED`, `TEXT_STORED`, `TEXT` constants + `stored_field()`/`text_field()` convenience constructors
+- Token loop wired in `SegmentWorker`: checks `field.field_type().tokenized`, extracts field value as reader
+- `NormsConsumer` — counts tokens per field, computes SmallFloat-encoded norms, writes `.nvm`/`.nvd` via DEBT norms codec copy
+- `.fnm` writer updated for indexed fields: dynamic bits encoding (STORE_TERMVECTOR, OMIT_NORMS, STORE_PAYLOADS), configurable index_options
+- Norms codec DEBT copy at `newindex/codecs/norms.rs` with ALL/SPARSE/EMPTY/CONSTANT patterns
+- Integration tests reading real docs from `testdata/docs/`, e2e text field scenarios with Java CheckIndex
 
-**Validates:** Analyzer plumbing, token flow through consumers, norms computation and encoding.
+**Design changes from original plan:**
+- Norms data stored in `NormsConsumer` directly, not in `SegmentAccumulator` — no other consumer needs it
+- `.fnm` `FieldInfo` does not track `stored` — it's not part of the Lucene94 `.fnm` format (stored-ness is implicit from stored field data)
 
 ### Phase 4: Postings
 

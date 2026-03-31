@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::stored_field;
+use bearing::newindex::field::{stored_field, text_field};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
 
@@ -20,6 +20,7 @@ fn main() {
     let mut max_buffered_docs: i32 = -1;
     let mut num_threads: usize = 1;
     let mut use_compound_file = false;
+    let mut text_fields = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -38,6 +39,9 @@ fn main() {
             }
             "--compound" => {
                 use_compound_file = true;
+            }
+            "--text-fields" => {
+                text_fields = true;
             }
             arg if !arg.starts_with('-') && index_path.is_none() => {
                 index_path = Some(PathBuf::from(arg));
@@ -70,14 +74,20 @@ fn main() {
     let writer = IndexWriter::new(config, Box::new(fs_dir));
 
     for i in 0..doc_count {
-        let doc = DocumentBuilder::new()
-            .add_field(stored_field("title", format!("Document {i}")))
-            .add_field(stored_field(
+        let mut doc =
+            DocumentBuilder::new().add_field(stored_field("title", format!("Document {i}")));
+        if text_fields {
+            doc = doc.add_field(text_field(
                 "body",
                 format!("This is the body text for document number {i}."),
-            ))
-            .build();
-        writer.add_document(doc).unwrap();
+            ));
+        } else {
+            doc = doc.add_field(stored_field(
+                "body",
+                format!("This is the body text for document number {i}."),
+            ));
+        }
+        writer.add_document(doc.build()).unwrap();
     }
 
     let segments = writer.commit().unwrap();

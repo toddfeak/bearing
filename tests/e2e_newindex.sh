@@ -59,6 +59,9 @@ run_scenario "Multi-thread" --doc-count 10 --threads 2
 run_scenario "Multi-thread + multi-segment" --doc-count 10 --threads 2 --max-buffered-docs 3
 run_scenario "Compound file" --doc-count 10 --compound
 run_scenario "Compound + multi-segment" --doc-count 10 --max-buffered-docs 3 --compound
+run_scenario "Text fields (single segment)" --doc-count 10 --text-fields
+run_scenario "Text fields (multi-segment)" --doc-count 10 --text-fields --max-buffered-docs 3
+run_scenario "Text fields (multi-thread)" --doc-count 10 --text-fields --threads 2
 
 # --- Summary ---
 echo ""
