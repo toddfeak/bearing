@@ -245,7 +245,7 @@ fn compound_with_multi_segment() {
     }
 }
 
-// --- Text field (tokenized + norms) tests ---
+// --- Text field (tokenized + norms + postings) tests ---
 
 fn add_text_docs_from_testdata(writer: &IndexWriter) {
     let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
@@ -263,7 +263,7 @@ fn add_text_docs_from_testdata(writer: &IndexWriter) {
 }
 
 #[test]
-fn text_fields_produce_norms_files() {
+fn text_fields_produce_norms_and_postings_files() {
     let writer = IndexWriter::new(
         IndexWriterConfig::default(),
         Box::new(MemoryDirectory::new()),
@@ -275,12 +275,20 @@ fn text_fields_produce_norms_files() {
     assert_eq!(segments.len(), 1);
 
     let files = &segments[0].file_names;
-    // Should have stored fields + norms + field infos + segment info
+    // Norms
     assert_any!(files.iter(), |f: &String| f.ends_with(".nvm"));
     assert_any!(files.iter(), |f: &String| f.ends_with(".nvd"));
+    // Stored fields
     assert_any!(files.iter(), |f: &String| f.ends_with(".fdt"));
+    // Field infos + segment info
     assert_any!(files.iter(), |f: &String| f.ends_with(".fnm"));
     assert_any!(files.iter(), |f: &String| f.ends_with(".si"));
+    // Postings
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tim"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tip"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tmd"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".doc"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".pos"));
 }
 
 #[test]
@@ -300,9 +308,72 @@ fn text_fields_multi_segment() {
     let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
     assert_eq!(total_docs, 4);
 
-    // Each segment has norms files
+    // Each segment has norms and postings files
     for seg in &segments {
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".nvm"));
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".nvd"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tim"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".doc"));
     }
+}
+
+#[test]
+fn text_only_fields_produce_postings_without_stored() {
+    use bearing::newindex::field::FieldType;
+
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    // TEXT type: tokenized, not stored
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(
+                bearing::newindex::field::FieldBuilder::new("body")
+                    .field_type(FieldType::TEXT)
+                    .string_value(format!("hello world document {i}"))
+                    .build(),
+            )
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Postings present
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tim"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".doc"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".pos"));
+    // Norms present (TEXT type has norms)
+    assert_any!(files.iter(), |f: &String| f.ends_with(".nvm"));
+}
+
+#[test]
+fn mixed_stored_and_text_fields() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    for i in 0..5 {
+        let doc = DocumentBuilder::new()
+            .add_field(stored_field("id", format!("{i}")))
+            .add_field(text_field("body", format!("quick brown fox {i}")))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Both stored fields and postings
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fdt"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tim"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".doc"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".pos"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".nvm"));
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Writes a stored-fields-only index via the newindex pipeline.
+//! Writes an index via the newindex pipeline.
 //!
 //! Used by e2e tests to produce an on-disk index for Java CheckIndex validation.
 

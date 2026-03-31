@@ -231,6 +231,16 @@ impl BlockFlushState {
     }
 }
 
+/// Groups per-term context for the block encoding path.
+struct TermWriteContext {
+    doc_freq: i32,
+    total_term_freq: i64,
+    doc_start_fp: i64,
+    pos_start_fp: i64,
+    write_freqs: bool,
+    write_positions: bool,
+}
+
 /// Writes postings (.doc, .pos, .psm) files.
 pub struct PostingsWriter {
     doc_out: Box<dyn IndexOutput>,
@@ -352,12 +362,14 @@ impl PostingsWriter {
             debug!("postings_writer: block encoding, doc_freq={}", doc_freq);
             self.write_term_blocks(
                 postings,
-                doc_freq,
-                total_term_freq,
-                doc_start_fp,
-                pos_start_fp,
-                write_freqs,
-                write_positions,
+                &TermWriteContext {
+                    doc_freq,
+                    total_term_freq,
+                    doc_start_fp,
+                    pos_start_fp,
+                    write_freqs,
+                    write_positions,
+                },
                 norms,
             )
         } else {
@@ -414,18 +426,18 @@ impl PostingsWriter {
     }
 
     /// Write a term with docFreq >= BLOCK_SIZE using block encoding with skip data.
-    #[allow(clippy::too_many_arguments)]
     fn write_term_blocks(
         &mut self,
         postings: &[(i32, i32, &[i32])],
-        doc_freq: i32,
-        total_term_freq: i64,
-        doc_start_fp: i64,
-        pos_start_fp: i64,
-        write_freqs: bool,
-        write_positions: bool,
+        ctx: &TermWriteContext,
         norms: &NormsLookup,
     ) -> io::Result<IntBlockTermState> {
+        let doc_freq = ctx.doc_freq;
+        let total_term_freq = ctx.total_term_freq;
+        let doc_start_fp = ctx.doc_start_fp;
+        let pos_start_fp = ctx.pos_start_fp;
+        let write_freqs = ctx.write_freqs;
+        let write_positions = ctx.write_positions;
         let mut doc_delta_buffer = [0i32; BLOCK_SIZE];
         let mut freq_buffer = [0i32; BLOCK_SIZE];
         let mut doc_buffer_upto = 0usize;

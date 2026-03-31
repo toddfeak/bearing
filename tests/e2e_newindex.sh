@@ -3,8 +3,8 @@
 #
 # E2E test for the newindex pipeline.
 #
-# Writes stored-fields-only indexes via the newindex_demo binary
-# under various configurations, then validates each with Java CheckIndex.
+# Writes indexes via the newindex_demo binary under various configurations,
+# then validates each with Java CheckIndex.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +62,7 @@ run_scenario "Compound + multi-segment" --doc-count 10 --max-buffered-docs 3 --c
 run_scenario "Text fields (single segment)" --doc-count 10 --text-fields
 run_scenario "Text fields (multi-segment)" --doc-count 10 --text-fields --max-buffered-docs 3
 run_scenario "Text fields (multi-thread)" --doc-count 10 --text-fields --threads 2
+run_scenario "Text fields (compound)" --doc-count 10 --text-fields --compound
 
 # --- Summary ---
 echo ""

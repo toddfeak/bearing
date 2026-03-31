@@ -8,6 +8,7 @@ use crate::newindex::consumer::FieldConsumer;
 use crate::newindex::coordinator::WorkerFactory;
 use crate::newindex::field_infos_consumer::FieldInfosConsumer;
 use crate::newindex::norms_consumer::NormsConsumer;
+use crate::newindex::postings_consumer::PostingsConsumer;
 use crate::newindex::segment::SegmentId;
 use crate::newindex::segment_context::SegmentContext;
 use crate::newindex::segment_worker::SegmentWorker;
@@ -58,6 +59,7 @@ impl WorkerFactory for DefaultWorkerFactory {
         let consumers: Vec<Box<dyn FieldConsumer>> = vec![
             Box::new(NormsConsumer::new()),
             Box::new(StoredFieldsConsumer::new()),
+            Box::new(PostingsConsumer::new()),
             Box::new(FieldInfosConsumer::new()),
         ];
 

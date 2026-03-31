@@ -94,16 +94,20 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - Norms data stored in `NormsConsumer` directly, not in `SegmentAccumulator` — no other consumer needs it
 - `.fnm` `FieldInfo` does not track `stored` — it's not part of the Lucene94 `.fnm` format (stored-ness is implicit from stored field data)
 
-### Phase 4: Postings
+### Phase 4: Postings ✓
 
-Add the postings pipeline for text fields: term deduplication, frequency/position accumulation, and encoding via the existing postings codec.
+**Complete.** Postings pipeline validated by Java CheckIndex across single-segment, multi-segment, multi-thread, and compound file configurations.
 
-**Work:**
-- Populate `SegmentAccumulator` with `ByteBlockPool`, `IntBlockPool`
-- `PostingsConsumer` — a `FieldConsumer` that accumulates terms/postings in pools, flushes via existing postings codec
-- E2e validation: Java reads postings, terms, and norms from a Rust-written index
+**What was built:**
+- `PostingsConsumer` — a `FieldConsumer` that owns two `ByteBlockPool` instances (doc/freq and positions), accumulates terms/postings, flushes via block tree terms writer
+- `PerFieldPostings` — per-field term deduplication via `BytesRefHash`, parallel arrays for doc/freq/position tracking, byte-sorted term iteration at flush
+- DEBT codec copies at `newindex/codecs/postings_writer.rs` and `newindex/codecs/blocktree_writer.rs` producing `.tim`, `.tip`, `.tmd`, `.doc`, `.pos`, `.psm` files
+- Norms-to-postings integration: `PostingsConsumer` reads norms from `SegmentAccumulator` at flush time for competitive impact encoding
+- Integration tests with real testdata docs, e2e text field scenarios with Java CheckIndex
 
-**Validates:** Term accumulation in shared pools, postings encoding, norms→postings flush ordering.
+**Design changes from original plan:**
+- Pools owned by `PostingsConsumer` directly, not stored in `SegmentAccumulator` — pools have per-consumer lifetimes and don't need to be shared. `SegmentAccumulator` stores only cross-consumer metadata (norms).
+- No `IntBlockPool` — position deltas written directly to a dedicated `ByteBlockPool` during token processing, doc/freq deltas written at document boundaries. This splits encoding work between the hot path (positions) and document-boundary path (doc/freq).
 
 ### Phase 5: Remaining Field Types
 
@@ -150,7 +154,7 @@ During migration, thin adapters bridge `src/newindex/` traits to existing code:
 | `newindex::Directory` | `store::Directory` | Wrapper delegating to existing methods |
 | `newindex::Analyzer` | `analysis::Analyzer` | Wrapper adapting streaming API |
 | `FieldConsumer` (stored) | `Lucene90CompressingStoredFieldsWriter` | Consumer holding a codec writer |
-| `FieldConsumer` (postings) | `Lucene103PostingsWriter` + `BlockTreeTermsWriter` | Consumer driving the existing codec |
+| `FieldConsumer` (postings) | `Lucene103PostingsWriter` + `BlockTreeTermsWriter` | DEBT codec copies adapted to accept `PerFieldPostings` + `ByteBlockPool` |
 | `FieldConsumer` (norms) | `Lucene90NormsConsumer` | Consumer wrapping the codec |
 
 These adapters exist temporarily. After switchover (Phase 8), the underlying code is updated to align with `newindex` interfaces and the adapters are removed.

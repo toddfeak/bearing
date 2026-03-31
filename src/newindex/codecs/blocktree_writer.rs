@@ -480,9 +480,11 @@ impl TermsWriter {
 
         for spec in &block_specs {
             let block = write_block_to_output(
-                &self.pending,
-                &self.last_term,
-                prefix_length,
+                &BlockWriteInput {
+                    pending: &self.pending,
+                    last_term: &self.last_term,
+                    prefix_length,
+                },
                 spec,
                 terms_out,
                 postings_writer,
@@ -629,18 +631,25 @@ impl TermsWriter {
     }
 }
 
-/// Write a single block to .tim output.
-#[allow(clippy::too_many_arguments)]
-fn write_block_to_output(
-    pending: &[PendingEntry],
-    last_term: &[u8],
+/// Groups the accumulated terms state passed into block writing.
+struct BlockWriteInput<'a> {
+    pending: &'a [PendingEntry],
+    last_term: &'a [u8],
     prefix_length: usize,
+}
+
+/// Write a single block to .tim output.
+fn write_block_to_output(
+    input: &BlockWriteInput<'_>,
     spec: &BlockSpec,
     terms_out: &mut dyn IndexOutput,
     postings_writer: &PostingsWriter,
     field_ctx: &FieldWriteContext,
     lz4_ht: &mut lz4::HighCompressionHashTable,
 ) -> io::Result<PendingBlock> {
+    let pending = input.pending;
+    let last_term = input.last_term;
+    let prefix_length = input.prefix_length;
     let start_fp = terms_out.file_pointer();
     let has_floor_lead_label = spec.is_floor && spec.floor_lead_label != -1;
 
