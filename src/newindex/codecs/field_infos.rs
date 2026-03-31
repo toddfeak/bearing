@@ -25,6 +25,8 @@ pub(crate) struct FieldInfo {
     pub name: String,
     pub number: u32,
     pub stored: bool,
+    pub has_norms: bool,
+    pub index_options: u8,
 }
 
 /// Collection of field metadata for a segment.
@@ -61,15 +63,9 @@ pub(crate) fn write(
     output.write_vint(field_infos.fields.len() as i32)?;
 
     for fi in &field_infos.fields {
-        assert!(
-            fi.stored,
-            "field_infos::write only supports stored-only fields (field {:?} has stored=false)",
-            fi.name
-        );
-
         debug!(
-            "field_infos: field={:?} #{}, stored={}",
-            fi.name, fi.number, fi.stored
+            "field_infos: field={:?} #{}, stored={}, has_norms={}, index_options={}",
+            fi.name, fi.number, fi.stored, fi.has_norms, fi.index_options
         );
 
         // Field name
@@ -78,12 +74,18 @@ pub(crate) fn write(
         // Field number
         output.write_vint(fi.number as i32)?;
 
-        // Field bits: stored-only fields have no term vectors, norms, payloads, etc.
-        let bits: u8 = 0b0000_0010; // OMIT_NORMS — stored-only fields omit norms
+        // Field bits
+        let mut bits: u8 = 0;
+        if fi.stored {
+            bits |= 0b0000_0001; // IS_STORED
+        }
+        if !fi.has_norms {
+            bits |= 0b0000_0010; // OMIT_NORMS
+        }
         output.write_byte(bits)?;
 
-        // Index options: 0 = NONE (stored-only, not indexed)
-        output.write_byte(0)?;
+        // Index options
+        output.write_byte(fi.index_options)?;
 
         // Doc values type: 0 = NONE
         output.write_byte(0)?;
@@ -124,21 +126,30 @@ mod tests {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
+    fn stored_only(name: &str, number: u32) -> FieldInfo {
+        FieldInfo {
+            name: name.to_string(),
+            number,
+            stored: true,
+            has_norms: false,
+            index_options: 0,
+        }
+    }
+
+    fn indexed_with_norms(name: &str, number: u32) -> FieldInfo {
+        FieldInfo {
+            name: name.to_string(),
+            number,
+            stored: false,
+            has_norms: true,
+            index_options: 3, // DocsAndFreqsAndPositions
+        }
+    }
+
     #[test]
     fn write_produces_fnm_file() {
         let dir = test_directory();
-        let fields = vec![
-            FieldInfo {
-                name: "title".to_string(),
-                number: 0,
-                stored: true,
-            },
-            FieldInfo {
-                name: "body".to_string(),
-                number: 1,
-                stored: true,
-            },
-        ];
+        let fields = vec![stored_only("title", 0), stored_only("body", 1)];
         let fis = FieldInfos::new(fields);
         let name = write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
         assert_eq!(name, "_0.fnm");
@@ -157,18 +168,7 @@ mod tests {
     #[test]
     fn write_encodes_field_count_and_names() {
         let dir = test_directory();
-        let fields = vec![
-            FieldInfo {
-                name: "title".to_string(),
-                number: 0,
-                stored: true,
-            },
-            FieldInfo {
-                name: "body".to_string(),
-                number: 1,
-                stored: true,
-            },
-        ];
+        let fields = vec![stored_only("title", 0), stored_only("body", 1)];
         let fis = FieldInfos::new(fields);
         write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
 
@@ -189,14 +189,9 @@ mod tests {
     }
 
     #[test]
-    fn write_stored_only_field_has_omit_norms() {
+    fn stored_only_field_has_omit_norms() {
         let dir = test_directory();
-        let fields = vec![FieldInfo {
-            name: "f".to_string(),
-            number: 0,
-            stored: true,
-        }];
-        let fis = FieldInfos::new(fields);
+        let fis = FieldInfos::new(vec![stored_only("f", 0)]);
         write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
 
         let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
@@ -204,13 +199,55 @@ mod tests {
         // Header(44) + field_count(1) + name_len(1) + "f"(1) + field_number(1) = 48
         let bits_offset = 48;
 
-        // bits byte: OMIT_NORMS = 0x02
-        assert_eq!(data[bits_offset], 0x02);
+        // bits byte: IS_STORED | OMIT_NORMS = 0x03
+        assert_eq!(data[bits_offset], 0b0000_0011);
 
         // index options byte: NONE = 0
         assert_eq!(data[bits_offset + 1], 0);
 
         // doc values type byte: NONE = 0
         assert_eq!(data[bits_offset + 2], 0);
+    }
+
+    #[test]
+    fn indexed_field_with_norms() {
+        let dir = test_directory();
+        let fis = FieldInfos::new(vec![indexed_with_norms("body", 0)]);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "body"(4) + field_number(1) = 51
+        let bits_offset = 51;
+
+        // bits byte: no IS_STORED, no OMIT_NORMS = 0x00
+        assert_eq!(data[bits_offset], 0b0000_0000);
+
+        // index options byte: 3 = DocsAndFreqsAndPositions
+        assert_eq!(data[bits_offset + 1], 3);
+    }
+
+    #[test]
+    fn indexed_stored_field_with_norms() {
+        let dir = test_directory();
+        let fields = vec![FieldInfo {
+            name: "body".to_string(),
+            number: 0,
+            stored: true,
+            has_norms: true,
+            index_options: 3,
+        }];
+        let fis = FieldInfos::new(fields);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        let bits_offset = 51;
+
+        // bits byte: IS_STORED only, no OMIT_NORMS = 0x01
+        assert_eq!(data[bits_offset], 0b0000_0001);
+
+        // index options byte: 3
+        assert_eq!(data[bits_offset + 1], 3);
     }
 }

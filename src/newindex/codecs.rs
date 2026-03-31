@@ -7,6 +7,7 @@
 // reconcile with the originals into a single set of writers.
 
 pub(crate) mod field_infos;
+pub(crate) mod norms;
 pub(crate) mod segment_info;
 pub(crate) mod segment_infos;
 pub(crate) mod stored_fields;

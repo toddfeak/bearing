@@ -50,10 +50,15 @@ impl FieldConsumer for FieldInfosConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        self.fields.entry(field_id).or_insert_with(|| FieldInfo {
-            name: field.name().to_string(),
-            number: field_id,
-            stored: field.field_type().stored,
+        self.fields.entry(field_id).or_insert_with(|| {
+            let ft = field.field_type();
+            FieldInfo {
+                name: field.name().to_string(),
+                number: field_id,
+                stored: ft.stored,
+                has_norms: ft.tokenized && !ft.omit_norms,
+                index_options: if ft.tokenized { 3 } else { 0 },
+            }
         });
         Ok(TokenInterest::NoTokens)
     }
