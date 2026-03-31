@@ -13,7 +13,9 @@ use std::path::Path;
 use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{stored_field, stored_tokenized_field, tokenized_field};
+use bearing::newindex::field::{
+    stored_field, stored_indexed_field, stored_tokenized_field, tokenized_field,
+};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::MemoryDirectory;
 
@@ -463,4 +465,67 @@ fn reader_field_not_stored() {
     assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
     // Norms exist for "contents"
     assert!(files.contains(&"_0.nvm".to_string()));
+}
+
+#[test]
+fn string_field_produces_docs_only_postings() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(stored_indexed_field("title", format!("doc_{i}")))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].doc_count, 3);
+
+    let files = &segments[0].file_names;
+    // Postings files exist (DOCS-only terms)
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    // Stored fields exist
+    assert!(files.contains(&"_0.fdt".to_string()));
+    // No norms (StringField omits norms)
+    assert!(!files.iter().any(|f| f.ends_with(".nvm")));
+    // No positions file for DOCS-only fields
+    assert!(!files.iter().any(|f| f.ends_with(".pos")));
+}
+
+#[test]
+fn mixed_string_and_text_fields() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(stored_indexed_field("title", format!("doc_{i}")))
+            .add_field(stored_tokenized_field(
+                "body",
+                format!("quick brown fox {i}"),
+            ))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Both fields have postings
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    // Positions exist (from tokenized "body" field)
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    // Norms exist (from tokenized "body" field)
+    assert!(files.contains(&"_0.nvm".to_string()));
+    // Stored fields exist
+    assert!(files.contains(&"_0.fdt".to_string()));
 }

@@ -3,6 +3,8 @@
 use std::fmt;
 use std::io::{self, Read};
 
+use crate::document::IndexOptions;
+
 /// The kind of field, combining type and value in a single enum.
 ///
 /// Each variant carries exactly the data it needs. Invalid combinations
@@ -15,42 +17,61 @@ pub enum FieldKind {
     Tokenized(Box<dyn Read + Send>),
     /// Tokenized, indexed, and stored.
     StoredTokenized(String),
+    /// Indexed as a single exact-match term, not stored. No norms.
+    Indexed(String),
+    /// Indexed as a single exact-match term + stored. No norms.
+    StoredIndexed(String),
 }
 
-/// Not indexed.
-const INDEX_OPTIONS_NONE: u8 = 0;
-/// Indexed with docs, frequencies, and positions.
-const INDEX_OPTIONS_DOCS_AND_FREQS_AND_POSITIONS: u8 = 3;
-
 impl FieldKind {
-    /// Index options for `.fnm`.
-    pub fn index_options(&self) -> u8 {
+    /// Index options for this field.
+    pub fn index_options(&self) -> IndexOptions {
         match self {
-            FieldKind::Stored(_) => INDEX_OPTIONS_NONE,
+            FieldKind::Stored(_) => IndexOptions::None,
+            FieldKind::Indexed(_) | FieldKind::StoredIndexed(_) => IndexOptions::Docs,
             FieldKind::Tokenized(_) | FieldKind::StoredTokenized(_) => {
-                INDEX_OPTIONS_DOCS_AND_FREQS_AND_POSITIONS
+                IndexOptions::DocsAndFreqsAndPositions
             }
         }
     }
 
+    /// Whether this field is tokenized (run through an analyzer).
+    pub fn is_tokenized(&self) -> bool {
+        matches!(
+            self,
+            FieldKind::Tokenized(_) | FieldKind::StoredTokenized(_)
+        )
+    }
+
     /// Whether this field computes and stores norms.
     pub fn has_norms(&self) -> bool {
+        matches!(
+            self,
+            FieldKind::Tokenized(_) | FieldKind::StoredTokenized(_)
+        )
+    }
+
+    /// Returns the string value for non-reader variants.
+    ///
+    /// Panics if called on `Tokenized` (reader-backed, no accessible string).
+    pub fn string_value(&self) -> &str {
         match self {
-            FieldKind::Stored(_) => false,
-            FieldKind::Tokenized(_) | FieldKind::StoredTokenized(_) => true,
+            FieldKind::Stored(s)
+            | FieldKind::StoredTokenized(s)
+            | FieldKind::Indexed(s)
+            | FieldKind::StoredIndexed(s) => s,
+            FieldKind::Tokenized(_) => panic!("string_value called on reader-backed field"),
         }
     }
 
     /// Consumes the value and returns a boxed reader for tokenization.
     ///
-    /// - `Stored` and `StoredTokenized` string values are converted to an in-memory `Cursor`.
-    /// - `Tokenized` reader values are returned directly.
+    /// Only valid for tokenized fields. Panics if called on non-tokenized variants.
     pub fn into_reader(self) -> Box<dyn Read + Send> {
         match self {
-            FieldKind::Stored(s) | FieldKind::StoredTokenized(s) => {
-                Box::new(io::Cursor::new(s.into_bytes()))
-            }
             FieldKind::Tokenized(r) => r,
+            FieldKind::StoredTokenized(s) => Box::new(io::Cursor::new(s.into_bytes())),
+            _ => panic!("into_reader called on non-tokenized field"),
         }
     }
 }
@@ -61,6 +82,8 @@ impl fmt::Debug for FieldKind {
             FieldKind::Stored(s) => f.debug_tuple("Stored").field(s).finish(),
             FieldKind::Tokenized(_) => f.debug_tuple("Tokenized").field(&"...").finish(),
             FieldKind::StoredTokenized(s) => f.debug_tuple("StoredTokenized").field(s).finish(),
+            FieldKind::Indexed(s) => f.debug_tuple("Indexed").field(s).finish(),
+            FieldKind::StoredIndexed(s) => f.debug_tuple("StoredIndexed").field(s).finish(),
         }
     }
 }
@@ -68,7 +91,7 @@ impl fmt::Debug for FieldKind {
 /// An immutable field within a document.
 ///
 /// Created via convenience functions [`stored_field`], [`tokenized_field`],
-/// or [`stored_tokenized_field`].
+/// [`stored_tokenized_field`], [`indexed_field`], or [`stored_indexed_field`].
 // LOCKED
 #[derive(Debug)]
 pub struct Field {
@@ -126,6 +149,22 @@ pub fn stored_tokenized_field(name: &str, value: impl Into<String>) -> Field {
     }
 }
 
+/// Creates an indexed exact-match field. Not tokenized, not stored. No norms.
+pub fn indexed_field(name: &str, value: impl Into<String>) -> Field {
+    Field {
+        name: name.to_string(),
+        kind: FieldKind::Indexed(value.into()),
+    }
+}
+
+/// Creates an indexed exact-match field that is also stored. Not tokenized. No norms.
+pub fn stored_indexed_field(name: &str, value: impl Into<String>) -> Field {
+    Field {
+        name: name.to_string(),
+        kind: FieldKind::StoredIndexed(value.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem;
@@ -138,8 +177,10 @@ mod tests {
         let field = stored_field("title", "hello");
         assert_eq!(field.name(), "title");
         assert!(matches!(field.kind(), FieldKind::Stored(_)));
-        assert_eq!(field.kind().index_options(), 0);
+        assert_eq!(field.kind().index_options(), IndexOptions::None);
+        assert!(!field.kind().is_tokenized());
         assert!(!field.kind().has_norms());
+        assert_eq!(field.kind().string_value(), "hello");
     }
 
     #[test]
@@ -147,7 +188,11 @@ mod tests {
         let field = tokenized_field("contents", Cursor::new(b"hello world".to_vec()));
         assert_eq!(field.name(), "contents");
         assert!(matches!(field.kind(), FieldKind::Tokenized(_)));
-        assert_eq!(field.kind().index_options(), 3);
+        assert_eq!(
+            field.kind().index_options(),
+            IndexOptions::DocsAndFreqsAndPositions
+        );
+        assert!(field.kind().is_tokenized());
         assert!(field.kind().has_norms());
     }
 
@@ -156,8 +201,35 @@ mod tests {
         let field = stored_tokenized_field("body", "hello world");
         assert_eq!(field.name(), "body");
         assert!(matches!(field.kind(), FieldKind::StoredTokenized(_)));
-        assert_eq!(field.kind().index_options(), 3);
+        assert_eq!(
+            field.kind().index_options(),
+            IndexOptions::DocsAndFreqsAndPositions
+        );
+        assert!(field.kind().is_tokenized());
         assert!(field.kind().has_norms());
+        assert_eq!(field.kind().string_value(), "hello world");
+    }
+
+    #[test]
+    fn indexed_field_kind() {
+        let field = indexed_field("tag", "rust");
+        assert_eq!(field.name(), "tag");
+        assert!(matches!(field.kind(), FieldKind::Indexed(_)));
+        assert_eq!(field.kind().index_options(), IndexOptions::Docs);
+        assert!(!field.kind().is_tokenized());
+        assert!(!field.kind().has_norms());
+        assert_eq!(field.kind().string_value(), "rust");
+    }
+
+    #[test]
+    fn stored_indexed_field_kind() {
+        let field = stored_indexed_field("title", "hello");
+        assert_eq!(field.name(), "title");
+        assert!(matches!(field.kind(), FieldKind::StoredIndexed(_)));
+        assert_eq!(field.kind().index_options(), IndexOptions::Docs);
+        assert!(!field.kind().is_tokenized());
+        assert!(!field.kind().has_norms());
+        assert_eq!(field.kind().string_value(), "hello");
     }
 
     #[test]
@@ -189,7 +261,6 @@ mod tests {
         reader.read_to_string(&mut buf).unwrap();
         assert_eq!(buf, "streaming content");
 
-        // After consumption, kind is the replacement
         assert!(matches!(field.kind(), FieldKind::Stored(_)));
     }
 
@@ -205,5 +276,11 @@ mod tests {
 
         let stored_tok = FieldKind::StoredTokenized("world".to_string());
         assert!(format!("{stored_tok:?}").contains("StoredTokenized"));
+
+        let indexed = FieldKind::Indexed("exact".to_string());
+        assert!(format!("{indexed:?}").contains("Indexed"));
+
+        let stored_idx = FieldKind::StoredIndexed("exact stored".to_string());
+        assert!(format!("{stored_idx:?}").contains("StoredIndexed"));
     }
 }

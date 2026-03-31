@@ -44,11 +44,11 @@ impl FieldConsumer for StoredFieldsConsumer {
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
         match field.kind() {
-            FieldKind::Stored(s) | FieldKind::StoredTokenized(s) => {
+            FieldKind::Stored(s) | FieldKind::StoredTokenized(s) | FieldKind::StoredIndexed(s) => {
                 self.current_doc_fields
                     .push((field_id, StoredValue::String(s.clone())));
             }
-            FieldKind::Tokenized(_) => {}
+            FieldKind::Tokenized(_) | FieldKind::Indexed(_) => {}
         }
         Ok(TokenInterest::NoTokens)
     }

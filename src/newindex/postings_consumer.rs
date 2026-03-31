@@ -11,10 +11,11 @@ use std::fmt;
 use std::io;
 
 use crate::codecs::competitive_impact::NormsLookup;
+use crate::document::IndexOptions;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
-use crate::newindex::field::{Field, FieldKind};
+use crate::newindex::field::Field;
 use crate::newindex::per_field_postings::PerFieldPostings;
 use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
@@ -41,6 +42,7 @@ struct PerFieldState {
     postings: PerFieldPostings,
     field_name: String,
     field_number: u32,
+    index_options: IndexOptions,
     /// Set of term IDs that appeared in the current document for this field.
     /// Used to finalize all active terms when the field ends.
     active_term_ids: Vec<usize>,
@@ -92,20 +94,51 @@ impl FieldConsumer for PostingsConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        if matches!(field.kind(), FieldKind::Stored(_)) {
+        let opts = field.kind().index_options();
+        if opts == IndexOptions::None {
             return Ok(TokenInterest::NoTokens);
         }
 
         self.current_position = 0;
 
-        self.per_field
+        let state = self
+            .per_field
             .entry(field_id)
             .or_insert_with(|| PerFieldState {
-                postings: PerFieldPostings::new(true),
+                postings: PerFieldPostings::new(opts.has_freqs(), opts.has_positions()),
                 field_name: field.name().to_string(),
                 field_number: field_id,
+                index_options: opts,
                 active_term_ids: Vec::new(),
             });
+
+        // Non-tokenized indexed fields: record the exact value as a single term
+        // directly here. No analyzer, no segment worker involvement.
+        if !field.kind().is_tokenized() {
+            let value = field.kind().string_value();
+            let tid = state.postings.add_term(
+                value.as_bytes(),
+                &mut self.byte_pool,
+                if opts.has_positions() {
+                    Some(&mut self.positions_pool)
+                } else {
+                    None
+                },
+            );
+            state.postings.record_occurrence(
+                tid,
+                self.current_doc_id,
+                0,
+                &mut self.byte_pool,
+                if opts.has_positions() {
+                    Some(&mut self.positions_pool)
+                } else {
+                    None
+                },
+            );
+            state.active_term_ids.push(tid);
+            return Ok(TokenInterest::NoTokens);
+        }
 
         Ok(TokenInterest::WantsTokens)
     }
@@ -184,8 +217,11 @@ impl FieldConsumer for PostingsConsumer {
         let mut field_ids: Vec<u32> = self.per_field.keys().copied().collect();
         field_ids.sort();
 
-        // Determine if any field has positions
-        let has_positions = true; // all tokenized fields get DOCS_AND_FREQS_AND_POSITIONS
+        // Determine if any field has positions (controls .pos file creation)
+        let has_positions = self
+            .per_field
+            .values()
+            .any(|s| s.index_options.has_positions());
 
         // Suffix must match PerFieldPostingsFormat.suffix written in .fnm attributes
         let per_field_suffix = "Lucene103_0";
@@ -220,8 +256,8 @@ impl FieldConsumer for PostingsConsumer {
             let field_ctx = FieldWriteContext {
                 field_name: state.field_name.clone(),
                 field_number: state.field_number,
-                write_freqs: true,
-                write_positions: true,
+                write_freqs: state.index_options.has_freqs(),
+                write_positions: state.index_options.has_positions(),
             };
 
             writer.write_field(
@@ -241,7 +277,7 @@ impl FieldConsumer for PostingsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{stored_field, stored_tokenized_field};
+    use crate::newindex::field::{stored_field, stored_indexed_field, stored_tokenized_field};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;
@@ -368,5 +404,74 @@ mod tests {
 
         let names = consumer.flush(&ctx, &acc).unwrap();
         assert_is_empty!(&names);
+    }
+
+    #[test]
+    fn indexed_field_returns_no_tokens() {
+        let mut consumer = PostingsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+        let field = stored_indexed_field("title", "hello");
+
+        consumer.start_document(0).unwrap();
+        let interest = consumer.start_field(0, &field, &mut acc).unwrap();
+        assert_eq!(interest, TokenInterest::NoTokens);
+        consumer.finish_field(0, &field, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc).unwrap();
+    }
+
+    #[test]
+    fn indexed_field_produces_postings_without_positions() {
+        let ctx = test_context();
+        let mut consumer = PostingsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        for doc_id in 0..3 {
+            let field = stored_indexed_field("title", format!("doc_{doc_id}"));
+            consumer.start_document(doc_id).unwrap();
+            consumer.start_field(0, &field, &mut acc).unwrap();
+            consumer.finish_field(0, &field, &mut acc).unwrap();
+            consumer.finish_document(doc_id, &mut acc).unwrap();
+        }
+
+        let names = consumer.flush(&ctx, &acc).unwrap();
+
+        // Should produce terms files but NO positions file
+        assert!(names.iter().any(|n| n.ends_with(".tim")));
+        assert!(names.iter().any(|n| n.ends_with(".doc")));
+        assert!(!names.iter().any(|n| n.ends_with(".pos")));
+    }
+
+    #[test]
+    fn mixed_indexed_and_tokenized_fields() {
+        let ctx = test_context();
+        let mut consumer = PostingsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        let title = stored_indexed_field("title", "hello");
+        let body = stored_tokenized_field("body", "ignored");
+
+        consumer.start_document(0).unwrap();
+
+        // StringField — handled in start_field, returns NoTokens
+        let interest = consumer.start_field(0, &title, &mut acc).unwrap();
+        assert_eq!(interest, TokenInterest::NoTokens);
+        consumer.finish_field(0, &title, &mut acc).unwrap();
+
+        // TextField — returns WantsTokens
+        let interest = consumer.start_field(1, &body, &mut acc).unwrap();
+        assert_eq!(interest, TokenInterest::WantsTokens);
+        let token = make_token("world");
+        consumer.add_token(1, &body, &token, &mut acc).unwrap();
+        consumer.finish_field(1, &body, &mut acc).unwrap();
+
+        consumer.finish_document(0, &mut acc).unwrap();
+
+        let names = consumer.flush(&ctx, &acc).unwrap();
+
+        // Both fields produce terms
+        assert!(names.iter().any(|n| n.ends_with(".tim")));
+        assert!(names.iter().any(|n| n.ends_with(".doc")));
+        // Positions file exists because body field has positions
+        assert!(names.iter().any(|n| n.ends_with(".pos")));
     }
 }

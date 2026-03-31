@@ -49,6 +49,7 @@ pub struct PerFieldPostings {
     /// Last position written per term (for delta encoding).
     last_positions: Vec<i32>,
 
+    has_freqs: bool,
     has_positions: bool,
 }
 
@@ -56,6 +57,7 @@ impl fmt::Debug for PerFieldPostings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PerFieldPostings")
             .field("term_count", &self.terms.size())
+            .field("has_freqs", &self.has_freqs)
             .field("has_positions", &self.has_positions)
             .finish()
     }
@@ -63,7 +65,11 @@ impl fmt::Debug for PerFieldPostings {
 
 impl PerFieldPostings {
     /// Creates empty per-field state.
-    pub fn new(has_positions: bool) -> Self {
+    /// Creates empty per-field state.
+    ///
+    /// `has_freqs` controls whether term frequencies are recorded (false for DOCS-only).
+    /// `has_positions` controls whether position deltas are written.
+    pub fn new(has_freqs: bool, has_positions: bool) -> Self {
         Self {
             terms: BytesRefHash::with_default_capacity(),
             byte_stream_starts: Vec::new(),
@@ -74,6 +80,7 @@ impl PerFieldPostings {
             positions_stream_starts: Vec::new(),
             positions_stream_addrs: Vec::new(),
             last_positions: Vec::new(),
+            has_freqs,
             has_positions,
         }
     }
@@ -168,7 +175,9 @@ impl PerFieldPostings {
         let delta = self.current_doc_ids[tid] - self.last_doc_ids[tid];
         let mut writer = ByteSliceWriter::from_address(self.byte_stream_addrs[tid] as usize);
         writer.write_vint(byte_pool, delta);
-        writer.write_vint(byte_pool, self.current_freqs[tid]);
+        if self.has_freqs {
+            writer.write_vint(byte_pool, self.current_freqs[tid]);
+        }
         self.byte_stream_addrs[tid] = writer.address() as u32;
 
         self.last_doc_ids[tid] = self.current_doc_ids[tid];
@@ -231,7 +240,11 @@ impl PerFieldPostings {
             let doc_id = last_doc_id + doc_delta;
             last_doc_id = doc_id;
 
-            let freq = store::read_vint(&mut reader)?;
+            let freq = if self.has_freqs {
+                store::read_vint(&mut reader)?
+            } else {
+                1
+            };
 
             let positions = if let Some(ref mut pos_r) = pos_reader {
                 let mut positions = Vec::with_capacity(freq as usize);
@@ -286,7 +299,7 @@ mod tests {
     #[test]
     fn single_term_single_doc() {
         let (mut byte_pool, mut positions_pool) = make_pools(true);
-        let mut pfp = PerFieldPostings::new(true);
+        let mut pfp = PerFieldPostings::new(true, true);
 
         let tid = pfp.add_term(b"hello", &mut byte_pool, positions_pool.as_mut());
         assert_eq!(tid, 0);
@@ -307,7 +320,7 @@ mod tests {
     #[test]
     fn single_term_multiple_docs() {
         let (mut byte_pool, mut positions_pool) = make_pools(true);
-        let mut pfp = PerFieldPostings::new(true);
+        let mut pfp = PerFieldPostings::new(true, true);
 
         let tid = pfp.add_term(b"hello", &mut byte_pool, positions_pool.as_mut());
 
@@ -332,7 +345,7 @@ mod tests {
     #[test]
     fn multiple_terms_multiple_docs() {
         let (mut byte_pool, mut positions_pool) = make_pools(true);
-        let mut pfp = PerFieldPostings::new(true);
+        let mut pfp = PerFieldPostings::new(true, true);
 
         let tid_hello = pfp.add_term(b"hello", &mut byte_pool, positions_pool.as_mut());
         let tid_world = pfp.add_term(b"world", &mut byte_pool, positions_pool.as_mut());
@@ -365,7 +378,7 @@ mod tests {
     #[test]
     fn term_sorting() {
         let (mut byte_pool, mut positions_pool) = make_pools(false);
-        let mut pfp = PerFieldPostings::new(false);
+        let mut pfp = PerFieldPostings::new(true, false);
 
         pfp.add_term(b"zebra", &mut byte_pool, positions_pool.as_mut());
         pfp.add_term(b"apple", &mut byte_pool, positions_pool.as_mut());
@@ -379,7 +392,7 @@ mod tests {
     #[test]
     fn existing_term_returns_same_id() {
         let (mut byte_pool, mut positions_pool) = make_pools(false);
-        let mut pfp = PerFieldPostings::new(false);
+        let mut pfp = PerFieldPostings::new(true, false);
 
         let id1 = pfp.add_term(b"hello", &mut byte_pool, positions_pool.as_mut());
         let id2 = pfp.add_term(b"hello", &mut byte_pool, positions_pool.as_mut());
@@ -390,7 +403,7 @@ mod tests {
     #[test]
     fn frequency_counting() {
         let (mut byte_pool, mut positions_pool) = make_pools(false);
-        let mut pfp = PerFieldPostings::new(false);
+        let mut pfp = PerFieldPostings::new(true, false);
 
         let tid = pfp.add_term(b"the", &mut byte_pool, positions_pool.as_mut());
 
@@ -411,7 +424,7 @@ mod tests {
     #[test]
     fn position_delta_encoding() {
         let (mut byte_pool, mut positions_pool) = make_pools(true);
-        let mut pfp = PerFieldPostings::new(true);
+        let mut pfp = PerFieldPostings::new(true, true);
 
         let tid = pfp.add_term(b"test", &mut byte_pool, positions_pool.as_mut());
 
@@ -426,5 +439,24 @@ mod tests {
             .decode_term(tid, &byte_pool, positions_pool.as_ref())
             .unwrap();
         assert_eq!(postings[0], (0, 3, vec![2, 7, 15]));
+    }
+
+    #[test]
+    fn docs_only_no_freqs_no_positions() {
+        let (mut byte_pool, _) = make_pools(false);
+        let mut pfp = PerFieldPostings::new(false, false);
+
+        let tid = pfp.add_term(b"hello", &mut byte_pool, None);
+
+        // Two docs, single occurrence each
+        pfp.record_occurrence(tid, 0, 0, &mut byte_pool, None);
+        pfp.record_occurrence(tid, 1, 0, &mut byte_pool, None);
+        pfp.finalize_all(&mut byte_pool);
+
+        let postings = pfp.decode_term(tid, &byte_pool, None).unwrap();
+        assert_len_eq_x!(&postings, 2);
+        // freq defaults to 1, no positions
+        assert_eq!(postings[0], (0, 1, vec![]));
+        assert_eq!(postings[1], (1, 1, vec![]));
     }
 }

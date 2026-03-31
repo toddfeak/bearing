@@ -160,8 +160,7 @@ public class VerifyNewindex {
                                        int numDocs, boolean ok) throws Exception {
         int sampleSize = Math.min(numDocs, 3);
 
-        // Check "title" stored values (DEBT: stored-only, no terms check — title is not
-        // indexed in newindex yet, unlike StringField in indexfiles)
+        // Check "title" — StringField: stored + indexed (DOCS-only terms)
         int titleFailures = 0;
         for (int i = 0; i < numDocs; i++) {
             Document doc = storedFields.document(i);
@@ -176,6 +175,23 @@ public class VerifyNewindex {
         } else {
             System.out.println("\nExtended field checks:");
             System.out.println("  title: all " + numDocs + " docs have stored values (OK)");
+        }
+
+        // Check "title" has terms in inverted index (StringField is indexed)
+        for (LeafReaderContext ctx : reader.leaves()) {
+            Terms titleTerms = ctx.reader().terms("title");
+            if (titleTerms != null) {
+                TermsEnum te = titleTerms.iterator();
+                long count = 0;
+                while (te.next() != null) count++;
+                if (count > 0) {
+                    System.out.println("  title: " + count + " terms in index (OK)");
+                } else {
+                    System.err.println("FAIL: 'title' StringField has no terms");
+                    ok = false;
+                }
+            }
+            break; // only need one leaf
         }
 
         // Check "notes" stored values (sample + count)

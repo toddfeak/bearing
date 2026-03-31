@@ -1306,7 +1306,7 @@ mod tests {
                 None
             };
             Self {
-                pfp: PerFieldPostings::new(has_positions),
+                pfp: PerFieldPostings::new(true, has_positions),
                 byte_pool,
                 positions_pool,
             }

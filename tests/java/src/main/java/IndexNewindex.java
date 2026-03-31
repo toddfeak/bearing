@@ -21,6 +21,7 @@ import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StoredField;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
@@ -118,9 +119,9 @@ public class IndexNewindex {
         Document doc = new Document();
 
         // Same 4 fields as newindex_demo make_document:
-        doc.add(new StoredField("path", file.toString()));
+        doc.add(new StringField("path", file.toString(), Field.Store.YES));
         doc.add(new TextField("contents", contents, Field.Store.NO));
-        doc.add(new StoredField("title", title));
+        doc.add(new StringField("title", title, Field.Store.YES));
         doc.add(new StoredField("notes", "indexed by Java"));
 
         writer.addDocument(doc);

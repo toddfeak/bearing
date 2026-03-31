@@ -157,11 +157,7 @@ impl SegmentWorker {
 
             // 2b. Tokenized fields: run the analyzer once, stream tokens
             //     to only the field consumers that opted in.
-            let needs_tokenization = matches!(
-                field.kind(),
-                FieldKind::Tokenized(_) | FieldKind::StoredTokenized(_)
-            );
-            if needs_tokenization && !interested.is_empty() {
+            if field.kind().is_tokenized() && !interested.is_empty() {
                 let kind = mem::replace(field.kind_mut(), FieldKind::Stored(String::new()));
                 let mut reader = kind.into_reader();
                 let mut token_buf = mem::take(&mut self.token_buf);

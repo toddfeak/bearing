@@ -109,17 +109,51 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - Pools owned by `PostingsConsumer` directly, not stored in `SegmentAccumulator` — pools have per-consumer lifetimes and don't need to be shared. `SegmentAccumulator` stores only cross-consumer metadata (norms).
 - No `IntBlockPool` — position deltas written directly to a dedicated `ByteBlockPool` during token processing, doc/freq deltas written at document boundaries. This splits encoding work between the hot path (positions) and document-boundary path (doc/freq).
 
-### Phase 5: Remaining Field Types
+### Phase 4b: Tooling and Field Refactor ✓
 
-Incrementally add consumers for the remaining field types. Each one is a `FieldConsumer` implementation adapting to the existing codec writer.
+**Complete.** E2e tooling, FieldKind enum refactor, and FieldValue::Reader streaming support.
 
-- `DocValuesConsumer` — all five types (NUMERIC, BINARY, SORTED, SORTED_SET, SORTED_NUMERIC)
-- `PointsConsumer` — BKD tree writing
+**What was built:**
+- `newindex_demo` binary — DEBT copy of `indexfiles` with `-docs`/`-index` CLI, streaming `BufReader` for contents
+- `VerifyNewindex` Java utility — content validation (stored fields, terms, norms, queries)
+- `IndexNewindex` Java utility — matching Java baseline indexer with multi-threading
+- `compare_newindex_perf.sh` — performance comparison script
+- `e2e_newindex.sh` upgraded with real-doc scenarios and `VerifyNewindex` content verification
+- `FieldKind` enum replacing `FieldType` + `FieldValue` + `FieldBuilder` — invalid states unrepresentable at compile time
+- Streaming tokenization via `FieldKind::into_reader()` unification
+
+### Phase 5a: StringField ✓
+
+**Complete.** Non-tokenized indexed fields (StringField) with DOCS-only postings.
+
+**What was built:**
+- `FieldKind::Indexed` and `FieldKind::StoredIndexed` variants for exact-match indexed fields
+- `IndexOptions` from `src/document.rs` used as first-class type in `FieldKind`, `PostingsConsumer`, and `PerFieldPostings`
+- `PostingsConsumer` handles non-tokenized indexed fields directly in `start_field` — reads the field value and records it as a single term, returns `NoTokens`
+- `PerFieldPostings` DOCS-only support via `has_freqs` flag — no freq/position writing
+- `FieldKind::is_tokenized()` and `string_value()` methods — segment worker uses properties, not variant matching
+- `newindex_demo` updated: `path` and `title` as `StoredIndexed` (StringField)
+- Java tooling updated: `StringField` for path/title, title terms verification
+- Integration tests for DOCS-only postings and mixed string+text fields
+
+### Phase 5b: DocValuesConsumer
+
+Add doc values support for all five types.
+
+- `DocValuesConsumer` — a new `FieldConsumer` accumulating doc values, flushing via DEBT codec copy
+- DEBT codec copy of `Lucene90DocValuesConsumer` at `newindex/codecs/doc_values.rs`
+- Fix `.fnm` writer to emit `PerFieldDocValuesFormat.format`/`.suffix` attributes (known gap)
+- New `FieldKind` variants with doc values data
+- E2e validation via updated `VerifyNewindex`
+
+### Phase 5c: KeywordField and Remaining Field Types
+
+Add remaining consumers and field types. Each gets its own e2e validation pass.
+
+- `KeywordField` — requires `DocValuesConsumer` (Phase 5b) for SORTED_SET doc values
+- `PointsConsumer` — BKD tree writing for `IntField`, `FloatField`, `DoubleField`, `LongField`, `LatLonPoint`, range fields
 - `TermVectorsConsumer` — per-document term vector writing
-- `StringField`, `KeywordField`, `IntField`, `FloatField`, `DoubleField`, `LongField`, `LatLonPoint`, `FeatureField`, range fields
-- Expand `FieldType` and `FieldValue` to cover all field configurations
-
-Each field type addition gets its own e2e validation pass via `VerifyIndex`.
+- `FeatureField` — special postings with DOCS_AND_FREQS index options
 
 ### Phase 6: RAM-Based Flush Control
 
@@ -131,7 +165,7 @@ Each field type addition gets its own e2e validation pass via `VerifyIndex`.
 
 Full cross-validation against the existing indexing path.
 
-- New e2e script that mirrors `e2e_all.sh` but uses the new pipeline binary
+- Upgrade `VerifyNewindex` to match `VerifyIndex` check coverage
 - Golden summary comparison: new pipeline vs existing pipeline vs Java
 - Impact verification (`VerifyImpacts`)
 - Performance comparison: new pipeline vs existing pipeline

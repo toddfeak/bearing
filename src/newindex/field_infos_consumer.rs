@@ -55,7 +55,7 @@ impl FieldConsumer for FieldInfosConsumer {
             name: field.name().to_string(),
             number: field_id,
             has_norms: field.kind().has_norms(),
-            index_options: field.kind().index_options(),
+            index_options: field.kind().index_options() as u8,
         });
         Ok(TokenInterest::NoTokens)
     }

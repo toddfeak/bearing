@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{stored_field, tokenized_field};
+use bearing::newindex::field::{stored_field, stored_indexed_field, tokenized_field};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
 
@@ -211,11 +211,11 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
     };
 
     DocumentBuilder::new()
-        // "path" — DEBT: KeywordField in indexfiles, stored only here
-        .add_field(stored_field("path", &path_str))
+        // "path" — DEBT: KeywordField in indexfiles, StringField here until DV support
+        .add_field(stored_indexed_field("path", &path_str))
         .add_field(contents_field)
-        // "title" — DEBT: StringField in indexfiles, stored only here
-        .add_field(stored_field("title", &title))
+        // "title" — StringField: indexed exact match + stored (matches indexfiles)
+        .add_field(stored_indexed_field("title", &title))
         // "notes" — stored only (same as indexfiles)
         .add_field(stored_field("notes", "indexed by Rust"))
         .build()
