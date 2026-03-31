@@ -6,8 +6,10 @@
 // src/index/, adapted to use newindex-local types. After switchover,
 // reconcile with the originals into a single set of writers.
 
+pub(crate) mod blocktree_writer;
 pub(crate) mod field_infos;
 pub(crate) mod norms;
+pub(crate) mod postings_writer;
 pub(crate) mod segment_info;
 pub(crate) mod segment_infos;
 pub(crate) mod stored_fields;
