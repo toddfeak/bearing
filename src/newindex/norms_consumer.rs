@@ -2,7 +2,6 @@
 
 //! [`FieldConsumer`] that computes norms from token counts and writes `.nvm`, `.nvd`.
 
-use std::collections::HashMap;
 use std::io;
 
 use crate::newindex::analyzer::Token;
@@ -13,45 +12,26 @@ use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
 use crate::util::small_float;
 
-/// Per-field accumulated norms.
-struct PerFieldNorms {
-    field_name: String,
-    norms: Vec<i64>,
-    docs: Vec<i32>,
-}
-
 /// Computes and writes per-field norms from token counts.
 ///
 /// For each tokenized field that has norms enabled, counts tokens via
 /// `add_token` and computes a SmallFloat-encoded norm in `finish_field`.
-/// At flush time, writes `.nvm` and `.nvd` via the norms codec.
-#[derive(Default)]
+/// Norm values are stored in the [`SegmentAccumulator`] so that other
+/// consumers (e.g., postings) can access them at flush time.
+/// At flush time, reads norms from the accumulator and writes `.nvm`
+/// and `.nvd` via the norms codec.
+#[derive(Debug, Default)]
 pub struct NormsConsumer {
-    per_field: HashMap<u32, PerFieldNorms>,
     current_token_count: i32,
     current_has_norms: bool,
     current_doc_id: i32,
     doc_count: i32,
 }
 
-impl std::fmt::Debug for NormsConsumer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NormsConsumer")
-            .field("field_count", &self.per_field.len())
-            .finish()
-    }
-}
-
 impl NormsConsumer {
     /// Creates a new consumer.
     pub fn new() -> Self {
-        Self {
-            per_field: HashMap::new(),
-            current_token_count: 0,
-            current_has_norms: false,
-            current_doc_id: 0,
-            doc_count: 0,
-        }
+        Self::default()
     }
 }
 
@@ -101,20 +81,11 @@ impl FieldConsumer for NormsConsumer {
         &mut self,
         field_id: u32,
         field: &Field,
-        _accumulator: &mut SegmentAccumulator,
+        accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()> {
         if self.current_has_norms && self.current_token_count > 0 {
             let norm = compute_norm(self.current_token_count);
-            let entry = self
-                .per_field
-                .entry(field_id)
-                .or_insert_with(|| PerFieldNorms {
-                    field_name: field.name().to_string(),
-                    norms: Vec::new(),
-                    docs: Vec::new(),
-                });
-            entry.norms.push(norm);
-            entry.docs.push(self.current_doc_id);
+            accumulator.record_norm(field_id, field.name(), self.current_doc_id, norm);
         }
         Ok(())
     }
@@ -131,21 +102,21 @@ impl FieldConsumer for NormsConsumer {
     fn flush(
         &mut self,
         context: &SegmentContext,
-        _accumulator: &SegmentAccumulator,
+        accumulator: &SegmentAccumulator,
     ) -> io::Result<Vec<String>> {
-        if self.per_field.is_empty() {
+        let norms = accumulator.norms();
+        if norms.is_empty() {
             return Ok(vec![]);
         }
 
         // Build sorted field data for the codec writer
-        let mut fields: Vec<NormsFieldData> = self
-            .per_field
-            .drain()
-            .map(|(field_number, pf)| NormsFieldData {
-                field_name: pf.field_name,
+        let mut fields: Vec<NormsFieldData> = norms
+            .iter()
+            .map(|(&field_number, data)| NormsFieldData {
+                field_name: data.field_name.clone(),
                 field_number,
-                norms: pf.norms,
-                docs: pf.docs,
+                norms: data.values.clone(),
+                docs: data.docs.clone(),
             })
             .collect();
         fields.sort_by_key(|f| f.field_number);
@@ -285,6 +256,28 @@ mod tests {
         let names = consumer.flush(&ctx, &acc).unwrap();
         // Should still write files (1 doc has norms)
         assert_len_eq_x!(&names, 2);
+    }
+
+    #[test]
+    fn norms_stored_in_accumulator() {
+        let mut consumer = NormsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+        let field = text_field("body", "ignored");
+
+        consumer.start_document(0).unwrap();
+        process_tokenized_field(&mut consumer, 0, &field, 5, &mut acc);
+        consumer.finish_document(0, &mut acc).unwrap();
+
+        consumer.start_document(1).unwrap();
+        process_tokenized_field(&mut consumer, 0, &field, 3, &mut acc);
+        consumer.finish_document(1, &mut acc).unwrap();
+
+        let norms = acc.norms();
+        assert_len_eq_x!(norms, 1); // one field
+        let field_norms = &norms[&0];
+        assert_eq!(field_norms.field_name, "body");
+        assert_eq!(field_norms.docs, vec![0, 1]);
+        assert_len_eq_x!(&field_norms.values, 2);
     }
 
     #[test]
