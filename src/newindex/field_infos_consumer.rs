@@ -54,8 +54,8 @@ impl FieldConsumer for FieldInfosConsumer {
         self.fields.entry(field_id).or_insert_with(|| FieldInfo {
             name: field.name().to_string(),
             number: field_id,
-            has_norms: field.kind().has_norms(),
-            index_options: field.kind().index_options() as u8,
+            has_norms: field.field_type().has_norms(),
+            index_options: field.field_type().index_options() as u8,
         });
         Ok(TokenInterest::NoTokens)
     }
@@ -109,7 +109,7 @@ impl FieldConsumer for FieldInfosConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::stored_field;
+    use crate::newindex::field::stored;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use std::sync::Arc;
 
@@ -128,7 +128,7 @@ mod tests {
         let mut acc = SegmentAccumulator::new();
 
         consumer.start_document(0).unwrap();
-        let f = stored_field("title", "hello");
+        let f = stored("title").string("hello");
         consumer.start_field(0, &f, &mut acc).unwrap();
         consumer.finish_field(0, &f, &mut acc).unwrap();
         consumer.finish_document(0, &mut acc).unwrap();
@@ -145,11 +145,11 @@ mod tests {
 
         consumer.start_document(0).unwrap();
 
-        let f1 = stored_field("title", "t");
+        let f1 = stored("title").string("t");
         consumer.start_field(0, &f1, &mut acc).unwrap();
         consumer.finish_field(0, &f1, &mut acc).unwrap();
 
-        let f2 = stored_field("body", "b");
+        let f2 = stored("body").string("b");
         consumer.start_field(1, &f2, &mut acc).unwrap();
         consumer.finish_field(1, &f2, &mut acc).unwrap();
 
@@ -181,7 +181,7 @@ mod tests {
 
         for doc_id in 0..3 {
             consumer.start_document(doc_id).unwrap();
-            let f = stored_field("title", format!("t{doc_id}"));
+            let f = stored("title").string(format!("t{doc_id}"));
             consumer.start_field(0, &f, &mut acc).unwrap();
             consumer.finish_field(0, &f, &mut acc).unwrap();
             consumer.finish_document(doc_id, &mut acc).unwrap();

@@ -3,9 +3,35 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::mem::{self, Discriminant};
 
-use crate::newindex::field::FieldKind;
+use crate::document::{DocValuesType, IndexOptions};
+use crate::newindex::field::FieldType;
+
+/// Captures the structural identity of a field type for conflict detection.
+///
+/// Two fields with the same name must have the same shape within a segment.
+/// The shape captures which axes are active and their derived properties,
+/// but not the actual values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FieldShape {
+    is_stored: bool,
+    index_options: IndexOptions,
+    has_norms: bool,
+    doc_values_type: DocValuesType,
+    has_points: bool,
+}
+
+impl FieldShape {
+    fn from_field_type(ft: &FieldType) -> Self {
+        Self {
+            is_stored: ft.stored().is_some(),
+            index_options: ft.index_options(),
+            has_norms: ft.has_norms(),
+            doc_values_type: ft.doc_values_type(),
+            has_points: ft.points().is_some(),
+        }
+    }
+}
 
 /// A field that has been registered in this segment.
 #[derive(Debug, Clone)]
@@ -14,8 +40,8 @@ pub struct RegisteredField {
     pub name: String,
     /// The assigned field number (unique within the segment).
     pub number: u32,
-    /// The discriminant of the field kind at registration time.
-    pub kind_discriminant: Discriminant<FieldKind>,
+    /// The structural shape of the field type at registration time.
+    shape: FieldShape,
 }
 
 /// Per-segment registry of field metadata.
@@ -46,19 +72,19 @@ impl FieldInfoRegistry {
     }
 
     /// Returns the field number for the given name, registering it on
-    /// first occurrence with the provided `FieldKind`.
+    /// first occurrence with the provided [`FieldType`].
     ///
     /// If the field was already registered, validates that the new
-    /// `FieldKind` discriminant is consistent with the existing one.
-    /// Returns an error if there is a conflict.
-    pub fn get_or_register(&mut self, name: &str, kind: &FieldKind) -> io::Result<u32> {
-        let disc = mem::discriminant(kind);
+    /// field type shape is consistent with the existing one. Returns
+    /// an error if there is a conflict.
+    pub fn get_or_register(&mut self, name: &str, field_type: &FieldType) -> io::Result<u32> {
+        let shape = FieldShape::from_field_type(field_type);
         if let Some(&idx) = self.by_name.get(name) {
             let existing = &self.fields[idx];
-            if existing.kind_discriminant != disc {
+            if existing.shape != shape {
                 return Err(io::Error::other(format!(
                     "field '{}' registered with {:?}, but now seen with {:?}",
-                    name, existing.kind_discriminant, disc
+                    name, existing.shape, shape
                 )));
             }
             Ok(existing.number)
@@ -68,7 +94,7 @@ impl FieldInfoRegistry {
             self.fields.push(RegisteredField {
                 name: name.to_string(),
                 number,
-                kind_discriminant: disc,
+                shape,
             });
             self.by_name.insert(name.to_string(), idx);
             Ok(number)
@@ -86,35 +112,35 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::newindex::field::{stored_field, stored_tokenized_field, tokenized_field};
+    use crate::newindex::field::{stored, text};
 
     #[test]
     fn register_new_field_assigns_zero() {
         let mut reg = FieldInfoRegistry::new();
-        let field = stored_field("title", "hello");
-        let num = reg.get_or_register("title", field.kind()).unwrap();
+        let field = stored("title").string("hello");
+        let num = reg.get_or_register("title", field.field_type()).unwrap();
         assert_eq!(num, 0);
     }
 
     #[test]
     fn same_field_returns_same_number() {
         let mut reg = FieldInfoRegistry::new();
-        let f1 = stored_field("title", "a");
-        let f2 = stored_field("title", "b");
-        let n1 = reg.get_or_register("title", f1.kind()).unwrap();
-        let n2 = reg.get_or_register("title", f2.kind()).unwrap();
+        let f1 = stored("title").string("a");
+        let f2 = stored("title").string("b");
+        let n1 = reg.get_or_register("title", f1.field_type()).unwrap();
+        let n2 = reg.get_or_register("title", f2.field_type()).unwrap();
         assert_eq!(n1, n2);
     }
 
     #[test]
     fn different_fields_get_sequential_numbers() {
         let mut reg = FieldInfoRegistry::new();
-        let f0 = stored_field("title", "a");
-        let f1 = stored_field("body", "b");
-        let f2 = stored_field("author", "c");
-        let n0 = reg.get_or_register("title", f0.kind()).unwrap();
-        let n1 = reg.get_or_register("body", f1.kind()).unwrap();
-        let n2 = reg.get_or_register("author", f2.kind()).unwrap();
+        let f0 = stored("title").string("a");
+        let f1 = stored("body").string("b");
+        let f2 = stored("author").string("c");
+        let n0 = reg.get_or_register("title", f0.field_type()).unwrap();
+        let n1 = reg.get_or_register("body", f1.field_type()).unwrap();
+        let n2 = reg.get_or_register("author", f2.field_type()).unwrap();
         assert_eq!(n0, 0);
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
@@ -123,21 +149,21 @@ mod tests {
     #[test]
     fn conflicting_kind_returns_error() {
         let mut reg = FieldInfoRegistry::new();
-        let stored = stored_field("title", "a");
-        reg.get_or_register("title", stored.kind()).unwrap();
+        let s = stored("title").string("a");
+        reg.get_or_register("title", s.field_type()).unwrap();
 
-        let tokenized = stored_tokenized_field("title", "a");
-        let result = reg.get_or_register("title", tokenized.kind());
+        let t = text("title").stored().value("a");
+        let result = reg.get_or_register("title", t.field_type());
         assert!(result.is_err());
     }
 
     #[test]
     fn registered_fields_returns_in_order() {
         let mut reg = FieldInfoRegistry::new();
-        let fa = stored_field("a", "x");
-        let fb = stored_field("b", "y");
-        reg.get_or_register("a", fa.kind()).unwrap();
-        reg.get_or_register("b", fb.kind()).unwrap();
+        let fa = stored("a").string("x");
+        let fb = stored("b").string("y");
+        reg.get_or_register("a", fa.field_type()).unwrap();
+        reg.get_or_register("b", fb.field_type()).unwrap();
         let fields = reg.registered_fields();
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "a");
@@ -149,11 +175,11 @@ mod tests {
     #[test]
     fn stored_vs_tokenized_conflicts() {
         let mut reg = FieldInfoRegistry::new();
-        let stored = stored_field("body", "x");
-        reg.get_or_register("body", stored.kind()).unwrap();
+        let s = stored("body").string("x");
+        reg.get_or_register("body", s.field_type()).unwrap();
 
-        let tok = tokenized_field("body", Cursor::new(b"y".to_vec()));
-        let result = reg.get_or_register("body", tok.kind());
+        let t = text("body").reader(Cursor::new(b"y".to_vec()));
+        let result = reg.get_or_register("body", t.field_type());
         assert!(result.is_err());
     }
 }

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{stored_field, stored_indexed_field, tokenized_field};
+use bearing::newindex::field::{stored, string, text};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
 
@@ -206,18 +206,18 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
 
     // "contents" — streamed from file (DEBT: no term vectors yet)
     let contents_field = match File::open(path) {
-        Ok(file) => tokenized_field("contents", BufReader::new(file)),
-        Err(_) => tokenized_field("contents", io::empty()),
+        Ok(file) => text("contents").reader(BufReader::new(file)),
+        Err(_) => text("contents").reader(io::empty()),
     };
 
     DocumentBuilder::new()
         // "path" — DEBT: KeywordField in indexfiles, StringField here until DV support
-        .add_field(stored_indexed_field("path", &path_str))
+        .add_field(string("path").stored().value(&path_str))
         .add_field(contents_field)
         // "title" — StringField: indexed exact match + stored (matches indexfiles)
-        .add_field(stored_indexed_field("title", &title))
+        .add_field(string("title").stored().value(&title))
         // "notes" — stored only (same as indexfiles)
-        .add_field(stored_field("notes", "indexed by Rust"))
+        .add_field(stored("notes").string("indexed by Rust"))
         .build()
 }
 

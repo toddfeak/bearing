@@ -10,7 +10,7 @@ use crate::newindex::codecs::segment_info;
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 
 use crate::newindex::document::Document;
-use crate::newindex::field::FieldKind;
+use crate::newindex::field::InvertableValue;
 use crate::newindex::field_info_registry::FieldInfoRegistry;
 use crate::newindex::segment::{FlushedSegment, SegmentId};
 use crate::newindex::segment_accumulator::SegmentAccumulator;
@@ -143,7 +143,9 @@ impl SegmentWorker {
 
         // 2. Field iteration
         for field in doc.fields() {
-            let field_id = self.registry.get_or_register(field.name(), field.kind())?;
+            let field_id = self
+                .registry
+                .get_or_register(field.name(), field.field_type())?;
 
             // 2a. Start field — every consumer prepares for this field
             //     and declares whether it wants tokens.
@@ -157,9 +159,15 @@ impl SegmentWorker {
 
             // 2b. Tokenized fields: run the analyzer once, stream tokens
             //     to only the field consumers that opted in.
-            if field.kind().is_tokenized() && !interested.is_empty() {
-                let kind = mem::replace(field.kind_mut(), FieldKind::Stored(String::new()));
-                let mut reader = kind.into_reader();
+            if field.field_type().is_tokenized() && !interested.is_empty() {
+                let invertable = field.field_type_mut().take_invertable();
+                let mut reader: Box<dyn std::io::Read + Send> = match invertable {
+                    Some(InvertableValue::Tokenized(r)) => r,
+                    Some(InvertableValue::TokenizedString(s)) => {
+                        Box::new(std::io::Cursor::new(s.into_bytes()))
+                    }
+                    _ => continue,
+                };
                 let mut token_buf = mem::take(&mut self.token_buf);
 
                 self.analyzer.reset();

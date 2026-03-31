@@ -13,17 +13,15 @@ use std::path::Path;
 use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{
-    stored_field, stored_indexed_field, stored_tokenized_field, tokenized_field,
-};
+use bearing::newindex::field::{stored, string, text};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::MemoryDirectory;
 
 fn add_stored_docs(writer: &IndexWriter, count: usize) {
     for i in 0..count {
         let doc = DocumentBuilder::new()
-            .add_field(stored_field("title", format!("Document {i}")))
-            .add_field(stored_field("body", format!("Body text for document {i}")))
+            .add_field(stored("title").string(format!("Document {i}")))
+            .add_field(stored("body").string(format!("Body text for document {i}")))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -38,8 +36,8 @@ fn single_segment_stored_fields() {
 
     for i in 0..5 {
         let doc = DocumentBuilder::new()
-            .add_field(stored_field("title", format!("Document {i}")))
-            .add_field(stored_field("body", format!("Body text for document {i}")))
+            .add_field(stored("title").string(format!("Document {i}")))
+            .add_field(stored("body").string(format!("Body text for document {i}")))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -77,7 +75,7 @@ fn segment_file_names_use_segment_prefix() {
     );
 
     let doc = DocumentBuilder::new()
-        .add_field(stored_field("title", "hello"))
+        .add_field(stored("title").string("hello"))
         .build();
     writer.add_document(doc).unwrap();
 
@@ -260,8 +258,8 @@ fn add_text_docs_from_testdata(writer: &IndexWriter) {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let contents = fs::read_to_string(&path).unwrap();
         let doc = DocumentBuilder::new()
-            .add_field(stored_field("path", &name))
-            .add_field(stored_tokenized_field("contents", contents))
+            .add_field(stored("path").string(&name))
+            .add_field(text("contents").stored().value(contents))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -337,10 +335,9 @@ fn text_only_fields_produce_postings_without_stored() {
     // Tokenized, not stored
     for i in 0..3 {
         let doc = DocumentBuilder::new()
-            .add_field(tokenized_field(
-                "body",
-                Cursor::new(format!("hello world document {i}").into_bytes()),
-            ))
+            .add_field(text("body").reader(Cursor::new(
+                format!("hello world document {i}").into_bytes(),
+            )))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -366,11 +363,8 @@ fn mixed_stored_and_stored_tokenized_fields() {
 
     for i in 0..5 {
         let doc = DocumentBuilder::new()
-            .add_field(stored_field("id", format!("{i}")))
-            .add_field(stored_tokenized_field(
-                "body",
-                format!("quick brown fox {i}"),
-            ))
+            .add_field(stored("id").string(format!("{i}")))
+            .add_field(text("body").stored().value(format!("quick brown fox {i}")))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -403,7 +397,7 @@ fn tokenized_field_produces_same_postings_as_string() {
         let path = entry.path();
         let file = fs::File::open(&path).unwrap();
         let doc = DocumentBuilder::new()
-            .add_field(tokenized_field("contents", BufReader::new(file)))
+            .add_field(text("contents").reader(BufReader::new(file)))
             .build();
         writer_reader.add_document(doc).unwrap();
     }
@@ -419,7 +413,7 @@ fn tokenized_field_produces_same_postings_as_string() {
         let path = entry.path();
         let contents = fs::read_to_string(&path).unwrap();
         let doc = DocumentBuilder::new()
-            .add_field(stored_tokenized_field("contents", contents))
+            .add_field(text("contents").stored().value(contents))
             .build();
         writer_string.add_document(doc).unwrap();
     }
@@ -447,11 +441,8 @@ fn reader_field_not_stored() {
     );
 
     let doc = DocumentBuilder::new()
-        .add_field(stored_field("title", "test"))
-        .add_field(tokenized_field(
-            "contents",
-            Cursor::new(b"hello world document".to_vec()),
-        ))
+        .add_field(stored("title").string("test"))
+        .add_field(text("contents").reader(Cursor::new(b"hello world document".to_vec())))
         .build();
     writer.add_document(doc).unwrap();
 
@@ -476,7 +467,7 @@ fn string_field_produces_docs_only_postings() {
 
     for i in 0..3 {
         let doc = DocumentBuilder::new()
-            .add_field(stored_indexed_field("title", format!("doc_{i}")))
+            .add_field(string("title").stored().value(format!("doc_{i}")))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -506,11 +497,8 @@ fn mixed_string_and_text_fields() {
 
     for i in 0..3 {
         let doc = DocumentBuilder::new()
-            .add_field(stored_indexed_field("title", format!("doc_{i}")))
-            .add_field(stored_tokenized_field(
-                "body",
-                format!("quick brown fox {i}"),
-            ))
+            .add_field(string("title").stored().value(format!("doc_{i}")))
+            .add_field(text("body").stored().value(format!("quick brown fox {i}")))
             .build();
         writer.add_document(doc).unwrap();
     }

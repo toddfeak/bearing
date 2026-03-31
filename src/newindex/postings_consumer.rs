@@ -15,7 +15,7 @@ use crate::document::IndexOptions;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
-use crate::newindex::field::Field;
+use crate::newindex::field::{Field, InvertableValue};
 use crate::newindex::per_field_postings::PerFieldPostings;
 use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
@@ -94,7 +94,7 @@ impl FieldConsumer for PostingsConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        let opts = field.kind().index_options();
+        let opts = field.field_type().index_options();
         if opts == IndexOptions::None {
             return Ok(TokenInterest::NoTokens);
         }
@@ -114,8 +114,7 @@ impl FieldConsumer for PostingsConsumer {
 
         // Non-tokenized indexed fields: record the exact value as a single term
         // directly here. No analyzer, no segment worker involvement.
-        if !field.kind().is_tokenized() {
-            let value = field.kind().string_value();
+        if let Some(InvertableValue::ExactMatch(value)) = field.field_type().invertable() {
             let tid = state.postings.add_term(
                 value.as_bytes(),
                 &mut self.byte_pool,
@@ -277,7 +276,7 @@ impl FieldConsumer for PostingsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{stored_field, stored_indexed_field, stored_tokenized_field};
+    use crate::newindex::field::{stored, string, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;
@@ -323,7 +322,7 @@ mod tests {
         let ctx = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = stored_tokenized_field("body", "ignored");
+        let field = text("body").stored().value("ignored");
 
         process_doc(&mut consumer, 0, 0, &field, &["hello", "world"], &mut acc);
 
@@ -343,7 +342,7 @@ mod tests {
         let ctx = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = stored_tokenized_field("body", "ignored");
+        let field = text("body").stored().value("ignored");
 
         process_doc(&mut consumer, 0, 0, &field, &["hello", "world"], &mut acc);
         process_doc(&mut consumer, 1, 0, &field, &["hello", "rust"], &mut acc);
@@ -358,7 +357,7 @@ mod tests {
         let ctx = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = stored_field("title", "hello");
+        let field = stored("title").string("hello");
 
         consumer.start_document(0).unwrap();
         let interest = consumer.start_field(0, &field, &mut acc).unwrap();
@@ -375,8 +374,8 @@ mod tests {
         let ctx = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let title = stored_tokenized_field("title", "ignored");
-        let body = stored_tokenized_field("body", "ignored");
+        let title = text("title").stored().value("ignored");
+        let body = text("body").stored().value("ignored");
 
         consumer.start_document(0).unwrap();
 
@@ -410,7 +409,7 @@ mod tests {
     fn indexed_field_returns_no_tokens() {
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = stored_indexed_field("title", "hello");
+        let field = string("title").stored().value("hello");
 
         consumer.start_document(0).unwrap();
         let interest = consumer.start_field(0, &field, &mut acc).unwrap();
@@ -426,7 +425,7 @@ mod tests {
         let mut acc = SegmentAccumulator::new();
 
         for doc_id in 0..3 {
-            let field = stored_indexed_field("title", format!("doc_{doc_id}"));
+            let field = string("title").stored().value(format!("doc_{doc_id}"));
             consumer.start_document(doc_id).unwrap();
             consumer.start_field(0, &field, &mut acc).unwrap();
             consumer.finish_field(0, &field, &mut acc).unwrap();
@@ -447,8 +446,8 @@ mod tests {
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
-        let title = stored_indexed_field("title", "hello");
-        let body = stored_tokenized_field("body", "ignored");
+        let title = string("title").stored().value("hello");
+        let body = text("body").stored().value("ignored");
 
         consumer.start_document(0).unwrap();
 

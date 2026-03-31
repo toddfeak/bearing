@@ -5,20 +5,33 @@
 use std::io;
 use std::mem;
 
-use crate::document::StoredValue;
+use crate::document::StoredValue as CodecStoredValue;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::stored_fields::{self, StoredDoc};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
-use crate::newindex::field::{Field, FieldKind};
+use crate::newindex::field::{Field, StoredValue};
 use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
+
+/// Converts a newindex [`StoredValue`] to the codec's [`CodecStoredValue`].
+// DEBT: remove after switchover when codec uses newindex types directly
+fn to_codec_stored_value(sv: &StoredValue) -> CodecStoredValue {
+    match sv {
+        StoredValue::String(s) => CodecStoredValue::String(s.clone()),
+        StoredValue::Bytes(b) => CodecStoredValue::Bytes(b.clone()),
+        StoredValue::Int(v) => CodecStoredValue::Int(*v),
+        StoredValue::Long(v) => CodecStoredValue::Long(*v),
+        StoredValue::Float(v) => CodecStoredValue::Float(*v),
+        StoredValue::Double(v) => CodecStoredValue::Double(*v),
+    }
+}
 
 /// Buffers stored field values per document and flushes them as
 /// compressed stored fields files via the codec writer.
 #[derive(Debug, Default)]
 pub struct StoredFieldsConsumer {
     docs: Vec<StoredDoc>,
-    current_doc_fields: Vec<(u32, StoredValue)>,
+    current_doc_fields: Vec<(u32, CodecStoredValue)>,
 }
 
 impl StoredFieldsConsumer {
@@ -43,12 +56,9 @@ impl FieldConsumer for StoredFieldsConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        match field.kind() {
-            FieldKind::Stored(s) | FieldKind::StoredTokenized(s) | FieldKind::StoredIndexed(s) => {
-                self.current_doc_fields
-                    .push((field_id, StoredValue::String(s.clone())));
-            }
-            FieldKind::Tokenized(_) | FieldKind::Indexed(_) => {}
+        if let Some(sv) = field.field_type().stored() {
+            self.current_doc_fields
+                .push((field_id, to_codec_stored_value(sv)));
         }
         Ok(TokenInterest::NoTokens)
     }
@@ -105,7 +115,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::newindex::field::{stored_field, tokenized_field};
+    use crate::newindex::field::{stored, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_context() -> SegmentContext {
@@ -123,7 +133,7 @@ mod tests {
         let mut acc = SegmentAccumulator::new();
 
         consumer.start_document(0).unwrap();
-        let field = stored_field("title", "hello");
+        let field = stored("title").string("hello");
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
         consumer.finish_document(0, &mut acc).unwrap();
@@ -142,7 +152,7 @@ mod tests {
         let mut acc = SegmentAccumulator::new();
 
         consumer.start_document(0).unwrap();
-        let field = tokenized_field("not_stored", Cursor::new(b"invisible".to_vec()));
+        let field = text("not_stored").reader(Cursor::new(b"invisible".to_vec()));
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
         consumer.finish_document(0, &mut acc).unwrap();
@@ -161,11 +171,11 @@ mod tests {
         for doc_id in 0..3 {
             consumer.start_document(doc_id).unwrap();
 
-            let f1 = stored_field("title", format!("title {doc_id}"));
+            let f1 = stored("title").string(format!("title {doc_id}"));
             consumer.start_field(0, &f1, &mut acc).unwrap();
             consumer.finish_field(0, &f1, &mut acc).unwrap();
 
-            let f2 = stored_field("body", format!("body {doc_id}"));
+            let f2 = stored("body").string(format!("body {doc_id}"));
             consumer.start_field(1, &f2, &mut acc).unwrap();
             consumer.finish_field(1, &f2, &mut acc).unwrap();
 

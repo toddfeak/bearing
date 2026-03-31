@@ -55,7 +55,7 @@ impl FieldConsumer for NormsConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        self.current_has_norms = field.kind().has_norms();
+        self.current_has_norms = field.field_type().has_norms();
         self.current_token_count = 0;
 
         if self.current_has_norms {
@@ -134,7 +134,7 @@ impl FieldConsumer for NormsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{stored_field, stored_tokenized_field};
+    use crate::newindex::field::{stored, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;
@@ -176,7 +176,7 @@ mod tests {
     fn computes_norms_from_token_count() {
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = stored_tokenized_field("body", "ignored");
+        let field = text("body").stored().value("ignored");
 
         // Doc 0: 3 tokens, Doc 1: 10 tokens, Doc 2: 1 token
         for (doc_id, count) in [(0, 3), (1, 10), (2, 1)] {
@@ -196,7 +196,7 @@ mod tests {
     fn non_tokenized_produces_no_files() {
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = stored_field("title", "ignored");
+        let field = stored("title").string("ignored");
 
         consumer.start_document(0).unwrap();
         consumer.start_field(0, &field, &mut acc).unwrap();
@@ -212,7 +212,7 @@ mod tests {
     fn zero_tokens_produces_no_norm_for_that_doc() {
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = stored_tokenized_field("body", "ignored");
+        let field = text("body").stored().value("ignored");
 
         // Doc 0: 3 tokens (gets norm), Doc 1: 0 tokens (no norm)
         consumer.start_document(0).unwrap();
@@ -233,7 +233,7 @@ mod tests {
     fn norms_stored_in_accumulator() {
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = stored_tokenized_field("body", "ignored");
+        let field = text("body").stored().value("ignored");
 
         consumer.start_document(0).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 5, &mut acc);

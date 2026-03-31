@@ -491,9 +491,9 @@ mod tests {
 
     fn make_doc() -> Document {
         use crate::newindex::document::DocumentBuilder;
-        use crate::newindex::field::stored_field;
+        use crate::newindex::field::stored;
         DocumentBuilder::new()
-            .add_field(stored_field("f", "v"))
+            .add_field(stored("f").string("v"))
             .build()
     }
 
