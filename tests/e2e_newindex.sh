@@ -3,13 +3,15 @@
 #
 # E2E test for the newindex pipeline.
 #
-# Writes indexes via the newindex_demo binary under various configurations,
-# then validates each with Java CheckIndex.
+# Indexes real documents via the newindex_demo binary under various configurations,
+# then validates each with Java VerifyNewindex (content verification) and CheckIndex.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 GRADLE="$SCRIPT_DIR/java/gradlew --project-dir=$SCRIPT_DIR/java --quiet"
+DOCS_DIR="$PROJECT_DIR/testdata/docs"
+DOC_COUNT=$(find "$DOCS_DIR" -type f | wc -l)
 
 PASSED=0
 FAILED=0
@@ -30,7 +32,7 @@ run_scenario() {
     local idx_dir
     idx_dir="$(mktemp -d)"
 
-    "$DEMO" "$idx_dir" "${args[@]}"
+    "$DEMO" -docs "$DOCS_DIR" -index "$idx_dir" "${args[@]}"
 
     # Verify segments file exists
     if [ ! -f "$idx_dir/segments_1" ]; then
@@ -40,12 +42,12 @@ run_scenario() {
         return
     fi
 
-    # Java CheckIndex validates segment structure
-    if $GRADLE -q runJava -PmainClass=CheckIndex -Pargs="$idx_dir" 2>&1; then
+    # Java VerifyNewindex validates content (stored fields, terms, norms)
+    if $GRADLE -q verifyNewindex -PindexDir="$idx_dir" -PdocCount="$DOC_COUNT" 2>&1; then
         echo "PASSED: $name"
         PASSED=$((PASSED + 1))
     else
-        echo "FAILED: $name — Java CheckIndex rejected the index"
+        echo "FAILED: $name — Java VerifyNewindex rejected the index"
         FAILED=$((FAILED + 1))
     fi
 
@@ -53,16 +55,12 @@ run_scenario() {
 }
 
 # --- Scenarios ---
-run_scenario "Single segment (default)" --doc-count 10
-run_scenario "Multi-segment (max-buffered-docs)" --doc-count 10 --max-buffered-docs 3
-run_scenario "Multi-thread" --doc-count 10 --threads 2
-run_scenario "Multi-thread + multi-segment" --doc-count 10 --threads 2 --max-buffered-docs 3
-run_scenario "Compound file" --doc-count 10 --compound
-run_scenario "Compound + multi-segment" --doc-count 10 --max-buffered-docs 3 --compound
-run_scenario "Text fields (single segment)" --doc-count 10 --text-fields
-run_scenario "Text fields (multi-segment)" --doc-count 10 --text-fields --max-buffered-docs 3
-run_scenario "Text fields (multi-thread)" --doc-count 10 --text-fields --threads 2
-run_scenario "Text fields (compound)" --doc-count 10 --text-fields --compound
+run_scenario "Single segment"
+run_scenario "Multi-segment" --max-buffered-docs 2
+run_scenario "Multi-thread" --threads 2
+run_scenario "Multi-thread + multi-segment" --threads 2 --max-buffered-docs 2
+run_scenario "Compound file" --compound
+run_scenario "Compound + multi-segment" --max-buffered-docs 2 --compound
 
 # --- Summary ---
 echo ""

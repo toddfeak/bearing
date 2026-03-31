@@ -1,100 +1,292 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Writes an index via the newindex pipeline.
-//!
-//! Used by e2e tests to produce an on-disk index for Java CheckIndex validation.
+// DEBT: Limited copy of indexfiles.rs adapted for the newindex pipeline.
+// Only supports the field types newindex currently handles (stored + text).
+// As newindex gains field types, this binary should grow to match indexfiles.
 
-use std::path::PathBuf;
+use std::env;
+use std::fs::{self, File};
+use std::io::{self, BufReader};
+use std::path::{Path, PathBuf};
+use std::process;
+use std::time::Instant;
 
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{stored_field, stored_tokenized_field};
+use bearing::newindex::field::{stored_field, tokenized_field};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
+struct CliArgs {
+    index_path: String,
+    docs_path: String,
+    max_buffered_docs: i32,
+    num_threads: usize,
+    use_compound_file: bool,
+}
 
-    let mut index_path = None;
-    let mut doc_count: usize = 10;
+fn parse_args() -> CliArgs {
+    let args: Vec<String> = env::args().collect();
+
+    let mut index_path = String::from("index");
+    let mut docs_path: Option<String> = None;
     let mut max_buffered_docs: i32 = -1;
     let mut num_threads: usize = 1;
-    let mut use_compound_file = false;
-    let mut stored_tokenized_fields = false;
+    let mut use_compound_file: bool = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--doc-count" => {
+            "-index" => {
                 i += 1;
-                doc_count = args[i].parse().expect("invalid --doc-count");
+                if i >= args.len() {
+                    eprintln!("-index requires a value");
+                    process::exit(1);
+                }
+                index_path = args[i].clone();
+            }
+            "-docs" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("-docs requires a value");
+                    process::exit(1);
+                }
+                docs_path = Some(args[i].clone());
             }
             "--max-buffered-docs" => {
                 i += 1;
-                max_buffered_docs = args[i].parse().expect("invalid --max-buffered-docs");
+                if i >= args.len() {
+                    eprintln!("--max-buffered-docs requires a value");
+                    process::exit(1);
+                }
+                max_buffered_docs = match args[i].parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("--max-buffered-docs must be an integer");
+                        process::exit(1);
+                    }
+                };
             }
             "--threads" => {
                 i += 1;
-                num_threads = args[i].parse().expect("invalid --threads");
+                if i >= args.len() {
+                    eprintln!("--threads requires a value");
+                    process::exit(1);
+                }
+                num_threads = match args[i].parse() {
+                    Ok(n) if n >= 1 => n,
+                    _ => {
+                        eprintln!("--threads must be a positive integer");
+                        process::exit(1);
+                    }
+                };
             }
             "--compound" => {
                 use_compound_file = true;
             }
-            "--text-fields" => {
-                stored_tokenized_fields = true;
-            }
-            arg if !arg.starts_with('-') && index_path.is_none() => {
-                index_path = Some(PathBuf::from(arg));
-            }
-            _ => {
-                eprintln!(
-                    "Usage: newindex_demo <index-dir> [--doc-count N] [--max-buffered-docs N] [--threads N]"
-                );
-                std::process::exit(1);
+            other => {
+                eprintln!("Unknown parameter: {other}");
+                print_usage();
+                process::exit(1);
             }
         }
         i += 1;
     }
 
-    let index_path = index_path.unwrap_or_else(|| {
+    let docs_path = match docs_path {
+        Some(p) => p,
+        None => {
+            print_usage();
+            process::exit(1);
+        }
+    };
+
+    CliArgs {
+        index_path,
+        docs_path,
+        max_buffered_docs,
+        num_threads,
+        use_compound_file,
+    }
+}
+
+fn main() {
+    let args = parse_args();
+
+    let doc_dir = PathBuf::from(&args.docs_path);
+    if !doc_dir.is_dir() {
         eprintln!(
-            "Usage: newindex_demo <index-dir> [--doc-count N] [--max-buffered-docs N] [--threads N]"
+            "Document directory '{}' does not exist or is not readable",
+            doc_dir.display()
         );
-        std::process::exit(1);
-    });
+        process::exit(1);
+    }
+
+    // Remove any existing index files in the output directory
+    let index_dir = Path::new(&args.index_path);
+    if index_dir.is_dir()
+        && let Err(e) = remove_index_files(index_dir)
+    {
+        eprintln!("Error cleaning index directory '{}': {e}", args.index_path);
+        process::exit(1);
+    }
+
+    println!(
+        "Creating index in '{}' from documents in '{}'...",
+        args.index_path, args.docs_path
+    );
+
+    let start = Instant::now();
+
+    // Collect document paths
+    let mut doc_paths = Vec::new();
+    walk_docs(&doc_dir, &mut doc_paths);
 
     let config = IndexWriterConfig {
-        num_threads,
-        max_buffered_docs,
-        use_compound_file,
+        num_threads: args.num_threads,
+        max_buffered_docs: args.max_buffered_docs,
+        use_compound_file: args.use_compound_file,
         ..Default::default()
     };
 
-    let fs_dir = FSDirectory::open_with_file_handles(&index_path).unwrap();
+    let fs_dir = FSDirectory::open_with_file_handles(index_dir).unwrap();
     let writer = IndexWriter::new(config, Box::new(fs_dir));
 
-    for i in 0..doc_count {
-        let mut doc =
-            DocumentBuilder::new().add_field(stored_field("title", format!("Document {i}")));
-        if stored_tokenized_fields {
-            doc = doc.add_field(stored_tokenized_field(
-                "body",
-                format!("This is the body text for document number {i}."),
-            ));
-        } else {
-            doc = doc.add_field(stored_field(
-                "body",
-                format!("This is the body text for document number {i}."),
-            ));
-        }
-        writer.add_document(doc.build()).unwrap();
+    // Threading is handled internally by IndexWriter via num_threads config.
+    for path in &doc_paths {
+        let doc = make_document(path);
+        writer.add_document(doc).unwrap();
+        println!("  indexed: {}", path.display());
     }
 
     let segments = writer.commit().unwrap();
-    println!(
-        "Wrote {} segment(s) with {} total docs to {}",
-        segments.len(),
-        segments.iter().map(|s| s.doc_count).sum::<i32>(),
-        index_path.display()
+
+    let elapsed = start.elapsed();
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+
+    println!();
+    println!("Indexed {total_docs} documents in {elapsed:.2?}");
+    println!("Wrote {} segment(s) to {}", segments.len(), args.index_path);
+
+    // Report index file sizes
+    if let Ok(entries) = fs::read_dir(index_dir) {
+        let mut files: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .collect();
+        files.sort_by_key(|e| e.file_name());
+        println!("Produced {} index files:", files.len());
+        for entry in &files {
+            let name = entry.file_name();
+            match entry.metadata() {
+                Ok(meta) => println!("  {}: {} bytes", name.to_string_lossy(), meta.len()),
+                Err(_) => println!("  {}", name.to_string_lossy()),
+            }
+        }
+    }
+
+    println!("\nIndex written to '{}'", args.index_path);
+}
+
+/// Creates a Document from a file path, exercising the supported field types.
+///
+/// DEBT: Limited subset of indexfiles make_document. Uses stored fields where
+/// indexfiles uses KeywordField/StringField (not yet supported in newindex).
+fn make_document(path: &Path) -> bearing::newindex::document::Document {
+    let path_str = path.to_string_lossy().to_string();
+    let file_name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let title = match file_name.rfind('.') {
+        Some(dot) => file_name[..dot].to_string(),
+        None => file_name,
+    };
+
+    // "contents" — streamed from file (DEBT: no term vectors yet)
+    let contents_field = match File::open(path) {
+        Ok(file) => tokenized_field("contents", BufReader::new(file)),
+        Err(_) => tokenized_field("contents", io::empty()),
+    };
+
+    DocumentBuilder::new()
+        // "path" — DEBT: KeywordField in indexfiles, stored only here
+        .add_field(stored_field("path", &path_str))
+        .add_field(contents_field)
+        // "title" — DEBT: StringField in indexfiles, stored only here
+        .add_field(stored_field("title", &title))
+        // "notes" — stored only (same as indexfiles)
+        .add_field(stored_field("notes", "indexed by Rust"))
+        .build()
+}
+
+/// Recursively collects file paths from a directory.
+fn walk_docs(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("Error reading directory '{}': {e}", dir.display());
+            return;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Error reading entry: {e}");
+                continue;
+            }
+        };
+
+        let path = entry.path();
+        if path.is_dir() {
+            walk_docs(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// Removes known Lucene index files from a directory.
+fn remove_index_files(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if is_index_file(name) {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Returns true if the filename looks like a Lucene index file.
+fn is_index_file(name: &str) -> bool {
+    if name.starts_with("segments_") || name.starts_with("pending_segments_") {
+        return true;
+    }
+    if name.starts_with('_') && name.contains('.') {
+        return true;
+    }
+    false
+}
+
+fn print_usage() {
+    eprintln!(
+        "Usage: newindex_demo [-index INDEX_PATH] -docs DOCS_PATH [OPTIONS]\n\n\
+         DEBT: Limited copy of indexfiles for the newindex pipeline.\n\
+         Indexes documents with stored + text fields only.\n\n\
+         Options:\n\
+         \t--max-buffered-docs N  Flush after N docs per segment (-1 = disabled)\n\
+         \t--threads N            Number of indexing threads (default: 1)\n\
+         \t--compound             Package segment files into .cfs/.cfe (default: non-compound)"
     );
 }
