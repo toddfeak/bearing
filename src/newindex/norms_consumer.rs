@@ -55,8 +55,7 @@ impl FieldConsumer for NormsConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        let ft = field.field_type();
-        self.current_has_norms = ft.tokenized && !ft.omit_norms;
+        self.current_has_norms = field.kind().has_norms();
         self.current_token_count = 0;
 
         if self.current_has_norms {
@@ -135,7 +134,7 @@ impl FieldConsumer for NormsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{FieldBuilder, FieldType, stored_tokenized_field};
+    use crate::newindex::field::{stored_field, stored_tokenized_field};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;
@@ -194,38 +193,10 @@ mod tests {
     }
 
     #[test]
-    fn omit_norms_produces_no_files() {
-        let mut consumer = NormsConsumer::new();
-        let mut acc = SegmentAccumulator::new();
-        let field = FieldBuilder::new("body")
-            .field_type(FieldType {
-                tokenized: true,
-                omit_norms: true,
-                ..Default::default()
-            })
-            .string_value("ignored")
-            .build();
-
-        consumer.start_document(0).unwrap();
-        process_tokenized_field(&mut consumer, 0, &field, 5, &mut acc);
-        consumer.finish_document(0, &mut acc).unwrap();
-
-        let ctx = test_context();
-        let names = consumer.flush(&ctx, &acc).unwrap();
-        assert_is_empty!(&names);
-    }
-
-    #[test]
     fn non_tokenized_produces_no_files() {
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = FieldBuilder::new("title")
-            .field_type(FieldType {
-                stored: true,
-                ..Default::default()
-            })
-            .string_value("ignored")
-            .build();
+        let field = stored_field("title", "ignored");
 
         consumer.start_document(0).unwrap();
         consumer.start_field(0, &field, &mut acc).unwrap();

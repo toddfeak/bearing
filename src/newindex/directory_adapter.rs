@@ -5,6 +5,7 @@
 // DEBT: this adapter bridges store::Directory (&mut self) to newindex::Directory
 // (&self via Mutex). After switchover, reconcile the two Directory traits.
 
+use std::fmt;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
@@ -19,8 +20,8 @@ pub struct DirectoryAdapter {
     inner: Arc<store::SharedDirectory>,
 }
 
-impl std::fmt::Debug for DirectoryAdapter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for DirectoryAdapter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DirectoryAdapter").finish_non_exhaustive()
     }
 }

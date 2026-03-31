@@ -2,6 +2,7 @@
 
 //! Default [`WorkerFactory`] implementation.
 
+use std::fmt;
 use std::sync::Arc;
 
 use crate::newindex::consumer::FieldConsumer;
@@ -21,8 +22,8 @@ pub struct DefaultWorkerFactory {
     directory: Arc<SharedDirectory>,
 }
 
-impl std::fmt::Debug for DefaultWorkerFactory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for DefaultWorkerFactory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DefaultWorkerFactory")
             .finish_non_exhaustive()
     }

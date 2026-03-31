@@ -6,6 +6,7 @@
 //! have finished processing before field infos are written.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 
 use crate::newindex::analyzer::Token;
@@ -22,8 +23,8 @@ pub struct FieldInfosConsumer {
     fields: HashMap<u32, FieldInfo>,
 }
 
-impl std::fmt::Debug for FieldInfosConsumer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for FieldInfosConsumer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FieldInfosConsumer")
             .field("field_count", &self.fields.len())
             .finish()
@@ -50,14 +51,11 @@ impl FieldConsumer for FieldInfosConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        self.fields.entry(field_id).or_insert_with(|| {
-            let ft = field.field_type();
-            FieldInfo {
-                name: field.name().to_string(),
-                number: field_id,
-                has_norms: ft.tokenized && !ft.omit_norms,
-                index_options: if ft.tokenized { 3 } else { 0 },
-            }
+        self.fields.entry(field_id).or_insert_with(|| FieldInfo {
+            name: field.name().to_string(),
+            number: field_id,
+            has_norms: field.kind().has_norms(),
+            index_options: field.kind().index_options(),
         });
         Ok(TokenInterest::NoTokens)
     }

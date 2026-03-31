@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::env;
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use log::debug;
 
@@ -171,8 +173,8 @@ fn package_compound_segment(
 
     let mut diagnostics = HashMap::new();
     diagnostics.insert("source".to_string(), "flush".to_string());
-    diagnostics.insert("os.name".to_string(), std::env::consts::OS.to_string());
-    diagnostics.insert("os.arch".to_string(), std::env::consts::ARCH.to_string());
+    diagnostics.insert("os.name".to_string(), env::consts::OS.to_string());
+    diagnostics.insert("os.arch".to_string(), env::consts::ARCH.to_string());
 
     let mut attributes = HashMap::new();
     attributes.insert(
@@ -248,7 +250,7 @@ fn package_compound_segment(
 // LOCKED
 pub struct IndexCoordinator {
     sender: Sender,
-    workers: Vec<std::thread::JoinHandle<io::Result<Vec<FlushedSegment>>>>,
+    workers: Vec<thread::JoinHandle<io::Result<Vec<FlushedSegment>>>>,
     /// Whether to package segment files into compound format (.cfs/.cfe).
     use_compound_file: bool,
     /// Shared directory for writing segment infos at commit time.
@@ -276,8 +278,7 @@ impl IndexCoordinator {
             let rx = receiver.clone();
             let source = Arc::clone(&worker_source);
 
-            let handle =
-                std::thread::spawn(move || worker_thread_loop(rx, source, max_buffered_docs));
+            let handle = thread::spawn(move || worker_thread_loop(rx, source, max_buffered_docs));
             workers.push(handle);
         }
 

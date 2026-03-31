@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::env;
 use std::io;
+use std::mem;
 
 use crate::newindex::analyzer::Analyzer;
 use crate::newindex::codecs::segment_info;
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 
 use crate::newindex::document::Document;
-use crate::newindex::field::FieldValue;
+use crate::newindex::field::FieldKind;
 use crate::newindex::field_info_registry::FieldInfoRegistry;
 use crate::newindex::segment::{FlushedSegment, SegmentId};
 use crate::newindex::segment_accumulator::SegmentAccumulator;
@@ -141,9 +143,7 @@ impl SegmentWorker {
 
         // 2. Field iteration
         for field in doc.fields() {
-            let field_id = self
-                .registry
-                .get_or_register(field.name(), field.field_type())?;
+            let field_id = self.registry.get_or_register(field.name(), field.kind())?;
 
             // 2a. Start field — every consumer prepares for this field
             //     and declares whether it wants tokens.
@@ -157,10 +157,14 @@ impl SegmentWorker {
 
             // 2b. Tokenized fields: run the analyzer once, stream tokens
             //     to only the field consumers that opted in.
-            if field.field_type().tokenized && !interested.is_empty() {
-                let value = std::mem::replace(field.value_mut(), FieldValue::String(String::new()));
-                let mut reader = value.into_reader();
-                let mut token_buf = std::mem::take(&mut self.token_buf);
+            let needs_tokenization = matches!(
+                field.kind(),
+                FieldKind::Tokenized(_) | FieldKind::StoredTokenized(_)
+            );
+            if needs_tokenization && !interested.is_empty() {
+                let kind = mem::replace(field.kind_mut(), FieldKind::Stored(String::new()));
+                let mut reader = kind.into_reader();
+                let mut token_buf = mem::take(&mut self.token_buf);
 
                 self.analyzer.reset();
                 while let Some(token) = self.analyzer.next_token(&mut *reader, &mut token_buf)? {
@@ -236,8 +240,8 @@ impl SegmentWorker {
         // 2. Write .si file — must come after consumers so the file list is complete
         let mut diagnostics = HashMap::new();
         diagnostics.insert("source".to_string(), "flush".to_string());
-        diagnostics.insert("os.name".to_string(), std::env::consts::OS.to_string());
-        diagnostics.insert("os.arch".to_string(), std::env::consts::ARCH.to_string());
+        diagnostics.insert("os.name".to_string(), env::consts::OS.to_string());
+        diagnostics.insert("os.arch".to_string(), env::consts::ARCH.to_string());
 
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -275,7 +279,7 @@ mod tests {
     use crate::newindex::field::Field;
     use crate::newindex::segment::SegmentId;
     use crate::newindex::standard_analyzer::StandardAnalyzer;
-    use crate::store::MemoryDirectory;
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
     /// No-op consumer that returns an empty file list.
     struct NoOpConsumer;
@@ -327,9 +331,7 @@ mod tests {
 
     fn test_context() -> SegmentContext {
         SegmentContext {
-            directory: Arc::new(crate::store::SharedDirectory::new(Box::new(
-                MemoryDirectory::new(),
-            ))),
+            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }

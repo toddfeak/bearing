@@ -9,7 +9,9 @@
 //! data into shared [`ByteBlockPool`]s owned by the
 //! [`PostingsConsumer`](super::postings_consumer::PostingsConsumer).
 
+use std::fmt;
 use std::io;
+use std::str;
 
 use crate::store;
 use crate::util::byte_block_pool::{
@@ -50,8 +52,8 @@ pub struct PerFieldPostings {
     has_positions: bool,
 }
 
-impl std::fmt::Debug for PerFieldPostings {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for PerFieldPostings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PerFieldPostings")
             .field("term_count", &self.terms.size())
             .field("has_positions", &self.has_positions)
@@ -188,7 +190,7 @@ impl PerFieldPostings {
             .iter()
             .map(|&id| {
                 let bytes = self.terms.get(id as usize);
-                let text = std::str::from_utf8(bytes)
+                let text = str::from_utf8(bytes)
                     .expect("term bytes must be valid UTF-8")
                     .to_string();
                 (text, id as usize)

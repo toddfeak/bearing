@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
 use std::sync::Arc;
 
 use crate::store::SharedDirectory;
@@ -18,8 +19,8 @@ pub struct SegmentContext {
     pub segment_id: [u8; 16],
 }
 
-impl std::fmt::Debug for SegmentContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for SegmentContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SegmentContext")
             .field("segment_name", &self.segment_name)
             .finish_non_exhaustive()

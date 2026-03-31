@@ -3,12 +3,13 @@
 //! [`FieldConsumer`] that buffers stored field data and writes `.fdt`, `.fdx`, `.fdm`.
 
 use std::io;
+use std::mem;
 
 use crate::document::StoredValue;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::stored_fields::{self, StoredDoc};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
-use crate::newindex::field::{Field, FieldValue};
+use crate::newindex::field::{Field, FieldKind};
 use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
 
@@ -42,12 +43,12 @@ impl FieldConsumer for StoredFieldsConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        if field.field_type().stored {
-            let stored_value = match field.value() {
-                FieldValue::String(s) => StoredValue::String(s.clone()),
-                FieldValue::Reader(_) => return Ok(TokenInterest::NoTokens),
-            };
-            self.current_doc_fields.push((field_id, stored_value));
+        match field.kind() {
+            FieldKind::Stored(s) | FieldKind::StoredTokenized(s) => {
+                self.current_doc_fields
+                    .push((field_id, StoredValue::String(s.clone())));
+            }
+            FieldKind::Tokenized(_) => {}
         }
         Ok(TokenInterest::NoTokens)
     }
@@ -76,7 +77,7 @@ impl FieldConsumer for StoredFieldsConsumer {
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()> {
-        let fields = std::mem::take(&mut self.current_doc_fields);
+        let fields = mem::take(&mut self.current_doc_fields);
         self.docs.push(StoredDoc { fields });
         Ok(())
     }
@@ -100,10 +101,12 @@ impl FieldConsumer for StoredFieldsConsumer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::newindex::field::{FieldBuilder, FieldType, stored_field};
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use std::io::Cursor;
     use std::sync::Arc;
+
+    use super::*;
+    use crate::newindex::field::{stored_field, tokenized_field};
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_context() -> SegmentContext {
         SegmentContext {
@@ -139,13 +142,7 @@ mod tests {
         let mut acc = SegmentAccumulator::new();
 
         consumer.start_document(0).unwrap();
-        let field = FieldBuilder::new("not_stored")
-            .field_type(FieldType {
-                stored: false,
-                ..Default::default()
-            })
-            .string_value("invisible")
-            .build();
+        let field = tokenized_field("not_stored", Cursor::new(b"invisible".to_vec()));
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
         consumer.finish_document(0, &mut acc).unwrap();

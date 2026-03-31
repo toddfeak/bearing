@@ -6,6 +6,9 @@
 //! correct segments returned with expected file lists.
 
 use std::collections::HashSet;
+use std::fs;
+use std::io::Cursor;
+use std::path::Path;
 
 use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
@@ -248,12 +251,12 @@ fn compound_with_multi_segment() {
 // --- Text field (tokenized + norms + postings) tests ---
 
 fn add_text_docs_from_testdata(writer: &IndexWriter) {
-    let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
-    for entry in std::fs::read_dir(&docs_dir).unwrap() {
+    let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
+    for entry in fs::read_dir(&docs_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let contents = std::fs::read_to_string(&path).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
         let doc = DocumentBuilder::new()
             .add_field(stored_field("path", &name))
             .add_field(stored_tokenized_field("contents", contents))
@@ -324,22 +327,18 @@ fn stored_tokenized_fields_multi_segment() {
 
 #[test]
 fn text_only_fields_produce_postings_without_stored() {
-    use bearing::newindex::field::FieldType;
-
     let writer = IndexWriter::new(
         IndexWriterConfig::default(),
         Box::new(MemoryDirectory::new()),
     );
 
-    // TEXT type: tokenized, not stored
+    // Tokenized, not stored
     for i in 0..3 {
         let doc = DocumentBuilder::new()
-            .add_field(
-                bearing::newindex::field::FieldBuilder::new("body")
-                    .field_type(FieldType::TEXT)
-                    .string_value(format!("hello world document {i}"))
-                    .build(),
-            )
+            .add_field(tokenized_field(
+                "body",
+                Cursor::new(format!("hello world document {i}").into_bytes()),
+            ))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -390,17 +389,17 @@ fn mixed_stored_and_stored_tokenized_fields() {
 fn tokenized_field_produces_same_postings_as_string() {
     use std::io::BufReader;
 
-    let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
+    let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
 
     // Index with tokenized_field (streaming)
     let writer_reader = IndexWriter::new(
         IndexWriterConfig::default(),
         Box::new(MemoryDirectory::new()),
     );
-    for entry in std::fs::read_dir(&docs_dir).unwrap() {
+    for entry in fs::read_dir(&docs_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        let file = std::fs::File::open(&path).unwrap();
+        let file = fs::File::open(&path).unwrap();
         let doc = DocumentBuilder::new()
             .add_field(tokenized_field("contents", BufReader::new(file)))
             .build();
@@ -413,10 +412,10 @@ fn tokenized_field_produces_same_postings_as_string() {
         IndexWriterConfig::default(),
         Box::new(MemoryDirectory::new()),
     );
-    for entry in std::fs::read_dir(&docs_dir).unwrap() {
+    for entry in fs::read_dir(&docs_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        let contents = std::fs::read_to_string(&path).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
         let doc = DocumentBuilder::new()
             .add_field(stored_tokenized_field("contents", contents))
             .build();
@@ -449,7 +448,7 @@ fn reader_field_not_stored() {
         .add_field(stored_field("title", "test"))
         .add_field(tokenized_field(
             "contents",
-            std::io::Cursor::new(b"hello world document".to_vec()),
+            Cursor::new(b"hello world document".to_vec()),
         ))
         .build();
     writer.add_document(doc).unwrap();

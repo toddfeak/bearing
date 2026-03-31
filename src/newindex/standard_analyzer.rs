@@ -6,6 +6,7 @@
 //! to the pull-based `newindex::Analyzer` trait (`next_token` iteration).
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::io::{self, Read};
 
 use crate::analysis;
@@ -33,8 +34,8 @@ pub struct StandardAnalyzer {
     consumed: bool,
 }
 
-impl std::fmt::Debug for StandardAnalyzer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for StandardAnalyzer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StandardAnalyzer")
             .field("buffered_tokens", &self.tokens.len())
             .finish()

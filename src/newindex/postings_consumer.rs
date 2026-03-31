@@ -7,13 +7,14 @@
 //! the block tree terms dictionary and postings codecs.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
-use crate::newindex::field::Field;
+use crate::newindex::field::{Field, FieldKind};
 use crate::newindex::per_field_postings::PerFieldPostings;
 use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
@@ -45,8 +46,8 @@ struct PerFieldState {
     active_term_ids: Vec<usize>,
 }
 
-impl std::fmt::Debug for PostingsConsumer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for PostingsConsumer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostingsConsumer")
             .field("field_count", &self.per_field.len())
             .field("doc_count", &self.doc_count)
@@ -91,7 +92,7 @@ impl FieldConsumer for PostingsConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
-        if !field.field_type().tokenized {
+        if matches!(field.kind(), FieldKind::Stored(_)) {
             return Ok(TokenInterest::NoTokens);
         }
 
@@ -240,7 +241,7 @@ impl FieldConsumer for PostingsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::stored_tokenized_field;
+    use crate::newindex::field::{stored_field, stored_tokenized_field};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;
@@ -321,7 +322,7 @@ mod tests {
         let ctx = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = crate::newindex::field::stored_field("title", "hello");
+        let field = stored_field("title", "hello");
 
         consumer.start_document(0).unwrap();
         let interest = consumer.start_field(0, &field, &mut acc).unwrap();
