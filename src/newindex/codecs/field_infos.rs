@@ -95,8 +95,18 @@ pub(crate) fn write(
         // Doc values gen: -1 (no doc values)
         output.write_le_long(-1)?;
 
-        // Attributes: empty
-        output.write_map_of_strings(&HashMap::new())?;
+        // Attributes: per-field postings format metadata for indexed fields
+        if fi.index_options > 0 {
+            let mut attrs = HashMap::new();
+            attrs.insert(
+                "PerFieldPostingsFormat.format".to_string(),
+                "Lucene103".to_string(),
+            );
+            attrs.insert("PerFieldPostingsFormat.suffix".to_string(), "0".to_string());
+            output.write_map_of_strings(&attrs)?;
+        } else {
+            output.write_map_of_strings(&HashMap::new())?;
+        }
 
         // Point dimensions: 0 (no points)
         output.write_vint(0)?;
@@ -245,5 +255,33 @@ mod tests {
 
         // index options byte: 3
         assert_eq!(data[bits_offset + 1], 3);
+    }
+
+    #[test]
+    fn indexed_field_has_postings_format_attributes() {
+        let dir = test_directory();
+        let fis = FieldInfos::new(vec![indexed_with_norms("body", 0)]);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let content = String::from_utf8_lossy(&data);
+
+        // Indexed fields must have PerFieldPostingsFormat attributes
+        assert!(content.contains("PerFieldPostingsFormat.format"));
+        assert!(content.contains("Lucene103"));
+        assert!(content.contains("PerFieldPostingsFormat.suffix"));
+    }
+
+    #[test]
+    fn stored_only_field_has_no_postings_format_attributes() {
+        let dir = test_directory();
+        let fis = FieldInfos::new(vec![stored_only("title", 0)]);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let content = String::from_utf8_lossy(&data);
+
+        // Stored-only fields must NOT have PerFieldPostingsFormat attributes
+        assert!(!content.contains("PerFieldPostingsFormat"));
     }
 }

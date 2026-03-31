@@ -186,10 +186,13 @@ impl FieldConsumer for PostingsConsumer {
         // Determine if any field has positions
         let has_positions = true; // all tokenized fields get DOCS_AND_FREQS_AND_POSITIONS
 
+        // Suffix must match PerFieldPostingsFormat.suffix written in .fnm attributes
+        let per_field_suffix = "Lucene103_0";
+
         let mut writer = BlockTreeTermsWriter::new(
             &context.directory,
             &context.segment_name,
-            "",
+            per_field_suffix,
             &context.segment_id,
             has_positions,
         )?;
@@ -289,14 +292,13 @@ mod tests {
 
         let names = consumer.flush(&ctx, &acc).unwrap();
 
-        // Should produce .tim, .tip, .tmd, .doc, .pos, .psm
-        assert_ge!(names.len(), 5);
-        for ext in &[".tim", ".tip", ".tmd", ".doc", ".pos"] {
-            assert!(
-                names.iter().any(|n| n.ends_with(ext)),
-                "missing {ext}: {names:?}"
-            );
-        }
+        assert_len_eq_x!(&names, 6);
+        assert!(names.contains(&"_0_Lucene103_0.tim".to_string()));
+        assert!(names.contains(&"_0_Lucene103_0.tip".to_string()));
+        assert!(names.contains(&"_0_Lucene103_0.tmd".to_string()));
+        assert!(names.contains(&"_0_Lucene103_0.doc".to_string()));
+        assert!(names.contains(&"_0_Lucene103_0.pos".to_string()));
+        assert!(names.contains(&"_0_Lucene103_0.psm".to_string()));
     }
 
     #[test]

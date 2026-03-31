@@ -276,19 +276,22 @@ fn text_fields_produce_norms_and_postings_files() {
 
     let files = &segments[0].file_names;
     // Norms
-    assert_any!(files.iter(), |f: &String| f.ends_with(".nvm"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".nvd"));
+    assert!(files.contains(&"_0.nvm".to_string()));
+    assert!(files.contains(&"_0.nvd".to_string()));
     // Stored fields
-    assert_any!(files.iter(), |f: &String| f.ends_with(".fdt"));
+    assert!(files.contains(&"_0.fdt".to_string()));
+    assert!(files.contains(&"_0.fdx".to_string()));
+    assert!(files.contains(&"_0.fdm".to_string()));
     // Field infos + segment info
-    assert_any!(files.iter(), |f: &String| f.ends_with(".fnm"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".si"));
-    // Postings
-    assert_any!(files.iter(), |f: &String| f.ends_with(".tim"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".tip"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".tmd"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".doc"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".pos"));
+    assert!(files.contains(&"_0.fnm".to_string()));
+    assert!(files.contains(&"_0.si".to_string()));
+    // Postings — per-field suffix must match PerFieldPostingsFormat attributes in .fnm
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.tip".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.tmd".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.psm".to_string()));
 }
 
 #[test]
@@ -312,8 +315,10 @@ fn text_fields_multi_segment() {
     for seg in &segments {
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".nvm"));
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".nvd"));
-        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tim"));
-        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".doc"));
+        assert_any!(seg.file_names.iter(), |f: &String| f
+            .ends_with("_Lucene103_0.tim"));
+        assert_any!(seg.file_names.iter(), |f: &String| f
+            .ends_with("_Lucene103_0.doc"));
     }
 }
 
@@ -344,11 +349,11 @@ fn text_only_fields_produce_postings_without_stored() {
 
     let files = &segments[0].file_names;
     // Postings present
-    assert_any!(files.iter(), |f: &String| f.ends_with(".tim"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".doc"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".pos"));
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
     // Norms present (TEXT type has norms)
-    assert_any!(files.iter(), |f: &String| f.ends_with(".nvm"));
+    assert!(files.contains(&"_0.nvm".to_string()));
 }
 
 #[test]
@@ -371,9 +376,9 @@ fn mixed_stored_and_text_fields() {
 
     let files = &segments[0].file_names;
     // Both stored fields and postings
-    assert_any!(files.iter(), |f: &String| f.ends_with(".fdt"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".tim"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".doc"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".pos"));
-    assert_any!(files.iter(), |f: &String| f.ends_with(".nvm"));
+    assert!(files.contains(&"_0.fdt".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    assert!(files.contains(&"_0.nvm".to_string()));
 }
