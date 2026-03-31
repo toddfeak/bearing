@@ -52,10 +52,10 @@ impl FieldInfoRegistry {
     pub fn get_or_register(&mut self, name: &str, field_type: &FieldType) -> io::Result<u32> {
         if let Some(&idx) = self.by_name.get(name) {
             let existing = &self.fields[idx];
-            if existing.field_type.stored != field_type.stored {
+            if existing.field_type != *field_type {
                 return Err(io::Error::other(format!(
-                    "field '{}' registered with stored={}, but now seen with stored={}",
-                    name, existing.field_type.stored, field_type.stored
+                    "field '{}' registered with {:?}, but now seen with {:?}",
+                    name, existing.field_type, field_type
                 )));
             }
             Ok(existing.number)
@@ -85,7 +85,10 @@ mod tests {
     #[test]
     fn register_new_field_assigns_zero() {
         let mut reg = FieldInfoRegistry::new();
-        let ft = FieldType { stored: true };
+        let ft = FieldType {
+            stored: true,
+            ..Default::default()
+        };
         let num = reg.get_or_register("title", &ft).unwrap();
         assert_eq!(num, 0);
     }
@@ -93,7 +96,10 @@ mod tests {
     #[test]
     fn same_field_returns_same_number() {
         let mut reg = FieldInfoRegistry::new();
-        let ft = FieldType { stored: true };
+        let ft = FieldType {
+            stored: true,
+            ..Default::default()
+        };
         let n1 = reg.get_or_register("title", &ft).unwrap();
         let n2 = reg.get_or_register("title", &ft).unwrap();
         assert_eq!(n1, n2);
@@ -102,7 +108,10 @@ mod tests {
     #[test]
     fn different_fields_get_sequential_numbers() {
         let mut reg = FieldInfoRegistry::new();
-        let ft = FieldType { stored: true };
+        let ft = FieldType {
+            stored: true,
+            ..Default::default()
+        };
         let n0 = reg.get_or_register("title", &ft).unwrap();
         let n1 = reg.get_or_register("body", &ft).unwrap();
         let n2 = reg.get_or_register("author", &ft).unwrap();
@@ -114,16 +123,31 @@ mod tests {
     #[test]
     fn conflicting_type_returns_error() {
         let mut reg = FieldInfoRegistry::new();
-        reg.get_or_register("title", &FieldType { stored: true })
-            .unwrap();
-        let result = reg.get_or_register("title", &FieldType { stored: false });
+        reg.get_or_register(
+            "title",
+            &FieldType {
+                stored: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result = reg.get_or_register(
+            "title",
+            &FieldType {
+                stored: false,
+                ..Default::default()
+            },
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn registered_fields_returns_in_order() {
         let mut reg = FieldInfoRegistry::new();
-        let ft = FieldType { stored: true };
+        let ft = FieldType {
+            stored: true,
+            ..Default::default()
+        };
         reg.get_or_register("a", &ft).unwrap();
         reg.get_or_register("b", &ft).unwrap();
         let fields = reg.registered_fields();
@@ -132,5 +156,49 @@ mod tests {
         assert_eq!(fields[0].number, 0);
         assert_eq!(fields[1].name, "b");
         assert_eq!(fields[1].number, 1);
+    }
+
+    #[test]
+    fn conflicting_tokenized_returns_error() {
+        let mut reg = FieldInfoRegistry::new();
+        reg.get_or_register(
+            "body",
+            &FieldType {
+                tokenized: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result = reg.get_or_register(
+            "body",
+            &FieldType {
+                tokenized: false,
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn conflicting_omit_norms_returns_error() {
+        let mut reg = FieldInfoRegistry::new();
+        reg.get_or_register(
+            "body",
+            &FieldType {
+                tokenized: true,
+                omit_norms: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result = reg.get_or_register(
+            "body",
+            &FieldType {
+                tokenized: true,
+                omit_norms: true,
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
     }
 }

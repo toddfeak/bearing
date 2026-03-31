@@ -10,29 +10,15 @@ use std::collections::HashSet;
 use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{FieldBuilder, FieldType};
+use bearing::newindex::field::stored_field;
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::MemoryDirectory;
-
-fn stored_type() -> FieldType {
-    FieldType { stored: true }
-}
 
 fn add_stored_docs(writer: &IndexWriter, count: usize) {
     for i in 0..count {
         let doc = DocumentBuilder::new()
-            .add_field(
-                FieldBuilder::new("title")
-                    .field_type(stored_type())
-                    .string_value(format!("Document {i}"))
-                    .build(),
-            )
-            .add_field(
-                FieldBuilder::new("body")
-                    .field_type(stored_type())
-                    .string_value(format!("Body text for document {i}"))
-                    .build(),
-            )
+            .add_field(stored_field("title", format!("Document {i}")))
+            .add_field(stored_field("body", format!("Body text for document {i}")))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -47,18 +33,8 @@ fn single_segment_stored_fields() {
 
     for i in 0..5 {
         let doc = DocumentBuilder::new()
-            .add_field(
-                FieldBuilder::new("title")
-                    .field_type(stored_type())
-                    .string_value(format!("Document {i}"))
-                    .build(),
-            )
-            .add_field(
-                FieldBuilder::new("body")
-                    .field_type(stored_type())
-                    .string_value(format!("Body text for document {i}"))
-                    .build(),
-            )
+            .add_field(stored_field("title", format!("Document {i}")))
+            .add_field(stored_field("body", format!("Body text for document {i}")))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -96,12 +72,7 @@ fn segment_file_names_use_segment_prefix() {
     );
 
     let doc = DocumentBuilder::new()
-        .add_field(
-            FieldBuilder::new("title")
-                .field_type(stored_type())
-                .string_value("hello")
-                .build(),
-        )
+        .add_field(stored_field("title", "hello"))
         .build();
     writer.add_document(doc).unwrap();
 

@@ -4,10 +4,55 @@
 ///
 /// Reusable across fields that share the same configuration.
 // LOCKED
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FieldType {
     /// Whether the field's value is stored verbatim for retrieval.
     pub stored: bool,
+    /// Whether the field's value is tokenized for indexing.
+    pub tokenized: bool,
+    /// Whether to skip norm computation for this field.
+    pub omit_norms: bool,
+}
+
+impl FieldType {
+    /// Stored-only field. Not indexed, not tokenized.
+    pub const STORED: FieldType = FieldType {
+        stored: true,
+        tokenized: false,
+        omit_norms: false,
+    };
+
+    /// Indexed and tokenized, with norms, and stored.
+    pub const TEXT_STORED: FieldType = FieldType {
+        stored: true,
+        tokenized: true,
+        omit_norms: false,
+    };
+
+    /// Indexed and tokenized, with norms, not stored.
+    pub const TEXT: FieldType = FieldType {
+        stored: false,
+        tokenized: true,
+        omit_norms: false,
+    };
+}
+
+/// Creates a stored-only field.
+pub fn stored_field(name: &str, value: impl Into<String>) -> Field {
+    Field {
+        name: name.to_string(),
+        field_type: FieldType::STORED,
+        value: FieldValue::String(value.into()),
+    }
+}
+
+/// Creates a tokenized text field that is also stored.
+pub fn text_field(name: &str, value: impl Into<String>) -> Field {
+    Field {
+        name: name.to_string(),
+        field_type: FieldType::TEXT_STORED,
+        value: FieldValue::String(value.into()),
+    }
 }
 
 /// The value carried by a field.

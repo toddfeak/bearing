@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{FieldBuilder, FieldType};
+use bearing::newindex::field::stored_field;
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
 
@@ -69,22 +69,13 @@ fn main() {
     let fs_dir = FSDirectory::open_with_file_handles(&index_path).unwrap();
     let writer = IndexWriter::new(config, Box::new(fs_dir));
 
-    let stored_type = FieldType { stored: true };
-
     for i in 0..doc_count {
         let doc = DocumentBuilder::new()
-            .add_field(
-                FieldBuilder::new("title")
-                    .field_type(stored_type.clone())
-                    .string_value(format!("Document {i}"))
-                    .build(),
-            )
-            .add_field(
-                FieldBuilder::new("body")
-                    .field_type(stored_type.clone())
-                    .string_value(format!("This is the body text for document number {i}."))
-                    .build(),
-            )
+            .add_field(stored_field("title", format!("Document {i}")))
+            .add_field(stored_field(
+                "body",
+                format!("This is the body text for document number {i}."),
+            ))
             .build();
         writer.add_document(doc).unwrap();
     }

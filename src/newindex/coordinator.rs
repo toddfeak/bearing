@@ -344,6 +344,7 @@ mod tests {
     use crate::newindex::field::Field;
     use crate::newindex::id_generator::RandomIdGenerator;
     use crate::newindex::segment_accumulator::SegmentAccumulator;
+    use crate::newindex::standard_analyzer::StandardAnalyzer;
     use crate::store::MemoryDirectory;
 
     /// Deterministic ID generator for reproducible tests.
@@ -420,7 +421,7 @@ mod tests {
             let worker = SegmentWorker::new(
                 segment_id,
                 vec![Box::new(NoOpConsumer)],
-                Box::new(crate::newindex::standard_analyzer::StandardAnalyzer),
+                Box::new(StandardAnalyzer::default()),
             );
             (worker, context)
         }
@@ -446,11 +447,8 @@ mod tests {
                 Box::new(StoredFieldsConsumer::new()),
                 Box::new(FieldInfosConsumer::new()),
             ];
-            let worker = SegmentWorker::new(
-                segment_id,
-                consumers,
-                Box::new(crate::newindex::standard_analyzer::StandardAnalyzer),
-            );
+            let worker =
+                SegmentWorker::new(segment_id, consumers, Box::new(StandardAnalyzer::default()));
             (worker, context)
         }
     }
@@ -492,14 +490,9 @@ mod tests {
 
     fn make_doc() -> Document {
         use crate::newindex::document::DocumentBuilder;
-        use crate::newindex::field::{FieldBuilder, FieldType};
+        use crate::newindex::field::stored_field;
         DocumentBuilder::new()
-            .add_field(
-                FieldBuilder::new("f")
-                    .field_type(FieldType { stored: true })
-                    .string_value("v")
-                    .build(),
-            )
+            .add_field(stored_field("f", "v"))
             .build()
     }
 

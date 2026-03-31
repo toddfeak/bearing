@@ -100,7 +100,7 @@ impl FieldConsumer for StoredFieldsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{FieldBuilder, FieldType};
+    use crate::newindex::field::{FieldBuilder, FieldType, stored_field};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use std::sync::Arc;
 
@@ -110,13 +110,6 @@ mod tests {
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }
-    }
-
-    fn stored_field(name: &str, value: &str) -> Field {
-        FieldBuilder::new(name)
-            .field_type(FieldType { stored: true })
-            .string_value(value)
-            .build()
     }
 
     #[test]
@@ -146,7 +139,10 @@ mod tests {
 
         consumer.start_document(0).unwrap();
         let field = FieldBuilder::new("not_stored")
-            .field_type(FieldType { stored: false })
+            .field_type(FieldType {
+                stored: false,
+                ..Default::default()
+            })
             .string_value("invisible")
             .build();
         consumer.start_field(0, &field, &mut acc).unwrap();
@@ -167,11 +163,11 @@ mod tests {
         for doc_id in 0..3 {
             consumer.start_document(doc_id).unwrap();
 
-            let f1 = stored_field("title", &format!("title {doc_id}"));
+            let f1 = stored_field("title", format!("title {doc_id}"));
             consumer.start_field(0, &f1, &mut acc).unwrap();
             consumer.finish_field(0, &f1, &mut acc).unwrap();
 
-            let f2 = stored_field("body", &format!("body {doc_id}"));
+            let f2 = stored_field("body", format!("body {doc_id}"));
             consumer.start_field(1, &f2, &mut acc).unwrap();
             consumer.finish_field(1, &f2, &mut acc).unwrap();
 

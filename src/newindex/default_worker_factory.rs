@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::newindex::consumer::FieldConsumer;
 use crate::newindex::coordinator::WorkerFactory;
 use crate::newindex::field_infos_consumer::FieldInfosConsumer;
 use crate::newindex::segment::SegmentId;
@@ -53,12 +54,13 @@ impl WorkerFactory for DefaultWorkerFactory {
         //   TermVectorsConsumer  — term vectors (shares term pool with postings)
         //   PostingsConsumer     — postings + terms
         //   FieldInfosConsumer   — field infos (.fnm, must be last)
-        let consumers: Vec<Box<dyn crate::newindex::consumer::FieldConsumer>> = vec![
+        let consumers: Vec<Box<dyn FieldConsumer>> = vec![
             Box::new(StoredFieldsConsumer::new()),
             Box::new(FieldInfosConsumer::new()),
         ];
 
-        let worker = SegmentWorker::new(segment_id, consumers, Box::new(StandardAnalyzer));
+        let worker =
+            SegmentWorker::new(segment_id, consumers, Box::new(StandardAnalyzer::default()));
 
         (worker, context)
     }

@@ -107,7 +107,7 @@ impl FieldConsumer for FieldInfosConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{FieldBuilder, FieldType};
+    use crate::newindex::field::stored_field;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use std::sync::Arc;
 
@@ -117,13 +117,6 @@ mod tests {
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }
-    }
-
-    fn stored_field(name: &str, value: &str) -> Field {
-        FieldBuilder::new(name)
-            .field_type(FieldType { stored: true })
-            .string_value(value)
-            .build()
     }
 
     #[test]
@@ -186,7 +179,7 @@ mod tests {
 
         for doc_id in 0..3 {
             consumer.start_document(doc_id).unwrap();
-            let f = stored_field("title", &format!("t{doc_id}"));
+            let f = stored_field("title", format!("t{doc_id}"));
             consumer.start_field(0, &f, &mut acc).unwrap();
             consumer.finish_field(0, &f, &mut acc).unwrap();
             consumer.finish_document(doc_id, &mut acc).unwrap();

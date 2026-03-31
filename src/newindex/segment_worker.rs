@@ -8,6 +8,7 @@ use crate::newindex::codecs::segment_info;
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 
 use crate::newindex::document::Document;
+use crate::newindex::field::FieldValue;
 use crate::newindex::field_info_registry::FieldInfoRegistry;
 use crate::newindex::segment::{FlushedSegment, SegmentId};
 use crate::newindex::segment_accumulator::SegmentAccumulator;
@@ -156,10 +157,11 @@ impl SegmentWorker {
 
             // 2b. Tokenized fields: run the analyzer once, stream tokens
             //     to only the field consumers that opted in.
-            // TODO: check field.field_type().tokenized()
-            if !interested.is_empty() {
-                // TODO: get reader from field value (string or Reader)
-                let mut reader: &[u8] = b"";
+            if field.field_type().tokenized && !interested.is_empty() {
+                let field_bytes = match field.value() {
+                    FieldValue::String(s) => s.as_bytes(),
+                };
+                let mut reader: &[u8] = field_bytes;
                 let mut token_buf = std::mem::take(&mut self.token_buf);
 
                 self.analyzer.reset();
@@ -268,13 +270,14 @@ impl SegmentWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::newindex::analyzer::Token;
     use crate::newindex::consumer::FieldConsumer;
     use crate::newindex::field::Field;
     use crate::newindex::segment::SegmentId;
     use crate::newindex::standard_analyzer::StandardAnalyzer;
     use crate::store::MemoryDirectory;
-    use std::sync::Arc;
 
     /// No-op consumer that returns an empty file list.
     struct NoOpConsumer;
@@ -288,8 +291,8 @@ mod tests {
             _field_id: u32,
             _field: &Field,
             _acc: &mut SegmentAccumulator,
-        ) -> io::Result<crate::newindex::consumer::TokenInterest> {
-            Ok(crate::newindex::consumer::TokenInterest::NoTokens)
+        ) -> io::Result<TokenInterest> {
+            Ok(TokenInterest::NoTokens)
         }
         fn add_token(
             &mut self,
@@ -344,7 +347,7 @@ mod tests {
         let worker = SegmentWorker::new(
             segment_id,
             vec![Box::new(NoOpConsumer)],
-            Box::new(StandardAnalyzer),
+            Box::new(StandardAnalyzer::default()),
         );
 
         let flushed = worker.flush(&context).unwrap();
@@ -373,8 +376,8 @@ mod tests {
                 _: u32,
                 _: &Field,
                 _: &mut SegmentAccumulator,
-            ) -> io::Result<crate::newindex::consumer::TokenInterest> {
-                Ok(crate::newindex::consumer::TokenInterest::NoTokens)
+            ) -> io::Result<TokenInterest> {
+                Ok(TokenInterest::NoTokens)
             }
             fn add_token(
                 &mut self,
@@ -413,7 +416,7 @@ mod tests {
         let worker = SegmentWorker::new(
             segment_id,
             vec![Box::new(FakeConsumer)],
-            Box::new(StandardAnalyzer),
+            Box::new(StandardAnalyzer::default()),
         );
 
         let flushed = worker.flush(&context).unwrap();
