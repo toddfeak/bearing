@@ -240,7 +240,7 @@ impl FieldConsumer for PostingsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::text_field;
+    use crate::newindex::field::stored_tokenized_field;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;
@@ -286,7 +286,7 @@ mod tests {
         let ctx = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = text_field("body", "ignored");
+        let field = stored_tokenized_field("body", "ignored");
 
         process_doc(&mut consumer, 0, 0, &field, &["hello", "world"], &mut acc);
 
@@ -306,7 +306,7 @@ mod tests {
         let ctx = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = text_field("body", "ignored");
+        let field = stored_tokenized_field("body", "ignored");
 
         process_doc(&mut consumer, 0, 0, &field, &["hello", "world"], &mut acc);
         process_doc(&mut consumer, 1, 0, &field, &["hello", "rust"], &mut acc);
@@ -338,8 +338,8 @@ mod tests {
         let ctx = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let title = text_field("title", "ignored");
-        let body = text_field("body", "ignored");
+        let title = stored_tokenized_field("title", "ignored");
+        let body = stored_tokenized_field("body", "ignored");
 
         consumer.start_document(0).unwrap();
 

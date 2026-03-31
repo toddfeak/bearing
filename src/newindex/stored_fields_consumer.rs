@@ -45,6 +45,7 @@ impl FieldConsumer for StoredFieldsConsumer {
         if field.field_type().stored {
             let stored_value = match field.value() {
                 FieldValue::String(s) => StoredValue::String(s.clone()),
+                FieldValue::Reader(_) => return Ok(TokenInterest::NoTokens),
             };
             self.current_doc_fields.push((field_id, stored_value));
         }

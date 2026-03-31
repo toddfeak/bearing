@@ -135,7 +135,7 @@ impl FieldConsumer for NormsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{FieldBuilder, FieldType, text_field};
+    use crate::newindex::field::{FieldBuilder, FieldType, stored_tokenized_field};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;
@@ -177,7 +177,7 @@ mod tests {
     fn computes_norms_from_token_count() {
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = text_field("body", "ignored");
+        let field = stored_tokenized_field("body", "ignored");
 
         // Doc 0: 3 tokens, Doc 1: 10 tokens, Doc 2: 1 token
         for (doc_id, count) in [(0, 3), (1, 10), (2, 1)] {
@@ -241,7 +241,7 @@ mod tests {
     fn zero_tokens_produces_no_norm_for_that_doc() {
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = text_field("body", "ignored");
+        let field = stored_tokenized_field("body", "ignored");
 
         // Doc 0: 3 tokens (gets norm), Doc 1: 0 tokens (no norm)
         consumer.start_document(0).unwrap();
@@ -262,7 +262,7 @@ mod tests {
     fn norms_stored_in_accumulator() {
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
-        let field = text_field("body", "ignored");
+        let field = stored_tokenized_field("body", "ignored");
 
         consumer.start_document(0).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 5, &mut acc);

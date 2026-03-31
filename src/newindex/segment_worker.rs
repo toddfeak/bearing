@@ -131,7 +131,7 @@ impl SegmentWorker {
     }
 
     /// Processes a single document through the indexing pipeline.
-    pub fn add_document(&mut self, doc: Document) -> io::Result<()> {
+    pub fn add_document(&mut self, mut doc: Document) -> io::Result<()> {
         let doc_id = self.doc_count;
 
         // 1. Start document — notify all field consumers
@@ -158,14 +158,12 @@ impl SegmentWorker {
             // 2b. Tokenized fields: run the analyzer once, stream tokens
             //     to only the field consumers that opted in.
             if field.field_type().tokenized && !interested.is_empty() {
-                let field_bytes = match field.value() {
-                    FieldValue::String(s) => s.as_bytes(),
-                };
-                let mut reader: &[u8] = field_bytes;
+                let value = std::mem::replace(field.value_mut(), FieldValue::String(String::new()));
+                let mut reader = value.into_reader();
                 let mut token_buf = std::mem::take(&mut self.token_buf);
 
                 self.analyzer.reset();
-                while let Some(token) = self.analyzer.next_token(&mut reader, &mut token_buf)? {
+                while let Some(token) = self.analyzer.next_token(&mut *reader, &mut token_buf)? {
                     for &i in &interested {
                         self.field_consumers[i].add_token(
                             field_id,

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{stored_field, text_field};
+use bearing::newindex::field::{stored_field, stored_tokenized_field};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
 
@@ -20,7 +20,7 @@ fn main() {
     let mut max_buffered_docs: i32 = -1;
     let mut num_threads: usize = 1;
     let mut use_compound_file = false;
-    let mut text_fields = false;
+    let mut stored_tokenized_fields = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -41,7 +41,7 @@ fn main() {
                 use_compound_file = true;
             }
             "--text-fields" => {
-                text_fields = true;
+                stored_tokenized_fields = true;
             }
             arg if !arg.starts_with('-') && index_path.is_none() => {
                 index_path = Some(PathBuf::from(arg));
@@ -76,8 +76,8 @@ fn main() {
     for i in 0..doc_count {
         let mut doc =
             DocumentBuilder::new().add_field(stored_field("title", format!("Document {i}")));
-        if text_fields {
-            doc = doc.add_field(text_field(
+        if stored_tokenized_fields {
+            doc = doc.add_field(stored_tokenized_field(
                 "body",
                 format!("This is the body text for document number {i}."),
             ));

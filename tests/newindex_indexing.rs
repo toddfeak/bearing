@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{stored_field, text_field};
+use bearing::newindex::field::{stored_field, stored_tokenized_field, tokenized_field};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::MemoryDirectory;
 
@@ -256,14 +256,14 @@ fn add_text_docs_from_testdata(writer: &IndexWriter) {
         let contents = std::fs::read_to_string(&path).unwrap();
         let doc = DocumentBuilder::new()
             .add_field(stored_field("path", &name))
-            .add_field(text_field("contents", contents))
+            .add_field(stored_tokenized_field("contents", contents))
             .build();
         writer.add_document(doc).unwrap();
     }
 }
 
 #[test]
-fn text_fields_produce_norms_and_postings_files() {
+fn stored_tokenized_fields_produce_norms_and_postings_files() {
     let writer = IndexWriter::new(
         IndexWriterConfig::default(),
         Box::new(MemoryDirectory::new()),
@@ -295,7 +295,7 @@ fn text_fields_produce_norms_and_postings_files() {
 }
 
 #[test]
-fn text_fields_multi_segment() {
+fn stored_tokenized_fields_multi_segment() {
     let config = IndexWriterConfig {
         max_buffered_docs: 2,
         ..Default::default()
@@ -357,7 +357,7 @@ fn text_only_fields_produce_postings_without_stored() {
 }
 
 #[test]
-fn mixed_stored_and_text_fields() {
+fn mixed_stored_and_stored_tokenized_fields() {
     let writer = IndexWriter::new(
         IndexWriterConfig::default(),
         Box::new(MemoryDirectory::new()),
@@ -366,7 +366,10 @@ fn mixed_stored_and_text_fields() {
     for i in 0..5 {
         let doc = DocumentBuilder::new()
             .add_field(stored_field("id", format!("{i}")))
-            .add_field(text_field("body", format!("quick brown fox {i}")))
+            .add_field(stored_tokenized_field(
+                "body",
+                format!("quick brown fox {i}"),
+            ))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -380,5 +383,85 @@ fn mixed_stored_and_text_fields() {
     assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
     assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
     assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    assert!(files.contains(&"_0.nvm".to_string()));
+}
+
+#[test]
+fn tokenized_field_produces_same_postings_as_string() {
+    use std::io::BufReader;
+
+    let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
+
+    // Index with tokenized_field (streaming)
+    let writer_reader = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+    for entry in std::fs::read_dir(&docs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let file = std::fs::File::open(&path).unwrap();
+        let doc = DocumentBuilder::new()
+            .add_field(tokenized_field("contents", BufReader::new(file)))
+            .build();
+        writer_reader.add_document(doc).unwrap();
+    }
+    let segments_reader = writer_reader.commit().unwrap();
+
+    // Index with stored_tokenized_field (string)
+    let writer_string = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+    for entry in std::fs::read_dir(&docs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let doc = DocumentBuilder::new()
+            .add_field(stored_tokenized_field("contents", contents))
+            .build();
+        writer_string.add_document(doc).unwrap();
+    }
+    let segments_string = writer_string.commit().unwrap();
+
+    // Both should produce the same number of segments and docs
+    assert_eq!(segments_reader.len(), segments_string.len());
+    let total_reader: i32 = segments_reader.iter().map(|s| s.doc_count).sum();
+    let total_string: i32 = segments_string.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_reader, total_string);
+
+    // Reader-based index should have postings and norms
+    let files = &segments_reader[0].file_names;
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    assert!(files.contains(&"_0.nvm".to_string()));
+}
+
+#[test]
+fn reader_field_not_stored() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    let doc = DocumentBuilder::new()
+        .add_field(stored_field("title", "test"))
+        .add_field(tokenized_field(
+            "contents",
+            std::io::Cursor::new(b"hello world document".to_vec()),
+        ))
+        .build();
+    writer.add_document(doc).unwrap();
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // "title" is stored → .fdt exists
+    assert!(files.contains(&"_0.fdt".to_string()));
+    // "contents" via reader → postings exist
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    // Norms exist for "contents"
     assert!(files.contains(&"_0.nvm".to_string()));
 }

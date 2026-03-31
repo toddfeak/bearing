@@ -32,7 +32,7 @@ impl IndexWriter {
     ///
     /// The document is handed off to the internal worker pool for
     /// processing. This method is safe to call from any thread.
-    pub fn add_document(&self, doc: Document) -> io::Result<()> {
+    pub fn add_document(&self, mut doc: Document) -> io::Result<()> {
         log::debug!("add_document: {} fields", doc.fields().len());
         self.coordinator.add_document(doc)
     }

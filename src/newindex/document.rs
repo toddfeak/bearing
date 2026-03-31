@@ -14,8 +14,11 @@ pub struct Document {
 
 impl Document {
     /// Returns the fields in this document.
-    pub fn fields(&self) -> &[Field] {
-        &self.fields
+    ///
+    /// Mutable access is needed to consume reader-backed field values
+    /// during tokenization.
+    pub fn fields(&mut self) -> &mut [Field] {
+        &mut self.fields
     }
 }
 
