@@ -162,8 +162,8 @@ impl SegmentWorker {
             if field.field_type().is_tokenized() && !interested.is_empty() {
                 let invertable = field.field_type_mut().take_invertable();
                 let mut reader: Box<dyn std::io::Read + Send> = match invertable {
-                    Some(InvertableValue::Tokenized(r)) => r,
-                    Some(InvertableValue::TokenizedString(s)) => {
+                    Some(InvertableValue::Tokenized(r, _)) => r,
+                    Some(InvertableValue::TokenizedString(s, _)) => {
                         Box::new(std::io::Cursor::new(s.into_bytes()))
                     }
                     _ => continue,

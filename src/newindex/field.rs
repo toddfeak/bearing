@@ -62,19 +62,68 @@ impl fmt::Debug for StoredValue {
     }
 }
 
+/// What term vector data to store for a tokenized field.
+///
+/// Term vectors record the token stream per-document alongside the inverted
+/// index. Only tokenized fields (`Tokenized`/`TokenizedString`) can have term
+/// vectors. The enum makes invalid combinations unrepresentable — payloads
+/// always require positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermVectorOptions {
+    /// Store term text only.
+    Terms,
+    /// Store term text and token positions.
+    Positions,
+    /// Store term text and character offsets.
+    Offsets,
+    /// Store term text, positions, and offsets.
+    PositionsAndOffsets,
+    /// Store term text, positions, and payloads.
+    PositionsAndPayloads,
+    /// Store term text, positions, offsets, and payloads.
+    PositionsOffsetsAndPayloads,
+}
+
+impl TermVectorOptions {
+    /// Whether this option includes token positions.
+    pub fn has_positions(self) -> bool {
+        !matches!(self, TermVectorOptions::Terms | TermVectorOptions::Offsets)
+    }
+
+    /// Whether this option includes character offsets.
+    pub fn has_offsets(self) -> bool {
+        matches!(
+            self,
+            TermVectorOptions::Offsets
+                | TermVectorOptions::PositionsAndOffsets
+                | TermVectorOptions::PositionsOffsetsAndPayloads
+        )
+    }
+
+    /// Whether this option includes payloads.
+    pub fn has_payloads(self) -> bool {
+        matches!(
+            self,
+            TermVectorOptions::PositionsAndPayloads
+                | TermVectorOptions::PositionsOffsetsAndPayloads
+        )
+    }
+}
+
 /// How a field enters the inverted index (postings).
 ///
 /// Determines the [`IndexOptions`] level (docs, freqs, positions) and whether
-/// the field is run through an analyzer.
+/// the field is run through an analyzer. Tokenized variants carry an optional
+/// [`TermVectorOptions`] for per-document term vector storage.
 // LOCKED
 pub enum InvertableValue {
     /// Streaming reader run through an analyzer. Produces a token stream
     /// with docs, freqs, and positions. Has norms. Cannot be stored.
-    Tokenized(Box<dyn Read + Send>),
+    Tokenized(Box<dyn Read + Send>, Option<TermVectorOptions>),
     /// String run through an analyzer. Produces a token stream with docs,
     /// freqs, and positions. Has norms. Can be stored (the string is
     /// accessible before tokenization consumes it).
-    TokenizedString(String),
+    TokenizedString(String, Option<TermVectorOptions>),
     /// Single exact-match term indexed at the DOCS level only. Omits norms.
     ExactMatch(String),
     /// Term with a feature value encoded as term frequency. Indexed at
@@ -85,9 +134,11 @@ pub enum InvertableValue {
 impl fmt::Debug for InvertableValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            InvertableValue::Tokenized(_) => f.debug_tuple("Tokenized").field(&"...").finish(),
-            InvertableValue::TokenizedString(s) => {
-                f.debug_tuple("TokenizedString").field(s).finish()
+            InvertableValue::Tokenized(_, tv) => {
+                f.debug_tuple("Tokenized").field(&"...").field(tv).finish()
+            }
+            InvertableValue::TokenizedString(s, tv) => {
+                f.debug_tuple("TokenizedString").field(s).field(tv).finish()
             }
             InvertableValue::ExactMatch(s) => f.debug_tuple("ExactMatch").field(s).finish(),
             InvertableValue::Feature(name, val) => {
@@ -232,7 +283,7 @@ impl FieldType {
     pub fn index_options(&self) -> IndexOptions {
         match &self.invertable {
             None => IndexOptions::None,
-            Some(InvertableValue::Tokenized(_) | InvertableValue::TokenizedString(_)) => {
+            Some(InvertableValue::Tokenized(_, _) | InvertableValue::TokenizedString(_, _)) => {
                 IndexOptions::DocsAndFreqsAndPositions
             }
             Some(InvertableValue::ExactMatch(_)) => IndexOptions::Docs,
@@ -244,7 +295,7 @@ impl FieldType {
     pub fn is_tokenized(&self) -> bool {
         matches!(
             &self.invertable,
-            Some(InvertableValue::Tokenized(_) | InvertableValue::TokenizedString(_))
+            Some(InvertableValue::Tokenized(_, _) | InvertableValue::TokenizedString(_, _))
         )
     }
 
@@ -252,6 +303,19 @@ impl FieldType {
     /// have norms.
     pub fn has_norms(&self) -> bool {
         self.is_tokenized()
+    }
+
+    /// Returns the term vector options for this field, if any.
+    ///
+    /// Only tokenized fields can have term vectors. Returns `None` for
+    /// non-tokenized fields and tokenized fields without term vectors.
+    pub fn term_vector_options(&self) -> Option<TermVectorOptions> {
+        match &self.invertable {
+            Some(InvertableValue::Tokenized(_, tv) | InvertableValue::TokenizedString(_, tv)) => {
+                *tv
+            }
+            _ => None,
+        }
     }
 
     /// Returns the doc values type for this field, derived from the doc value.
@@ -329,6 +393,7 @@ impl Field {
 pub fn text(name: &str) -> TextFieldBuilder {
     TextFieldBuilder {
         name: name.to_string(),
+        term_vectors: None,
     }
 }
 
@@ -339,17 +404,30 @@ pub fn text(name: &str) -> TextFieldBuilder {
 /// - [`.reader()`](TextFieldBuilder::reader) — reader-backed, not stored
 /// - [`.stored()`](TextFieldBuilder::stored) — returns a
 ///   [`StoredTextFieldBuilder`] that only accepts string values
+///
+/// Optionally chain [`.with_term_vectors()`](TextFieldBuilder::with_term_vectors)
+/// before the terminal method to enable per-document term vector storage.
 pub struct TextFieldBuilder {
     name: String,
+    term_vectors: Option<TermVectorOptions>,
 }
 
 impl TextFieldBuilder {
+    /// Enables term vector storage with the given options.
+    pub fn with_term_vectors(mut self, options: TermVectorOptions) -> Self {
+        self.term_vectors = Some(options);
+        self
+    }
+
     /// Marks this text field as stored.
     ///
     /// Returns a [`StoredTextFieldBuilder`] that accepts only string values
     /// (readers cannot be stored).
     pub fn stored(self) -> StoredTextFieldBuilder {
-        StoredTextFieldBuilder { name: self.name }
+        StoredTextFieldBuilder {
+            name: self.name,
+            term_vectors: self.term_vectors,
+        }
     }
 
     /// Sets the string value and builds the field. Not stored.
@@ -359,7 +437,7 @@ impl TextFieldBuilder {
             name: self.name,
             field_type: FieldType {
                 stored: None,
-                invertable: Some(InvertableValue::TokenizedString(s)),
+                invertable: Some(InvertableValue::TokenizedString(s, self.term_vectors)),
                 doc: None,
                 points: None,
             },
@@ -375,7 +453,10 @@ impl TextFieldBuilder {
             name: self.name,
             field_type: FieldType {
                 stored: None,
-                invertable: Some(InvertableValue::Tokenized(Box::new(reader))),
+                invertable: Some(InvertableValue::Tokenized(
+                    Box::new(reader),
+                    self.term_vectors,
+                )),
                 doc: None,
                 points: None,
             },
@@ -389,6 +470,7 @@ impl TextFieldBuilder {
 /// because reader-backed fields cannot be stored.
 pub struct StoredTextFieldBuilder {
     name: String,
+    term_vectors: Option<TermVectorOptions>,
 }
 
 impl StoredTextFieldBuilder {
@@ -401,7 +483,7 @@ impl StoredTextFieldBuilder {
             name: self.name,
             field_type: FieldType {
                 stored: Some(StoredValue::String(s.clone())),
-                invertable: Some(InvertableValue::TokenizedString(s)),
+                invertable: Some(InvertableValue::TokenizedString(s, self.term_vectors)),
                 doc: None,
                 points: None,
             },
@@ -1320,7 +1402,7 @@ mod tests {
         assert_none!(field.field_type().stored());
         assert!(matches!(
             field.field_type().invertable(),
-            Some(InvertableValue::Tokenized(_))
+            Some(InvertableValue::Tokenized(_, None))
         ));
         assert_eq!(
             field.field_type().index_options(),
@@ -1344,7 +1426,7 @@ mod tests {
         let mut field = text("body").reader(Cursor::new(b"streaming content".to_vec()));
         let invertable = field.field_type_mut().take_invertable().unwrap();
         match invertable {
-            InvertableValue::Tokenized(mut reader) => {
+            InvertableValue::Tokenized(mut reader, _) => {
                 let mut buf = String::new();
                 reader.read_to_string(&mut buf).unwrap();
                 assert_eq!(buf, "streaming content");
@@ -1946,5 +2028,139 @@ mod tests {
             field.field_type().doc_values_type(),
             DocValuesType::SortedNumeric
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // TermVectorOptions tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn term_vector_options_has_positions() {
+        assert!(!TermVectorOptions::Terms.has_positions());
+        assert!(TermVectorOptions::Positions.has_positions());
+        assert!(!TermVectorOptions::Offsets.has_positions());
+        assert!(TermVectorOptions::PositionsAndOffsets.has_positions());
+        assert!(TermVectorOptions::PositionsAndPayloads.has_positions());
+        assert!(TermVectorOptions::PositionsOffsetsAndPayloads.has_positions());
+    }
+
+    #[test]
+    fn term_vector_options_has_offsets() {
+        assert!(!TermVectorOptions::Terms.has_offsets());
+        assert!(!TermVectorOptions::Positions.has_offsets());
+        assert!(TermVectorOptions::Offsets.has_offsets());
+        assert!(TermVectorOptions::PositionsAndOffsets.has_offsets());
+        assert!(!TermVectorOptions::PositionsAndPayloads.has_offsets());
+        assert!(TermVectorOptions::PositionsOffsetsAndPayloads.has_offsets());
+    }
+
+    #[test]
+    fn term_vector_options_has_payloads() {
+        assert!(!TermVectorOptions::Terms.has_payloads());
+        assert!(!TermVectorOptions::Positions.has_payloads());
+        assert!(!TermVectorOptions::Offsets.has_payloads());
+        assert!(!TermVectorOptions::PositionsAndOffsets.has_payloads());
+        assert!(TermVectorOptions::PositionsAndPayloads.has_payloads());
+        assert!(TermVectorOptions::PositionsOffsetsAndPayloads.has_payloads());
+    }
+
+    // -----------------------------------------------------------------------
+    // Text field + term vectors builder tests (rows 10-12)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn text_field_with_term_vectors_not_stored() {
+        let field = text("body")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("hello world");
+        assert_eq!(field.name(), "body");
+        assert_none!(field.field_type().stored());
+        assert!(field.field_type().is_tokenized());
+        assert!(field.field_type().has_norms());
+        assert_eq!(
+            field.field_type().term_vector_options(),
+            Some(TermVectorOptions::PositionsAndOffsets)
+        );
+        assert_eq!(
+            field.field_type().index_options(),
+            IndexOptions::DocsAndFreqsAndPositions
+        );
+    }
+
+    #[test]
+    fn text_field_with_term_vectors_stored() {
+        let field = text("body")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .stored()
+            .value("hello world");
+        assert_eq!(field.name(), "body");
+        assert!(field.field_type().stored().is_some());
+        assert!(field.field_type().is_tokenized());
+        assert_eq!(
+            field.field_type().term_vector_options(),
+            Some(TermVectorOptions::PositionsAndOffsets)
+        );
+    }
+
+    #[test]
+    fn text_field_with_term_vectors_reader() {
+        let field = text("body")
+            .with_term_vectors(TermVectorOptions::Positions)
+            .reader(Cursor::new(b"streaming".to_vec()));
+        assert_eq!(field.name(), "body");
+        assert_none!(field.field_type().stored());
+        assert!(field.field_type().is_tokenized());
+        assert_eq!(
+            field.field_type().term_vector_options(),
+            Some(TermVectorOptions::Positions)
+        );
+    }
+
+    #[test]
+    fn text_field_without_term_vectors_returns_none() {
+        let field = text("body").value("hello");
+        assert_none!(field.field_type().term_vector_options());
+    }
+
+    #[test]
+    fn text_field_stored_without_term_vectors_returns_none() {
+        let field = text("body").stored().value("hello");
+        assert_none!(field.field_type().term_vector_options());
+    }
+
+    #[test]
+    fn non_tokenized_fields_have_no_term_vectors() {
+        let string_f = string("s").value("x");
+        assert_none!(string_f.field_type().term_vector_options());
+
+        let keyword_f = keyword("k").value("x");
+        assert_none!(keyword_f.field_type().term_vector_options());
+
+        let feature_f = feature("f").value("s", 1.0);
+        assert_none!(feature_f.field_type().term_vector_options());
+
+        let stored_f = stored("s").string("x");
+        assert_none!(stored_f.field_type().term_vector_options());
+
+        let dv_f = numeric_dv("n").value(1);
+        assert_none!(dv_f.field_type().term_vector_options());
+
+        let point_f = int_field("i").value(1);
+        assert_none!(point_f.field_type().term_vector_options());
+    }
+
+    #[test]
+    fn text_field_all_term_vector_options() {
+        for tv in [
+            TermVectorOptions::Terms,
+            TermVectorOptions::Positions,
+            TermVectorOptions::Offsets,
+            TermVectorOptions::PositionsAndOffsets,
+            TermVectorOptions::PositionsAndPayloads,
+            TermVectorOptions::PositionsOffsetsAndPayloads,
+        ] {
+            let field = text("body").with_term_vectors(tv).value("test");
+            assert_eq!(field.field_type().term_vector_options(), Some(tv));
+        }
     }
 }

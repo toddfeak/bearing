@@ -5,7 +5,7 @@ use std::fmt;
 use std::io;
 
 use crate::document::{DocValuesType, IndexOptions};
-use crate::newindex::field::FieldType;
+use crate::newindex::field::{FieldType, TermVectorOptions};
 
 /// Captures the structural identity of a field type for conflict detection.
 ///
@@ -19,6 +19,7 @@ struct FieldShape {
     has_norms: bool,
     doc_values_type: DocValuesType,
     has_points: bool,
+    term_vectors: Option<TermVectorOptions>,
 }
 
 impl FieldShape {
@@ -29,6 +30,7 @@ impl FieldShape {
             has_norms: ft.has_norms(),
             doc_values_type: ft.doc_values_type(),
             has_points: ft.points().is_some(),
+            term_vectors: ft.term_vector_options(),
         }
     }
 }
@@ -181,5 +183,33 @@ mod tests {
         let t = text("body").reader(Cursor::new(b"y".to_vec()));
         let result = reg.get_or_register("body", t.field_type());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn text_with_vs_without_term_vectors_conflicts() {
+        let mut reg = FieldInfoRegistry::new();
+        let without_tv = text("body").value("a");
+        reg.get_or_register("body", without_tv.field_type())
+            .unwrap();
+
+        let with_tv = text("body")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("b");
+        let result = reg.get_or_register("body", with_tv.field_type());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn same_term_vectors_does_not_conflict() {
+        let mut reg = FieldInfoRegistry::new();
+        let f1 = text("body")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("a");
+        let f2 = text("body")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("b");
+        reg.get_or_register("body", f1.field_type()).unwrap();
+        let n = reg.get_or_register("body", f2.field_type()).unwrap();
+        assert_eq!(n, 0);
     }
 }
