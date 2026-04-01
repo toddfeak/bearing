@@ -18,7 +18,7 @@ use crate::newindex::segment_context::SegmentContext;
 
 /// Accumulates per-document term vector data during indexing and writes
 /// `.tvd`/`.tvx`/`.tvm` files at flush time via the DEBT codec copy.
-#[derive(Default)]
+#[derive(Default, mem_dbg::MemSize)]
 pub struct TermVectorsConsumer {
     /// Completed term vector documents, in document order.
     /// Only includes documents that have at least one TV field.
@@ -30,6 +30,7 @@ pub struct TermVectorsConsumer {
 }
 
 /// Accumulation state for a single field within a single document.
+#[derive(mem_dbg::MemSize)]
 struct TvFieldAccum {
     field_number: u32,
     has_positions: bool,
@@ -42,6 +43,7 @@ struct TvFieldAccum {
 }
 
 /// Accumulation state for a single term within a field.
+#[derive(mem_dbg::MemSize)]
 struct TvTermAccum {
     freq: i32,
     positions: Vec<i32>,
@@ -54,19 +56,6 @@ impl fmt::Debug for TermVectorsConsumer {
         f.debug_struct("TermVectorsConsumer")
             .field("doc_count", &self.docs.len())
             .finish()
-    }
-}
-
-impl mem_dbg::MemSize for TermVectorsConsumer {
-    fn mem_size_rec(
-        &self,
-        flags: mem_dbg::SizeFlags,
-        refs: &mut mem_dbg::HashMap<usize, usize>,
-    ) -> usize {
-        let docs_bytes: usize = self.docs.iter().map(|d| d.mem_size_rec(flags, refs)).sum();
-        let current_fields_bytes =
-            self.current_fields.capacity() * std::mem::size_of::<TermVectorField>();
-        docs_bytes + current_fields_bytes
     }
 }
 
@@ -354,10 +343,10 @@ mod tests {
     }
 
     #[test]
-    fn mem_size_empty_is_zero() {
+    fn mem_size_empty_is_small() {
         use mem_dbg::{MemSize, SizeFlags};
         let consumer = TermVectorsConsumer::new();
-        assert_eq!(consumer.mem_size(SizeFlags::CAPACITY), 0);
+        assert_lt!(consumer.mem_size(SizeFlags::CAPACITY), 200);
     }
 
     #[test]

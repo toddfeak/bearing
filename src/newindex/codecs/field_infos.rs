@@ -21,7 +21,7 @@ const EXTENSION: &str = "fnm";
 
 /// Per-field metadata for writing the .fnm file.
 // DEBT: parallel to index::FieldInfo — merge after switchover
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, mem_dbg::MemSize)]
 pub(crate) struct FieldInfo {
     pub name: String,
     pub number: u32,

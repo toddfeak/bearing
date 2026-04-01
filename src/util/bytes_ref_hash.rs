@@ -19,6 +19,7 @@ pub const DEFAULT_CAPACITY: usize = 16;
 ///
 /// Each unique byte sequence gets an ID starting at 0. The bytes are stored
 /// length-prefixed in the pool (1 byte for lengths < 128, 2 bytes otherwise).
+#[derive(mem_dbg::MemSize)]
 pub struct BytesRefHash {
     pool: ByteBlockPool<DirectAllocator>,
     bytes_start: Vec<i32>,

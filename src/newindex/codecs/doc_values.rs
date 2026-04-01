@@ -24,6 +24,7 @@ use crate::util::string_helper;
 
 /// Per-field doc values accumulation state.
 // DEBT: parallel to index::indexing_chain::DocValuesAccumulator
+#[derive(mem_dbg::MemSize)]
 pub(crate) enum DocValuesAccumulator {
     #[expect(dead_code)]
     None,

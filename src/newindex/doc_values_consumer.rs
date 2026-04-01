@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::mem::size_of;
 
 use crate::document::DocValuesType;
 use crate::newindex::analyzer::Token;
@@ -16,6 +15,7 @@ use crate::newindex::segment_context::SegmentContext;
 use crate::util::BytesRef;
 
 /// Per-field state for accumulating doc values during indexing.
+#[derive(mem_dbg::MemSize)]
 struct PerFieldState {
     field_name: String,
     accumulator: DocValuesAccumulator,
@@ -30,42 +30,11 @@ impl std::fmt::Debug for PerFieldState {
 }
 
 /// Buffers doc values per field and flushes them as Lucene90 doc values files.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, mem_dbg::MemSize)]
 pub struct DocValuesConsumer {
     /// field_id → per-field accumulation state
     fields: HashMap<u32, PerFieldState>,
     current_doc_id: i32,
-}
-
-impl mem_dbg::MemSize for DocValuesConsumer {
-    fn mem_size_rec(
-        &self,
-        _flags: mem_dbg::SizeFlags,
-        _refs: &mut mem_dbg::HashMap<usize, usize>,
-    ) -> usize {
-        self.fields
-            .values()
-            .map(|pf| {
-                pf.field_name.capacity()
-                    + match &pf.accumulator {
-                        DocValuesAccumulator::None => 0,
-                        DocValuesAccumulator::Numeric(v) => v.capacity() * size_of::<(i32, i64)>(),
-                        DocValuesAccumulator::Binary(v) => {
-                            v.capacity() * size_of::<(i32, Vec<u8>)>()
-                        }
-                        DocValuesAccumulator::Sorted(v) => {
-                            v.capacity() * size_of::<(i32, BytesRef)>()
-                        }
-                        DocValuesAccumulator::SortedNumeric(v) => {
-                            v.capacity() * size_of::<(i32, Vec<i64>)>()
-                        }
-                        DocValuesAccumulator::SortedSet(v) => {
-                            v.capacity() * size_of::<(i32, Vec<BytesRef>)>()
-                        }
-                    }
-            })
-            .sum()
-    }
 }
 
 impl DocValuesConsumer {
@@ -414,10 +383,10 @@ mod tests {
     }
 
     #[test]
-    fn mem_size_empty_is_zero() {
+    fn mem_size_empty_is_small() {
         use mem_dbg::{MemSize, SizeFlags};
         let consumer = DocValuesConsumer::new();
-        assert_eq!(consumer.mem_size(SizeFlags::CAPACITY), 0);
+        assert_lt!(consumer.mem_size(SizeFlags::CAPACITY), 200);
     }
 
     #[test]

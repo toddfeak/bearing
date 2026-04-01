@@ -18,7 +18,7 @@ use crate::newindex::segment_context::SegmentContext;
 
 /// Tracks field metadata from `start_field` calls and writes the `.fnm`
 /// file at flush time.
-#[derive(Default)]
+#[derive(Default, mem_dbg::MemSize)]
 pub struct FieldInfosConsumer {
     fields: HashMap<u32, FieldInfo>,
 }
@@ -28,16 +28,6 @@ impl fmt::Debug for FieldInfosConsumer {
         f.debug_struct("FieldInfosConsumer")
             .field("field_count", &self.fields.len())
             .finish()
-    }
-}
-
-impl mem_dbg::MemSize for FieldInfosConsumer {
-    fn mem_size_rec(
-        &self,
-        _flags: mem_dbg::SizeFlags,
-        _refs: &mut mem_dbg::HashMap<usize, usize>,
-    ) -> usize {
-        std::mem::size_of::<Self>()
     }
 }
 

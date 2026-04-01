@@ -56,7 +56,7 @@ const DAY_ENCODING: u8 = 0xC0;
 
 /// Per-document stored field data.
 // DEBT: parallel to index::indexing_chain::StoredDoc — merge after switchover
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, mem_dbg::MemSize)]
 pub(crate) struct StoredDoc {
     pub fields: Vec<(u32, StoredValue)>,
 }

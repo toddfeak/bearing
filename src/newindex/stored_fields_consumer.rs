@@ -4,7 +4,6 @@
 
 use std::io;
 use std::mem;
-use std::mem::size_of;
 
 use crate::document::StoredValue as CodecStoredValue;
 use crate::newindex::analyzer::Token;
@@ -29,23 +28,10 @@ fn to_codec_stored_value(sv: &StoredValue) -> CodecStoredValue {
 
 /// Buffers stored field values per document and flushes them as
 /// compressed stored fields files via the codec writer.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, mem_dbg::MemSize)]
 pub struct StoredFieldsConsumer {
     docs: Vec<StoredDoc>,
     current_doc_fields: Vec<(u32, CodecStoredValue)>,
-}
-
-impl mem_dbg::MemSize for StoredFieldsConsumer {
-    fn mem_size_rec(
-        &self,
-        _flags: mem_dbg::SizeFlags,
-        _refs: &mut mem_dbg::HashMap<usize, usize>,
-    ) -> usize {
-        let docs_bytes = self.docs.capacity() * size_of::<StoredDoc>();
-        let current_bytes =
-            self.current_doc_fields.capacity() * size_of::<(u32, CodecStoredValue)>();
-        docs_bytes + current_bytes
-    }
 }
 
 impl StoredFieldsConsumer {
@@ -208,10 +194,11 @@ mod tests {
     }
 
     #[test]
-    fn mem_size_empty_is_zero() {
+    fn mem_size_empty_is_small() {
         use mem_dbg::{MemSize, SizeFlags};
         let consumer = StoredFieldsConsumer::new();
-        assert_eq!(consumer.mem_size(SizeFlags::CAPACITY), 0);
+        // Derived MemSize includes size_of::<Self>() for the stack portion.
+        assert_lt!(consumer.mem_size(SizeFlags::CAPACITY), 200);
     }
 
     #[test]

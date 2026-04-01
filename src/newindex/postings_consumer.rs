@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::mem::size_of;
 
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::document::IndexOptions;
@@ -26,6 +25,7 @@ use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
 /// and writes them at flush time via the block tree + postings codecs.
 ///
 /// Owns shared byte pools that all per-field states write into.
+#[derive(mem_dbg::MemSize)]
 pub struct PostingsConsumer {
     /// field_id → per-field postings state
     per_field: HashMap<u32, PerFieldState>,
@@ -38,6 +38,7 @@ pub struct PostingsConsumer {
 }
 
 /// Per-field state tracked by PostingsConsumer.
+#[derive(mem_dbg::MemSize)]
 struct PerFieldState {
     postings: PerFieldPostings,
     field_name: String,
@@ -53,26 +54,6 @@ impl fmt::Debug for PostingsConsumer {
         f.debug_struct("PostingsConsumer")
             .field("field_count", &self.per_field.len())
             .finish()
-    }
-}
-
-impl mem_dbg::MemSize for PostingsConsumer {
-    fn mem_size_rec(
-        &self,
-        _flags: mem_dbg::SizeFlags,
-        _refs: &mut mem_dbg::HashMap<usize, usize>,
-    ) -> usize {
-        let pools = self.byte_pool.ram_bytes_used() + self.positions_pool.ram_bytes_used();
-        let per_field: usize = self
-            .per_field
-            .values()
-            .map(|pf| {
-                pf.postings.ram_bytes_used()
-                    + pf.field_name.capacity()
-                    + pf.active_term_ids.capacity() * size_of::<usize>()
-            })
-            .sum();
-        pools + per_field
     }
 }
 

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 ///    [`NormsConsumer`](super::norms_consumer::NormsConsumer) are stored
 ///    here so that the postings consumer can build `NormsLookup` at flush
 ///    time for competitive impact encoding.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, mem_dbg::MemSize)]
 pub struct SegmentAccumulator {
     /// field_id → per-field norms data
     norms: HashMap<u32, PerFieldNormsData>,
@@ -33,7 +33,7 @@ pub struct SegmentAccumulator {
 /// Written by `NormsConsumer` in `finish_field`, read by both
 /// `NormsConsumer` (at flush for .nvm/.nvd writing) and
 /// `PostingsConsumer` (at flush for competitive impact encoding).
-#[derive(Debug)]
+#[derive(Debug, mem_dbg::MemSize)]
 pub struct PerFieldNormsData {
     /// Field name (for debug logging and codec writing).
     pub field_name: String,
@@ -41,23 +41,6 @@ pub struct PerFieldNormsData {
     pub docs: Vec<i32>,
     /// Norm values, parallel with `docs`.
     pub values: Vec<i64>,
-}
-
-impl mem_dbg::MemSize for SegmentAccumulator {
-    fn mem_size_rec(
-        &self,
-        _flags: mem_dbg::SizeFlags,
-        _refs: &mut mem_dbg::HashMap<usize, usize>,
-    ) -> usize {
-        self.norms
-            .values()
-            .map(|n| {
-                n.field_name.capacity()
-                    + n.docs.capacity() * std::mem::size_of::<i32>()
-                    + n.values.capacity() * std::mem::size_of::<i64>()
-            })
-            .sum()
-    }
 }
 
 impl SegmentAccumulator {
@@ -106,9 +89,9 @@ mod tests {
     use mem_dbg::{MemSize, SizeFlags};
 
     #[test]
-    fn mem_size_empty_is_zero() {
+    fn mem_size_empty_is_small() {
         let acc = SegmentAccumulator::new();
-        assert_eq!(acc.mem_size(SizeFlags::CAPACITY), 0);
+        assert_lt!(acc.mem_size(SizeFlags::CAPACITY), 200);
     }
 
     #[test]

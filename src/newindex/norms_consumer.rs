@@ -20,21 +20,12 @@ use crate::util::small_float;
 /// consumers (e.g., postings) can access them at flush time.
 /// At flush time, reads norms from the accumulator and writes `.nvm`
 /// and `.nvd` via the norms codec.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, mem_dbg::MemSize)]
+#[mem_size_flat]
 pub struct NormsConsumer {
     current_token_count: i32,
     current_has_norms: bool,
     current_doc_id: i32,
-}
-
-impl mem_dbg::MemSize for NormsConsumer {
-    fn mem_size_rec(
-        &self,
-        _flags: mem_dbg::SizeFlags,
-        _refs: &mut mem_dbg::HashMap<usize, usize>,
-    ) -> usize {
-        std::mem::size_of::<Self>()
-    }
 }
 
 impl NormsConsumer {

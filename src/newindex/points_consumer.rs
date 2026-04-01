@@ -14,6 +14,7 @@ use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
 
 /// Per-field state for accumulating point values during indexing.
+#[derive(mem_dbg::MemSize)]
 struct PerFieldState {
     field_name: String,
     field_number: u32,
@@ -33,27 +34,11 @@ impl fmt::Debug for PerFieldState {
 }
 
 /// Buffers point values per field and flushes them as BKD tree files.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, mem_dbg::MemSize)]
 pub struct PointsConsumer {
     /// field_id → per-field accumulation state
     fields: HashMap<u32, PerFieldState>,
     current_doc_id: i32,
-}
-
-impl mem_dbg::MemSize for PointsConsumer {
-    fn mem_size_rec(
-        &self,
-        _flags: mem_dbg::SizeFlags,
-        _refs: &mut mem_dbg::HashMap<usize, usize>,
-    ) -> usize {
-        self.fields
-            .values()
-            .map(|pf| {
-                pf.field_name.capacity()
-                    + pf.points.capacity() * std::mem::size_of::<(i32, Vec<u8>)>()
-            })
-            .sum()
-    }
 }
 
 impl PointsConsumer {
@@ -309,10 +294,10 @@ mod tests {
     }
 
     #[test]
-    fn mem_size_empty_is_zero() {
+    fn mem_size_empty_is_small() {
         use mem_dbg::{MemSize, SizeFlags};
         let consumer = PointsConsumer::new();
-        assert_eq!(consumer.mem_size(SizeFlags::CAPACITY), 0);
+        assert_lt!(consumer.mem_size(SizeFlags::CAPACITY), 200);
     }
 
     #[test]
