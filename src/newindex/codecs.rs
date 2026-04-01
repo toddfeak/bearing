@@ -15,3 +15,4 @@ pub(crate) mod postings_writer;
 pub(crate) mod segment_info;
 pub(crate) mod segment_infos;
 pub(crate) mod stored_fields;
+pub(crate) mod term_vectors;

@@ -25,6 +25,7 @@ const EXTENSION: &str = "fnm";
 pub(crate) struct FieldInfo {
     pub name: String,
     pub number: u32,
+    pub store_term_vectors: bool,
     pub has_norms: bool,
     pub index_options: u8,
     pub doc_values_type: DocValuesType,
@@ -99,6 +100,9 @@ pub(crate) fn write(
         //   0x02 = OMIT_NORMS
         //   0x04 = STORE_PAYLOADS
         let mut bits: u8 = 0;
+        if fi.store_term_vectors {
+            bits |= 0b0000_0001; // STORE_TERMVECTOR
+        }
         if !fi.has_norms {
             bits |= 0b0000_0010; // OMIT_NORMS
         }
@@ -173,6 +177,7 @@ mod tests {
         FieldInfo {
             name: name.to_string(),
             number,
+            store_term_vectors: false,
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::None,
@@ -186,6 +191,7 @@ mod tests {
         FieldInfo {
             name: name.to_string(),
             number,
+            store_term_vectors: false,
             has_norms: true,
             index_options: 3, // DocsAndFreqsAndPositions
             doc_values_type: DocValuesType::None,
@@ -282,6 +288,7 @@ mod tests {
         let fields = vec![FieldInfo {
             name: "body".to_string(),
             number: 0,
+            store_term_vectors: false,
             has_norms: true,
             index_options: 3,
             doc_values_type: DocValuesType::None,
@@ -337,6 +344,7 @@ mod tests {
         let fis = FieldInfos::new(vec![FieldInfo {
             name: "count".to_string(),
             number: 0,
+            store_term_vectors: false,
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::Numeric,
@@ -365,6 +373,7 @@ mod tests {
         let fis = FieldInfos::new(vec![FieldInfo {
             name: "tags".to_string(),
             number: 0,
+            store_term_vectors: false,
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::SortedSet,
@@ -389,6 +398,7 @@ mod tests {
         let fis = FieldInfos::new(vec![FieldInfo {
             name: "vals".to_string(),
             number: 0,
+            store_term_vectors: false,
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::SortedNumeric,
@@ -413,6 +423,7 @@ mod tests {
         let fis = FieldInfos::new(vec![FieldInfo {
             name: "count".to_string(),
             number: 0,
+            store_term_vectors: false,
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::SortedNumeric,

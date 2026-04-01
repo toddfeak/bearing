@@ -14,7 +14,8 @@ use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
 use bearing::newindex::field::{
-    binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored, string, text,
+    TermVectorOptions, binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored,
+    string, text,
 };
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::MemoryDirectory;
@@ -683,5 +684,103 @@ fn dv_multi_segment() {
     for seg in &segments {
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".dvm"));
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".dvd"));
+    }
+}
+
+// --- Term vectors tests ---
+
+fn add_tv_docs_from_testdata(writer: &IndexWriter) {
+    let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
+    for entry in fs::read_dir(&docs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let contents = fs::read_to_string(&path).unwrap();
+        let doc = DocumentBuilder::new()
+            .add_field(stored("path").string(&name))
+            .add_field(
+                text("contents")
+                    .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+                    .stored()
+                    .value(contents),
+            )
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+}
+
+#[test]
+fn term_vectors_produce_tvd_tvx_tvm_files() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    add_tv_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tvd"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tvx"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tvm"));
+}
+
+#[test]
+fn term_vectors_multi_segment() {
+    let config = IndexWriterConfig {
+        max_buffered_docs: 2,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+
+    add_tv_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 2);
+
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvd"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvx"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvm"));
+    }
+}
+
+#[test]
+fn term_vectors_compound() {
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+
+    add_tv_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfs"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfe"));
+}
+
+#[test]
+fn term_vectors_multi_thread() {
+    let config = IndexWriterConfig {
+        num_threads: 2,
+        max_buffered_docs: 2,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+
+    add_tv_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 4);
+
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvd"));
     }
 }

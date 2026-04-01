@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DEBT: Limited copy of compare_index_perf.sh for the newindex pipeline.
-# Uses IndexNewindex (Java) and newindex_demo (Rust) with the same field subset.
+# Uses IndexAllFields (Java) and newindex_demo (Rust) with the same field subset.
 # As newindex gains field types, this script should grow to match compare_index_perf.sh.
 
 set -euo pipefail
@@ -14,7 +14,7 @@ set -euo pipefail
 #   --debug        Build Rust in debug mode (default: release)
 #   --threads N    Thread count for multi-threaded runs (default: 12)
 #   --1t           Also run single-threaded (1T) for both Java and Rust
-#   --no-verify    Skip VerifyNewindex validation
+#   --no-verify    Skip VerifyIndex validation
 #   --compound     Use compound file format (.cfs/.cfe)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -199,8 +199,8 @@ echo ""
 
 # --- 1T runs (optional) ---
 if [[ -n "$RUN_1T" ]]; then
-    run_index "JAVA IndexNewindex (1 thread)" \
-        "$GRADLE indexNewindex --quiet -PdocsDir=$DOCS_DIR -PindexDir=$JAVA_1T_INDEX -Pthreads=1 $JAVA_COMPOUND_FLAG" \
+    run_index "JAVA IndexAllFields (1 thread)" \
+        "$GRADLE indexAllFields --quiet -PdocsDir=$DOCS_DIR -PindexDir=$JAVA_1T_INDEX -Pthreads=1 $JAVA_COMPOUND_FLAG" \
         "$JAVA_1T_INDEX"
     JAVA_1T_MS=$_TIME_MS; JAVA_1T_RSS_KB=$_PEAK_RSS_KB
     JAVA_1T_TOTAL=$_INDEX_TOTAL; JAVA_1T_FC=$_INDEX_FILE_COUNT
@@ -213,8 +213,8 @@ if [[ -n "$RUN_1T" ]]; then
 fi
 
 # --- MT runs (always) ---
-run_index "JAVA IndexNewindex ($MT_THREADS threads)" \
-    "$GRADLE indexNewindex --quiet -PdocsDir=$DOCS_DIR -PindexDir=$JAVA_MT_INDEX -Pthreads=$MT_THREADS $JAVA_COMPOUND_FLAG" \
+run_index "JAVA IndexAllFields ($MT_THREADS threads)" \
+    "$GRADLE indexAllFields --quiet -PdocsDir=$DOCS_DIR -PindexDir=$JAVA_MT_INDEX -Pthreads=$MT_THREADS $JAVA_COMPOUND_FLAG" \
     "$JAVA_MT_INDEX"
 JAVA_MT_MS=$_TIME_MS; JAVA_MT_RSS_KB=$_PEAK_RSS_KB
 JAVA_MT_TOTAL=$_INDEX_TOTAL; JAVA_MT_FC=$_INDEX_FILE_COUNT
@@ -225,7 +225,7 @@ run_index "RUST newindex_demo ($BUILD_MODE, $MT_THREADS threads)" \
 RUST_MT_MS=$_TIME_MS; RUST_MT_RSS_KB=$_PEAK_RSS_KB
 RUST_MT_TOTAL=$_INDEX_TOTAL; RUST_MT_FC=$_INDEX_FILE_COUNT
 
-# --- VerifyNewindex ---
+# --- VerifyIndex ---
 if [[ -n "$VERIFY" ]]; then
     VERIFY_TARGETS=()
     if [[ -n "$RUN_1T" ]]; then
@@ -236,9 +236,9 @@ if [[ -n "$VERIFY" ]]; then
         label="${label_dir%%:*}"
         dir="${label_dir#*:}"
         echo "========================================"
-        echo "  VerifyNewindex on $label index"
+        echo "  VerifyIndex on $label index"
         echo "========================================"
-        $GRADLE verifyNewindex --quiet -PindexDir="$dir" -PdocCount="$DOC_COUNT" 2>&1
+        $GRADLE verifyIndex --quiet -PindexDir="$dir" -PdocCount="$DOC_COUNT" 2>&1
         echo ""
     done
 fi

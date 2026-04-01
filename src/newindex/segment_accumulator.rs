@@ -24,6 +24,8 @@ use std::collections::HashMap;
 pub struct SegmentAccumulator {
     /// field_id → per-field norms data
     norms: HashMap<u32, PerFieldNormsData>,
+    /// Total documents processed in this segment.
+    doc_count: i32,
 }
 
 /// Per-field norms accumulated during document processing.
@@ -67,5 +69,15 @@ impl SegmentAccumulator {
     /// Returns the accumulated norms data for all fields.
     pub fn norms(&self) -> &HashMap<u32, PerFieldNormsData> {
         &self.norms
+    }
+
+    /// Increments the document count by one.
+    pub fn increment_doc_count(&mut self) {
+        self.doc_count += 1;
+    }
+
+    /// Returns the total number of documents processed.
+    pub fn doc_count(&self) -> i32 {
+        self.doc_count
     }
 }

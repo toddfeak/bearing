@@ -27,4 +27,5 @@ pub mod segment_infos;
 pub mod segment_worker;
 pub mod standard_analyzer;
 pub mod stored_fields_consumer;
+pub mod term_vectors_consumer;
 pub mod writer;

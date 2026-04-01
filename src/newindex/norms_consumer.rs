@@ -25,7 +25,6 @@ pub struct NormsConsumer {
     current_token_count: i32,
     current_has_norms: bool,
     current_doc_id: i32,
-    doc_count: i32,
 }
 
 impl NormsConsumer {
@@ -94,7 +93,6 @@ impl FieldConsumer for NormsConsumer {
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()> {
-        self.doc_count += 1;
         Ok(())
     }
 
@@ -126,7 +124,7 @@ impl FieldConsumer for NormsConsumer {
             "",
             &context.segment_id,
             &fields,
-            self.doc_count,
+            accumulator.doc_count(),
         )
     }
 }
@@ -183,6 +181,7 @@ mod tests {
             consumer.start_document(doc_id).unwrap();
             process_tokenized_field(&mut consumer, 0, &field, count, &mut acc);
             consumer.finish_document(doc_id, &mut acc).unwrap();
+            acc.increment_doc_count();
         }
 
         let ctx = test_context();
@@ -202,6 +201,7 @@ mod tests {
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
         consumer.finish_document(0, &mut acc).unwrap();
+        acc.increment_doc_count();
 
         let ctx = test_context();
         let names = consumer.flush(&ctx, &acc).unwrap();
@@ -218,10 +218,12 @@ mod tests {
         consumer.start_document(0).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 3, &mut acc);
         consumer.finish_document(0, &mut acc).unwrap();
+        acc.increment_doc_count();
 
         consumer.start_document(1).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 0, &mut acc);
         consumer.finish_document(1, &mut acc).unwrap();
+        acc.increment_doc_count();
 
         let ctx = test_context();
         let names = consumer.flush(&ctx, &acc).unwrap();
@@ -238,10 +240,12 @@ mod tests {
         consumer.start_document(0).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 5, &mut acc);
         consumer.finish_document(0, &mut acc).unwrap();
+        acc.increment_doc_count();
 
         consumer.start_document(1).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 3, &mut acc);
         consumer.finish_document(1, &mut acc).unwrap();
+        acc.increment_doc_count();
 
         let norms = acc.norms();
         assert_len_eq_x!(norms, 1); // one field

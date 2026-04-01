@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// DEBT: Limited copy of indexfiles.rs adapted for the newindex pipeline.
-// Only supports the field types newindex currently handles (stored + text).
-// As newindex gains field types, this binary should grow to match indexfiles.
+// DEBT: Copy of indexfiles.rs adapted for the newindex pipeline.
+// Field-for-field parity with indexfiles — replaces it after switchover.
 
 use std::env;
 use std::fs::{self, File};
@@ -14,9 +13,9 @@ use std::time::Instant;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
 use bearing::newindex::field::{
-    binary_dv, double_field, double_range, feature, float_field, float_range, int_field, int_range,
-    keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv, sorted_numeric_dv,
-    sorted_set_dv, stored, string, text,
+    TermVectorOptions, binary_dv, double_field, double_range, feature, float_field, float_range,
+    int_field, int_range, keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv,
+    sorted_numeric_dv, sorted_set_dv, stored, string, text,
 };
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
@@ -193,8 +192,6 @@ fn main() {
 }
 
 /// Creates a Document from a file path, matching indexfiles make_document.
-///
-/// DEBT: "contents" uses text without term vectors — needs Phase 8 (TermVectorsConsumer).
 fn make_document(path: &Path) -> bearing::newindex::document::Document {
     let path_str = path.to_string_lossy().to_string();
     let file_name = path
@@ -215,10 +212,13 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    // DEBT: indexfiles uses text_field_reader_with_term_vectors — needs Phase 8
     let contents_field = match File::open(path) {
-        Ok(file) => text("contents").reader(BufReader::new(file)),
-        Err(_) => text("contents").reader(io::empty()),
+        Ok(file) => text("contents")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .reader(BufReader::new(file)),
+        Err(_) => text("contents")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .reader(io::empty()),
     };
 
     let lat = 40.7128 + (file_size % 10) as f64 * 0.01;

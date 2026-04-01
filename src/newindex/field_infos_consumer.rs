@@ -72,6 +72,7 @@ impl FieldConsumer for FieldInfosConsumer {
         self.fields.entry(field_id).or_insert_with(|| FieldInfo {
             name: field.name().to_string(),
             number: field_id,
+            store_term_vectors: field.field_type().term_vector_options().is_some(),
             has_norms: field.field_type().has_norms(),
             index_options: field.field_type().index_options() as u8,
             doc_values_type: field.field_type().doc_values_type(),

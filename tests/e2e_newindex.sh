@@ -4,7 +4,7 @@
 # E2E test for the newindex pipeline.
 #
 # Indexes real documents via the newindex_demo binary under various configurations,
-# then validates each with Java VerifyNewindex (content verification) and CheckIndex.
+# then validates each with Java VerifyIndex (content verification) and CheckIndex.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,12 +42,12 @@ run_scenario() {
         return
     fi
 
-    # Java VerifyNewindex validates content (stored fields, terms, norms)
-    if $GRADLE -q verifyNewindex -PindexDir="$idx_dir" -PdocCount="$DOC_COUNT" 2>&1; then
+    # Java VerifyIndex validates content (stored fields, terms, norms, etc.)
+    if $GRADLE -q verifyIndex -PindexDir="$idx_dir" -PdocCount="$DOC_COUNT" 2>&1; then
         echo "PASSED: $name"
         PASSED=$((PASSED + 1))
     else
-        echo "FAILED: $name — Java VerifyNewindex rejected the index"
+        echo "FAILED: $name — Java VerifyIndex rejected the index"
         FAILED=$((FAILED + 1))
     fi
 

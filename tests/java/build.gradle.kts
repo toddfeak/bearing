@@ -46,25 +46,6 @@ tasks.register<JavaExec>("indexAllFields") {
         (if (compound != null) listOf("--compound") else emptyList())
 }
 
-tasks.register<JavaExec>("indexNewindex") {
-    classpath = sourceSets["main"].runtimeClasspath
-    mainClass = "IndexNewindex"
-    val docsDir = project.findProperty("docsDir") as? String
-    val indexDir = project.findProperty("indexDir") as? String
-    val threads = project.findProperty("threads") as? String
-    val compound = project.findProperty("compound") as? String
-    args = listOfNotNull(docsDir, indexDir) +
-        (if (threads != null) listOf("--threads", threads) else emptyList()) +
-        (if (compound != null) listOf("--compound") else emptyList())
-}
-
-tasks.register<JavaExec>("verifyNewindex") {
-    classpath = sourceSets["main"].runtimeClasspath
-    mainClass = "VerifyNewindex"
-    val indexDir = project.findProperty("indexDir") as? String
-    val docCount = project.findProperty("docCount") as? String
-    args = listOfNotNull(indexDir, docCount)
-}
 
 tasks.register<JavaExec>("generateIndexSummary") {
     classpath = sourceSets["main"].runtimeClasspath

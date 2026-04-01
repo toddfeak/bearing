@@ -183,14 +183,18 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - `newindex_demo` now matches `indexfiles` field-for-field: `LongField` (modified), `IntField` (size), `FloatField` (score), `DoubleField` (rating), `LatLonPoint` (location), all four range fields. Only remaining DEBT: contents term vectors (Phase 8)
 - Java tooling updated: `IndexNewindex` adds matching point fields, `VerifyNewindex` checks point doc counts and dimensions
 
-### Phase 8: TermVectorsConsumer
+### Phase 8: TermVectorsConsumer ✓
 
-DEBT copy of term vectors writer, new `TermVectorsConsumer`, .fnm STORE_TERMVECTOR bit.
+**Complete.** Term vector writing for tokenized fields, validated by Java Lucene across single-segment, multi-segment, multi-thread, and compound file configurations.
 
-- DEBT copy of `src/codecs/lucene90/term_vectors.rs` → `src/newindex/codecs/term_vectors.rs`
-- `TermVectorsConsumer` implementing `FieldConsumer` — accumulates per-doc term/position/offset data during tokenization, flushes via DEBT writer producing `.tvd`/`.tvx`/`.tvm`
-- `.fnm` writer: add `store_term_vectors` to `FieldInfo`, set STORE_TERMVECTOR bit (0x01)
-- Demo: enable TV on "contents" field; Java: matching + TV verification
+**What was built:**
+- DEBT codec copy at `newindex/codecs/term_vectors.rs` (~1124 lines) with local `TermVectorDoc`/`TermVectorField`/`TermVectorTerm`/`OffsetBuffers` types
+- `TermVectorsConsumer` — a `FieldConsumer` that checks `term_vector_options()` in `start_field`, accumulates per-document term/position/offset data via `HashMap<String, TvTermAccum>`, sorts terms by byte order in `finish_field`, flushes via DEBT writer producing `.tvd`/`.tvx`/`.tvm`
+- `.fnm` writer: `FieldInfo` extended with `store_term_vectors`, STORE_TERMVECTOR bit (0x01) set correctly
+- `SegmentAccumulator` extended with `doc_count` — shared across all consumers, replacing per-consumer duplicates in NormsConsumer and PostingsConsumer
+- `newindex_demo` now matches `indexfiles` field-for-field: all field types including term vectors on "contents". No remaining DEBT comments.
+- Java tooling consolidated: `VerifyNewindex` and `IndexNewindex` retired — newindex has field-for-field parity with the old pipeline, so `VerifyIndex` and `IndexAllFields` are used directly
+- `e2e_golden.sh` expanded: newindex non-compound and compound scenarios added alongside Java and old-Rust, all producing identical golden summaries
 
 ### Phase 9: RAM-Based Flush Control
 
@@ -202,8 +206,7 @@ DEBT copy of term vectors writer, new `TermVectorsConsumer`, .fnm STORE_TERMVECT
 
 Full cross-validation against the existing indexing path.
 
-- Upgrade `VerifyNewindex` to match `VerifyIndex` check coverage
-- Golden summary comparison: new pipeline vs existing pipeline vs Java
+- Golden summary comparison: new pipeline vs existing pipeline vs Java ✓ (completed in Phase 8)
 - Impact verification (`VerifyImpacts`)
 - Performance comparison: new pipeline vs existing pipeline
 

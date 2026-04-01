@@ -17,6 +17,7 @@ use crate::newindex::segment_context::SegmentContext;
 use crate::newindex::segment_worker::SegmentWorker;
 use crate::newindex::standard_analyzer::StandardAnalyzer;
 use crate::newindex::stored_fields_consumer::StoredFieldsConsumer;
+use crate::newindex::term_vectors_consumer::TermVectorsConsumer;
 use crate::store::SharedDirectory;
 
 /// Creates workers with the standard set of field consumers.
@@ -52,7 +53,7 @@ impl WorkerFactory for DefaultWorkerFactory {
             Box::new(DocValuesConsumer::new()),
             Box::new(PointsConsumer::new()),
             Box::new(StoredFieldsConsumer::new()),
-            // TODO: TermVectorsConsumer goes here (Phase 8)
+            Box::new(TermVectorsConsumer::new()),
             Box::new(PostingsConsumer::new()),
             Box::new(FieldInfosConsumer::new()),
         ];

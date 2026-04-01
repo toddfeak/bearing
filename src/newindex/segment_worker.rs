@@ -197,6 +197,7 @@ impl SegmentWorker {
         }
 
         self.doc_count += 1;
+        self.accumulator.increment_doc_count();
 
         Ok(())
     }

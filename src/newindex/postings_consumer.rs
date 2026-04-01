@@ -34,7 +34,6 @@ pub struct PostingsConsumer {
     positions_pool: ByteBlockPool<DirectAllocator>,
     current_doc_id: i32,
     current_position: i32,
-    doc_count: i32,
 }
 
 /// Per-field state tracked by PostingsConsumer.
@@ -52,7 +51,6 @@ impl fmt::Debug for PostingsConsumer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostingsConsumer")
             .field("field_count", &self.per_field.len())
-            .field("doc_count", &self.doc_count)
             .finish()
     }
 }
@@ -71,7 +69,6 @@ impl PostingsConsumer {
             positions_pool,
             current_doc_id: 0,
             current_position: 0,
-            doc_count: 0,
         }
     }
 }
@@ -210,7 +207,6 @@ impl FieldConsumer for PostingsConsumer {
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()> {
-        self.doc_count += 1;
         Ok(())
     }
 
