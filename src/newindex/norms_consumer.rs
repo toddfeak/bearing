@@ -93,6 +93,7 @@ impl FieldConsumer for NormsConsumer {
         &mut self,
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
+        _context: &SegmentContext,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -173,6 +174,7 @@ mod tests {
 
     #[test]
     fn computes_norms_from_token_count() {
+        let context = test_context();
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = text("body").stored().value("ignored");
@@ -181,12 +183,14 @@ mod tests {
         for (doc_id, count) in [(0, 3), (1, 10), (2, 1)] {
             consumer.start_document(doc_id).unwrap();
             process_tokenized_field(&mut consumer, 0, &field, count, &mut acc);
-            consumer.finish_document(doc_id, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
             acc.increment_doc_count();
         }
 
-        let ctx = test_context();
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let context = test_context();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_len_eq_x!(&names, 2);
         assert_eq!(names[0], "_0.nvm");
         assert_eq!(names[1], "_0.nvd");
@@ -194,6 +198,7 @@ mod tests {
 
     #[test]
     fn non_tokenized_produces_no_files() {
+        let context = test_context();
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = stored("title").string("ignored");
@@ -201,16 +206,17 @@ mod tests {
         consumer.start_document(0).unwrap();
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
         acc.increment_doc_count();
 
-        let ctx = test_context();
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let context = test_context();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_is_empty!(&names);
     }
 
     #[test]
     fn zero_tokens_produces_no_norm_for_that_doc() {
+        let context = test_context();
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = text("body").stored().value("ignored");
@@ -218,34 +224,35 @@ mod tests {
         // Doc 0: 3 tokens (gets norm), Doc 1: 0 tokens (no norm)
         consumer.start_document(0).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 3, &mut acc);
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
         acc.increment_doc_count();
 
         consumer.start_document(1).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 0, &mut acc);
-        consumer.finish_document(1, &mut acc).unwrap();
+        consumer.finish_document(1, &mut acc, &context).unwrap();
         acc.increment_doc_count();
 
-        let ctx = test_context();
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let context = test_context();
+        let names = consumer.flush(&context, &acc).unwrap();
         // Should still write files (1 doc has norms)
         assert_len_eq_x!(&names, 2);
     }
 
     #[test]
     fn norms_stored_in_accumulator() {
+        let context = test_context();
         let mut consumer = NormsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = text("body").stored().value("ignored");
 
         consumer.start_document(0).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 5, &mut acc);
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
         acc.increment_doc_count();
 
         consumer.start_document(1).unwrap();
         process_tokenized_field(&mut consumer, 0, &field, 3, &mut acc);
-        consumer.finish_document(1, &mut acc).unwrap();
+        consumer.finish_document(1, &mut acc, &context).unwrap();
         acc.increment_doc_count();
 
         let norms = acc.norms();

@@ -106,6 +106,7 @@ impl FieldConsumer for FieldInfosConsumer {
         &mut self,
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
+        _context: &SegmentContext,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -146,7 +147,7 @@ mod tests {
 
     #[test]
     fn flush_produces_fnm_file() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = FieldInfosConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -154,15 +155,15 @@ mod tests {
         let f = stored("title").string("hello");
         consumer.start_field(0, &f, &mut acc).unwrap();
         consumer.finish_field(0, &f, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names, vec!["_0.fnm"]);
     }
 
     #[test]
     fn tracks_multiple_fields() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = FieldInfosConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -176,13 +177,13 @@ mod tests {
         consumer.start_field(1, &f2, &mut acc).unwrap();
         consumer.finish_field(1, &f2, &mut acc).unwrap();
 
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names, vec!["_0.fnm"]);
 
         // Verify file has content
-        let guard = ctx.directory.lock().unwrap();
+        let guard = context.directory.lock().unwrap();
         let data = guard.read_file("_0.fnm").unwrap();
 
         // Header magic
@@ -198,7 +199,7 @@ mod tests {
 
     #[test]
     fn deduplicates_same_field_across_docs() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = FieldInfosConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -207,13 +208,15 @@ mod tests {
             let f = stored("title").string(format!("t{doc_id}"));
             consumer.start_field(0, &f, &mut acc).unwrap();
             consumer.finish_field(0, &f, &mut acc).unwrap();
-            consumer.finish_document(doc_id, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
         }
 
         // Should only have 1 field registered despite 3 documents
         assert_eq!(consumer.fields.len(), 1);
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names, vec!["_0.fnm"]);
     }
 

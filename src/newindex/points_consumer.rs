@@ -135,6 +135,7 @@ impl FieldConsumer for PointsConsumer {
         &mut self,
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
+        _context: &SegmentContext,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -197,17 +198,17 @@ mod tests {
 
     #[test]
     fn no_point_fields_produces_no_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PointsConsumer::new();
         let acc = SegmentAccumulator::new();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_is_empty!(&names);
     }
 
     #[test]
     fn int_field_produces_point_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PointsConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -216,10 +217,12 @@ mod tests {
             consumer.start_document(doc_id).unwrap();
             consumer.start_field(0, &field, &mut acc).unwrap();
             consumer.finish_field(0, &field, &mut acc).unwrap();
-            consumer.finish_document(doc_id, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
         }
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 3);
         assert!(names.iter().any(|n| n.ends_with(".kdd")));
         assert!(names.iter().any(|n| n.ends_with(".kdi")));
@@ -228,7 +231,7 @@ mod tests {
 
     #[test]
     fn lat_lon_field_produces_point_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PointsConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -236,9 +239,9 @@ mod tests {
         consumer.start_document(0).unwrap();
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 3);
     }
 
@@ -272,7 +275,7 @@ mod tests {
 
     #[test]
     fn multiple_point_fields() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PointsConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -286,9 +289,9 @@ mod tests {
         consumer.start_field(1, &f2, &mut acc).unwrap();
         consumer.finish_field(1, &f2, &mut acc).unwrap();
 
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         // One set of .kdd/.kdi/.kdm for all point fields in the segment
         assert_eq!(names.len(), 3);
     }
@@ -303,6 +306,7 @@ mod tests {
     #[test]
     fn mem_size_grows_with_point_fields() {
         use mem_dbg::{MemSize, SizeFlags};
+        let context = test_context();
         let mut consumer = PointsConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -311,7 +315,9 @@ mod tests {
             let field = int_field("size").value(doc_id * 100);
             consumer.start_field(0, &field, &mut acc).unwrap();
             consumer.finish_field(0, &field, &mut acc).unwrap();
-            consumer.finish_document(doc_id, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
         }
 
         assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 0);

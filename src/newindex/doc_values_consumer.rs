@@ -136,6 +136,7 @@ impl FieldConsumer for DocValuesConsumer {
         &mut self,
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
+        _context: &SegmentContext,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -206,7 +207,7 @@ mod tests {
 
     #[test]
     fn no_dv_fields_produces_no_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -214,15 +215,15 @@ mod tests {
         let field = stored("title").string("hello");
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert!(names.is_empty());
     }
 
     #[test]
     fn numeric_dv_produces_two_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -230,9 +231,9 @@ mod tests {
         let field = numeric_dv("count").value(42);
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 2);
         assert!(names[0].ends_with(".dvm"));
         assert!(names[1].ends_with(".dvd"));
@@ -240,7 +241,7 @@ mod tests {
 
     #[test]
     fn binary_dv_produces_two_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -248,15 +249,15 @@ mod tests {
         let field = binary_dv("payload").value(vec![1, 2, 3]);
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 2);
     }
 
     #[test]
     fn sorted_dv_produces_two_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -264,15 +265,15 @@ mod tests {
         let field = sorted_dv("category").value(b"sports".to_vec());
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 2);
     }
 
     #[test]
     fn sorted_set_dv_produces_two_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -280,15 +281,15 @@ mod tests {
         let field = sorted_set_dv("tags").value(vec![b"a".to_vec(), b"b".to_vec()]);
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 2);
     }
 
     #[test]
     fn sorted_numeric_dv_produces_two_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -296,15 +297,15 @@ mod tests {
         let field = sorted_numeric_dv("sizes").value(vec![10, 20, 30]);
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 2);
     }
 
     #[test]
     fn multiple_docs_accumulates() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -313,13 +314,15 @@ mod tests {
             let field = numeric_dv("count").value(doc_id as i64 * 10);
             consumer.start_field(0, &field, &mut acc).unwrap();
             consumer.finish_field(0, &field, &mut acc).unwrap();
-            consumer.finish_document(doc_id, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
         }
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 2);
 
-        let guard = ctx.directory.lock().unwrap();
+        let guard = context.directory.lock().unwrap();
         for name in &names {
             let data = guard.read_file(name).unwrap();
             assert!(!data.is_empty());
@@ -328,7 +331,7 @@ mod tests {
 
     #[test]
     fn multiple_dv_fields() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -342,15 +345,15 @@ mod tests {
         consumer.start_field(1, &f2, &mut acc).unwrap();
         consumer.finish_field(1, &f2, &mut acc).unwrap();
 
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 2);
     }
 
     #[test]
     fn non_dv_field_is_ignored() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -359,15 +362,15 @@ mod tests {
         let interest = consumer.start_field(0, &field, &mut acc).unwrap();
         assert_eq!(interest, TokenInterest::NoTokens);
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert!(names.is_empty());
     }
 
     #[test]
     fn file_names_use_per_field_suffix() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -375,9 +378,9 @@ mod tests {
         let field = numeric_dv("count").value(42);
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names[0], "_0_Lucene90_0.dvm");
         assert_eq!(names[1], "_0_Lucene90_0.dvd");
     }
@@ -392,6 +395,7 @@ mod tests {
     #[test]
     fn mem_size_grows_with_dv_fields() {
         use mem_dbg::{MemSize, SizeFlags};
+        let context = test_context();
         let mut consumer = DocValuesConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -400,7 +404,9 @@ mod tests {
             let field = numeric_dv("count").value(doc_id as i64);
             consumer.start_field(0, &field, &mut acc).unwrap();
             consumer.finish_field(0, &field, &mut acc).unwrap();
-            consumer.finish_document(doc_id, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
         }
 
         assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 0);

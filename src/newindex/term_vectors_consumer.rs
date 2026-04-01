@@ -185,6 +185,7 @@ impl FieldConsumer for TermVectorsConsumer {
         &mut self,
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
+        _context: &SegmentContext,
     ) -> io::Result<()> {
         if !self.current_fields.is_empty() {
             let fields = std::mem::take(&mut self.current_fields);
@@ -215,10 +216,21 @@ impl FieldConsumer for TermVectorsConsumer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use assertables::*;
 
     use super::*;
     use crate::newindex::field::{TermVectorOptions, text};
+    use crate::store::{MemoryDirectory, SharedDirectory};
+
+    fn test_context() -> SegmentContext {
+        SegmentContext {
+            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            segment_name: "_0".to_string(),
+            segment_id: [0u8; 16],
+        }
+    }
 
     #[test]
     fn test_no_tv_fields_returns_no_tokens() {
@@ -242,6 +254,7 @@ mod tests {
 
     #[test]
     fn test_single_doc_accumulation() {
+        let context = test_context();
         let mut consumer = TermVectorsConsumer::new();
         let mut accum = SegmentAccumulator::new();
 
@@ -269,7 +282,7 @@ mod tests {
         consumer.add_token(0, &field, &token2, &mut accum).unwrap();
 
         consumer.finish_field(0, &field, &mut accum).unwrap();
-        consumer.finish_document(0, &mut accum).unwrap();
+        consumer.finish_document(0, &mut accum, &context).unwrap();
 
         assert_len_eq_x!(&consumer.docs, 1);
         assert_len_eq_x!(&consumer.docs[0].fields, 1);
@@ -289,6 +302,7 @@ mod tests {
 
     #[test]
     fn test_repeated_term_accumulation() {
+        let context = test_context();
         let mut consumer = TermVectorsConsumer::new();
         let mut accum = SegmentAccumulator::new();
 
@@ -318,7 +332,7 @@ mod tests {
         }
 
         consumer.finish_field(0, &field, &mut accum).unwrap();
-        consumer.finish_document(0, &mut accum).unwrap();
+        consumer.finish_document(0, &mut accum, &context).unwrap();
 
         let tv_field = &consumer.docs[0].fields[0];
         // Find "the" — should have freq=2 and positions [0, 4]
@@ -329,6 +343,7 @@ mod tests {
 
     #[test]
     fn test_doc_without_tv_not_accumulated() {
+        let context = test_context();
         let mut consumer = TermVectorsConsumer::new();
         let mut accum = SegmentAccumulator::new();
 
@@ -337,7 +352,7 @@ mod tests {
         let field = text("contents").value("hello");
         consumer.start_field(0, &field, &mut accum).unwrap();
         consumer.finish_field(0, &field, &mut accum).unwrap();
-        consumer.finish_document(0, &mut accum).unwrap();
+        consumer.finish_document(0, &mut accum, &context).unwrap();
 
         assert!(consumer.docs.is_empty());
     }
@@ -352,6 +367,7 @@ mod tests {
     #[test]
     fn mem_size_grows_with_documents() {
         use mem_dbg::{MemSize, SizeFlags};
+        let context = test_context();
         let mut consumer = TermVectorsConsumer::new();
         let mut accum = SegmentAccumulator::new();
 
@@ -368,7 +384,7 @@ mod tests {
         };
         consumer.add_token(0, &field, &token, &mut accum).unwrap();
         consumer.finish_field(0, &field, &mut accum).unwrap();
-        consumer.finish_document(0, &mut accum).unwrap();
+        consumer.finish_document(0, &mut accum, &context).unwrap();
 
         assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 0);
     }

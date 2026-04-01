@@ -98,7 +98,7 @@ fn worker_thread_loop(
     let (mut worker, mut context) = worker_source.create_worker();
 
     while let Some(doc) = doc_rx.recv() {
-        worker.add_document(doc)?;
+        worker.add_document(doc, &context)?;
 
         flush_control.after_document(worker_id, worker.ram_bytes_used() as u64);
 
@@ -427,6 +427,7 @@ mod tests {
             &mut self,
             _doc_id: i32,
             _acc: &mut SegmentAccumulator,
+            _context: &SegmentContext,
         ) -> io::Result<()> {
             Ok(())
         }

@@ -208,6 +208,7 @@ impl FieldConsumer for PostingsConsumer {
         &mut self,
         _doc_id: i32,
         _accumulator: &mut SegmentAccumulator,
+        _context: &SegmentContext,
     ) -> io::Result<()> {
         Ok(())
     }
@@ -321,6 +322,7 @@ mod tests {
         tokens: &[&str],
         acc: &mut SegmentAccumulator,
     ) {
+        let context = test_context();
         consumer.start_document(doc_id).unwrap();
         consumer.start_field(field_id, field, acc).unwrap();
         for &t in tokens {
@@ -328,19 +330,19 @@ mod tests {
             consumer.add_token(field_id, field, &token, acc).unwrap();
         }
         consumer.finish_field(field_id, field, acc).unwrap();
-        consumer.finish_document(doc_id, acc).unwrap();
+        consumer.finish_document(doc_id, acc, &context).unwrap();
     }
 
     #[test]
     fn single_doc_produces_postings_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = text("body").stored().value("ignored");
 
         process_doc(&mut consumer, 0, 0, &field, &["hello", "world"], &mut acc);
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
 
         assert_len_eq_x!(&names, 6);
         assert!(names.contains(&"_0_Lucene103_0.tim".to_string()));
@@ -353,7 +355,7 @@ mod tests {
 
     #[test]
     fn multiple_docs_produce_postings() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = text("body").stored().value("ignored");
@@ -362,13 +364,13 @@ mod tests {
         process_doc(&mut consumer, 1, 0, &field, &["hello", "rust"], &mut acc);
         process_doc(&mut consumer, 2, 0, &field, &["world", "rust"], &mut acc);
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_ge!(names.len(), 5);
     }
 
     #[test]
     fn stored_only_field_ignored() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = stored("title").string("hello");
@@ -377,15 +379,15 @@ mod tests {
         let interest = consumer.start_field(0, &field, &mut acc).unwrap();
         assert_eq!(interest, TokenInterest::NoTokens);
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_is_empty!(&names);
     }
 
     #[test]
     fn multiple_fields_produce_postings() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let title = text("title").stored().value("ignored");
@@ -403,24 +405,25 @@ mod tests {
         consumer.add_token(1, &body, &token, &mut acc).unwrap();
         consumer.finish_field(1, &body, &mut acc).unwrap();
 
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_ge!(names.len(), 5);
     }
 
     #[test]
     fn no_tokenized_fields_produces_no_files() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let acc = SegmentAccumulator::new();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
         assert_is_empty!(&names);
     }
 
     #[test]
     fn indexed_field_returns_no_tokens() {
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = string("title").stored().value("hello");
@@ -429,12 +432,12 @@ mod tests {
         let interest = consumer.start_field(0, &field, &mut acc).unwrap();
         assert_eq!(interest, TokenInterest::NoTokens);
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
     }
 
     #[test]
     fn indexed_field_produces_postings_without_positions() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -443,10 +446,12 @@ mod tests {
             consumer.start_document(doc_id).unwrap();
             consumer.start_field(0, &field, &mut acc).unwrap();
             consumer.finish_field(0, &field, &mut acc).unwrap();
-            consumer.finish_document(doc_id, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
         }
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
 
         // Should produce terms files but NO positions file
         assert!(names.iter().any(|n| n.ends_with(".tim")));
@@ -456,7 +461,7 @@ mod tests {
 
     #[test]
     fn mixed_indexed_and_tokenized_fields() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -477,9 +482,9 @@ mod tests {
         consumer.add_token(1, &body, &token, &mut acc).unwrap();
         consumer.finish_field(1, &body, &mut acc).unwrap();
 
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
 
         // Both fields produce terms
         assert!(names.iter().any(|n| n.ends_with(".tim")));
@@ -490,6 +495,7 @@ mod tests {
 
     #[test]
     fn feature_field_returns_no_tokens() {
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
         let field = feature("pagerank").value("score", 0.95);
@@ -498,12 +504,12 @@ mod tests {
         let interest = consumer.start_field(0, &field, &mut acc).unwrap();
         assert_eq!(interest, TokenInterest::NoTokens);
         consumer.finish_field(0, &field, &mut acc).unwrap();
-        consumer.finish_document(0, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
     }
 
     #[test]
     fn feature_field_produces_postings_without_positions() {
-        let ctx = test_context();
+        let context = test_context();
         let mut consumer = PostingsConsumer::new();
         let mut acc = SegmentAccumulator::new();
 
@@ -512,10 +518,12 @@ mod tests {
             consumer.start_document(doc_id).unwrap();
             consumer.start_field(0, &field, &mut acc).unwrap();
             consumer.finish_field(0, &field, &mut acc).unwrap();
-            consumer.finish_document(doc_id, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
         }
 
-        let names = consumer.flush(&ctx, &acc).unwrap();
+        let names = consumer.flush(&context, &acc).unwrap();
 
         // Should produce terms files but NO positions file
         assert!(names.iter().any(|n| n.ends_with(".tim")));

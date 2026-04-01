@@ -135,7 +135,7 @@ impl SegmentWorker {
     }
 
     /// Processes a single document through the indexing pipeline.
-    pub fn add_document(&mut self, mut doc: Document) -> io::Result<()> {
+    pub fn add_document(&mut self, mut doc: Document, context: &SegmentContext) -> io::Result<()> {
         let doc_id = self.doc_count;
 
         // 1. Start document — notify all field consumers
@@ -195,7 +195,7 @@ impl SegmentWorker {
 
         // 3. Finish document — notify all field consumers
         for consumer in &mut self.field_consumers {
-            consumer.finish_document(doc_id, &mut self.accumulator)?;
+            consumer.finish_document(doc_id, &mut self.accumulator, context)?;
         }
 
         self.doc_count += 1;
@@ -315,6 +315,7 @@ mod tests {
             &mut self,
             _doc_id: i32,
             _acc: &mut SegmentAccumulator,
+            _context: &SegmentContext,
         ) -> io::Result<()> {
             Ok(())
         }
@@ -404,7 +405,12 @@ mod tests {
             ) -> io::Result<()> {
                 Ok(())
             }
-            fn finish_document(&mut self, _: i32, _: &mut SegmentAccumulator) -> io::Result<()> {
+            fn finish_document(
+                &mut self,
+                _: i32,
+                _: &mut SegmentAccumulator,
+                _: &SegmentContext,
+            ) -> io::Result<()> {
                 Ok(())
             }
             fn flush(
