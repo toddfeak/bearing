@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
-use log::debug;
+use log::{debug, trace};
 
 /// Fraction of `ram_buffer_size_bytes` to target after signaling flushes.
 /// When total RAM exceeds the threshold, enough workers are signaled
@@ -79,8 +79,19 @@ impl FlushControl {
         let doc_count = self.per_worker_docs[worker_id].fetch_add(1, Ordering::Relaxed) + 1;
         self.per_worker_bytes[worker_id].store(ram_bytes, Ordering::Relaxed);
 
+        trace!(
+            "flush_control: w{} doc={} ram={:.2}MB",
+            worker_id,
+            doc_count,
+            ram_bytes as f64 / 1_048_576.0,
+        );
+
         // Document count threshold (per-worker).
         if self.max_buffered_docs > 0 && doc_count >= self.max_buffered_docs {
+            debug!(
+                "flush_control: w{} hit doc limit ({} docs), signaling flush",
+                worker_id, doc_count,
+            );
             self.flush_signals[worker_id].store(true, Ordering::Relaxed);
             return;
         }
@@ -111,18 +122,6 @@ impl FlushControl {
             .collect();
         workers.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-        debug!(
-            "flush_control: total={:.1}MB limit={:.1}MB target={:.1}MB workers=[{}]",
-            total as f64 / 1_048_576.0,
-            self.ram_buffer_size_bytes as f64 / 1_048_576.0,
-            target as f64 / 1_048_576.0,
-            workers
-                .iter()
-                .map(|(id, b)| format!("w{}={:.1}MB", id, *b as f64 / 1_048_576.0))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-
         // Signal workers largest-first until projected total <= target.
         let mut bytes_to_flush: u64 = 0;
         let mut signaled: Vec<usize> = Vec::new();
@@ -139,7 +138,9 @@ impl FlushControl {
         }
 
         debug!(
-            "flush_control: signaling flush for workers {:?} ({:.1}MB)",
+            "flush_control: ram={:.1}MB/{:.1}MB, signaling workers {:?} ({:.1}MB to flush)",
+            total as f64 / 1_048_576.0,
+            self.ram_buffer_size_bytes as f64 / 1_048_576.0,
             signaled,
             bytes_to_flush as f64 / 1_048_576.0,
         );

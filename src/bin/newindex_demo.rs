@@ -114,6 +114,12 @@ fn parse_args() -> CliArgs {
 }
 
 fn main() {
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Warn)
+        .env()
+        .init()
+        .unwrap();
+
     let args = parse_args();
 
     let doc_dir = PathBuf::from(&args.docs_path);
