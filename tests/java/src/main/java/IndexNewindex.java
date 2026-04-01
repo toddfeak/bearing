@@ -18,14 +18,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.SortedDocValuesField;
+import org.apache.lucene.document.SortedNumericDocValuesField;
+import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.store.FSDirectory;
+import org.apache.lucene.util.BytesRef;
 
 /**
  * Indexes documents with the same fields as newindex_demo for cross-validation.
@@ -115,14 +121,23 @@ public class IndexNewindex {
         String contents = Files.readString(file);
         String fileName = file.getFileName().toString();
         String title = fileName.contains(".") ? fileName.substring(0, fileName.lastIndexOf('.')) : fileName;
+        long fileSize = Files.size(file);
 
         Document doc = new Document();
 
-        // Same 4 fields as newindex_demo make_document:
+        // Same fields as newindex_demo make_document:
         doc.add(new StringField("path", file.toString(), Field.Store.YES));
         doc.add(new TextField("contents", contents, Field.Store.NO));
         doc.add(new StringField("title", title, Field.Store.YES));
         doc.add(new StoredField("notes", "indexed by Java"));
+
+        // Doc-values-only fields (matching newindex_demo)
+        doc.add(new NumericDocValuesField("dv_count", fileSize));
+        doc.add(new BinaryDocValuesField("dv_hash",
+            new BytesRef(String.format("%016x", fileSize))));
+        doc.add(new SortedDocValuesField("dv_category", new BytesRef(title)));
+        doc.add(new SortedSetDocValuesField("dv_tag", new BytesRef(title)));
+        doc.add(new SortedNumericDocValuesField("dv_priority", fileSize % 10));
 
         writer.addDocument(doc);
         System.out.println("  indexed: " + file);

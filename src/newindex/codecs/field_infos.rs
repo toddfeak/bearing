@@ -11,6 +11,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::document::DocValuesType;
 use crate::newindex::index_file_names;
 use crate::store::SharedDirectory;
 
@@ -26,6 +27,7 @@ pub(crate) struct FieldInfo {
     pub number: u32,
     pub has_norms: bool,
     pub index_options: u8,
+    pub doc_values_type: DocValuesType,
 }
 
 /// Collection of field metadata for a segment.
@@ -37,6 +39,22 @@ pub(crate) struct FieldInfos {
 impl FieldInfos {
     pub fn new(fields: Vec<FieldInfo>) -> Self {
         Self { fields }
+    }
+}
+
+/// Encodes a [`DocValuesType`] to the .fnm byte format.
+///
+/// Matches `Lucene94FieldInfosFormat.docValuesByte` — note that
+/// `SortedSet` and `SortedNumeric` have different byte values than
+/// their Rust enum discriminants.
+fn doc_values_byte(dvt: DocValuesType) -> u8 {
+    match dvt {
+        DocValuesType::None => 0,
+        DocValuesType::Numeric => 1,
+        DocValuesType::Binary => 2,
+        DocValuesType::Sorted => 3,
+        DocValuesType::SortedSet => 4,
+        DocValuesType::SortedNumeric => 5,
     }
 }
 
@@ -86,27 +104,36 @@ pub(crate) fn write(
         // Index options
         output.write_byte(fi.index_options)?;
 
-        // Doc values type: 0 = NONE
-        output.write_byte(0)?;
+        // Doc values type — custom encoding matching Lucene94FieldInfosFormat,
+        // NOT the DocValuesType enum ordinal (SortedSet/SortedNumeric are swapped)
+        output.write_byte(doc_values_byte(fi.doc_values_type))?;
 
         // Doc values skip index type: 0 = NONE
         output.write_byte(0)?;
 
-        // Doc values gen: -1 (no doc values)
+        // Doc values gen: -1 (no per-gen doc values)
         output.write_le_long(-1)?;
 
-        // Attributes: per-field postings format metadata for indexed fields
+        // Attributes: per-field format metadata
+        let mut attrs = HashMap::new();
         if fi.index_options > 0 {
-            let mut attrs = HashMap::new();
             attrs.insert(
                 "PerFieldPostingsFormat.format".to_string(),
                 "Lucene103".to_string(),
             );
             attrs.insert("PerFieldPostingsFormat.suffix".to_string(), "0".to_string());
-            output.write_map_of_strings(&attrs)?;
-        } else {
-            output.write_map_of_strings(&HashMap::new())?;
         }
+        if fi.doc_values_type != DocValuesType::None {
+            attrs.insert(
+                "PerFieldDocValuesFormat.format".to_string(),
+                "Lucene90".to_string(),
+            );
+            attrs.insert(
+                "PerFieldDocValuesFormat.suffix".to_string(),
+                "0".to_string(),
+            );
+        }
+        output.write_map_of_strings(&attrs)?;
 
         // Point dimensions: 0 (no points)
         output.write_vint(0)?;
@@ -141,6 +168,7 @@ mod tests {
             number,
             has_norms: false,
             index_options: 0,
+            doc_values_type: DocValuesType::None,
         }
     }
 
@@ -150,6 +178,7 @@ mod tests {
             number,
             has_norms: true,
             index_options: 3, // DocsAndFreqsAndPositions
+            doc_values_type: DocValuesType::None,
         }
     }
 
@@ -242,6 +271,7 @@ mod tests {
             number: 0,
             has_norms: true,
             index_options: 3,
+            doc_values_type: DocValuesType::None,
         }];
         let fis = FieldInfos::new(fields);
         write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
@@ -283,5 +313,106 @@ mod tests {
 
         // Stored-only fields must NOT have PerFieldPostingsFormat attributes
         assert!(!content.contains("PerFieldPostingsFormat"));
+    }
+
+    #[test]
+    fn dv_only_field_writes_correct_type_byte() {
+        let dir = test_directory();
+        let fis = FieldInfos::new(vec![FieldInfo {
+            name: "count".to_string(),
+            number: 0,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::Numeric,
+        }]);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "count"(5) + field_number(1) = 52
+        let bits_offset = 52;
+
+        // bits byte: OMIT_NORMS
+        assert_eq!(data[bits_offset], 0b0000_0010);
+        // index options: NONE
+        assert_eq!(data[bits_offset + 1], 0);
+        // doc values type: Numeric = 1
+        assert_eq!(data[bits_offset + 2], 1);
+    }
+
+    #[test]
+    fn dv_sorted_set_writes_byte_4() {
+        let dir = test_directory();
+        let fis = FieldInfos::new(vec![FieldInfo {
+            name: "tags".to_string(),
+            number: 0,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::SortedSet,
+        }]);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "tags"(4) + field_number(1) = 51
+        let bits_offset = 51;
+
+        // doc values type: SortedSet = 4 in .fnm format
+        assert_eq!(data[bits_offset + 2], 4);
+    }
+
+    #[test]
+    fn dv_sorted_numeric_writes_byte_5() {
+        let dir = test_directory();
+        let fis = FieldInfos::new(vec![FieldInfo {
+            name: "vals".to_string(),
+            number: 0,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::SortedNumeric,
+        }]);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "vals"(4) + field_number(1) = 51
+        let bits_offset = 51;
+
+        // doc values type: SortedNumeric = 5 in .fnm format
+        assert_eq!(data[bits_offset + 2], 5);
+    }
+
+    #[test]
+    fn dv_field_has_doc_values_format_attributes() {
+        let dir = test_directory();
+        let fis = FieldInfos::new(vec![FieldInfo {
+            name: "count".to_string(),
+            number: 0,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::SortedNumeric,
+        }]);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let content = String::from_utf8_lossy(&data);
+
+        assert!(content.contains("PerFieldDocValuesFormat.format"));
+        assert!(content.contains("Lucene90"));
+        assert!(content.contains("PerFieldDocValuesFormat.suffix"));
+        // No postings format for DV-only field
+        assert!(!content.contains("PerFieldPostingsFormat"));
+    }
+
+    #[test]
+    fn dv_type_none_has_no_dv_attributes() {
+        let dir = test_directory();
+        let fis = FieldInfos::new(vec![stored_only("title", 0)]);
+        write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let content = String::from_utf8_lossy(&data);
+
+        assert!(!content.contains("PerFieldDocValuesFormat"));
     }
 }

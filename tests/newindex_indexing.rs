@@ -13,7 +13,9 @@ use std::path::Path;
 use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{stored, string, text};
+use bearing::newindex::field::{
+    binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored, string, text,
+};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::MemoryDirectory;
 
@@ -516,4 +518,170 @@ fn mixed_string_and_text_fields() {
     assert!(files.contains(&"_0.nvm".to_string()));
     // Stored fields exist
     assert!(files.contains(&"_0.fdt".to_string()));
+}
+
+// --- Doc values field tests ---
+
+#[test]
+fn numeric_dv_produces_doc_values_files() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(numeric_dv("count").value(i as i64 * 10))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    assert!(files.contains(&"_0_Lucene90_0.dvm".to_string()));
+    assert!(files.contains(&"_0_Lucene90_0.dvd".to_string()));
+    assert!(files.contains(&"_0.fnm".to_string()));
+    assert!(files.contains(&"_0.si".to_string()));
+}
+
+#[test]
+fn all_dv_types_produce_files() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(numeric_dv("count").value(i as i64))
+            .add_field(binary_dv("hash").value(format!("{:04x}", i).into_bytes()))
+            .add_field(sorted_dv("category").value(format!("cat_{i}").into_bytes()))
+            .add_field(sorted_set_dv("tags").value(vec![format!("tag_{i}").into_bytes()]))
+            .add_field(sorted_numeric_dv("priority").value(vec![i as i64]))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    assert!(files.contains(&"_0_Lucene90_0.dvm".to_string()));
+    assert!(files.contains(&"_0_Lucene90_0.dvd".to_string()));
+}
+
+#[test]
+fn mixed_dv_and_stored_and_postings() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    for i in 0..5 {
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("doc {i}")))
+            .add_field(text("body").stored().value(format!("hello world {i}")))
+            .add_field(string("id").stored().value(format!("id_{i}")))
+            .add_field(numeric_dv("count").value(i as i64 * 100))
+            .add_field(sorted_dv("sort_key").value(format!("key_{i}").into_bytes()))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Doc values
+    assert!(files.contains(&"_0_Lucene90_0.dvm".to_string()));
+    assert!(files.contains(&"_0_Lucene90_0.dvd".to_string()));
+    // Stored fields
+    assert!(files.contains(&"_0.fdt".to_string()));
+    // Postings
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    // Norms (from text field)
+    assert!(files.contains(&"_0.nvm".to_string()));
+}
+
+#[test]
+fn dv_only_docs_no_stored_or_postings() {
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(numeric_dv("val").value(i as i64))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Doc values present
+    assert!(files.contains(&"_0_Lucene90_0.dvm".to_string()));
+    assert!(files.contains(&"_0_Lucene90_0.dvd".to_string()));
+    // No postings
+    assert!(!files.iter().any(|f| f.ends_with(".tim")));
+    // No norms
+    assert!(!files.iter().any(|f| f.ends_with(".nvm")));
+}
+
+#[test]
+fn dv_compound_file_packaging() {
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("doc {i}")))
+            .add_field(numeric_dv("count").value(i as i64))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Compound packaging wraps sub-files
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfs"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfe"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".si"));
+}
+
+#[test]
+fn dv_multi_segment() {
+    let config = IndexWriterConfig {
+        max_buffered_docs: 2,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+
+    for i in 0..5 {
+        let doc = DocumentBuilder::new()
+            .add_field(numeric_dv("count").value(i as i64))
+            .add_field(sorted_dv("key").value(format!("k{i}").into_bytes()))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 3); // 2 + 2 + 1
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 5);
+
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".dvm"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".dvd"));
+    }
 }

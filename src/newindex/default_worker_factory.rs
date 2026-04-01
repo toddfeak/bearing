@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::newindex::consumer::FieldConsumer;
 use crate::newindex::coordinator::WorkerFactory;
+use crate::newindex::doc_values_consumer::DocValuesConsumer;
 use crate::newindex::field_infos_consumer::FieldInfosConsumer;
 use crate::newindex::norms_consumer::NormsConsumer;
 use crate::newindex::postings_consumer::PostingsConsumer;
@@ -59,6 +60,7 @@ impl WorkerFactory for DefaultWorkerFactory {
         //   FieldInfosConsumer   — field infos (.fnm, must be last)
         let consumers: Vec<Box<dyn FieldConsumer>> = vec![
             Box::new(NormsConsumer::new()),
+            Box::new(DocValuesConsumer::new()),
             Box::new(StoredFieldsConsumer::new()),
             Box::new(PostingsConsumer::new()),
             Box::new(FieldInfosConsumer::new()),

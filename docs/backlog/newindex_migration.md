@@ -136,15 +136,18 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - Java tooling updated: `StringField` for path/title, title terms verification
 - Integration tests for DOCS-only postings and mixed string+text fields
 
-### Phase 5b: DocValuesConsumer
+### Phase 5b: DocValuesConsumer ✓
 
-Add doc values support for all five types.
+**Complete.** All five doc values types validated by Java Lucene across single-segment, multi-segment, multi-thread, and compound file configurations.
 
-- `DocValuesConsumer` — a new `FieldConsumer` accumulating doc values, flushing via DEBT codec copy
-- DEBT codec copy of `Lucene90DocValuesConsumer` at `newindex/codecs/doc_values.rs`
-- Fix `.fnm` writer to emit `PerFieldDocValuesFormat.format`/`.suffix` attributes (known gap)
-- New `FieldKind` variants with doc values data
-- E2e validation via updated `VerifyNewindex`
+**What was built:**
+- `DocValuesConsumer` — a `FieldConsumer` that accumulates per-field `(doc_id, value)` pairs and flushes via DEBT codec copy, producing `.dvm`/`.dvd` files with per-field suffix `Lucene90_0`
+- DEBT codec copy at `newindex/codecs/doc_values.rs` (~2087 lines) — full Lucene90 doc values writer for Numeric, Binary, Sorted, SortedSet, SortedNumeric types with LZ4-compressed terms dictionary
+- `.fnm` writer fixed: correct DV type byte encoding (via explicit `doc_values_byte()` — the `DocValuesType` enum discriminants differ from the .fnm byte format for SortedSet/SortedNumeric), `PerFieldDocValuesFormat.format`/`.suffix` attributes for DV fields
+- `FieldType` extended with `DocValue` enum and `doc_values_type()` method; five DV-only field builders (`numeric_dv`, `binary_dv`, `sorted_dv`, `sorted_set_dv`, `sorted_numeric_dv`)
+- `newindex_demo` updated with DV fields matching `indexfiles` (dv_count, dv_hash, dv_category, dv_tag, dv_priority)
+- Java tooling updated: `IndexNewindex` adds matching DV fields, `VerifyNewindex` validates all five DV types per-leaf
+- Integration tests for DV-only, mixed DV+stored+postings, compound, and multi-segment configurations
 
 ### Phase 5c: KeywordField and Remaining Field Types
 

@@ -7,6 +7,7 @@
 import java.nio.file.Paths;
 
 import org.apache.lucene.document.Document;
+import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
@@ -14,6 +15,9 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NumericDocValues;
+import org.apache.lucene.index.SortedDocValues;
+import org.apache.lucene.index.SortedNumericDocValues;
+import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.StoredFields;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.Terms;
@@ -238,6 +242,154 @@ public class VerifyNewindex {
                 }
             }
         }
+
+        // Check doc values fields (per-leaf, since multi-segment splits docs)
+        for (LeafReaderContext ctx : reader.leaves()) {
+            ok = checkDocValues(ctx.reader(), ok);
+        }
+
+        return ok;
+    }
+
+    /**
+     * Checks all five doc values field types if present in the leaf.
+     */
+    static boolean checkDocValues(LeafReader leaf, boolean ok) throws Exception {
+        FieldInfos fieldInfos = leaf.getFieldInfos();
+        int numDocs = leaf.numDocs();
+        int sampleSize = Math.min(numDocs, 3);
+
+            // NumericDocValues "dv_count"
+            if (fieldInfos.fieldInfo("dv_count") != null) {
+                System.out.println("\nDoc values field checks:");
+                NumericDocValues ndv = leaf.getNumericDocValues("dv_count");
+                if (ndv == null) {
+                    System.err.println("FAIL: 'dv_count' has no NumericDocValues");
+                    ok = false;
+                } else {
+                    int count = 0;
+                    while (ndv.nextDoc() != NumericDocValues.NO_MORE_DOCS) {
+                        if (count < sampleSize) {
+                            System.out.println("  doc " + ndv.docID() + ": dv_count = " + ndv.longValue());
+                        }
+                        count++;
+                    }
+                    System.out.println("  dv_count: " + count + "/" + numDocs + " docs (OK)");
+                    if (count != numDocs) {
+                        System.err.println("FAIL: dv_count has " + count + " values, expected " + numDocs);
+                        ok = false;
+                    }
+                }
+            }
+
+            // BinaryDocValues "dv_hash"
+            if (fieldInfos.fieldInfo("dv_hash") != null) {
+                BinaryDocValues bdv = leaf.getBinaryDocValues("dv_hash");
+                if (bdv == null) {
+                    System.err.println("FAIL: 'dv_hash' has no BinaryDocValues");
+                    ok = false;
+                } else {
+                    int count = 0;
+                    while (bdv.nextDoc() != BinaryDocValues.NO_MORE_DOCS) {
+                        if (count < sampleSize) {
+                            System.out.println("  doc " + bdv.docID() + ": dv_hash = " + bdv.binaryValue().utf8ToString());
+                        }
+                        count++;
+                    }
+                    System.out.println("  dv_hash: " + count + "/" + numDocs + " docs (OK)");
+                    if (count != numDocs) {
+                        System.err.println("FAIL: dv_hash has " + count + " values, expected " + numDocs);
+                        ok = false;
+                    }
+                }
+            }
+
+            // SortedDocValues "dv_category"
+            if (fieldInfos.fieldInfo("dv_category") != null) {
+                SortedDocValues sdv = leaf.getSortedDocValues("dv_category");
+                if (sdv == null) {
+                    System.err.println("FAIL: 'dv_category' has no SortedDocValues");
+                    ok = false;
+                } else {
+                    int count = 0;
+                    while (sdv.nextDoc() != SortedDocValues.NO_MORE_DOCS) {
+                        if (count < sampleSize) {
+                            System.out.println("  doc " + sdv.docID() + ": dv_category = "
+                                + sdv.lookupOrd(sdv.ordValue()).utf8ToString());
+                        }
+                        count++;
+                    }
+                    System.out.println("  dv_category: " + count + "/" + numDocs
+                        + " docs, " + sdv.getValueCount() + " unique values (OK)");
+                    if (count != numDocs) {
+                        System.err.println("FAIL: dv_category has " + count + " values, expected " + numDocs);
+                        ok = false;
+                    }
+                }
+            }
+
+            // SortedSetDocValues "dv_tag"
+            if (fieldInfos.fieldInfo("dv_tag") != null) {
+                SortedSetDocValues ssdv = leaf.getSortedSetDocValues("dv_tag");
+                if (ssdv == null) {
+                    System.err.println("FAIL: 'dv_tag' has no SortedSetDocValues");
+                    ok = false;
+                } else {
+                    int docCount = 0;
+                    int totalValues = 0;
+                    while (ssdv.nextDoc() != SortedSetDocValues.NO_MORE_DOCS) {
+                        int valueCount = ssdv.docValueCount();
+                        totalValues += valueCount;
+                        if (docCount < sampleSize) {
+                            StringBuilder sb = new StringBuilder();
+                            for (int j = 0; j < valueCount; j++) {
+                                if (j > 0) sb.append(", ");
+                                sb.append(ssdv.lookupOrd(ssdv.nextOrd()).utf8ToString());
+                            }
+                            System.out.println("  doc " + ssdv.docID() + ": dv_tag = [" + sb + "]");
+                        }
+                        docCount++;
+                    }
+                    System.out.println("  dv_tag: " + docCount + "/" + numDocs
+                        + " docs, " + totalValues + " total values, "
+                        + ssdv.getValueCount() + " unique terms (OK)");
+                    if (docCount != numDocs) {
+                        System.err.println("FAIL: dv_tag has " + docCount + " docs, expected " + numDocs);
+                        ok = false;
+                    }
+                }
+            }
+
+            // SortedNumericDocValues "dv_priority"
+            if (fieldInfos.fieldInfo("dv_priority") != null) {
+                SortedNumericDocValues sndv = leaf.getSortedNumericDocValues("dv_priority");
+                if (sndv == null) {
+                    System.err.println("FAIL: 'dv_priority' has no SortedNumericDocValues");
+                    ok = false;
+                } else {
+                    int docCount = 0;
+                    int totalValues = 0;
+                    while (sndv.nextDoc() != SortedNumericDocValues.NO_MORE_DOCS) {
+                        int valueCount = sndv.docValueCount();
+                        totalValues += valueCount;
+                        if (docCount < sampleSize) {
+                            StringBuilder sb = new StringBuilder();
+                            for (int j = 0; j < valueCount; j++) {
+                                if (j > 0) sb.append(", ");
+                                sb.append(sndv.nextValue());
+                            }
+                            System.out.println("  doc " + sndv.docID() + ": dv_priority = [" + sb + "]");
+                        }
+                        docCount++;
+                    }
+                    System.out.println("  dv_priority: " + docCount + "/" + numDocs
+                        + " docs, " + totalValues + " total values (OK)");
+                    if (docCount != numDocs) {
+                        System.err.println("FAIL: dv_priority has " + docCount + " docs, expected " + numDocs);
+                        ok = false;
+                    }
+                }
+            }
 
         return ok;
     }

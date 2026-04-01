@@ -13,7 +13,9 @@ use std::time::Instant;
 
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{stored, string, text};
+use bearing::newindex::field::{
+    binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored, string, text,
+};
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
 
@@ -204,6 +206,9 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
         None => file_name,
     };
 
+    let metadata = fs::metadata(path).ok();
+    let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+
     // "contents" — streamed from file (DEBT: no term vectors yet)
     let contents_field = match File::open(path) {
         Ok(file) => text("contents").reader(BufReader::new(file)),
@@ -218,6 +223,12 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
         .add_field(string("title").stored().value(&title))
         // "notes" — stored only (same as indexfiles)
         .add_field(stored("notes").string("indexed by Rust"))
+        // Doc-values-only fields (matching indexfiles)
+        .add_field(numeric_dv("dv_count").value(file_size as i64))
+        .add_field(binary_dv("dv_hash").value(format!("{:016x}", file_size).into_bytes()))
+        .add_field(sorted_dv("dv_category").value(title.as_bytes().to_vec()))
+        .add_field(sorted_set_dv("dv_tag").value(vec![title.as_bytes().to_vec()]))
+        .add_field(sorted_numeric_dv("dv_priority").value(vec![(file_size % 10) as i64]))
         .build()
 }
 
