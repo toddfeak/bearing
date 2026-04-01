@@ -155,16 +155,14 @@ public class VerifyNewindex {
     /**
      * Checks extended field types if they exist in the index.
      * Backward-compatible: skips checks if fields are not present.
-     *
-     * DEBT: Limited to stored fields and norms. As newindex gains field types
-     * (StringField, points, doc values, term vectors), add checks here to
-     * match VerifyIndex.checkExtendedFields().
      */
     static boolean checkExtendedFields(IndexReader reader, StoredFields storedFields,
                                        int numDocs, boolean ok) throws Exception {
         int sampleSize = Math.min(numDocs, 3);
 
-        // Check "title" — StringField: stored + indexed (DOCS-only terms)
+        System.out.println("\nExtended field checks:");
+
+        // Check "title" — StringField: stored + indexed
         int titleFailures = 0;
         for (int i = 0; i < numDocs; i++) {
             Document doc = storedFields.document(i);
@@ -177,11 +175,10 @@ public class VerifyNewindex {
             System.err.println("FAIL: " + titleFailures + " docs have no 'title' stored field");
             ok = false;
         } else {
-            System.out.println("\nExtended field checks:");
             System.out.println("  title: all " + numDocs + " docs have stored values (OK)");
         }
 
-        // Check "title" has terms in inverted index (StringField is indexed)
+        // Check "title" has terms in inverted index (StringField)
         for (LeafReaderContext ctx : reader.leaves()) {
             Terms titleTerms = ctx.reader().terms("title");
             if (titleTerms != null) {
@@ -195,7 +192,58 @@ public class VerifyNewindex {
                     ok = false;
                 }
             }
-            break; // only need one leaf
+            break;
+        }
+
+        // Check "path" has SortedSet doc values (KeywordField)
+        for (LeafReaderContext ctx : reader.leaves()) {
+            LeafReader leaf = ctx.reader();
+            SortedSetDocValues pathDv = leaf.getSortedSetDocValues("path");
+            if (pathDv != null) {
+                int dvCount = 0;
+                while (pathDv.nextDoc() != SortedSetDocValues.NO_MORE_DOCS) {
+                    dvCount++;
+                }
+                System.out.println("  path: " + dvCount + "/" + leaf.numDocs()
+                    + " docs have SortedSet DV (OK)");
+                if (dvCount != leaf.numDocs()) {
+                    System.err.println("FAIL: path SortedSet DV has " + dvCount
+                        + " docs, expected " + leaf.numDocs());
+                    ok = false;
+                }
+            }
+            break;
+        }
+
+        // Check "features" has terms (FeatureField — "pagerank" and "freshness")
+        for (LeafReaderContext ctx : reader.leaves()) {
+            Terms featTerms = ctx.reader().terms("features");
+            if (featTerms != null) {
+                TermsEnum te = featTerms.iterator();
+                long count = 0;
+                while (te.next() != null) count++;
+                if (count >= 2) {
+                    System.out.println("  features: " + count + " terms in index (OK)");
+                } else {
+                    System.err.println("FAIL: 'features' FeatureField has " + count
+                        + " terms, expected >= 2");
+                    ok = false;
+                }
+            }
+            break;
+        }
+
+        // Check stored extra fields
+        int extraIntCount = 0;
+        for (int i = 0; i < numDocs; i++) {
+            Document doc = storedFields.document(i);
+            if (doc.getField("extra_int") != null) extraIntCount++;
+        }
+        if (extraIntCount == numDocs) {
+            System.out.println("  extra_int: all " + numDocs + " docs have stored values (OK)");
+        } else {
+            System.err.println("FAIL: extra_int has " + extraIntCount + " stored values, expected " + numDocs);
+            ok = false;
         }
 
         // Check "notes" stored values (sample + count)

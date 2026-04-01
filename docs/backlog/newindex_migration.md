@@ -149,22 +149,54 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - Java tooling updated: `IndexNewindex` adds matching DV fields, `VerifyNewindex` validates all five DV types per-leaf
 - Integration tests for DV-only, mixed DV+stored+postings, compound, and multi-segment configurations
 
-### Phase 5c: KeywordField and Remaining Field Types
+### Phase 5c: TermVectorOptions on InvertableValue ✓
 
-Add remaining consumers and field types. Each gets its own e2e validation pass.
+**Complete.** Added `TermVectorOptions` enum to `InvertableValue::Tokenized` and `TokenizedString` variants, filling the last gap in the 4-axis field model. All 35 Lucene field type permutations now have builders and tests.
 
-- `KeywordField` — requires `DocValuesConsumer` (Phase 5b) for SORTED_SET doc values
-- `PointsConsumer` — BKD tree writing for `IntField`, `FloatField`, `DoubleField`, `LongField`, `LatLonPoint`, range fields
-- `TermVectorsConsumer` — per-document term vector writing
-- `FeatureField` — special postings with DOCS_AND_FREQS index options
+**What was built:**
+- `TermVectorOptions` enum with 6 variants (Terms, Positions, Offsets, PositionsAndOffsets, PositionsAndPayloads, PositionsOffsetsAndPayloads) and `has_positions()`/`has_offsets()`/`has_payloads()` query methods
+- `InvertableValue::Tokenized` and `TokenizedString` gain `Option<TermVectorOptions>` second field
+- `TextFieldBuilder::with_term_vectors()` chain method, flows through to `StoredTextFieldBuilder`
+- `FieldType::term_vector_options()` query method
+- `FieldShape` updated with `term_vectors` for conflict detection
+- 12 new unit tests covering all builder paths and option variants
 
-### Phase 6: RAM-Based Flush Control
+### Phase 6: KeywordField and FeatureField ✓
+
+**Complete.** KeywordField and FeatureField wired up with Java cross-validation across 2000 docs.
+
+**What was built:**
+- `PerFieldPostings::record_occurrence_with_freq()` for explicit freq encoding (FeatureField stores float value as term frequency)
+- `PostingsConsumer` handles `InvertableValue::Feature` — extracts term name, computes freq via `f32::to_bits(value) >> 15`, returns `NoTokens`
+- `newindex_demo` aligned field-for-field with `indexfiles`: KeywordField for "path", StringField for "title", FeatureField for "features" (pagerank + freshness), all stored-only extras, sparse doc values, `parse_doc_num` helper. DEBT comments mark fields waiting on future phases (points, TV, ranges).
+- `IndexNewindex.java` and `VerifyNewindex.java` updated to match: KeywordField path DV, StringField title terms, FeatureField terms, extra_int stored values
+- Phase numbering renumbered: consecutive 0–11, no sub-phases
+
+### Phase 7: PointsConsumer
+
+DEBT copy of BKD tree writer, new `PointsConsumer`, .fnm point dimension support.
+
+- DEBT copy of `src/codecs/lucene90/points.rs` → `src/newindex/codecs/points.rs`
+- `PointsConsumer` implementing `FieldConsumer` — accumulates `(doc_id, encoded_bytes)` per field, flushes via DEBT writer producing `.kdd`/`.kdi`/`.kdm`
+- `.fnm` writer: add point dimension fields to `FieldInfo`, write conditional dimensions instead of hardcoded 0
+- Demo: add `LongField`, `LatLonPoint`; Java: matching fields + point range query verification
+
+### Phase 8: TermVectorsConsumer
+
+DEBT copy of term vectors writer, new `TermVectorsConsumer`, .fnm STORE_TERMVECTOR bit.
+
+- DEBT copy of `src/codecs/lucene90/term_vectors.rs` → `src/newindex/codecs/term_vectors.rs`
+- `TermVectorsConsumer` implementing `FieldConsumer` — accumulates per-doc term/position/offset data during tokenization, flushes via DEBT writer producing `.tvd`/`.tvx`/`.tvm`
+- `.fnm` writer: add `store_term_vectors` to `FieldInfo`, set STORE_TERMVECTOR bit (0x01)
+- Demo: enable TV on "contents" field; Java: matching + TV verification
+
+### Phase 9: RAM-Based Flush Control
 
 - RAM-based flush signaling via `SegmentAccumulator` memory tracking
 - Stall control when total RAM exceeds limits
 - E2e validation with RAM-driven flushing
 
-### Phase 7: Feature Parity E2E
+### Phase 10: Feature Parity E2E
 
 Full cross-validation against the existing indexing path.
 
@@ -173,7 +205,7 @@ Full cross-validation against the existing indexing path.
 - Impact verification (`VerifyImpacts`)
 - Performance comparison: new pipeline vs existing pipeline
 
-### Phase 8: Switchover
+### Phase 11: Switchover
 
 Replace the old pipeline with the new one.
 

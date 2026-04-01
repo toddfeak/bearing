@@ -163,6 +163,29 @@ impl PerFieldPostings {
         }
     }
 
+    /// Records a term occurrence with an explicit frequency for the given document.
+    ///
+    /// Used by FeatureField where the frequency encodes a feature value rather
+    /// than being incremented per token. No positions are written.
+    #[inline]
+    pub fn record_occurrence_with_freq(
+        &mut self,
+        tid: usize,
+        doc_id: i32,
+        freq: i32,
+        byte_pool: &mut ByteBlockPool<DirectAllocator>,
+    ) {
+        if self.current_doc_ids[tid] != doc_id {
+            if self.current_doc_ids[tid] >= 0 {
+                self.finalize_doc(tid, byte_pool);
+            }
+            self.current_doc_ids[tid] = doc_id;
+            self.current_freqs[tid] = freq;
+        } else {
+            self.current_freqs[tid] = freq;
+        }
+    }
+
     /// Encodes the pending document for a term into the doc/freq byte stream.
     ///
     /// Writes doc_delta and freq as vInts. Position data was already written
@@ -458,5 +481,24 @@ mod tests {
         // freq defaults to 1, no positions
         assert_eq!(postings[0], (0, 1, vec![]));
         assert_eq!(postings[1], (1, 1, vec![]));
+    }
+
+    #[test]
+    fn explicit_freq_no_positions() {
+        let (mut byte_pool, _) = make_pools(false);
+        let mut pfp = PerFieldPostings::new(true, false);
+
+        let tid = pfp.add_term(b"score", &mut byte_pool, None);
+
+        // 0.95f32 bits = 0x3F733333, >> 15 = 0x7EE6 = 32486
+        let freq = (f32::to_bits(0.95) >> 15) as i32;
+        pfp.record_occurrence_with_freq(tid, 0, freq, &mut byte_pool);
+        pfp.record_occurrence_with_freq(tid, 1, freq, &mut byte_pool);
+        pfp.finalize_all(&mut byte_pool);
+
+        let postings = pfp.decode_term(tid, &byte_pool, None).unwrap();
+        assert_len_eq_x!(&postings, 2);
+        assert_eq!(postings[0], (0, freq, vec![]));
+        assert_eq!(postings[1], (1, freq, vec![]));
     }
 }

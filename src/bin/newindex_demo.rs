@@ -14,7 +14,8 @@ use std::time::Instant;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
 use bearing::newindex::field::{
-    binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored, string, text,
+    binary_dv, feature, keyword, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored,
+    string, text,
 };
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
@@ -190,10 +191,10 @@ fn main() {
     println!("\nIndex written to '{}'", args.index_path);
 }
 
-/// Creates a Document from a file path, exercising the supported field types.
+/// Creates a Document from a file path, matching indexfiles make_document.
 ///
-/// DEBT: Limited subset of indexfiles make_document. Uses stored fields where
-/// indexfiles uses KeywordField/StringField (not yet supported in newindex).
+/// Fields marked DEBT are waiting on a future phase (points, term vectors).
+/// When those phases land, remove the DEBT markers and add the fields.
 fn make_document(path: &Path) -> bearing::newindex::document::Document {
     let path_str = path.to_string_lossy().to_string();
     let file_name = path
@@ -209,27 +210,67 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
     let metadata = fs::metadata(path).ok();
     let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
 
-    // "contents" — streamed from file (DEBT: no term vectors yet)
+    // DEBT: indexfiles uses text_field_reader_with_term_vectors — needs Phase 8 (TermVectorsConsumer)
     let contents_field = match File::open(path) {
         Ok(file) => text("contents").reader(BufReader::new(file)),
         Err(_) => text("contents").reader(io::empty()),
     };
 
-    DocumentBuilder::new()
-        // "path" — DEBT: KeywordField in indexfiles, StringField here until DV support
-        .add_field(string("path").stored().value(&path_str))
-        .add_field(contents_field)
-        // "title" — StringField: indexed exact match + stored (matches indexfiles)
-        .add_field(string("title").stored().value(&title))
-        // "notes" — stored only (same as indexfiles)
+    let mut builder = DocumentBuilder::new();
+
+    // "path" — KeywordField (matches indexfiles::keyword_field)
+    builder = builder.add_field(keyword("path").stored().value(&path_str));
+
+    // DEBT: "modified" — LongField, needs Phase 7 (PointsConsumer)
+
+    // "contents" — TextField
+    builder = builder.add_field(contents_field);
+
+    // "title" — StringField: indexed exact match + stored
+    builder = builder.add_field(string("title").stored().value(&title));
+
+    // DEBT: "size" — IntField, needs Phase 7
+    // DEBT: "score" — FloatField, needs Phase 7
+    // DEBT: "rating" — DoubleField, needs Phase 7
+
+    // Stored-only fields
+    builder = builder
         .add_field(stored("notes").string("indexed by Rust"))
-        // Doc-values-only fields (matching indexfiles)
+        .add_field(stored("extra_int").int((file_size % 1000) as i32))
+        .add_field(stored("extra_float").float((file_size % 100) as f32 / 3.0))
+        .add_field(stored("extra_double").double(file_size as f64 * 0.123));
+
+    // DEBT: "location" — LatLonPoint, needs Phase 7
+    // DEBT: "int_range", "long_range", "float_range", "double_range" — needs Phase 7
+
+    // FeatureField (matches indexfiles::feature_field)
+    builder = builder
+        .add_field(feature("features").value("pagerank", (file_size % 100) as f32 / 10.0 + 0.5))
+        .add_field(feature("features").value("freshness", (file_size % 50) as f32 / 5.0 + 1.0));
+
+    // Doc-values-only fields
+    builder = builder
         .add_field(numeric_dv("dv_count").value(file_size as i64))
         .add_field(binary_dv("dv_hash").value(format!("{:016x}", file_size).into_bytes()))
         .add_field(sorted_dv("dv_category").value(title.as_bytes().to_vec()))
         .add_field(sorted_set_dv("dv_tag").value(vec![title.as_bytes().to_vec()]))
-        .add_field(sorted_numeric_dv("dv_priority").value(vec![(file_size % 10) as i64]))
-        .build()
+        .add_field(sorted_numeric_dv("dv_priority").value(vec![(file_size % 10) as i64]));
+
+    // Sparse doc values — only even-numbered docs
+    if let Some(doc_num) = parse_doc_num(&title)
+        && doc_num % 2 == 0
+    {
+        builder = builder.add_field(numeric_dv("sparse_count").value((doc_num * 100) as i64));
+    }
+
+    builder.build()
+}
+
+/// Extracts a doc number from a title like "doc_003" or "science".
+/// Returns `None` if no number can be parsed.
+fn parse_doc_num(title: &str) -> Option<i32> {
+    let suffix = title.rsplit('_').next()?;
+    suffix.parse().ok()
 }
 
 /// Recursively collects file paths from a directory.

@@ -139,6 +139,22 @@ impl FieldConsumer for PostingsConsumer {
             return Ok(TokenInterest::NoTokens);
         }
 
+        // Feature fields: single term with explicit freq encoding.
+        if let Some(InvertableValue::Feature(term_name, value)) = field.field_type().invertable() {
+            let tid = state
+                .postings
+                .add_term(term_name.as_bytes(), &mut self.byte_pool, None);
+            let freq = (f32::to_bits(*value) >> 15) as i32;
+            state.postings.record_occurrence_with_freq(
+                tid,
+                self.current_doc_id,
+                freq,
+                &mut self.byte_pool,
+            );
+            state.active_term_ids.push(tid);
+            return Ok(TokenInterest::NoTokens);
+        }
+
         Ok(TokenInterest::WantsTokens)
     }
 
@@ -276,7 +292,7 @@ impl FieldConsumer for PostingsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{stored, string, text};
+    use crate::newindex::field::{feature, stored, string, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;
@@ -472,5 +488,40 @@ mod tests {
         assert!(names.iter().any(|n| n.ends_with(".doc")));
         // Positions file exists because body field has positions
         assert!(names.iter().any(|n| n.ends_with(".pos")));
+    }
+
+    #[test]
+    fn feature_field_returns_no_tokens() {
+        let mut consumer = PostingsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+        let field = feature("pagerank").value("score", 0.95);
+
+        consumer.start_document(0).unwrap();
+        let interest = consumer.start_field(0, &field, &mut acc).unwrap();
+        assert_eq!(interest, TokenInterest::NoTokens);
+        consumer.finish_field(0, &field, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc).unwrap();
+    }
+
+    #[test]
+    fn feature_field_produces_postings_without_positions() {
+        let ctx = test_context();
+        let mut consumer = PostingsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        for doc_id in 0..3 {
+            let field = feature("pagerank").value("score", 0.95);
+            consumer.start_document(doc_id).unwrap();
+            consumer.start_field(0, &field, &mut acc).unwrap();
+            consumer.finish_field(0, &field, &mut acc).unwrap();
+            consumer.finish_document(doc_id, &mut acc).unwrap();
+        }
+
+        let names = consumer.flush(&ctx, &acc).unwrap();
+
+        // Should produce terms files but NO positions file
+        assert!(names.iter().any(|n| n.ends_with(".tim")));
+        assert!(names.iter().any(|n| n.ends_with(".doc")));
+        assert!(!names.iter().any(|n| n.ends_with(".pos")));
     }
 }

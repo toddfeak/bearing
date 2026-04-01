@@ -25,6 +25,7 @@ import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
+import org.apache.lucene.document.FeatureField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
@@ -35,12 +36,6 @@ import org.apache.lucene.util.BytesRef;
 
 /**
  * Indexes documents with the same fields as newindex_demo for cross-validation.
- *
- * Fields:
- *   "path"     — StoredField (stored only, not indexed)
- *   "contents" — TextField (tokenized + stored)
- *   "title"    — StoredField (stored only, not indexed)
- *   "notes"    — StoredField (stored only, not indexed)
  *
  * Usage: java IndexNewindex <docs-dir> <index-dir> [--threads N] [--compound]
  */
@@ -125,13 +120,38 @@ public class IndexNewindex {
 
         Document doc = new Document();
 
-        // Same fields as newindex_demo make_document:
-        doc.add(new StringField("path", file.toString(), Field.Store.YES));
-        doc.add(new TextField("contents", contents, Field.Store.NO));
-        doc.add(new StringField("title", title, Field.Store.YES));
-        doc.add(new StoredField("notes", "indexed by Java"));
+        // Matches newindex_demo make_document field-for-field:
 
-        // Doc-values-only fields (matching newindex_demo)
+        // "path" — KeywordField: StringField + SortedSetDocValuesField
+        doc.add(new StringField("path", file.toString(), Field.Store.YES));
+        doc.add(new SortedSetDocValuesField("path", new BytesRef(file.toString())));
+
+        // DEBT: "modified" — LongField, needs Phase 7 (PointsConsumer)
+
+        // "contents" — TextField (DEBT: no term vectors yet, needs Phase 8)
+        doc.add(new TextField("contents", contents, Field.Store.NO));
+
+        // "title" — StringField (indexed + stored)
+        doc.add(new StringField("title", title, Field.Store.YES));
+
+        // DEBT: "size" — IntField, needs Phase 7
+        // DEBT: "score" — FloatField, needs Phase 7
+        // DEBT: "rating" — DoubleField, needs Phase 7
+
+        // Stored-only fields
+        doc.add(new StoredField("notes", "indexed by Java"));
+        doc.add(new StoredField("extra_int", (int)(fileSize % 1000)));
+        doc.add(new StoredField("extra_float", (float)(fileSize % 100) / 3.0f));
+        doc.add(new StoredField("extra_double", fileSize * 0.123));
+
+        // DEBT: "location" — LatLonPoint, needs Phase 7
+        // DEBT: range fields, needs Phase 7
+
+        // FeatureField (matches indexfiles)
+        doc.add(new FeatureField("features", "pagerank", (float)(fileSize % 100) / 10.0f + 0.5f));
+        doc.add(new FeatureField("features", "freshness", (float)(fileSize % 50) / 5.0f + 1.0f));
+
+        // Doc-values-only fields
         doc.add(new NumericDocValuesField("dv_count", fileSize));
         doc.add(new BinaryDocValuesField("dv_hash",
             new BytesRef(String.format("%016x", fileSize))));
@@ -139,7 +159,23 @@ public class IndexNewindex {
         doc.add(new SortedSetDocValuesField("dv_tag", new BytesRef(title)));
         doc.add(new SortedNumericDocValuesField("dv_priority", fileSize % 10));
 
+        // Sparse doc values — only even-numbered docs
+        Integer docNum = parseDocNum(title);
+        if (docNum != null && docNum % 2 == 0) {
+            doc.add(new NumericDocValuesField("sparse_count", docNum * 100L));
+        }
+
         writer.addDocument(doc);
         System.out.println("  indexed: " + file);
+    }
+
+    static Integer parseDocNum(String title) {
+        int idx = title.lastIndexOf('_');
+        if (idx < 0) return null;
+        try {
+            return Integer.parseInt(title.substring(idx + 1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }
