@@ -165,7 +165,7 @@ fn main() {
     for path in &doc_paths {
         let doc = make_document(path);
         writer.add_document(doc).unwrap();
-        println!("  indexed: {}", path.display());
+        log::info!("indexed: {}", path.display());
     }
 
     let segments = writer.commit().unwrap();
@@ -184,12 +184,11 @@ fn main() {
             .filter(|e| e.path().is_file())
             .collect();
         files.sort_by_key(|e| e.file_name());
-        println!("Produced {} index files:", files.len());
         for entry in &files {
             let name = entry.file_name();
             match entry.metadata() {
-                Ok(meta) => println!("  {}: {} bytes", name.to_string_lossy(), meta.len()),
-                Err(_) => println!("  {}", name.to_string_lossy()),
+                Ok(meta) => log::info!("{}: {} bytes", name.to_string_lossy(), meta.len()),
+                Err(_) => log::info!("{}", name.to_string_lossy()),
             }
         }
     }

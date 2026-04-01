@@ -8,7 +8,7 @@ use std::process;
 use std::thread;
 use std::time::{Instant, UNIX_EPOCH};
 
-use log::{error, warn};
+use log::{error, info, warn};
 
 use bearing::document;
 use bearing::document::Document;
@@ -193,7 +193,7 @@ fn main() {
                 error!("Error indexing '{}': {e}", path.display());
                 process::exit(1);
             }
-            println!("  indexed: {}", path.display());
+            info!("indexed: {}", path.display());
         }
     } else {
         // Multi-threaded indexing
@@ -212,7 +212,7 @@ fn main() {
             }
         });
         for path in &doc_paths {
-            println!("  indexed: {}", path.display());
+            info!("indexed: {}", path.display());
         }
     }
 
@@ -233,12 +233,11 @@ fn main() {
     // Files are already on disk — just report the file names
     let written_files = commit.file_names();
 
-    println!("Produced {} index files:", written_files.len());
     let index_path = Path::new(&args.index_path);
     for name in written_files {
         match fs::metadata(index_path.join(name)) {
-            Ok(meta) => println!("  {name}: {} bytes", meta.len()),
-            Err(_) => println!("  {name}"),
+            Ok(meta) => info!("{name}: {} bytes", meta.len()),
+            Err(_) => info!("{name}"),
         }
     }
 
