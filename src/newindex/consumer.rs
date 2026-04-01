@@ -2,6 +2,8 @@
 
 use std::io;
 
+use mem_dbg::MemSize;
+
 use crate::newindex::analyzer::Token;
 use crate::newindex::field::Field;
 use crate::newindex::segment_accumulator::SegmentAccumulator;
@@ -60,7 +62,7 @@ pub enum TokenInterest {
 /// during their own flush. The consumer is then dropped along with
 /// the worker.
 // LOCKED
-pub trait FieldConsumer {
+pub trait FieldConsumer: MemSize {
     /// A new document is beginning.
     fn start_document(&mut self, doc_id: i32) -> io::Result<()>;
 

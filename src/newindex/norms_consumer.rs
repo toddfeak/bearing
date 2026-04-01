@@ -27,6 +27,16 @@ pub struct NormsConsumer {
     current_doc_id: i32,
 }
 
+impl mem_dbg::MemSize for NormsConsumer {
+    fn mem_size_rec(
+        &self,
+        _flags: mem_dbg::SizeFlags,
+        _refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
 impl NormsConsumer {
     /// Creates a new consumer.
     pub fn new() -> Self {
@@ -266,5 +276,15 @@ mod tests {
         let norm_100 = compute_norm(100);
         assert_ne!(norm_100, 100); // lossy
         assert_gt!(norm_100, 0); // positive field length → positive norm
+    }
+
+    #[test]
+    fn mem_size_is_struct_size() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let consumer = NormsConsumer::new();
+        assert_eq!(
+            consumer.mem_size(SizeFlags::CAPACITY),
+            std::mem::size_of::<NormsConsumer>()
+        );
     }
 }

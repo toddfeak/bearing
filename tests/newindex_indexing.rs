@@ -784,3 +784,72 @@ fn term_vectors_multi_thread() {
         assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvd"));
     }
 }
+
+// --- RAM-based flush tests ---
+
+/// Adds documents with enough text content to accumulate meaningful RAM.
+fn add_text_docs(writer: &IndexWriter, count: usize) {
+    let body = "the quick brown fox jumps over the lazy dog ".repeat(20);
+    for i in 0..count {
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("Document {i}")))
+            .add_field(text("body").stored().value(body.clone()))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+}
+
+#[test]
+fn ram_flush_produces_multiple_segments() {
+    let config = IndexWriterConfig {
+        ram_buffer_size_mb: 0.1, // very small — forces frequent flushes
+        max_buffered_docs: -1,   // disabled — only RAM triggers flushes
+        ..Default::default()
+    };
+
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    add_text_docs(&writer, 200);
+    let segments = writer.commit().unwrap();
+
+    // With a 0.1 MB buffer and ~1KB per doc, should produce multiple segments.
+    assert_gt!(segments.len(), 1);
+
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 200);
+}
+
+#[test]
+fn large_ram_buffer_produces_single_segment() {
+    let config = IndexWriterConfig {
+        ram_buffer_size_mb: 1000.0, // huge — should never trigger
+        max_buffered_docs: -1,
+        ..Default::default()
+    };
+
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    add_text_docs(&writer, 50);
+    let segments = writer.commit().unwrap();
+
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].doc_count, 50);
+}
+
+#[test]
+fn ram_flush_multi_thread() {
+    let config = IndexWriterConfig {
+        ram_buffer_size_mb: 0.1,
+        max_buffered_docs: -1,
+        num_threads: 4,
+        ..Default::default()
+    };
+
+    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    add_text_docs(&writer, 200);
+    let segments = writer.commit().unwrap();
+
+    // Multiple segments from RAM-triggered flushes across 4 threads.
+    assert_gt!(segments.len(), 1);
+
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 200);
+}

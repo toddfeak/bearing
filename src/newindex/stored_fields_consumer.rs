@@ -4,6 +4,7 @@
 
 use std::io;
 use std::mem;
+use std::mem::size_of;
 
 use crate::document::StoredValue as CodecStoredValue;
 use crate::newindex::analyzer::Token;
@@ -32,6 +33,19 @@ fn to_codec_stored_value(sv: &StoredValue) -> CodecStoredValue {
 pub struct StoredFieldsConsumer {
     docs: Vec<StoredDoc>,
     current_doc_fields: Vec<(u32, CodecStoredValue)>,
+}
+
+impl mem_dbg::MemSize for StoredFieldsConsumer {
+    fn mem_size_rec(
+        &self,
+        _flags: mem_dbg::SizeFlags,
+        _refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        let docs_bytes = self.docs.capacity() * size_of::<StoredDoc>();
+        let current_bytes =
+            self.current_doc_fields.capacity() * size_of::<(u32, CodecStoredValue)>();
+        docs_bytes + current_bytes
+    }
 }
 
 impl StoredFieldsConsumer {
@@ -191,5 +205,29 @@ mod tests {
             let data = guard.read_file(name).unwrap();
             assert!(!data.is_empty());
         }
+    }
+
+    #[test]
+    fn mem_size_empty_is_zero() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let consumer = StoredFieldsConsumer::new();
+        assert_eq!(consumer.mem_size(SizeFlags::CAPACITY), 0);
+    }
+
+    #[test]
+    fn mem_size_grows_with_documents() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let mut consumer = StoredFieldsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        for doc_id in 0..10 {
+            consumer.start_document(doc_id).unwrap();
+            let field = stored("title").string(format!("doc {doc_id}"));
+            consumer.start_field(0, &field, &mut acc).unwrap();
+            consumer.finish_field(0, &field, &mut acc).unwrap();
+            consumer.finish_document(doc_id, &mut acc).unwrap();
+        }
+
+        assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 0);
     }
 }

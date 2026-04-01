@@ -13,6 +13,7 @@ use crate::newindex::channel::{self, Receiver, Sender};
 use crate::newindex::codecs::segment_info;
 use crate::newindex::config::IndexWriterConfig;
 use crate::newindex::document::Document;
+use crate::newindex::flush_control::FlushControl;
 use crate::newindex::id_generator::IdGenerator;
 use crate::newindex::index_file_names::{self, radix_fmt};
 use crate::newindex::segment::{FlushedSegment, SegmentId};
@@ -91,6 +92,8 @@ fn worker_thread_loop(
     doc_rx: Receiver,
     worker_source: Arc<WorkerSource>,
     max_buffered_docs: i32,
+    flush_control: Arc<FlushControl>,
+    worker_id: usize,
 ) -> io::Result<Vec<FlushedSegment>> {
     let mut segments = Vec::new();
     let (mut worker, mut context) = worker_source.create_worker();
@@ -98,16 +101,28 @@ fn worker_thread_loop(
     while let Some(doc) = doc_rx.recv() {
         worker.add_document(doc)?;
 
-        if worker.should_flush(max_buffered_docs) {
+        // Report RAM after each document.
+        flush_control.update_ram_usage(worker_id, worker.ram_bytes_used() as u64);
+
+        // Check both doc-count and RAM-based flush signals.
+        let should_flush =
+            worker.should_flush(max_buffered_docs) || flush_control.should_flush(worker_id);
+
+        if should_flush {
             segments.push(worker.flush(&context)?);
+            // Report zero after flush.
+            flush_control.update_ram_usage(worker_id, 0);
+            // Create replacement and report its baseline.
             let (new_worker, new_context) = worker_source.create_worker();
             worker = new_worker;
             context = new_context;
+            flush_control.update_ram_usage(worker_id, worker.ram_bytes_used() as u64);
         }
     }
 
-    // Channel closed — flush remaining buffered data
+    // Channel closed — flush remaining buffered data.
     let flushed = worker.flush(&context)?;
+    flush_control.update_ram_usage(worker_id, 0);
     if flushed.doc_count > 0 {
         segments.push(flushed);
     }
@@ -257,6 +272,10 @@ pub struct IndexCoordinator {
     directory: Arc<SharedDirectory>,
     /// Tracks committed segments and writes `segments_N`.
     segment_infos: SegmentInfos,
+    /// Shared flush coordination state for RAM-based flushing.
+    /// Held to keep the `Arc` alive; future stall control will read from it.
+    #[expect(dead_code)]
+    flush_control: Arc<FlushControl>,
 }
 
 impl IndexCoordinator {
@@ -267,18 +286,25 @@ impl IndexCoordinator {
         directory: Arc<SharedDirectory>,
         worker_factory: Arc<dyn WorkerFactory>,
     ) -> Self {
-        let queue_capacity = config.num_threads * 2;
+        let queue_capacity = config.num_threads;
         let (sender, receiver) = channel::bounded(queue_capacity);
         let max_buffered_docs = config.max_buffered_docs;
         let worker_source = Arc::new(WorkerSource::new(id_generator, worker_factory));
+        let flush_control = Arc::new(FlushControl::new(
+            config.num_threads,
+            config.ram_buffer_size_mb,
+        ));
 
         let mut workers = Vec::with_capacity(config.num_threads);
 
-        for _ in 0..config.num_threads {
+        for worker_id in 0..config.num_threads {
             let rx = receiver.clone();
             let source = Arc::clone(&worker_source);
+            let fc = Arc::clone(&flush_control);
 
-            let handle = thread::spawn(move || worker_thread_loop(rx, source, max_buffered_docs));
+            let handle = thread::spawn(move || {
+                worker_thread_loop(rx, source, max_buffered_docs, fc, worker_id)
+            });
             workers.push(handle);
         }
 
@@ -288,6 +314,7 @@ impl IndexCoordinator {
             use_compound_file: config.use_compound_file,
             directory,
             segment_infos: SegmentInfos::new(),
+            flush_control,
         }
     }
 
@@ -343,10 +370,16 @@ mod tests {
     use crate::newindex::analyzer::Token;
     use crate::newindex::consumer::{FieldConsumer, TokenInterest};
     use crate::newindex::field::Field;
+    use crate::newindex::flush_control::FlushControl;
     use crate::newindex::id_generator::RandomIdGenerator;
     use crate::newindex::segment_accumulator::SegmentAccumulator;
     use crate::newindex::standard_analyzer::StandardAnalyzer;
     use crate::store::MemoryDirectory;
+
+    /// Creates a disabled FlushControl for tests that don't need RAM-based flushing.
+    fn disabled_flush_control() -> Arc<FlushControl> {
+        Arc::new(FlushControl::new(1, 0.0))
+    }
 
     /// Deterministic ID generator for reproducible tests.
     struct SequentialIdGenerator(u8);
@@ -361,6 +394,16 @@ mod tests {
 
     /// No-op consumer that returns an empty file list.
     struct NoOpConsumer;
+
+    impl mem_dbg::MemSize for NoOpConsumer {
+        fn mem_size_rec(
+            &self,
+            _flags: mem_dbg::SizeFlags,
+            _refs: &mut mem_dbg::HashMap<usize, usize>,
+        ) -> usize {
+            0
+        }
+    }
 
     impl FieldConsumer for NoOpConsumer {
         fn start_document(&mut self, _doc_id: i32) -> io::Result<()> {
@@ -513,7 +556,7 @@ mod tests {
         tx.send(make_doc()).unwrap();
         drop(tx);
 
-        let segments = worker_thread_loop(rx, source, -1).unwrap();
+        let segments = worker_thread_loop(rx, source, -1, disabled_flush_control(), 0).unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].doc_count, 2);
     }
@@ -536,7 +579,7 @@ mod tests {
         drop(tx);
 
         // max_buffered_docs=3 → segments of 3, 3, 1
-        let segments = worker_thread_loop(rx, source, 3).unwrap();
+        let segments = worker_thread_loop(rx, source, 3, disabled_flush_control(), 0).unwrap();
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].doc_count, 3);
         assert_eq!(segments[1].doc_count, 3);
@@ -560,7 +603,7 @@ mod tests {
         let (tx, rx) = channel::bounded(4);
         drop(tx);
 
-        let segments = worker_thread_loop(rx, source, -1).unwrap();
+        let segments = worker_thread_loop(rx, source, -1, disabled_flush_control(), 0).unwrap();
         assert_is_empty!(segments);
     }
 
@@ -581,7 +624,7 @@ mod tests {
         tx.send(make_doc()).unwrap();
         drop(tx);
 
-        let mut segments = worker_thread_loop(rx, source, -1).unwrap();
+        let mut segments = worker_thread_loop(rx, source, -1, disabled_flush_control(), 0).unwrap();
         assert_eq!(segments.len(), 1);
 
         // Verify sub-files exist before packaging (.fdt, .fdm, .fdx, .fnm, .si)

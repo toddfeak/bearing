@@ -31,6 +31,16 @@ impl fmt::Debug for FieldInfosConsumer {
     }
 }
 
+impl mem_dbg::MemSize for FieldInfosConsumer {
+    fn mem_size_rec(
+        &self,
+        _flags: mem_dbg::SizeFlags,
+        _refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
 impl FieldInfosConsumer {
     /// Creates a new consumer.
     pub fn new() -> Self {
@@ -215,5 +225,15 @@ mod tests {
 
         let names = consumer.flush(&ctx, &acc).unwrap();
         assert_eq!(names, vec!["_0.fnm"]);
+    }
+
+    #[test]
+    fn mem_size_is_struct_size() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let consumer = FieldInfosConsumer::new();
+        assert_eq!(
+            consumer.mem_size(SizeFlags::CAPACITY),
+            std::mem::size_of::<FieldInfosConsumer>()
+        );
     }
 }

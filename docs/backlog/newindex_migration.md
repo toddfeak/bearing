@@ -196,11 +196,24 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - Java tooling consolidated: `VerifyNewindex` and `IndexNewindex` retired — newindex has field-for-field parity with the old pipeline, so `VerifyIndex` and `IndexAllFields` are used directly
 - `e2e_golden.sh` expanded: newindex non-compound and compound scenarios added alongside Java and old-Rust, all producing identical golden summaries
 
-### Phase 9: RAM-Based Flush Control
+### Phase 9: RAM-Based Flush Control ✓
 
-- RAM-based flush signaling via `SegmentAccumulator` memory tracking
-- Stall control when total RAM exceeds limits
-- E2e validation with RAM-driven flushing
+**Complete.** RAM-based flush signaling with cooperative multi-worker coordination. Workers report memory usage after each document; when total exceeds the configured buffer, enough workers (largest first) are signaled to flush to bring usage below 80% of the threshold.
+
+**What was built:**
+- `FlushControl` — shared coordination struct with per-worker `AtomicU64` RAM slots and `AtomicBool` flush signals. Signals enough workers (largest first, descending) to bring total RAM below `ram_buffer_size * 0.8`
+- `FieldConsumer` trait gains `MemSize` supertrait (from `mem_dbg`). Each consumer implements `MemSize` manually with pool-accurate sizing
+- `PerFieldPostings::ram_bytes_used()` helper for term hash + parallel arrays
+- `SegmentAccumulator` implements `MemSize` for norms data
+- `SegmentWorker::ram_bytes_used()` sums consumers + accumulator via `mem_size(SizeFlags::CAPACITY)`
+- `worker_thread_loop` reports RAM after each document, checks `FlushControl::should_flush()`, reports zero after flush and baseline after replacement
+- Channel capacity reduced from `num_threads * 2` to `num_threads` for tighter backpressure
+- Integration tests for RAM-triggered flushing (single-thread, multi-thread, large buffer)
+
+**Design decisions:**
+- Stalling deferred: channel backpressure only for now. `FlushControl` has per-worker RAM slots needed for future Condvar-based stalling at 2x threshold
+- No CLI flag for `ram_buffer_size_mb` — uses the 16.0 MB default, matching the old pipeline
+- Cooperative coordination: no coordinator thread. Each worker checks shared state after every document. Races are benign (at worst, slightly more workers flush)
 
 ### Phase 10: Feature Parity E2E
 

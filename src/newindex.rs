@@ -14,6 +14,7 @@ pub mod document;
 pub mod field;
 pub mod field_info_registry;
 pub mod field_infos_consumer;
+pub mod flush_control;
 pub mod id_generator;
 pub mod index_file_names;
 pub mod norms_consumer;

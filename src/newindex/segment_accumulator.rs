@@ -43,6 +43,23 @@ pub struct PerFieldNormsData {
     pub values: Vec<i64>,
 }
 
+impl mem_dbg::MemSize for SegmentAccumulator {
+    fn mem_size_rec(
+        &self,
+        _flags: mem_dbg::SizeFlags,
+        _refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        self.norms
+            .values()
+            .map(|n| {
+                n.field_name.capacity()
+                    + n.docs.capacity() * std::mem::size_of::<i32>()
+                    + n.values.capacity() * std::mem::size_of::<i64>()
+            })
+            .sum()
+    }
+}
+
 impl SegmentAccumulator {
     /// Creates an empty accumulator.
     pub fn new() -> Self {
@@ -79,5 +96,27 @@ impl SegmentAccumulator {
     /// Returns the total number of documents processed.
     pub fn doc_count(&self) -> i32 {
         self.doc_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assertables::*;
+    use mem_dbg::{MemSize, SizeFlags};
+
+    #[test]
+    fn mem_size_empty_is_zero() {
+        let acc = SegmentAccumulator::new();
+        assert_eq!(acc.mem_size(SizeFlags::CAPACITY), 0);
+    }
+
+    #[test]
+    fn mem_size_grows_with_norms() {
+        let mut acc = SegmentAccumulator::new();
+        for doc_id in 0..100 {
+            acc.record_norm(0, "body", doc_id, 42);
+        }
+        assert_gt!(acc.mem_size(SizeFlags::CAPACITY), 0);
     }
 }

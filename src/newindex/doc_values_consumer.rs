@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::mem::size_of;
 
 use crate::document::DocValuesType;
 use crate::newindex::analyzer::Token;
@@ -34,6 +35,37 @@ pub struct DocValuesConsumer {
     /// field_id → per-field accumulation state
     fields: HashMap<u32, PerFieldState>,
     current_doc_id: i32,
+}
+
+impl mem_dbg::MemSize for DocValuesConsumer {
+    fn mem_size_rec(
+        &self,
+        _flags: mem_dbg::SizeFlags,
+        _refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        self.fields
+            .values()
+            .map(|pf| {
+                pf.field_name.capacity()
+                    + match &pf.accumulator {
+                        DocValuesAccumulator::None => 0,
+                        DocValuesAccumulator::Numeric(v) => v.capacity() * size_of::<(i32, i64)>(),
+                        DocValuesAccumulator::Binary(v) => {
+                            v.capacity() * size_of::<(i32, Vec<u8>)>()
+                        }
+                        DocValuesAccumulator::Sorted(v) => {
+                            v.capacity() * size_of::<(i32, BytesRef)>()
+                        }
+                        DocValuesAccumulator::SortedNumeric(v) => {
+                            v.capacity() * size_of::<(i32, Vec<i64>)>()
+                        }
+                        DocValuesAccumulator::SortedSet(v) => {
+                            v.capacity() * size_of::<(i32, Vec<BytesRef>)>()
+                        }
+                    }
+            })
+            .sum()
+    }
 }
 
 impl DocValuesConsumer {
@@ -379,5 +411,29 @@ mod tests {
         let names = consumer.flush(&ctx, &acc).unwrap();
         assert_eq!(names[0], "_0_Lucene90_0.dvm");
         assert_eq!(names[1], "_0_Lucene90_0.dvd");
+    }
+
+    #[test]
+    fn mem_size_empty_is_zero() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let consumer = DocValuesConsumer::new();
+        assert_eq!(consumer.mem_size(SizeFlags::CAPACITY), 0);
+    }
+
+    #[test]
+    fn mem_size_grows_with_dv_fields() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let mut consumer = DocValuesConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        for doc_id in 0..10 {
+            consumer.start_document(doc_id).unwrap();
+            let field = numeric_dv("count").value(doc_id as i64);
+            consumer.start_field(0, &field, &mut acc).unwrap();
+            consumer.finish_field(0, &field, &mut acc).unwrap();
+            consumer.finish_document(doc_id, &mut acc).unwrap();
+        }
+
+        assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 0);
     }
 }

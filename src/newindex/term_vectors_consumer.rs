@@ -57,6 +57,19 @@ impl fmt::Debug for TermVectorsConsumer {
     }
 }
 
+impl mem_dbg::MemSize for TermVectorsConsumer {
+    fn mem_size_rec(
+        &self,
+        flags: mem_dbg::SizeFlags,
+        refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        let docs_bytes: usize = self.docs.iter().map(|d| d.mem_size_rec(flags, refs)).sum();
+        let current_fields_bytes =
+            self.current_fields.capacity() * std::mem::size_of::<TermVectorField>();
+        docs_bytes + current_fields_bytes
+    }
+}
+
 impl TermVectorsConsumer {
     /// Creates a new consumer with no accumulated data.
     pub fn new() -> Self {
@@ -338,5 +351,36 @@ mod tests {
         consumer.finish_document(0, &mut accum).unwrap();
 
         assert!(consumer.docs.is_empty());
+    }
+
+    #[test]
+    fn mem_size_empty_is_zero() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let consumer = TermVectorsConsumer::new();
+        assert_eq!(consumer.mem_size(SizeFlags::CAPACITY), 0);
+    }
+
+    #[test]
+    fn mem_size_grows_with_documents() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let mut consumer = TermVectorsConsumer::new();
+        let mut accum = SegmentAccumulator::new();
+
+        consumer.start_document(0).unwrap();
+        let field = text("contents")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("hello world");
+        consumer.start_field(0, &field, &mut accum).unwrap();
+        let token = Token {
+            text: "hello",
+            start_offset: 0,
+            end_offset: 5,
+            position_increment: 1,
+        };
+        consumer.add_token(0, &field, &token, &mut accum).unwrap();
+        consumer.finish_field(0, &field, &mut accum).unwrap();
+        consumer.finish_document(0, &mut accum).unwrap();
+
+        assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 0);
     }
 }

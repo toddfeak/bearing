@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::mem::size_of;
 
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::document::IndexOptions;
@@ -52,6 +53,26 @@ impl fmt::Debug for PostingsConsumer {
         f.debug_struct("PostingsConsumer")
             .field("field_count", &self.per_field.len())
             .finish()
+    }
+}
+
+impl mem_dbg::MemSize for PostingsConsumer {
+    fn mem_size_rec(
+        &self,
+        _flags: mem_dbg::SizeFlags,
+        _refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        let pools = self.byte_pool.ram_bytes_used() + self.positions_pool.ram_bytes_used();
+        let per_field: usize = self
+            .per_field
+            .values()
+            .map(|pf| {
+                pf.postings.ram_bytes_used()
+                    + pf.field_name.capacity()
+                    + pf.active_term_ids.capacity() * size_of::<usize>()
+            })
+            .sum();
+        pools + per_field
     }
 }
 
@@ -519,5 +540,37 @@ mod tests {
         assert!(names.iter().any(|n| n.ends_with(".tim")));
         assert!(names.iter().any(|n| n.ends_with(".doc")));
         assert!(!names.iter().any(|n| n.ends_with(".pos")));
+    }
+
+    #[test]
+    fn mem_size_baseline_includes_pools() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let consumer = PostingsConsumer::new();
+        // Two pre-allocated 32KB byte block pools.
+        assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 60_000);
+    }
+
+    #[test]
+    fn mem_size_grows_with_documents() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let mut consumer = PostingsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+        let field = text("body").stored().value("ignored");
+
+        let baseline = consumer.mem_size(SizeFlags::CAPACITY);
+
+        for doc_id in 0..50 {
+            process_doc(
+                &mut consumer,
+                doc_id,
+                0,
+                &field,
+                &["hello", "world", "foo", "bar"],
+                &mut acc,
+            );
+        }
+
+        let after = consumer.mem_size(SizeFlags::CAPACITY);
+        assert_gt!(after, baseline);
     }
 }

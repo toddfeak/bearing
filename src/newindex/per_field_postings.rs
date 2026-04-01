@@ -85,6 +85,23 @@ impl PerFieldPostings {
         }
     }
 
+    /// Returns the estimated RAM bytes used by this per-field state.
+    ///
+    /// Includes the term hash (pool + metadata) and all parallel arrays.
+    pub fn ram_bytes_used(&self) -> usize {
+        let hash_bytes = self.terms.ram_bytes_used();
+        let array_bytes = (self.byte_stream_starts.capacity()
+            + self.byte_stream_addrs.capacity()
+            + self.last_doc_ids.capacity()
+            + self.current_doc_ids.capacity()
+            + self.current_freqs.capacity()
+            + self.positions_stream_starts.capacity()
+            + self.positions_stream_addrs.capacity()
+            + self.last_positions.capacity())
+            * std::mem::size_of::<u32>();
+        hash_bytes + array_bytes
+    }
+
     /// Hashes a term, allocating byte slices for new terms. Returns the term ID.
     ///
     /// If the term already exists, returns its existing ID. For new terms,

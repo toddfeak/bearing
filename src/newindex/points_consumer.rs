@@ -40,6 +40,22 @@ pub struct PointsConsumer {
     current_doc_id: i32,
 }
 
+impl mem_dbg::MemSize for PointsConsumer {
+    fn mem_size_rec(
+        &self,
+        _flags: mem_dbg::SizeFlags,
+        _refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        self.fields
+            .values()
+            .map(|pf| {
+                pf.field_name.capacity()
+                    + pf.points.capacity() * std::mem::size_of::<(i32, Vec<u8>)>()
+            })
+            .sum()
+    }
+}
+
 impl PointsConsumer {
     /// Creates a new consumer.
     pub fn new() -> Self {
@@ -290,5 +306,29 @@ mod tests {
         let names = consumer.flush(&ctx, &acc).unwrap();
         // One set of .kdd/.kdi/.kdm for all point fields in the segment
         assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn mem_size_empty_is_zero() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let consumer = PointsConsumer::new();
+        assert_eq!(consumer.mem_size(SizeFlags::CAPACITY), 0);
+    }
+
+    #[test]
+    fn mem_size_grows_with_point_fields() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let mut consumer = PointsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        for doc_id in 0..10 {
+            consumer.start_document(doc_id).unwrap();
+            let field = int_field("size").value(doc_id * 100);
+            consumer.start_field(0, &field, &mut acc).unwrap();
+            consumer.finish_field(0, &field, &mut acc).unwrap();
+            consumer.finish_document(doc_id, &mut acc).unwrap();
+        }
+
+        assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 0);
     }
 }

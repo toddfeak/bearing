@@ -5,6 +5,8 @@ use std::env;
 use std::io;
 use std::mem;
 
+use mem_dbg::{MemSize, SizeFlags};
+
 use crate::newindex::analyzer::Analyzer;
 use crate::newindex::codecs::segment_info;
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
@@ -212,24 +214,19 @@ impl SegmentWorker {
             return true;
         }
 
-        // RAM-based threshold:
-        // - After each document, the worker reports its RAM usage to a
-        //   shared AtomicUsize on the coordinator.
-        // - The coordinator tracks total RAM across all workers.
-        // - If total RAM exceeds the configured limit, the coordinator
-        //   signals the worker with the most RAM to flush.
-        // - If total RAM exceeds 2x the limit, add_document stalls
-        //   (bounded channel backpressure) until flushes bring it down.
-        // - RAM measurement uses mem_dbg on consumer accumulators.
-        // TODO: implement RAM-based flush signaling
-
+        // RAM-based flushing is coordinated externally via FlushControl.
         false
     }
 
     /// Returns the estimated RAM bytes used by this worker's accumulators.
     pub fn ram_bytes_used(&self) -> usize {
-        // TODO: sum across field consumers and accumulator
-        0
+        let consumers: usize = self
+            .field_consumers
+            .iter()
+            .map(|c| c.mem_size(SizeFlags::CAPACITY))
+            .sum();
+        let accumulator = self.accumulator.mem_size(SizeFlags::CAPACITY);
+        consumers + accumulator
     }
 
     /// Flushes all accumulated data as a segment to the directory.
@@ -288,6 +285,16 @@ mod tests {
 
     /// No-op consumer that returns an empty file list.
     struct NoOpConsumer;
+
+    impl mem_dbg::MemSize for NoOpConsumer {
+        fn mem_size_rec(
+            &self,
+            _flags: mem_dbg::SizeFlags,
+            _refs: &mut mem_dbg::HashMap<usize, usize>,
+        ) -> usize {
+            0
+        }
+    }
 
     impl FieldConsumer for NoOpConsumer {
         fn start_document(&mut self, _doc_id: i32) -> io::Result<()> {
@@ -371,6 +378,16 @@ mod tests {
     fn flush_includes_consumer_files_in_si() {
         /// Consumer that claims it wrote a file.
         struct FakeConsumer;
+
+        impl mem_dbg::MemSize for FakeConsumer {
+            fn mem_size_rec(
+                &self,
+                _flags: mem_dbg::SizeFlags,
+                _refs: &mut mem_dbg::HashMap<usize, usize>,
+            ) -> usize {
+                0
+            }
+        }
 
         impl FieldConsumer for FakeConsumer {
             fn start_document(&mut self, _: i32) -> io::Result<()> {
