@@ -28,6 +28,9 @@ pub(crate) struct FieldInfo {
     pub has_norms: bool,
     pub index_options: u8,
     pub doc_values_type: DocValuesType,
+    pub point_dimension_count: u32,
+    pub point_index_dimension_count: u32,
+    pub point_num_bytes: u32,
 }
 
 /// Collection of field metadata for a segment.
@@ -135,8 +138,12 @@ pub(crate) fn write(
         }
         output.write_map_of_strings(&attrs)?;
 
-        // Point dimensions: 0 (no points)
-        output.write_vint(0)?;
+        // Point dimensions
+        output.write_vint(fi.point_dimension_count as i32)?;
+        if fi.point_dimension_count > 0 {
+            output.write_vint(fi.point_index_dimension_count as i32)?;
+            output.write_vint(fi.point_num_bytes as i32)?;
+        }
 
         // Vector dimension: 0
         output.write_vint(0)?;
@@ -169,6 +176,9 @@ mod tests {
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::None,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
         }
     }
 
@@ -179,6 +189,9 @@ mod tests {
             has_norms: true,
             index_options: 3, // DocsAndFreqsAndPositions
             doc_values_type: DocValuesType::None,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
         }
     }
 
@@ -272,6 +285,9 @@ mod tests {
             has_norms: true,
             index_options: 3,
             doc_values_type: DocValuesType::None,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
         }];
         let fis = FieldInfos::new(fields);
         write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
@@ -324,6 +340,9 @@ mod tests {
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::Numeric,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
         }]);
         write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
 
@@ -349,6 +368,9 @@ mod tests {
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::SortedSet,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
         }]);
         write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
 
@@ -370,6 +392,9 @@ mod tests {
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::SortedNumeric,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
         }]);
         write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
 
@@ -391,6 +416,9 @@ mod tests {
             has_norms: false,
             index_options: 0,
             doc_values_type: DocValuesType::SortedNumeric,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
         }]);
         write(&dir, "_0", "", &[0u8; 16], &fis).unwrap();
 

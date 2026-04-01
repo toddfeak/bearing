@@ -14,8 +14,9 @@ use std::time::Instant;
 use bearing::newindex::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
 use bearing::newindex::field::{
-    binary_dv, feature, keyword, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored,
-    string, text,
+    binary_dv, double_field, double_range, feature, float_field, float_range, int_field, int_range,
+    keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv, sorted_numeric_dv,
+    sorted_set_dv, stored, string, text,
 };
 use bearing::newindex::writer::IndexWriter;
 use bearing::store::FSDirectory;
@@ -193,8 +194,7 @@ fn main() {
 
 /// Creates a Document from a file path, matching indexfiles make_document.
 ///
-/// Fields marked DEBT are waiting on a future phase (points, term vectors).
-/// When those phases land, remove the DEBT markers and add the fields.
+/// DEBT: "contents" uses text without term vectors — needs Phase 8 (TermVectorsConsumer).
 fn make_document(path: &Path) -> bearing::newindex::document::Document {
     let path_str = path.to_string_lossy().to_string();
     let file_name = path
@@ -209,29 +209,46 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
 
     let metadata = fs::metadata(path).ok();
     let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+    let modified = metadata
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
 
-    // DEBT: indexfiles uses text_field_reader_with_term_vectors — needs Phase 8 (TermVectorsConsumer)
+    // DEBT: indexfiles uses text_field_reader_with_term_vectors — needs Phase 8
     let contents_field = match File::open(path) {
         Ok(file) => text("contents").reader(BufReader::new(file)),
         Err(_) => text("contents").reader(io::empty()),
     };
 
+    let lat = 40.7128 + (file_size % 10) as f64 * 0.01;
+    let lon = -74.006 + (file_size % 10) as f64 * 0.01;
+
     let mut builder = DocumentBuilder::new();
 
-    // "path" — KeywordField (matches indexfiles::keyword_field)
-    builder = builder.add_field(keyword("path").stored().value(&path_str));
-
-    // DEBT: "modified" — LongField, needs Phase 7 (PointsConsumer)
-
-    // "contents" — TextField
-    builder = builder.add_field(contents_field);
-
-    // "title" — StringField: indexed exact match + stored
-    builder = builder.add_field(string("title").stored().value(&title));
-
-    // DEBT: "size" — IntField, needs Phase 7
-    // DEBT: "score" — FloatField, needs Phase 7
-    // DEBT: "rating" — DoubleField, needs Phase 7
+    builder = builder
+        // "path" — KeywordField
+        .add_field(keyword("path").stored().value(&path_str))
+        // "modified" — LongField
+        .add_field(long_field("modified").value(modified))
+        // "contents" — TextField
+        .add_field(contents_field)
+        // "title" — StringField
+        .add_field(string("title").stored().value(&title))
+        // "size" — IntField (stored)
+        .add_field(int_field("size").stored().value(file_size as i32))
+        // "score" — FloatField (stored)
+        .add_field(
+            float_field("score")
+                .stored()
+                .value((file_size % 100) as f32 / 10.0),
+        )
+        // "rating" — DoubleField (stored)
+        .add_field(
+            double_field("rating")
+                .stored()
+                .value(file_size as f64 * 1.5),
+        );
 
     // Stored-only fields
     builder = builder
@@ -240,10 +257,23 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
         .add_field(stored("extra_float").float((file_size % 100) as f32 / 3.0))
         .add_field(stored("extra_double").double(file_size as f64 * 0.123));
 
-    // DEBT: "location" — LatLonPoint, needs Phase 7
-    // DEBT: "int_range", "long_range", "float_range", "double_range" — needs Phase 7
+    // LatLonPoint
+    builder = builder.add_field(lat_lon("location").value(lat, lon));
 
-    // FeatureField (matches indexfiles::feature_field)
+    // Range fields
+    builder = builder
+        .add_field(int_range("int_range").value(&[file_size as i32], &[file_size as i32 + 100]))
+        .add_field(long_range("long_range").value(&[file_size as i64], &[file_size as i64 + 1000]))
+        .add_field(
+            float_range("float_range")
+                .value(&[file_size as f32 / 10.0], &[file_size as f32 / 10.0 + 1.0]),
+        )
+        .add_field(
+            double_range("double_range")
+                .value(&[file_size as f64 * 0.1], &[file_size as f64 * 0.1 + 1.0]),
+        );
+
+    // FeatureField
     builder = builder
         .add_field(feature("features").value("pagerank", (file_size % 100) as f32 / 10.0 + 0.5))
         .add_field(feature("features").value("freshness", (file_size % 50) as f32 / 5.0 + 1.0));

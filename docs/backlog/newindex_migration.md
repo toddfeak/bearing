@@ -172,14 +172,16 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 - `IndexNewindex.java` and `VerifyNewindex.java` updated to match: KeywordField path DV, StringField title terms, FeatureField terms, extra_int stored values
 - Phase numbering renumbered: consecutive 0–11, no sub-phases
 
-### Phase 7: PointsConsumer
+### Phase 7: PointsConsumer ✓
 
-DEBT copy of BKD tree writer, new `PointsConsumer`, .fnm point dimension support.
+**Complete.** BKD tree point indexing for all numeric, spatial, and range field types, validated by Java Lucene across 5000 docs.
 
-- DEBT copy of `src/codecs/lucene90/points.rs` → `src/newindex/codecs/points.rs`
-- `PointsConsumer` implementing `FieldConsumer` — accumulates `(doc_id, encoded_bytes)` per field, flushes via DEBT writer producing `.kdd`/`.kdi`/`.kdm`
-- `.fnm` writer: add point dimension fields to `FieldInfo`, write conditional dimensions instead of hardcoded 0
-- Demo: add `LongField`, `LatLonPoint`; Java: matching fields + point range query verification
+**What was built:**
+- DEBT codec copy at `newindex/codecs/points.rs` (~1626 lines) — full Lucene90 BKD writer with `PointsFieldData` replacing `FieldInfos`/`PerFieldData`
+- `PointsConsumer` — a `FieldConsumer` that accumulates `(doc_id, encoded_bytes)` per field and flushes via DEBT writer producing `.kdd`/`.kdi`/`.kdm` with empty suffix
+- `.fnm` writer: `FieldInfo` extended with `point_dimension_count`/`point_index_dimension_count`/`point_num_bytes`, conditional dimension writing replacing hardcoded 0
+- `newindex_demo` now matches `indexfiles` field-for-field: `LongField` (modified), `IntField` (size), `FloatField` (score), `DoubleField` (rating), `LatLonPoint` (location), all four range fields. Only remaining DEBT: contents term vectors (Phase 8)
+- Java tooling updated: `IndexNewindex` adds matching point fields, `VerifyNewindex` checks point doc counts and dimensions
 
 ### Phase 8: TermVectorsConsumer
 

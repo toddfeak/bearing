@@ -12,7 +12,7 @@ use std::io;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::field_infos::{self, FieldInfo, FieldInfos};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
-use crate::newindex::field::Field;
+use crate::newindex::field::{Field, PointsValue};
 use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
 
@@ -51,12 +51,33 @@ impl FieldConsumer for FieldInfosConsumer {
         field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
+        let (pdim, pidx, pbytes) = match field.field_type().points() {
+            None => (0, 0, 0),
+            Some(PointsValue::Single {
+                bytes_per_dim,
+                encoded,
+            }) => {
+                let dims = (encoded.len() / bytes_per_dim) as u32;
+                (dims, dims, *bytes_per_dim as u32)
+            }
+            Some(PointsValue::Range {
+                dims,
+                bytes_per_dim,
+                ..
+            }) => {
+                let d = (*dims * 2) as u32;
+                (d, d, *bytes_per_dim as u32)
+            }
+        };
         self.fields.entry(field_id).or_insert_with(|| FieldInfo {
             name: field.name().to_string(),
             number: field_id,
             has_norms: field.field_type().has_norms(),
             index_options: field.field_type().index_options() as u8,
             doc_values_type: field.field_type().doc_values_type(),
+            point_dimension_count: pdim,
+            point_index_dimension_count: pidx,
+            point_num_bytes: pbytes,
         });
         Ok(TokenInterest::NoTokens)
     }

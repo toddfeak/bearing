@@ -10,6 +10,7 @@ use crate::newindex::coordinator::WorkerFactory;
 use crate::newindex::doc_values_consumer::DocValuesConsumer;
 use crate::newindex::field_infos_consumer::FieldInfosConsumer;
 use crate::newindex::norms_consumer::NormsConsumer;
+use crate::newindex::points_consumer::PointsConsumer;
 use crate::newindex::postings_consumer::PostingsConsumer;
 use crate::newindex::segment::SegmentId;
 use crate::newindex::segment_context::SegmentContext;
@@ -45,23 +46,13 @@ impl WorkerFactory for DefaultWorkerFactory {
             segment_id: segment_id.id,
         };
 
-        // Order matters: consumers are flushed in sequence and some depend
-        // on files written by earlier consumers. FieldInfosConsumer must
-        // remain last — it writes .fnm after all other consumers have
-        // finalized field metadata.
-        //
-        // Expected final order:
-        //   NormsConsumer        — norms must flush before postings (postings reads norms)
-        //   DocValuesConsumer    — doc values
-        //   PointsConsumer       — BKD tree
-        //   StoredFieldsConsumer — stored fields
-        //   TermVectorsConsumer  — term vectors (shares term pool with postings)
-        //   PostingsConsumer     — postings + terms
-        //   FieldInfosConsumer   — field infos (.fnm, must be last)
+        // Order matters: norms before postings, FieldInfosConsumer last.
         let consumers: Vec<Box<dyn FieldConsumer>> = vec![
             Box::new(NormsConsumer::new()),
             Box::new(DocValuesConsumer::new()),
+            Box::new(PointsConsumer::new()),
             Box::new(StoredFieldsConsumer::new()),
+            // TODO: TermVectorsConsumer goes here (Phase 8)
             Box::new(PostingsConsumer::new()),
             Box::new(FieldInfosConsumer::new()),
         ];

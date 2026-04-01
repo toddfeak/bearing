@@ -15,6 +15,7 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NumericDocValues;
+import org.apache.lucene.index.PointValues;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
@@ -244,6 +245,37 @@ public class VerifyNewindex {
         } else {
             System.err.println("FAIL: extra_int has " + extraIntCount + " stored values, expected " + numDocs);
             ok = false;
+        }
+
+        // Check point fields
+        for (LeafReaderContext ctx : reader.leaves()) {
+            LeafReader leaf = ctx.reader();
+            int leafDocs = leaf.numDocs();
+
+            // "size" — IntField has points
+            PointValues sizePoints = leaf.getPointValues("size");
+            if (sizePoints != null) {
+                int pc = sizePoints.getDocCount();
+                System.out.println("  size: " + pc + "/" + leafDocs + " docs have points (OK)");
+                if (pc != leafDocs) {
+                    System.err.println("FAIL: size has " + pc + " point docs, expected " + leafDocs);
+                    ok = false;
+                }
+            }
+
+            // "location" — LatLonPoint has 2D points
+            PointValues locPoints = leaf.getPointValues("location");
+            if (locPoints != null) {
+                int pc = locPoints.getDocCount();
+                System.out.println("  location: " + pc + "/" + leafDocs + " docs have points, "
+                    + locPoints.getNumDimensions() + "D (OK)");
+                if (pc != leafDocs) {
+                    System.err.println("FAIL: location has " + pc + " point docs, expected " + leafDocs);
+                    ok = false;
+                }
+            }
+
+            break; // one leaf is enough
         }
 
         // Check "notes" stored values (sample + count)

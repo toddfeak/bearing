@@ -18,6 +18,7 @@ pub mod id_generator;
 pub mod index_file_names;
 pub mod norms_consumer;
 pub mod per_field_postings;
+pub mod points_consumer;
 pub mod postings_consumer;
 pub mod segment;
 pub mod segment_accumulator;
