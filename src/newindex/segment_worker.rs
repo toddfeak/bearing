@@ -204,20 +204,6 @@ impl SegmentWorker {
         Ok(())
     }
 
-    /// Returns true if this worker has hit a threshold and should flush.
-    ///
-    /// Called by the thread loop after each document. Doc count is
-    /// checked directly. RAM-based flushing is coordinated externally.
-    pub fn should_flush(&self, max_buffered_docs: i32) -> bool {
-        // Doc count threshold (-1 means disabled)
-        if max_buffered_docs > 0 && self.doc_count >= max_buffered_docs {
-            return true;
-        }
-
-        // RAM-based flushing is coordinated externally via FlushControl.
-        false
-    }
-
     /// Returns the estimated RAM bytes used by this worker's accumulators.
     pub fn ram_bytes_used(&self) -> usize {
         let consumers: usize = self
