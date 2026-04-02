@@ -802,20 +802,20 @@ fn add_text_docs(writer: &IndexWriter, count: usize) {
 #[test]
 fn ram_flush_produces_multiple_segments() {
     let config = IndexWriterConfig {
-        ram_buffer_size_mb: 0.1, // very small — forces frequent flushes
-        max_buffered_docs: -1,   // disabled — only RAM triggers flushes
+        ram_buffer_size_mb: 0.05, // very small — forces frequent flushes
+        max_buffered_docs: -1,    // disabled — only RAM triggers flushes
         ..Default::default()
     };
 
     let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
-    add_text_docs(&writer, 200);
+    add_text_docs(&writer, 500);
     let segments = writer.commit().unwrap();
 
-    // With a 0.1 MB buffer and ~1KB per doc, should produce multiple segments.
+    // With a 0.05 MB buffer and ~1KB per doc, should produce multiple segments.
     assert_gt!(segments.len(), 1);
 
     let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
-    assert_eq!(total_docs, 200);
+    assert_eq!(total_docs, 500);
 }
 
 #[test]

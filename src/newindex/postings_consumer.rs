@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::mem;
 
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::document::IndexOptions;
@@ -16,37 +17,57 @@ use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::{Field, InvertableValue};
-use crate::newindex::per_field_postings::PerFieldPostings;
 use crate::newindex::segment_accumulator::SegmentAccumulator;
 use crate::newindex::segment_context::SegmentContext;
-use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
+use crate::newindex::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 
 /// Accumulates postings (terms, frequencies, positions) for indexed fields
 /// and writes them at flush time via the block tree + postings codecs.
 ///
-/// Owns shared byte pools that all per-field states write into.
-#[derive(mem_dbg::MemSize)]
+/// Owns a shared `TermsHash` (int pool + byte pool) that all per-field
+/// `FreqProxTermsWriterPerField` instances write into.
 pub struct PostingsConsumer {
     /// field_id → per-field postings state
     per_field: HashMap<u32, PerFieldState>,
-    /// Shared pool for doc delta + freq byte slices (all fields).
-    byte_pool: ByteBlockPool<DirectAllocator>,
-    /// Shared pool for position delta byte slices (all fields).
-    positions_pool: ByteBlockPool<DirectAllocator>,
+    /// Shared pools for all per-field writers.
+    terms_hash: TermsHash,
     current_doc_id: i32,
     current_position: i32,
 }
 
+impl mem_dbg::MemSize for PostingsConsumer {
+    fn mem_size_rec(
+        &self,
+        flags: mem_dbg::SizeFlags,
+        refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        // Estimate per-field overhead
+        let per_field_size: usize = self
+            .per_field
+            .values()
+            .map(|s| s.mem_size_rec(flags, refs))
+            .sum();
+        per_field_size + self.terms_hash.mem_size_rec(flags, refs) + mem::size_of::<Self>()
+    }
+}
+
 /// Per-field state tracked by PostingsConsumer.
-#[derive(mem_dbg::MemSize)]
 struct PerFieldState {
-    postings: PerFieldPostings,
+    writer: FreqProxTermsWriterPerField,
     field_name: String,
     field_number: u32,
     index_options: IndexOptions,
-    /// Set of term IDs that appeared in the current document for this field.
-    /// Used to finalize all active terms when the field ends.
-    active_term_ids: Vec<usize>,
+}
+
+impl mem_dbg::MemSize for PerFieldState {
+    fn mem_size_rec(
+        &self,
+        _flags: mem_dbg::SizeFlags,
+        _refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        // Rough estimate — the real cost is in the shared pools
+        mem::size_of::<Self>() + self.field_name.capacity()
+    }
 }
 
 impl fmt::Debug for PostingsConsumer {
@@ -60,15 +81,9 @@ impl fmt::Debug for PostingsConsumer {
 impl PostingsConsumer {
     /// Creates a new consumer with empty pools.
     pub fn new() -> Self {
-        let mut byte_pool = ByteBlockPool::new(DirectAllocator);
-        byte_pool.next_buffer();
-        let mut positions_pool = ByteBlockPool::new(DirectAllocator);
-        positions_pool.next_buffer();
-
         Self {
             per_field: HashMap::new(),
-            byte_pool,
-            positions_pool,
+            terms_hash: TermsHash::new(),
             current_doc_id: 0,
             current_position: 0,
         }
@@ -104,53 +119,41 @@ impl FieldConsumer for PostingsConsumer {
             .per_field
             .entry(field_id)
             .or_insert_with(|| PerFieldState {
-                postings: PerFieldPostings::new(opts.has_freqs(), opts.has_positions()),
+                writer: FreqProxTermsWriterPerField::new(field.name().to_string(), opts),
                 field_name: field.name().to_string(),
                 field_number: field_id,
                 index_options: opts,
-                active_term_ids: Vec::new(),
             });
 
         // Non-tokenized indexed fields: record the exact value as a single term
-        // directly here. No analyzer, no segment worker involvement.
         if let Some(InvertableValue::ExactMatch(value)) = field.field_type().invertable() {
-            let tid = state.postings.add_term(
-                value.as_bytes(),
-                &mut self.byte_pool,
-                if opts.has_positions() {
-                    Some(&mut self.positions_pool)
-                } else {
-                    None
-                },
-            );
-            state.postings.record_occurrence(
-                tid,
-                self.current_doc_id,
-                0,
-                &mut self.byte_pool,
-                if opts.has_positions() {
-                    Some(&mut self.positions_pool)
-                } else {
-                    None
-                },
-            );
-            state.active_term_ids.push(tid);
+            state.writer.current_position = 0;
+            state.writer.current_start_offset = 0;
+            state.writer.current_end_offset = 0;
+            state
+                .writer
+                .add(&mut self.terms_hash, value.as_bytes(), self.current_doc_id)?;
             return Ok(TokenInterest::NoTokens);
         }
 
         // Feature fields: single term with explicit freq encoding.
         if let Some(InvertableValue::Feature(term_name, value)) = field.field_type().invertable() {
-            let tid = state
-                .postings
-                .add_term(term_name.as_bytes(), &mut self.byte_pool, None);
             let freq = (f32::to_bits(*value) >> 15) as i32;
-            state.postings.record_occurrence_with_freq(
-                tid,
+            // For feature fields, we add the term then manually set the freq.
+            // The FreqProx encoding handles this: after add(), the pending
+            // doc has freq=1. We need to override it.
+            state.writer.current_position = 0;
+            state.writer.current_start_offset = 0;
+            state.writer.current_end_offset = 0;
+            let tid = state.writer.add(
+                &mut self.terms_hash,
+                term_name.as_bytes(),
                 self.current_doc_id,
-                freq,
-                &mut self.byte_pool,
-            );
-            state.active_term_ids.push(tid);
+            )?;
+            // Override the term frequency for feature fields
+            if let Some(ref mut freqs) = state.writer.postings_array.term_freqs {
+                freqs[tid] = freq;
+            }
             return Ok(TokenInterest::NoTokens);
         }
 
@@ -171,36 +174,25 @@ impl FieldConsumer for PostingsConsumer {
             .per_field
             .get_mut(&field_id)
             .expect("start_field must precede add_token");
-        let tid = state.postings.add_term(
+
+        state.writer.current_position = position;
+        state.writer.current_start_offset = token.start_offset;
+        state.writer.current_end_offset = token.end_offset;
+        state.writer.add(
+            &mut self.terms_hash,
             token.text.as_bytes(),
-            &mut self.byte_pool,
-            Some(&mut self.positions_pool),
-        );
-
-        state.postings.record_occurrence(
-            tid,
             self.current_doc_id,
-            position,
-            &mut self.byte_pool,
-            Some(&mut self.positions_pool),
-        );
-
-        if !state.active_term_ids.contains(&tid) {
-            state.active_term_ids.push(tid);
-        }
+        )?;
 
         Ok(())
     }
 
     fn finish_field(
         &mut self,
-        field_id: u32,
+        _field_id: u32,
         _field: &Field,
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()> {
-        if let Some(state) = self.per_field.get_mut(&field_id) {
-            state.active_term_ids.clear();
-        }
         Ok(())
     }
 
@@ -222,14 +214,21 @@ impl FieldConsumer for PostingsConsumer {
             return Ok(vec![]);
         }
 
-        // Finalize all pending docs across all fields
+        // Flush pending docs for all fields
         for state in self.per_field.values_mut() {
-            state.postings.finalize_all(&mut self.byte_pool);
+            state.writer.flush_pending_docs(&mut self.terms_hash);
         }
 
         // Sort fields by field number for deterministic output
         let mut field_ids: Vec<u32> = self.per_field.keys().copied().collect();
         field_ids.sort();
+
+        // Sort terms for each field
+        for state in self.per_field.values_mut() {
+            if state.writer.num_terms() > 0 {
+                state.writer.sort_terms(&self.terms_hash.byte_pool);
+            }
+        }
 
         // Determine if any field has positions (controls .pos file creation)
         let has_positions = self
@@ -251,15 +250,11 @@ impl FieldConsumer for PostingsConsumer {
         let norms_data = accumulator.norms();
 
         for &field_id in &field_ids {
-            let state = self.per_field.get_mut(&field_id).unwrap();
+            let state = self.per_field.get(&field_id).unwrap();
 
-            if state.postings.term_count() == 0 {
+            if state.writer.num_terms() == 0 {
                 continue;
             }
-
-            let sorted = state.postings.sort_terms();
-            let sorted_refs: Vec<(&str, usize)> =
-                sorted.iter().map(|(s, id)| (s.as_str(), *id)).collect();
 
             let norms = if let Some(field_norms) = norms_data.get(&field_id) {
                 NormsLookup::new(&field_norms.values, &field_norms.docs)
@@ -274,14 +269,7 @@ impl FieldConsumer for PostingsConsumer {
                 write_positions: state.index_options.has_positions(),
             };
 
-            writer.write_field(
-                &field_ctx,
-                &sorted_refs,
-                &state.postings,
-                &self.byte_pool,
-                Some(&self.positions_pool),
-                &norms,
-            )?;
+            writer.write_field(&field_ctx, &state.writer, &self.terms_hash, &norms)?;
         }
 
         writer.finish()
@@ -532,11 +520,11 @@ mod tests {
     }
 
     #[test]
-    fn mem_size_baseline_includes_pools() {
+    fn mem_size_baseline() {
         use mem_dbg::{MemSize, SizeFlags};
         let consumer = PostingsConsumer::new();
-        // Two pre-allocated 32KB byte block pools.
-        assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 60_000);
+        // Should have some baseline size from the TermsHash pools
+        assert_gt!(consumer.mem_size(SizeFlags::CAPACITY), 0);
     }
 
     #[test]

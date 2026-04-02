@@ -1,6 +1,8 @@
 //! Ground-up rebuild of the indexing pipeline.
 
 pub mod analyzer;
+pub(crate) mod byte_block_pool;
+pub(crate) mod bytes_ref_hash;
 pub mod channel;
 pub(crate) mod codecs;
 pub mod config;
@@ -17,8 +19,8 @@ pub mod field_infos_consumer;
 pub mod flush_control;
 pub mod id_generator;
 pub mod index_file_names;
+pub(crate) mod int_block_pool;
 pub mod norms_consumer;
-pub mod per_field_postings;
 pub mod points_consumer;
 pub mod postings_consumer;
 pub mod segment;
@@ -29,4 +31,6 @@ pub mod segment_worker;
 pub mod standard_analyzer;
 pub mod stored_fields_consumer;
 pub mod term_vectors_consumer;
+pub(crate) mod term_vectors_consumer_per_field;
+pub(crate) mod terms_hash;
 pub mod writer;

@@ -3,7 +3,7 @@
 //! [`FieldConsumer`] that streams stored field data to codec files per-document.
 //!
 //! Instead of buffering `StoredDoc` structs in memory, this consumer writes
-//! stored fields to a [`Lucene90StoredFieldsWriter`] incrementally as
+//! stored fields to a `Lucene90StoredFieldsWriter` incrementally as
 //! documents are indexed. Only a single document's fields are held in
 //! memory at a time.
 

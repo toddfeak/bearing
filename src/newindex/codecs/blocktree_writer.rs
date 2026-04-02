@@ -20,10 +20,9 @@ use crate::codecs::lucene103::postings_format::{
 use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4};
 use crate::newindex::index_file_names::segment_file_name;
-use crate::newindex::per_field_postings::PerFieldPostings;
+use crate::newindex::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
-use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
 
 use super::postings_writer::PostingsWriter;
 
@@ -148,28 +147,32 @@ impl BlockTreeTermsWriter {
     pub fn write_field(
         &mut self,
         field_ctx: &FieldWriteContext,
-        sorted_terms: &[(&str, usize)],
-        postings: &PerFieldPostings,
-        byte_pool: &ByteBlockPool<DirectAllocator>,
-        positions_pool: Option<&ByteBlockPool<DirectAllocator>>,
+        per_field: &FreqProxTermsWriterPerField,
+        terms_hash: &TermsHash,
         norms: &NormsLookup,
     ) -> io::Result<()> {
-        if sorted_terms.is_empty() {
+        let num_terms = per_field.num_terms();
+        if num_terms == 0 {
             return Ok(());
         }
 
+        let sorted_ids = per_field.sorted_term_ids();
+
         debug!(
             "blocktree_writer: write_field name={} num_terms={}",
-            field_ctx.field_name,
-            sorted_terms.len()
+            field_ctx.field_name, num_terms
         );
 
         let mut tw = TermsWriter::new(field_ctx, self.min_items_in_block, self.max_items_in_block);
 
         let mut docs_seen = HashSet::new();
 
-        for &(term_str, term_id) in sorted_terms {
-            let decoded = postings.decode_term(term_id, byte_pool, positions_pool)?;
+        for &sorted_id in &sorted_ids[..num_terms] {
+            let term_id = sorted_id as usize;
+            let term_bytes = per_field.term_bytes(&terms_hash.byte_pool, term_id);
+            let term_str = std::str::from_utf8(term_bytes).expect("term bytes must be valid UTF-8");
+
+            let decoded = per_field.decode_term(terms_hash, term_id)?;
 
             // Accumulate unique doc IDs for doc_count
             for &(doc_id, _, _) in &decoded {
@@ -1280,76 +1283,49 @@ fn choose_child_save_strategy(min_label: u8, max_label: u8, label_cnt: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::IndexOptions;
     use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
-    use crate::util::byte_block_pool::DirectAllocator;
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    /// Test helper: builds terms and postings using newindex types.
+    /// Test helper: builds terms and postings using FreqProxTermsWriterPerField.
+    ///
+    /// Unlike the old PerFieldPostings-based helper, this requires terms to be
+    /// added in document order (all tokens for doc 0 before doc 1, etc.) because
+    /// FreqProxTermsWriterPerField uses a shared last_doc_id assertion.
     struct TestTerms {
-        pfp: PerFieldPostings,
-        byte_pool: ByteBlockPool<DirectAllocator>,
-        positions_pool: Option<ByteBlockPool<DirectAllocator>>,
+        writer: FreqProxTermsWriterPerField,
+        terms_hash: TermsHash,
     }
 
     impl TestTerms {
         fn new(has_positions: bool) -> Self {
-            let mut byte_pool = ByteBlockPool::new(DirectAllocator);
-            byte_pool.next_buffer();
-            let positions_pool = if has_positions {
-                let mut pool = ByteBlockPool::new(DirectAllocator);
-                pool.next_buffer();
-                Some(pool)
+            let opts = if has_positions {
+                IndexOptions::DocsAndFreqsAndPositions
             } else {
-                None
+                IndexOptions::DocsAndFreqs
             };
             Self {
-                pfp: PerFieldPostings::new(true, has_positions),
-                byte_pool,
-                positions_pool,
+                writer: FreqProxTermsWriterPerField::new("test".to_string(), opts),
+                terms_hash: TermsHash::new(),
             }
         }
 
-        fn insert(&mut self, term: &str, data: &[(i32, i32, &[i32])]) {
-            let tid = self.pfp.add_term(
-                term.as_bytes(),
-                &mut self.byte_pool,
-                self.positions_pool.as_mut(),
-            );
-            for &(doc_id, freq, positions) in data {
-                if positions.is_empty() {
-                    // No positions — record occurrence once per freq
-                    for _ in 0..freq {
-                        self.pfp.record_occurrence(
-                            tid,
-                            doc_id,
-                            0,
-                            &mut self.byte_pool,
-                            self.positions_pool.as_mut(),
-                        );
-                    }
-                } else {
-                    for &pos in positions {
-                        self.pfp.record_occurrence(
-                            tid,
-                            doc_id,
-                            pos,
-                            &mut self.byte_pool,
-                            self.positions_pool.as_mut(),
-                        );
-                    }
-                }
-            }
+        /// Add a single term occurrence at the given doc/position.
+        fn add(&mut self, term: &str, doc_id: i32, position: i32) {
+            self.writer.current_position = position;
+            self.writer.current_start_offset = 0;
+            self.writer.current_end_offset = 0;
+            self.writer
+                .add(&mut self.terms_hash, term.as_bytes(), doc_id)
+                .unwrap();
         }
 
         fn finalize(&mut self) {
-            self.pfp.finalize_all(&mut self.byte_pool);
-        }
-
-        fn sorted(&mut self) -> Vec<(String, usize)> {
-            self.pfp.sort_terms()
+            self.writer.flush_pending_docs(&mut self.terms_hash);
+            self.writer.sort_terms(&self.terms_hash.byte_pool);
         }
     }
 
@@ -1556,23 +1532,25 @@ mod tests {
     #[test]
     fn test_write_field_simple() {
         let mut tt = TestTerms::new(false);
-        tt.insert("apple", &[(0, 2, &[])]);
-        tt.insert("banana", &[(0, 1, &[]), (1, 3, &[])]);
-        tt.insert("cherry", &[(2, 1, &[])]);
+        // Doc 0: apple x2, banana x1
+        tt.add("apple", 0, 0);
+        tt.add("apple", 0, 0);
+        tt.add("banana", 0, 0);
+        // Doc 1: banana x3
+        tt.add("banana", 1, 0);
+        tt.add("banana", 1, 0);
+        tt.add("banana", 1, 0);
+        // Doc 2: cherry x1
+        tt.add("cherry", 2, 0);
         tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let sorted = tt.sorted();
-        let sorted_refs: Vec<(&str, usize)> =
-            sorted.iter().map(|(s, id)| (s.as_str(), *id)).collect();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
         btw.write_field(
             &freq_field_ctx("test"),
-            &sorted_refs,
-            &tt.pfp,
-            &tt.byte_pool,
-            tt.positions_pool.as_ref(),
+            &tt.writer,
+            &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
         .unwrap();
@@ -1601,22 +1579,21 @@ mod tests {
     #[test]
     fn test_write_field_with_positions() {
         let mut tt = TestTerms::new(true);
-        tt.insert("hello", &[(0, 2, &[0, 5]), (1, 1, &[3])]);
-        tt.insert("world", &[(0, 1, &[1])]);
+        // Doc 0: hello@0, world@1, hello@5
+        tt.add("hello", 0, 0);
+        tt.add("world", 0, 1);
+        tt.add("hello", 0, 5);
+        // Doc 1: hello@3
+        tt.add("hello", 1, 3);
         tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let sorted = tt.sorted();
-        let sorted_refs: Vec<(&str, usize)> =
-            sorted.iter().map(|(s, id)| (s.as_str(), *id)).collect();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
         btw.write_field(
             &positions_field_ctx("contents"),
-            &sorted_refs,
-            &tt.pfp,
-            &tt.byte_pool,
-            tt.positions_pool.as_ref(),
+            &tt.writer,
+            &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
         .unwrap();
@@ -1631,29 +1608,25 @@ mod tests {
     #[test]
     fn test_push_term_many_terms_no_overflow() {
         let mut tt = TestTerms::new(true);
+        // All in doc 0 — positions just need to be distinct per term
         for i in 0..30 {
-            tt.insert(&format!("aaa_{i:02}"), &[(0, 1, &[i])]);
+            tt.add(&format!("aaa_{i:02}"), 0, i);
         }
         for i in 0..30 {
-            tt.insert(&format!("bbb_{i:02}"), &[(0, 1, &[30 + i])]);
+            tt.add(&format!("bbb_{i:02}"), 0, 30 + i);
         }
         for i in 0..30 {
-            tt.insert(&format!("ccc_{i:02}"), &[(0, 1, &[60 + i])]);
+            tt.add(&format!("ccc_{i:02}"), 0, 60 + i);
         }
         tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let sorted = tt.sorted();
-        let sorted_refs: Vec<(&str, usize)> =
-            sorted.iter().map(|(s, id)| (s.as_str(), *id)).collect();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
         btw.write_field(
             &positions_field_ctx("contents"),
-            &sorted_refs,
-            &tt.pfp,
-            &tt.byte_pool,
-            tt.positions_pool.as_ref(),
+            &tt.writer,
+            &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
         .unwrap();
@@ -1668,22 +1641,22 @@ mod tests {
     #[test]
     fn test_doc_count_computed_correctly() {
         let mut tt = TestTerms::new(false);
-        tt.insert("alpha", &[(0, 1, &[]), (1, 1, &[])]);
-        tt.insert("beta", &[(1, 1, &[]), (2, 1, &[])]);
+        // Doc 0: alpha
+        tt.add("alpha", 0, 0);
+        // Doc 1: alpha, beta
+        tt.add("alpha", 1, 0);
+        tt.add("beta", 1, 0);
+        // Doc 2: beta
+        tt.add("beta", 2, 0);
         tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let sorted = tt.sorted();
-        let sorted_refs: Vec<(&str, usize)> =
-            sorted.iter().map(|(s, id)| (s.as_str(), *id)).collect();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
         btw.write_field(
             &freq_field_ctx("test"),
-            &sorted_refs,
-            &tt.pfp,
-            &tt.byte_pool,
-            tt.positions_pool.as_ref(),
+            &tt.writer,
+            &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
         .unwrap();
@@ -1725,23 +1698,25 @@ mod tests {
     #[test]
     fn test_min_max_terms_written_to_tmd() {
         let mut tt = TestTerms::new(false);
-        tt.insert("apple", &[(0, 2, &[])]);
-        tt.insert("banana", &[(0, 1, &[]), (1, 3, &[])]);
-        tt.insert("cherry", &[(2, 1, &[])]);
+        // Doc 0: apple x2, banana x1
+        tt.add("apple", 0, 0);
+        tt.add("apple", 0, 0);
+        tt.add("banana", 0, 0);
+        // Doc 1: banana x3
+        tt.add("banana", 1, 0);
+        tt.add("banana", 1, 0);
+        tt.add("banana", 1, 0);
+        // Doc 2: cherry x1
+        tt.add("cherry", 2, 0);
         tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let sorted = tt.sorted();
-        let sorted_refs: Vec<(&str, usize)> =
-            sorted.iter().map(|(s, id)| (s.as_str(), *id)).collect();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
         btw.write_field(
             &freq_field_ctx("test"),
-            &sorted_refs,
-            &tt.pfp,
-            &tt.byte_pool,
-            tt.positions_pool.as_ref(),
+            &tt.writer,
+            &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
         .unwrap();
@@ -1824,29 +1799,25 @@ mod tests {
         let mut tt = TestTerms::new(true);
         let mut p = 0i32;
 
+        // All in doc 0 — different terms at different positions
         for group in b'a'..=b'z' {
             for i in 0..30 {
-                tt.insert(&format!("a{}{i:02}", group as char), &[(0, 1, &[p])]);
+                tt.add(&format!("a{}{i:02}", group as char), 0, p);
                 p += 1;
             }
         }
         for i in 0..30 {
-            tt.insert(&format!("b_{i:02}"), &[(0, 1, &[p + i])]);
+            tt.add(&format!("b_{i:02}"), 0, p + i);
         }
         tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let sorted = tt.sorted();
-        let sorted_refs: Vec<(&str, usize)> =
-            sorted.iter().map(|(s, id)| (s.as_str(), *id)).collect();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
         btw.write_field(
             &positions_field_ctx("contents"),
-            &sorted_refs,
-            &tt.pfp,
-            &tt.byte_pool,
-            tt.positions_pool.as_ref(),
+            &tt.writer,
+            &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
         .unwrap();
