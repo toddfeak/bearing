@@ -13,13 +13,13 @@ use std::time::Instant;
 use log::error;
 
 use bearing::index::config::IndexWriterConfig;
+use bearing::index::writer::IndexWriter;
 use bearing::newindex::document::DocumentBuilder;
 use bearing::newindex::field::{
     TermVectorOptions, binary_dv, double_field, double_range, feature, float_field, float_range,
     int_field, int_range, keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv,
     sorted_numeric_dv, sorted_set_dv, stored, string, text,
 };
-use bearing::newindex::writer::IndexWriter;
 use bearing::store::{FSDirectory, SharedDirectory};
 
 struct CliArgs {

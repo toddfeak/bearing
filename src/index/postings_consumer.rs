@@ -13,11 +13,11 @@ use std::mem;
 
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::document::IndexOptions;
+use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
-use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::{Field, InvertableValue};
 use crate::newindex::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 

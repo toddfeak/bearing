@@ -10,11 +10,11 @@
 use std::io;
 
 use crate::document::StoredValue as CodecStoredValue;
+use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::stored_fields::{Lucene90StoredFieldsWriter, StoredFieldsWriter};
-use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::{Field, StoredValue};
 
 /// Converts a newindex [`StoredValue`] to the codec's [`CodecStoredValue`].

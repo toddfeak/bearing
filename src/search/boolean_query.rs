@@ -264,9 +264,9 @@ mod tests {
 
     use crate::index::config::IndexWriterConfig;
     use crate::index::directory_reader::DirectoryReader;
+    use crate::index::writer::IndexWriter;
     use crate::newindex::document::DocumentBuilder;
     use crate::newindex::field::text;
-    use crate::newindex::writer::IndexWriter;
     use crate::search::index_searcher::IndexSearcher;
     use crate::search::term_query::TermQuery;
     use crate::store::{MemoryDirectory, SharedDirectory};

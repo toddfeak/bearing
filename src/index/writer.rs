@@ -4,10 +4,10 @@ use std::io;
 use std::sync::Arc;
 
 use crate::index::config::IndexWriterConfig;
+use crate::index::coordinator::IndexCoordinator;
+use crate::index::default_worker_factory::DefaultWorkerFactory;
 use crate::index::id_generator::RandomIdGenerator;
 use crate::index::segment::FlushedSegment;
-use crate::newindex::coordinator::IndexCoordinator;
-use crate::newindex::default_worker_factory::DefaultWorkerFactory;
 use crate::newindex::document::Document;
 use crate::store::SharedDirectory;
 

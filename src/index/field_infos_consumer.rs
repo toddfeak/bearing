@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 
+use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::field_infos::{self, FieldInfo, FieldInfos};
-use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::{Field, PointsValue};
 
 /// Tracks field metadata from `start_field` calls and writes the `.fnm`

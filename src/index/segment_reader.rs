@@ -294,9 +294,9 @@ mod tests {
 
     use super::*;
     use crate::index::config::IndexWriterConfig;
+    use crate::index::writer::IndexWriter;
     use crate::newindex::document::DocumentBuilder;
     use crate::newindex::field::{string, text};
-    use crate::newindex::writer::IndexWriter;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn write_test_index(compound: bool) -> (Arc<SharedDirectory>, String, [u8; 16]) {

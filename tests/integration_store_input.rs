@@ -110,9 +110,9 @@ impl Drop for DirCleanup<'_> {
 #[test]
 fn test_index_writer_files_readable() {
     use bearing::index::config::IndexWriterConfig;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
     let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
@@ -139,9 +139,9 @@ fn test_index_writer_files_readable() {
 #[test]
 fn test_index_writer_codec_files_have_valid_headers() {
     use bearing::index::config::IndexWriterConfig;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
     let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
@@ -182,9 +182,9 @@ fn test_index_writer_codec_files_have_valid_headers() {
 fn test_read_segments_from_index_writer() {
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: false,
@@ -219,9 +219,9 @@ fn test_read_segments_from_index_writer() {
 fn test_read_segments_multiple_docs() {
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, long_field, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: false,
@@ -255,9 +255,9 @@ fn test_read_segments_multiple_docs() {
 fn test_read_segments_memory_directory() {
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: false,
@@ -288,9 +288,9 @@ fn test_read_segments_memory_directory() {
 fn test_read_segments_compound_mode() {
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: true,
@@ -324,9 +324,9 @@ fn test_read_segments_compound_mode() {
 fn test_compound_directory_list_files() {
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: true,
@@ -362,9 +362,9 @@ fn test_compound_directory_list_files() {
 fn test_compound_directory_read_embedded_file() {
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: true,
@@ -405,9 +405,9 @@ fn test_compound_directory_read_embedded_file() {
 fn test_compound_directory_memory() {
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: true,
@@ -449,9 +449,9 @@ fn test_stored_fields_reader_round_trip() {
     use bearing::document::StoredValue;
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::stored;
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: false,
@@ -522,9 +522,9 @@ fn test_stored_fields_reader_all_types() {
     use bearing::document::StoredValue;
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::stored;
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: false,
@@ -601,9 +601,9 @@ fn test_stored_fields_reader_many_docs() {
     use bearing::document::StoredValue;
     use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
+    use bearing::index::writer::IndexWriter;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::stored;
-    use bearing::newindex::writer::IndexWriter;
 
     let config = IndexWriterConfig {
         use_compound_file: false,

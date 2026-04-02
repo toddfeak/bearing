@@ -4,11 +4,11 @@
 
 use std::io;
 
+use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::norms::{self, NormsFieldData};
-use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::Field;
 use crate::util::small_float;
 

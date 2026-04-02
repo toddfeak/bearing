@@ -9,17 +9,17 @@ use std::thread;
 use log::debug;
 
 use crate::codecs::lucene90;
+use crate::index::channel::{self, Receiver, Sender};
 use crate::index::config::IndexWriterConfig;
 use crate::index::flush_control::FlushControl;
 use crate::index::id_generator::IdGenerator;
 use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::channel::{self, Receiver, Sender};
+use crate::index::segment_worker::SegmentWorker;
 use crate::newindex::codecs::segment_info;
 use crate::newindex::document::Document;
 use crate::newindex::index_file_names::{self, radix_fmt};
 use crate::newindex::segment_infos::SegmentInfos;
-use crate::newindex::segment_worker::SegmentWorker;
 use crate::store::{self, SharedDirectory};
 
 /// Creates [`SegmentWorker`] instances for worker threads.
@@ -356,11 +356,11 @@ mod tests {
     use assertables::*;
     use std::collections::HashSet;
 
+    use crate::index::consumer::{FieldConsumer, TokenInterest};
     use crate::index::flush_control::FlushControl;
     use crate::index::id_generator::RandomIdGenerator;
     use crate::index::segment_accumulator::SegmentAccumulator;
     use crate::newindex::analyzer::Token;
-    use crate::newindex::consumer::{FieldConsumer, TokenInterest};
     use crate::newindex::field::Field;
     use crate::newindex::standard_analyzer::StandardAnalyzer;
     use crate::store::MemoryDirectory;
@@ -469,8 +469,8 @@ mod tests {
 
     impl WorkerFactory for StoredFieldsWorkerFactory {
         fn create_worker(&self, segment_id: SegmentId) -> (SegmentWorker, SegmentContext) {
-            use crate::newindex::field_infos_consumer::FieldInfosConsumer;
-            use crate::newindex::stored_fields_consumer::StoredFieldsConsumer;
+            use crate::index::field_infos_consumer::FieldInfosConsumer;
+            use crate::index::stored_fields_consumer::StoredFieldsConsumer;
 
             let context = SegmentContext {
                 directory: Arc::clone(&self.directory),

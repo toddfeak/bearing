@@ -13,7 +13,7 @@
 //! use bearing::index::config::IndexWriterConfig;
 //! use bearing::newindex::document::DocumentBuilder;
 //! use bearing::newindex::field::{text, keyword};
-//! use bearing::newindex::writer::IndexWriter;
+//! use bearing::index::writer::IndexWriter;
 //! use bearing::store::{FSDirectory, SharedDirectory};
 //!
 //! let fs_dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();

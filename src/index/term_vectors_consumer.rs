@@ -11,13 +11,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 
+use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
+use crate::index::term_vectors_consumer_per_field::TermVectorsConsumerPerField;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::term_vectors::{self, TermVectorChunkWriter};
-use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::Field;
-use crate::newindex::term_vectors_consumer_per_field::TermVectorsConsumerPerField;
 use crate::newindex::terms_hash::{TermsHash, TermsHashPerFieldTrait};
 
 /// Accumulates per-document term vector data during indexing and writes

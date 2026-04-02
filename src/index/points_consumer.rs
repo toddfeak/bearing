@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 
+use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::points::{self, PointsFieldData};
-use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::{Field, PointsValue};
 
 /// Per-field state for accumulating point values during indexing.

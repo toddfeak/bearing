@@ -6,13 +6,29 @@
 //! [`SegmentInfo`], [`SegmentCommitInfo`]) and readers for opening and
 //! querying indexes ([`directory_reader`], [`segment_reader`]).
 
+pub mod channel;
 pub mod config;
+pub mod consumer;
+pub mod coordinator;
+pub mod default_worker_factory;
+pub mod directory_adapter;
+pub mod doc_values_consumer;
+pub mod field_info_registry;
+pub mod field_infos_consumer;
 pub mod flush_control;
 pub mod id_generator;
 pub(crate) mod index_file_names;
+pub mod norms_consumer;
+pub mod points_consumer;
+pub mod postings_consumer;
 pub mod segment;
 pub mod segment_accumulator;
 pub mod segment_context;
+pub mod segment_worker;
+pub mod stored_fields_consumer;
+pub mod term_vectors_consumer;
+pub(crate) mod term_vectors_consumer_per_field;
+pub mod writer;
 
 pub use segment_infos::{SegmentEntry, SegmentInfosRead};
 pub mod directory_reader;
