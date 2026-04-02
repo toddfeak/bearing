@@ -220,8 +220,9 @@ The architecture, data flow, ownership model, and trait hierarchy are original t
 Full cross-validation against the existing indexing path.
 
 - Golden summary comparison: new pipeline vs existing pipeline vs Java ✓ (completed in Phase 8)
-- Impact verification (`VerifyImpacts`)
-- Performance comparison: new pipeline vs existing pipeline
+- Impact verification (`VerifyImpacts`) ✓
+- Performance comparison: new pipeline vs existing pipeline ✓
+- Tune memory/thread defaults (RAM buffer size, flush thresholds, channel capacity) based on profiling
 
 ### Phase 11: Switchover
 

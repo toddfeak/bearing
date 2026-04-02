@@ -62,6 +62,21 @@ run_scenario "Multi-thread + multi-segment" --threads 2 --max-buffered-docs 2
 run_scenario "Compound file" --compound
 run_scenario "Compound + multi-segment" --max-buffered-docs 2 --compound
 
+# --- VerifyImpacts (uses impact-docs corpus for sufficient docFreq) ---
+echo ""
+echo "--- VerifyImpacts ---"
+IMPACT_DOCS="$PROJECT_DIR/testdata/impact-docs"
+IMPACT_IDX="$(mktemp -d)"
+"$DEMO" -docs "$IMPACT_DOCS" -index "$IMPACT_IDX"
+if $GRADLE -q verifyImpacts -PindexDir="$IMPACT_IDX" 2>&1; then
+    echo "PASSED: VerifyImpacts"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAILED: VerifyImpacts"
+    FAILED=$((FAILED + 1))
+fi
+rm -rf "$IMPACT_IDX"
+
 # --- Summary ---
 echo ""
 echo "========================================"
