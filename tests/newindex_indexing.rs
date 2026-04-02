@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use assertables::*;
 use bearing::newindex::config::IndexWriterConfig;
@@ -17,7 +18,11 @@ use bearing::newindex::field::{
     string, text,
 };
 use bearing::newindex::writer::IndexWriter;
-use bearing::store::MemoryDirectory;
+use bearing::store::{MemoryDirectory, SharedDirectory};
+
+fn shared_memory_dir() -> Arc<SharedDirectory> {
+    Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())))
+}
 
 fn add_stored_docs(writer: &IndexWriter, count: usize) {
     for i in 0..count {
@@ -31,10 +36,7 @@ fn add_stored_docs(writer: &IndexWriter, count: usize) {
 
 #[test]
 fn single_segment_stored_fields() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..5 {
         let doc = DocumentBuilder::new()
@@ -61,20 +63,14 @@ fn single_segment_stored_fields() {
 
 #[test]
 fn empty_commit_produces_no_segments() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
     let segments = writer.commit().unwrap();
     assert_is_empty!(segments);
 }
 
 #[test]
 fn segment_file_names_use_segment_prefix() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     let doc = DocumentBuilder::new()
         .add_field(stored("title").string("hello"))
@@ -95,7 +91,7 @@ fn max_buffered_docs_creates_multiple_segments() {
         max_buffered_docs: 5,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 12);
 
@@ -128,7 +124,7 @@ fn multi_thread_produces_independent_segments() {
         max_buffered_docs: 1,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     // With max_buffered_docs=1, every doc triggers a flush. The flush
     // I/O gives the other thread time to pick up work from the channel.
@@ -159,7 +155,7 @@ fn multi_thread_with_mid_flush() {
         max_buffered_docs: 3,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 10);
 
@@ -181,8 +177,7 @@ fn compound_file_packaging() {
         use_compound_file: true,
         ..Default::default()
     };
-    let dir = Box::new(MemoryDirectory::new());
-    let writer = IndexWriter::new(config, dir);
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 5);
 
@@ -205,7 +200,7 @@ fn non_compound_keeps_individual_files() {
         use_compound_file: false,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 5);
 
@@ -231,7 +226,7 @@ fn compound_with_multi_segment() {
         max_buffered_docs: 5,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 12);
 
@@ -269,10 +264,7 @@ fn add_text_docs_from_testdata(writer: &IndexWriter) {
 
 #[test]
 fn stored_tokenized_fields_produce_norms_and_postings_files() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     add_text_docs_from_testdata(&writer);
 
@@ -305,7 +297,7 @@ fn stored_tokenized_fields_multi_segment() {
         max_buffered_docs: 2,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_text_docs_from_testdata(&writer);
 
@@ -329,10 +321,7 @@ fn stored_tokenized_fields_multi_segment() {
 
 #[test]
 fn text_only_fields_produce_postings_without_stored() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     // Tokenized, not stored
     for i in 0..3 {
@@ -356,10 +345,7 @@ fn text_only_fields_produce_postings_without_stored() {
 
 #[test]
 fn mixed_stored_and_stored_tokenized_fields() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..5 {
         let doc = DocumentBuilder::new()
@@ -386,10 +372,7 @@ fn tokenized_field_produces_same_postings_as_string() {
     let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
 
     // Index with tokenized_field (streaming)
-    let writer_reader = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer_reader = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
     for entry in fs::read_dir(&docs_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
@@ -401,10 +384,7 @@ fn tokenized_field_produces_same_postings_as_string() {
     let segments_reader = writer_reader.commit().unwrap();
 
     // Index with stored_tokenized_field (string)
-    let writer_string = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer_string = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
     for entry in fs::read_dir(&docs_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
@@ -432,10 +412,7 @@ fn tokenized_field_produces_same_postings_as_string() {
 
 #[test]
 fn reader_field_not_stored() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     let doc = DocumentBuilder::new()
         .add_field(stored("title").string("test"))
@@ -463,10 +440,7 @@ fn stored_tokenized_field_from_file_path() {
     let file_path = dir.join("doc.txt");
     fs::write(&file_path, "hello world from a file").unwrap();
 
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     let doc = DocumentBuilder::new()
         .add_field(text("contents").stored().value(file_path.clone()))
@@ -493,10 +467,7 @@ fn stored_tokenized_field_from_file_path() {
 
 #[test]
 fn string_field_produces_docs_only_postings() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..3 {
         let doc = DocumentBuilder::new()
@@ -523,10 +494,7 @@ fn string_field_produces_docs_only_postings() {
 
 #[test]
 fn mixed_string_and_text_fields() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..3 {
         let doc = DocumentBuilder::new()
@@ -555,10 +523,7 @@ fn mixed_string_and_text_fields() {
 
 #[test]
 fn numeric_dv_produces_doc_values_files() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..3 {
         let doc = DocumentBuilder::new()
@@ -579,10 +544,7 @@ fn numeric_dv_produces_doc_values_files() {
 
 #[test]
 fn all_dv_types_produce_files() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..3 {
         let doc = DocumentBuilder::new()
@@ -605,10 +567,7 @@ fn all_dv_types_produce_files() {
 
 #[test]
 fn mixed_dv_and_stored_and_postings() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..5 {
         let doc = DocumentBuilder::new()
@@ -639,10 +598,7 @@ fn mixed_dv_and_stored_and_postings() {
 
 #[test]
 fn dv_only_docs_no_stored_or_postings() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..3 {
         let doc = DocumentBuilder::new()
@@ -670,7 +626,7 @@ fn dv_compound_file_packaging() {
         use_compound_file: true,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     for i in 0..3 {
         let doc = DocumentBuilder::new()
@@ -696,7 +652,7 @@ fn dv_multi_segment() {
         max_buffered_docs: 2,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     for i in 0..5 {
         let doc = DocumentBuilder::new()
@@ -741,10 +697,7 @@ fn add_tv_docs_from_testdata(writer: &IndexWriter) {
 
 #[test]
 fn term_vectors_produce_tvd_tvx_tvm_files() {
-    let writer = IndexWriter::new(
-        IndexWriterConfig::default(),
-        Box::new(MemoryDirectory::new()),
-    );
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     add_tv_docs_from_testdata(&writer);
 
@@ -763,7 +716,7 @@ fn term_vectors_multi_segment() {
         max_buffered_docs: 2,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_tv_docs_from_testdata(&writer);
 
@@ -783,7 +736,7 @@ fn term_vectors_compound() {
         use_compound_file: true,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_tv_docs_from_testdata(&writer);
 
@@ -802,7 +755,7 @@ fn term_vectors_multi_thread() {
         max_buffered_docs: 2,
         ..Default::default()
     };
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_tv_docs_from_testdata(&writer);
 
@@ -837,7 +790,7 @@ fn ram_flush_produces_multiple_segments() {
         ..Default::default()
     };
 
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
     add_text_docs(&writer, 500);
     let segments = writer.commit().unwrap();
 
@@ -856,7 +809,7 @@ fn large_ram_buffer_produces_single_segment() {
         ..Default::default()
     };
 
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
     add_text_docs(&writer, 50);
     let segments = writer.commit().unwrap();
 
@@ -873,7 +826,7 @@ fn ram_flush_multi_thread() {
         ..Default::default()
     };
 
-    let writer = IndexWriter::new(config, Box::new(MemoryDirectory::new()));
+    let writer = IndexWriter::new(config, shared_memory_dir());
     add_text_docs(&writer, 200);
     let segments = writer.commit().unwrap();
 

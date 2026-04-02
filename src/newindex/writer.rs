@@ -9,23 +9,38 @@ use crate::newindex::default_worker_factory::DefaultWorkerFactory;
 use crate::newindex::document::Document;
 use crate::newindex::id_generator::RandomIdGenerator;
 use crate::newindex::segment::FlushedSegment;
-use crate::store::{Directory, SharedDirectory};
+use crate::store::SharedDirectory;
 
 /// Manages the indexing pipeline: accepts documents, coordinates worker
 /// threads, and flushes segments to the directory.
 // LOCKED
 pub struct IndexWriter {
     coordinator: IndexCoordinator,
+    directory: Arc<SharedDirectory>,
 }
 
 impl IndexWriter {
     /// Creates a new `IndexWriter` for the given directory.
-    pub fn new(config: IndexWriterConfig, directory: Box<dyn Directory>) -> Self {
-        let directory = Arc::new(SharedDirectory::new(directory));
+    ///
+    /// The caller retains shared access to the directory via `Arc`, matching
+    /// Lucene's model where the `Directory` is shared between writer and reader.
+    pub fn new(config: IndexWriterConfig, directory: Arc<SharedDirectory>) -> Self {
         let factory = Arc::new(DefaultWorkerFactory::new(Arc::clone(&directory)));
-        let coordinator =
-            IndexCoordinator::new(&config, Box::new(RandomIdGenerator), directory, factory);
-        Self { coordinator }
+        let coordinator = IndexCoordinator::new(
+            &config,
+            Box::new(RandomIdGenerator),
+            Arc::clone(&directory),
+            factory,
+        );
+        Self {
+            coordinator,
+            directory,
+        }
+    }
+
+    /// Returns the directory this writer is writing to.
+    pub fn directory(&self) -> &Arc<SharedDirectory> {
+        &self.directory
     }
 
     /// Adds a document to the index.

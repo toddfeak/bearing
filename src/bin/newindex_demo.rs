@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Arc;
 use std::time::Instant;
 
 use bearing::newindex::config::IndexWriterConfig;
@@ -18,7 +19,7 @@ use bearing::newindex::field::{
     sorted_numeric_dv, sorted_set_dv, stored, string, text,
 };
 use bearing::newindex::writer::IndexWriter;
-use bearing::store::FSDirectory;
+use bearing::store::{FSDirectory, SharedDirectory};
 
 struct CliArgs {
     index_path: String,
@@ -159,7 +160,8 @@ fn main() {
     };
 
     let fs_dir = FSDirectory::open_with_file_handles(index_dir).unwrap();
-    let writer = IndexWriter::new(config, Box::new(fs_dir));
+    let directory = Arc::new(SharedDirectory::new(Box::new(fs_dir)));
+    let writer = IndexWriter::new(config, directory);
 
     // Threading is handled internally by IndexWriter via num_threads config.
     for path in &doc_paths {
