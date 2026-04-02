@@ -9,6 +9,7 @@ Single unified script that builds the Rust `indexfiles` binary, indexes `testdat
 3. Index with `--compound` → verify `.cfs`/`.cfe` exist
 4. Java `VerifyIndex` on Rust index (stored fields, terms, points, doc values, term vectors, features, ranges)
 5. Java `VerifyImpacts` on Rust index (competitive impact data in skip blocks)
+6. Configuration variants with VerifyIndex (multi-segment, multi-thread, compound + multi-segment)
 
 ```bash
 ./tests/e2e_all.sh
@@ -66,56 +67,6 @@ To add a new Java utility:
 1. Create `tests/java/src/main/java/MyTool.java` with a `public static void main`
 2. Run it immediately with `runJava` — no `build.gradle.kts` changes required
 3. If the tool is permanent and needs structured property passing, add a dedicated task
-
-## Newindex E2E Test
-
-Validates the newindex pipeline by indexing `testdata/docs` (4 files) under various configurations and verifying each with Java `VerifyIndex` (content validation: stored fields, terms, norms, queries, points, doc values, term vectors, features, ranges).
-
-```bash
-./tests/e2e_newindex.sh
-```
-
-Scenarios: single segment, multi-segment, multi-thread, multi-thread + multi-segment, compound, compound + multi-segment.
-
-## Newindex Java Utilities
-
-Newindex uses the same Java utilities as the old pipeline — both paths produce field-for-field identical indexes. `IndexAllFields` for Java baselines, `VerifyIndex` for validation.
-
-## Newindex Performance Comparison
-
-Compare indexing speed, memory usage, and correctness between Java (`IndexAllFields`) and Rust (`newindex_demo`):
-
-```bash
-./tests/compare_newindex_perf.sh                                  # default: MT, release, verify
-./tests/compare_newindex_perf.sh --1t                             # also run single-threaded
-./tests/compare_newindex_perf.sh --debug                          # debug build
-./tests/compare_newindex_perf.sh -docs /tmp/perf-docs --no-verify # large corpus, skip verify
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `-docs DIR` | `testdata/docs` | Documents directory |
-| `--debug` | release | Build Rust in debug mode |
-| `--threads N` | `12` | Thread count for multi-threaded runs |
-| `--1t` | off | Also run single-threaded (1T) for both Java and Rust |
-| `--no-verify` | verify on | Skip VerifyIndex validation |
-| `--compound` | off | Use compound file format (.cfs/.cfe) |
-
-## Newindex CLI Reference
-
-The `newindex_demo` binary indexes files from a directory. DEBT copy of `indexfiles` with field-for-field parity.
-
-```bash
-cargo run --bin newindex_demo -- -docs <DOCS_PATH> [OPTIONS]
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `-docs PATH` | *(required)* | Source directory with files to index |
-| `-index PATH` | `index` | Output directory for the index |
-| `--max-buffered-docs N` | disabled | Flush after N documents per segment |
-| `--threads N` | `1` | Number of indexing threads |
-| `--compound` | off | Package segment files into .cfs/.cfe |
 
 ## Indexing Performance Comparison
 

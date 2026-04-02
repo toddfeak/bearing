@@ -8,8 +8,6 @@
 #   2. Rust write (non-compound) → Rust read
 #   3. Java write (compound) → Rust read
 #   4. Rust write (compound) → Rust read
-#   5. Newindex write (non-compound) → Rust read
-#   6. Newindex write (compound) → Rust read
 #
 # Usage: ./tests/e2e_golden.sh
 
@@ -60,7 +58,7 @@ check_summary() {
 }
 
 echo "Building Rust binaries..."
-cargo build --bin indexfiles --bin newindex_demo --bin generate_summary --manifest-path "$PROJECT_DIR/Cargo.toml" 2>&1 | tail -1
+cargo build --bin indexfiles --bin generate_summary --manifest-path "$PROJECT_DIR/Cargo.toml" 2>&1 | tail -1
 
 echo ""
 echo "========================================"
@@ -112,29 +110,6 @@ INDEX_DIR=$(make_temp_dir)
     --compound \
     > /dev/null 2>&1
 check_summary "Rust compound" "$INDEX_DIR"
-
-# --- Newindex write (non-compound) → Rust read ---
-
-echo ""
-echo "--- Newindex write (non-compound) → Rust read ---"
-INDEX_DIR=$(make_temp_dir)
-"$PROJECT_DIR/target/debug/newindex_demo" \
-    -docs "$GOLDEN_DOCS" \
-    -index "$INDEX_DIR" \
-    > /dev/null 2>&1
-check_summary "Newindex non-compound" "$INDEX_DIR"
-
-# --- Newindex write (compound) → Rust read ---
-
-echo ""
-echo "--- Newindex write (compound) → Rust read ---"
-INDEX_DIR=$(make_temp_dir)
-"$PROJECT_DIR/target/debug/newindex_demo" \
-    -docs "$GOLDEN_DOCS" \
-    -index "$INDEX_DIR" \
-    --compound \
-    > /dev/null 2>&1
-check_summary "Newindex compound" "$INDEX_DIR"
 
 # --- Result ---
 

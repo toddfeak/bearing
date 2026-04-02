@@ -1065,12 +1065,16 @@ fn read_vint_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::codecs::competitive_impact::NormsLookup;
     use crate::codecs::lucene103::postings_writer::PostingsWriter;
-    use crate::document::{self, Document, IndexOptions};
-    use crate::index::{
-        FieldInfo, FieldInfos, IndexWriter, IndexWriterConfig, PointDimensionConfig,
-    };
+    use crate::document::IndexOptions;
+    use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
+    use crate::newindex::config::IndexWriterConfig;
+    use crate::newindex::document::DocumentBuilder;
+    use crate::newindex::field::text;
+    use crate::newindex::writer::IndexWriter;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
@@ -1146,31 +1150,33 @@ mod tests {
 
     #[test]
     fn test_open_postings_reader() {
-        let config = IndexWriterConfig::new().set_use_compound_file(false);
-        let writer = IndexWriter::with_config(config);
-        let mut doc = Document::new();
-        doc.add(document::text_field("content", "hello world"));
-        writer.add_document(doc).unwrap();
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-        let result = writer.commit().unwrap();
-        let seg_files = result.into_segment_files().unwrap();
+        writer
+            .add_document(
+                DocumentBuilder::new()
+                    .add_field(text("content").value("hello world"))
+                    .build(),
+            )
+            .unwrap();
 
-        let mut mem_dir = MemoryDirectory::new();
-        for sf in &seg_files {
-            mem_dir.write_file(&sf.name, &sf.data).unwrap();
-        }
-        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        writer.commit().unwrap();
+        let dir = directory.lock().unwrap();
 
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = crate::index::segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let infos = crate::index::segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
         let si =
-            crate::codecs::lucene99::segment_info_format::read(dir.as_ref(), &seg.name, &seg.id)
-                .unwrap();
+            crate::codecs::lucene99::segment_info_format::read(&**dir, &seg.name, &seg.id).unwrap();
         let field_infos =
-            crate::codecs::lucene94::field_infos_format::read(dir.as_ref(), &si, "").unwrap();
+            crate::codecs::lucene94::field_infos_format::read(&**dir, &si, "").unwrap();
 
         let suffix = field_infos
             .iter()
@@ -1182,7 +1188,7 @@ mod tests {
             .unwrap();
 
         let reader =
-            PostingsReader::open(dir.as_ref(), &seg.name, &suffix, &seg.id, &field_infos).unwrap();
+            PostingsReader::open(&**dir, &seg.name, &suffix, &seg.id, &field_infos).unwrap();
 
         assert_ge!(reader.max_num_impacts_at_level0(), 0);
         assert_ge!(reader.max_impact_num_bytes_at_level0(), 0);

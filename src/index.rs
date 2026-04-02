@@ -1,25 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Indexing API and segment metadata.
+//! Segment metadata and index reading.
 //!
-//! [`IndexWriter`] is the primary entry point for building an index.
-//! [`IndexWriterConfig`] controls flush behavior. The remaining types
-//! ([`FieldInfo`], [`FieldInfos`], [`SegmentInfo`], [`SegmentCommitInfo`])
-//! represent segment-level metadata.
+//! Types for segment-level metadata ([`FieldInfo`], [`FieldInfos`],
+//! [`SegmentInfo`], [`SegmentCommitInfo`]) and readers for opening and
+//! querying indexes ([`directory_reader`], [`segment_reader`]).
 
-pub(crate) mod flush_control;
-pub(crate) mod flush_policy;
-pub mod freq_prox_fields;
 pub(crate) mod index_file_names;
-pub(crate) mod index_writer;
-pub(crate) mod index_writer_config;
-pub(crate) mod segment_worker;
-pub(crate) mod segment_worker_pool;
-pub mod stored_fields_consumer;
-pub mod terms_hash_per_field;
 
-pub use index_writer::{CommitResult, IndexWriter};
-pub use index_writer_config::IndexWriterConfig;
 pub use segment_infos::{SegmentEntry, SegmentInfosRead};
 pub mod directory_reader;
 pub mod indexing_chain;

@@ -679,30 +679,33 @@ impl DataInput for SliceReader<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::document::{
-        Document, StoredValue, stored_bytes_field, stored_double_field, stored_float_field,
-        stored_int_field, stored_long_field, stored_string_field,
-    };
-    use crate::index::{IndexWriter, IndexWriterConfig, segment_infos};
-    use crate::store::{Directory, MemoryDirectory};
+    use crate::document::StoredValue;
+    use crate::index::segment_infos;
+    use crate::newindex::config::IndexWriterConfig;
+    use crate::newindex::document::{Document, DocumentBuilder};
+    use crate::newindex::field::stored;
+    use crate::newindex::writer::IndexWriter;
+    use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
     /// Write a simple index and read stored fields back via CompressingStoredFieldsReader.
-    fn write_and_read_stored(docs: Vec<Document>) -> (Box<dyn Directory>, Vec<Vec<StoredField>>) {
+    fn write_and_read_stored(docs: Vec<Document>) -> (Arc<SharedDirectory>, Vec<Vec<StoredField>>) {
         let num_docs = docs.len();
-        let config = IndexWriterConfig::new().set_use_compound_file(false);
-        let writer = IndexWriter::with_config(config);
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
             writer.add_document(doc).unwrap();
         }
-        let result = writer.commit().unwrap();
+        writer.commit().unwrap();
 
-        let mut mem_dir = MemoryDirectory::new();
-        for seg_file in result.into_segment_files().unwrap() {
-            mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
-        }
-        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        let dir = directory.lock().unwrap();
 
         // Find the segment info to get segment name and ID
         let files = dir.list_all().unwrap();
@@ -710,29 +713,32 @@ mod tests {
             .iter()
             .find(|f| f.starts_with("segments_"))
             .expect("no segments file");
-        let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let infos = segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
         let mut reader =
-            CompressingStoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+            CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
 
         let mut results = Vec::new();
         for doc_id in 0..num_docs {
             results.push(reader.document(doc_id as u32).unwrap());
         }
 
-        (dir, results)
+        drop(dir);
+        (directory, results)
     }
 
     #[test]
     fn test_round_trip_string_and_int() {
-        let mut doc = Document::new();
-        doc.add(stored_string_field("title", "Hello World"));
-        doc.add(stored_int_field("count", 42));
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string("Hello World"))
+            .add_field(stored("count").int(42))
+            .build();
 
-        let mut doc2 = Document::new();
-        doc2.add(stored_string_field("title", "Second Doc"));
-        doc2.add(stored_int_field("count", 99));
+        let doc2 = DocumentBuilder::new()
+            .add_field(stored("title").string("Second Doc"))
+            .add_field(stored("count").int(99))
+            .build();
 
         let (_, results) = write_and_read_stored(vec![doc, doc2]);
 
@@ -765,13 +771,14 @@ mod tests {
 
     #[test]
     fn test_round_trip_all_types() {
-        let mut doc = Document::new();
-        doc.add(stored_string_field("s", "text"));
-        doc.add(stored_int_field("i", 123));
-        doc.add(stored_long_field("l", 456789));
-        doc.add(stored_float_field("f", 3.125));
-        doc.add(stored_double_field("d", 2.7));
-        doc.add(stored_bytes_field("b", vec![1, 2, 3]));
+        let doc = DocumentBuilder::new()
+            .add_field(stored("s").string("text"))
+            .add_field(stored("i").int(123))
+            .add_field(stored("l").long(456789))
+            .add_field(stored("f").float(3.125))
+            .add_field(stored("d").double(2.7))
+            .add_field(stored("b").bytes(vec![1, 2, 3]))
+            .build();
 
         let (_, results) = write_and_read_stored(vec![doc]);
         let fields = &results[0];
@@ -1076,31 +1083,32 @@ mod tests {
         // Reading them sequentially should hit the cache after the first.
         let mut docs = Vec::new();
         for i in 0..5 {
-            let mut doc = Document::new();
-            doc.add(stored_string_field("name", &format!("doc_{i}")));
-            doc.add(stored_int_field("idx", i));
+            let doc = DocumentBuilder::new()
+                .add_field(stored("name").string(format!("doc_{i}")))
+                .add_field(stored("idx").int(i))
+                .build();
             docs.push(doc);
         }
 
-        let config = IndexWriterConfig::new().set_use_compound_file(false);
-        let writer = IndexWriter::with_config(config);
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
             writer.add_document(doc).unwrap();
         }
-        let result = writer.commit().unwrap();
+        writer.commit().unwrap();
 
-        let mut mem_dir = MemoryDirectory::new();
-        for seg_file in result.into_segment_files().unwrap() {
-            mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
-        }
-        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        let dir = directory.lock().unwrap();
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let infos = segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
         let mut reader =
-            CompressingStoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+            CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
 
         // First read loads the block
         let fields0 = reader.document(0).unwrap();
@@ -1129,31 +1137,32 @@ mod tests {
 
         let mut docs = Vec::new();
         for i in 0..4 {
-            let mut doc = Document::new();
-            doc.add(stored_string_field("data", &big_string));
-            doc.add(stored_int_field("idx", i));
+            let doc = DocumentBuilder::new()
+                .add_field(stored("data").string(big_string.clone()))
+                .add_field(stored("idx").int(i))
+                .build();
             docs.push(doc);
         }
 
-        let config = IndexWriterConfig::new().set_use_compound_file(false);
-        let writer = IndexWriter::with_config(config);
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
             writer.add_document(doc).unwrap();
         }
-        let result = writer.commit().unwrap();
+        writer.commit().unwrap();
 
-        let mut mem_dir = MemoryDirectory::new();
-        for seg_file in result.into_segment_files().unwrap() {
-            mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
-        }
-        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        let dir = directory.lock().unwrap();
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let infos = segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
         let mut reader =
-            CompressingStoredFieldsReader::open(dir.as_ref(), &seg.name, "", &seg.id).unwrap();
+            CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
 
         // Read all docs and verify values — this exercises cache invalidation
         // as docs should span multiple blocks

@@ -6,8 +6,9 @@
 extern crate assertables;
 
 use std::path::Path;
+use std::sync::Arc;
 
-use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory};
+use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory, SharedDirectory};
 
 #[test]
 fn test_memory_directory_write_then_read() {
@@ -92,23 +93,40 @@ fn test_open_input_skip_bytes() {
     assert_eq!(input.read_byte().unwrap(), 6);
 }
 
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("bearing_test_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+struct DirCleanup<'a>(&'a Path);
+
+impl Drop for DirCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0);
+    }
+}
+
 #[test]
 fn test_index_writer_files_readable() {
-    use bearing::document::{Document, keyword_field, text_field};
-    use bearing::index::IndexWriter;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    let writer = IndexWriter::new();
+    let config = IndexWriterConfig::default();
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let mut doc = Document::new();
-    doc.add(text_field("body", "the quick brown fox"));
-    doc.add(keyword_field("category", "animals"));
+    let doc = DocumentBuilder::new()
+        .add_field(text("body").value("the quick brown fox"))
+        .add_field(keyword("category").value("animals"))
+        .build();
     writer.add_document(doc).unwrap();
-
-    let result = writer.commit().unwrap();
-    let mut dir = MemoryDirectory::new();
-    result.write_to_directory(&mut dir).unwrap();
+    writer.commit().unwrap();
 
     // Every file should be openable and have non-zero length
+    let dir = directory.lock().unwrap();
     let files = dir.list_all().unwrap();
     assert_not_empty!(files);
 
@@ -120,22 +138,25 @@ fn test_index_writer_files_readable() {
 
 #[test]
 fn test_index_writer_codec_files_have_valid_headers() {
-    use bearing::document::{Document, keyword_field, text_field};
-    use bearing::index::IndexWriter;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    let writer = IndexWriter::new();
+    let config = IndexWriterConfig::default();
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let mut doc = Document::new();
-    doc.add(text_field("body", "the quick brown fox"));
-    doc.add(keyword_field("category", "animals"));
+    let doc = DocumentBuilder::new()
+        .add_field(text("body").value("the quick brown fox"))
+        .add_field(keyword("category").value("animals"))
+        .build();
     writer.add_document(doc).unwrap();
-
-    let result = writer.commit().unwrap();
-    let mut dir = MemoryDirectory::new();
-    result.write_to_directory(&mut dir).unwrap();
+    writer.commit().unwrap();
 
     // Codec files (not segments_N) start with CODEC_MAGIC (0x3FD76C17 BE)
     let codec_magic_bytes: [u8; 4] = [0x3F, 0xD7, 0x6C, 0x17];
+    let dir = directory.lock().unwrap();
     let files = dir.list_all().unwrap();
 
     for file in &files {
@@ -159,27 +180,33 @@ fn test_index_writer_codec_files_have_valid_headers() {
 
 #[test]
 fn test_read_segments_from_index_writer() {
-    use bearing::document::{Document, keyword_field, text_field};
-    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let mut doc = Document::new();
-    doc.add(text_field("body", "the quick brown fox"));
-    doc.add(keyword_field("category", "animals"));
+    let doc = DocumentBuilder::new()
+        .add_field(text("body").value("the quick brown fox"))
+        .add_field(keyword("category").value("animals"))
+        .build();
     writer.add_document(doc).unwrap();
-
-    let result = writer.commit().unwrap();
-    let mut dir = MemoryDirectory::new();
-    result.write_to_directory(&mut dir).unwrap();
+    writer.commit().unwrap();
 
     // Find the segments_N file
+    let dir = directory.lock().unwrap();
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
 
     // Read segments_N
-    let infos = segment_infos::read(&dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
 
     // Should have exactly 1 segment
     assert_eq!(infos.segments.len(), 1);
@@ -190,27 +217,34 @@ fn test_read_segments_from_index_writer() {
 
 #[test]
 fn test_read_segments_multiple_docs() {
-    use bearing::document::{Document, keyword_field, long_field, text_field};
-    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, long_field, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     for i in 0..5 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("document number {i}")));
-        doc.add(keyword_field("id", &format!("doc_{i}")));
-        doc.add(long_field("modified", 1000 + i as i64));
+        let doc = DocumentBuilder::new()
+            .add_field(text("body").value(format!("document number {i}")))
+            .add_field(keyword("id").value(format!("doc_{i}")))
+            .add_field(long_field("modified").value(1000 + i as i64))
+            .build();
         writer.add_document(doc).unwrap();
     }
 
-    let result = writer.commit().unwrap();
-    let mut dir = MemoryDirectory::new();
-    result.write_to_directory(&mut dir).unwrap();
+    writer.commit().unwrap();
 
+    let dir = directory.lock().unwrap();
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
 
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
@@ -218,28 +252,31 @@ fn test_read_segments_multiple_docs() {
 }
 
 #[test]
-fn test_read_segments_fs_directory() {
-    use bearing::document::{Document, keyword_field, text_field};
-    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+fn test_read_segments_memory_directory() {
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    let dir_path = temp_dir("read_segments_fs");
-    let _cleanup = DirCleanup(&dir_path);
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
-
-    let mut doc = Document::new();
-    doc.add(text_field("body", "hello world"));
-    doc.add(keyword_field("tag", "test"));
+    let doc = DocumentBuilder::new()
+        .add_field(text("body").value("hello world"))
+        .add_field(keyword("tag").value("test"))
+        .build();
     writer.add_document(doc).unwrap();
+    writer.commit().unwrap();
 
-    let result = writer.commit().unwrap();
-    let mut fs_dir = FSDirectory::open(&dir_path).unwrap();
-    result.write_to_directory(&mut fs_dir).unwrap();
-
-    let files = fs_dir.list_all().unwrap();
+    let dir = directory.lock().unwrap();
+    let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&fs_dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
 
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
@@ -249,25 +286,31 @@ fn test_read_segments_fs_directory() {
 
 #[test]
 fn test_read_segments_compound_mode() {
-    use bearing::document::{Document, keyword_field, text_field};
-    use bearing::index::{IndexWriter, segment_infos};
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    // Default config uses compound files
-    let writer = IndexWriter::new();
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let mut doc = Document::new();
-    doc.add(text_field("body", "compound file test"));
-    doc.add(keyword_field("tag", "test"));
+    let doc = DocumentBuilder::new()
+        .add_field(text("body").value("compound file test"))
+        .add_field(keyword("tag").value("test"))
+        .build();
     writer.add_document(doc).unwrap();
-
-    let result = writer.commit().unwrap();
-    let mut dir = MemoryDirectory::new();
-    result.write_to_directory(&mut dir).unwrap();
+    writer.commit().unwrap();
 
     // segments_N should be readable even in compound mode
+    let dir = directory.lock().unwrap();
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
 
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
@@ -279,28 +322,35 @@ fn test_read_segments_compound_mode() {
 
 #[test]
 fn test_compound_directory_list_files() {
-    use bearing::document::{Document, keyword_field, text_field};
-    use bearing::index::{IndexWriter, segment_infos};
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    let writer = IndexWriter::new();
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let mut doc = Document::new();
-    doc.add(text_field("body", "compound listing test"));
-    doc.add(keyword_field("tag", "test"));
+    let doc = DocumentBuilder::new()
+        .add_field(text("body").value("compound listing test"))
+        .add_field(keyword("tag").value("test"))
+        .build();
     writer.add_document(doc).unwrap();
-
-    let result = writer.commit().unwrap();
-    let mut dir = MemoryDirectory::new();
-    result.write_to_directory(&mut dir).unwrap();
+    writer.commit().unwrap();
 
     // Read segments to get segment ID
+    let dir = directory.lock().unwrap();
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
     // Open compound directory
-    let compound_dir = CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap();
+    let compound_dir = CompoundDirectory::open(&**dir, &seg.name, &seg.id).unwrap();
     let compound_files = compound_dir.list_all().unwrap();
 
     // Should contain segment files like .fnm, .fdt, .fdm, etc.
@@ -310,26 +360,33 @@ fn test_compound_directory_list_files() {
 
 #[test]
 fn test_compound_directory_read_embedded_file() {
-    use bearing::document::{Document, keyword_field, text_field};
-    use bearing::index::{IndexWriter, segment_infos};
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    let writer = IndexWriter::new();
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let mut doc = Document::new();
-    doc.add(text_field("body", "embedded file test"));
-    doc.add(keyword_field("tag", "test"));
+    let doc = DocumentBuilder::new()
+        .add_field(text("body").value("embedded file test"))
+        .add_field(keyword("tag").value("test"))
+        .build();
     writer.add_document(doc).unwrap();
+    writer.commit().unwrap();
 
-    let result = writer.commit().unwrap();
-    let mut dir = MemoryDirectory::new();
-    result.write_to_directory(&mut dir).unwrap();
-
+    let dir = directory.lock().unwrap();
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let compound_dir = CompoundDirectory::open(&dir, &seg.name, &seg.id).unwrap();
+    let compound_dir = CompoundDirectory::open(&**dir, &seg.name, &seg.id).unwrap();
 
     // Read a .fnm file from compound — should start with codec magic
     let mut input = compound_dir.open_input(".fnm").unwrap();
@@ -345,31 +402,34 @@ fn test_compound_directory_read_embedded_file() {
 }
 
 #[test]
-fn test_compound_directory_fs() {
-    use bearing::document::{Document, keyword_field, text_field};
-    use bearing::index::{IndexWriter, segment_infos};
+fn test_compound_directory_memory() {
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::{keyword, text};
+    use bearing::newindex::writer::IndexWriter;
 
-    let dir_path = temp_dir("compound_fs");
-    let _cleanup = DirCleanup(&dir_path);
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let writer = IndexWriter::new();
-
-    let mut doc = Document::new();
-    doc.add(text_field("body", "fs compound test"));
-    doc.add(keyword_field("tag", "test"));
+    let doc = DocumentBuilder::new()
+        .add_field(text("body").value("memory compound test"))
+        .add_field(keyword("tag").value("test"))
+        .build();
     writer.add_document(doc).unwrap();
+    writer.commit().unwrap();
 
-    let result = writer.commit().unwrap();
-    let mut fs_dir = FSDirectory::open(&dir_path).unwrap();
-    result.write_to_directory(&mut fs_dir).unwrap();
-
-    let files = fs_dir.list_all().unwrap();
+    let dir = directory.lock().unwrap();
+    let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&fs_dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    // Open compound from FSDirectory — exercises FSIndexInput::slice()
-    let compound_dir = CompoundDirectory::open(&fs_dir, &seg.name, &seg.id).unwrap();
+    let compound_dir = CompoundDirectory::open(&**dir, &seg.name, &seg.id).unwrap();
     let compound_files = compound_dir.list_all().unwrap();
     assert_not_empty!(compound_files);
 
@@ -379,20 +439,6 @@ fn test_compound_directory_fs() {
     assert_eq!(magic, 0x3FD76C17_u32 as i32);
 }
 
-fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("bearing_test_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
-}
-
-struct DirCleanup<'a>(&'a Path);
-
-impl Drop for DirCleanup<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.0);
-    }
-}
-
 // ============================================================
 // Stored fields reader integration tests
 // ============================================================
@@ -400,38 +446,44 @@ impl Drop for DirCleanup<'_> {
 #[test]
 fn test_stored_fields_reader_round_trip() {
     use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
-    use bearing::document::{Document, StoredValue, stored_int_field, stored_string_field};
-    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+    use bearing::document::StoredValue;
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::stored;
+    use bearing::newindex::writer::IndexWriter;
 
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let mut doc = Document::new();
-    doc.add(stored_string_field("title", "Hello World"));
-    doc.add(stored_int_field("count", 42));
+    let doc = DocumentBuilder::new()
+        .add_field(stored("title").string("Hello World"))
+        .add_field(stored("count").int(42))
+        .build();
     writer.add_document(doc).unwrap();
 
-    let mut doc2 = Document::new();
-    doc2.add(stored_string_field("title", "Second Doc"));
-    doc2.add(stored_int_field("count", 99));
+    let doc2 = DocumentBuilder::new()
+        .add_field(stored("title").string("Second Doc"))
+        .add_field(stored("count").int(99))
+        .build();
     writer.add_document(doc2).unwrap();
 
-    let result = writer.commit().unwrap();
+    writer.commit().unwrap();
 
-    let mut mem_dir = MemoryDirectory::new();
-    for seg_file in result.into_segment_files().unwrap() {
-        mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
-    }
-
-    let files = mem_dir.list_all().unwrap();
+    let dir = directory.lock().unwrap();
+    let files = dir.list_all().unwrap();
     let segments_file = files
         .iter()
         .find(|f| f.starts_with("segments_"))
         .expect("no segments file");
-    let infos = segment_infos::read(&mem_dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = CompressingStoredFieldsReader::open(&mem_dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
 
     // Doc 0
     let fields = reader.document(0).unwrap();
@@ -467,40 +519,42 @@ fn test_stored_fields_reader_round_trip() {
 #[test]
 fn test_stored_fields_reader_all_types() {
     use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
-    use bearing::document::{
-        Document, StoredValue, stored_bytes_field, stored_double_field, stored_float_field,
-        stored_int_field, stored_long_field, stored_string_field,
+    use bearing::document::StoredValue;
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::stored;
+    use bearing::newindex::writer::IndexWriter;
+
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
     };
-    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
-
-    let mut doc = Document::new();
-    doc.add(stored_string_field("s", "text value"));
-    doc.add(stored_int_field("i", 12345));
-    doc.add(stored_long_field("l", 9876543210));
-    doc.add(stored_float_field("f", 3.125));
-    doc.add(stored_double_field("d", 2.7));
-    doc.add(stored_bytes_field("b", vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    let doc = DocumentBuilder::new()
+        .add_field(stored("s").string("text value"))
+        .add_field(stored("i").int(12345))
+        .add_field(stored("l").long(9876543210))
+        .add_field(stored("f").float(3.125))
+        .add_field(stored("d").double(2.7))
+        .add_field(stored("b").bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]))
+        .build();
     writer.add_document(doc).unwrap();
 
-    let result = writer.commit().unwrap();
+    writer.commit().unwrap();
 
-    let mut mem_dir = MemoryDirectory::new();
-    for seg_file in result.into_segment_files().unwrap() {
-        mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
-    }
-
-    let files = mem_dir.list_all().unwrap();
+    let dir = directory.lock().unwrap();
+    let files = dir.list_all().unwrap();
     let segments_file = files
         .iter()
         .find(|f| f.starts_with("segments_"))
         .expect("no segments file");
-    let infos = segment_infos::read(&mem_dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = CompressingStoredFieldsReader::open(&mem_dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
     let fields = reader.document(0).unwrap();
 
     assert!(
@@ -544,35 +598,40 @@ fn test_stored_fields_reader_all_types() {
 #[test]
 fn test_stored_fields_reader_many_docs() {
     use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
-    use bearing::document::{Document, StoredValue, stored_int_field, stored_string_field};
-    use bearing::index::{IndexWriter, IndexWriterConfig, segment_infos};
+    use bearing::document::StoredValue;
+    use bearing::index::segment_infos;
+    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::newindex::document::DocumentBuilder;
+    use bearing::newindex::field::stored;
+    use bearing::newindex::writer::IndexWriter;
 
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     for i in 0..50 {
-        let mut doc = Document::new();
-        doc.add(stored_string_field("title", &format!("Document {i}")));
-        doc.add(stored_int_field("id", i));
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("Document {i}")))
+            .add_field(stored("id").int(i))
+            .build();
         writer.add_document(doc).unwrap();
     }
 
-    let result = writer.commit().unwrap();
+    writer.commit().unwrap();
 
-    let mut mem_dir = MemoryDirectory::new();
-    for seg_file in result.into_segment_files().unwrap() {
-        mem_dir.write_file(&seg_file.name, &seg_file.data).unwrap();
-    }
-
-    let files = mem_dir.list_all().unwrap();
+    let dir = directory.lock().unwrap();
+    let files = dir.list_all().unwrap();
     let segments_file = files
         .iter()
         .find(|f| f.starts_with("segments_"))
         .expect("no segments file");
-    let infos = segment_infos::read(&mem_dir, segments_file).unwrap();
+    let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = CompressingStoredFieldsReader::open(&mem_dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
 
     for i in 0..50 {
         let fields = reader.document(i).unwrap();

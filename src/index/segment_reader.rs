@@ -2,8 +2,8 @@
 
 //! Segment-level reader that wires all codec readers for a single segment.
 //!
-//! [`SegmentReader`] is the read-side equivalent of what [`super::IndexWriter`]
-//! produces: it opens all the files for one segment and provides access to the
+//! [`SegmentReader`] is the read-side counterpart to the index writer: it opens
+//! all the files for one segment and provides access to the
 //! codec readers that decode stored fields, norms, doc values, term vectors,
 //! points, terms, and postings.
 //!
@@ -290,47 +290,54 @@ fn derive_suffix(field_infos: &FieldInfos, prefix: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::document::{self, Document};
-    use crate::index::{IndexWriter, IndexWriterConfig};
-    use crate::store::MemoryDirectory;
+    use crate::newindex::config::IndexWriterConfig;
+    use crate::newindex::document::DocumentBuilder;
+    use crate::newindex::field::{string, text};
+    use crate::newindex::writer::IndexWriter;
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
-    fn write_test_index(compound: bool) -> (Box<dyn Directory>, String, [u8; 16]) {
-        let config = IndexWriterConfig::new().set_use_compound_file(compound);
-        let writer = IndexWriter::with_config(config);
+    fn write_test_index(compound: bool) -> (Arc<SharedDirectory>, String, [u8; 16]) {
+        let config = IndexWriterConfig {
+            use_compound_file: compound,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-        let mut doc = Document::new();
-        doc.add(document::text_field("content", "hello world"));
-        doc.add(document::string_field("path", "/test.txt", true));
+        let doc = DocumentBuilder::new()
+            .add_field(text("content").value("hello world"))
+            .add_field(string("path").stored().value("/test.txt"))
+            .build();
         writer.add_document(doc).unwrap();
 
-        let mut doc2 = Document::new();
-        doc2.add(document::text_field("content", "goodbye world"));
-        doc2.add(document::string_field("path", "/other.txt", true));
+        let doc2 = DocumentBuilder::new()
+            .add_field(text("content").value("goodbye world"))
+            .add_field(string("path").stored().value("/other.txt"))
+            .build();
         writer.add_document(doc2).unwrap();
 
-        let result = writer.commit().unwrap();
-        let seg_files = result.into_segment_files().unwrap();
-
-        let mut mem_dir = MemoryDirectory::new();
-        for sf in &seg_files {
-            mem_dir.write_file(&sf.name, &sf.data).unwrap();
-        }
-        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        writer.commit().unwrap();
 
         // Find segment info
+        let dir = directory.lock().unwrap();
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = crate::index::segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let infos = crate::index::segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
+        let name = seg.name.clone();
+        let id = seg.id;
+        drop(dir);
 
-        (dir, seg.name.clone(), seg.id)
+        (directory, name, id)
     }
 
     #[test]
     fn test_open_non_compound() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         assert_eq!(reader.max_doc(), 2);
         assert_eq!(reader.segment_name(), &name);
@@ -342,7 +349,7 @@ mod tests {
     #[test]
     fn test_open_compound() {
         let (dir, name, id) = write_test_index(true);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         assert_eq!(reader.max_doc(), 2);
         assert!(reader.terms("content").is_some());
@@ -352,7 +359,7 @@ mod tests {
     #[test]
     fn test_stored_fields_access() {
         let (dir, name, id) = write_test_index(false);
-        let mut reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let mut reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         let sfr = reader.get_fields_reader().unwrap();
         let fields = sfr.document(0).unwrap();
@@ -362,7 +369,7 @@ mod tests {
     #[test]
     fn test_norms_access() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         // "content" is a TextField with norms — access via get_norm_values
         let mut norms = reader.get_norm_values("content").unwrap().unwrap();
@@ -373,7 +380,7 @@ mod tests {
     #[test]
     fn test_field_metadata() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         let fi = reader.field_infos();
         assert_some!(fi.field_info_by_name("content"));
@@ -438,7 +445,7 @@ mod tests {
     #[test]
     fn test_postings_term_found() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         // "world" appears in both docs (doc 0: "hello world", doc 1: "goodbye world")
         let mut iter = seek_postings(&reader, "content", b"world")
@@ -451,7 +458,7 @@ mod tests {
     #[test]
     fn test_postings_term_in_one_doc() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         // "hello" appears only in doc 0
         let mut iter = seek_postings(&reader, "content", b"hello")
@@ -471,7 +478,7 @@ mod tests {
     #[test]
     fn test_postings_nonexistent_term() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         let result = seek_postings(&reader, "content", b"nonexistent").unwrap();
         assert!(result.is_none());
@@ -480,7 +487,7 @@ mod tests {
     #[test]
     fn test_postings_nonexistent_field() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         let result = seek_postings(&reader, "no_such_field", b"hello").unwrap();
         assert!(result.is_none());
@@ -489,7 +496,7 @@ mod tests {
     #[test]
     fn test_postings_string_field() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         // StringField "path" stores exact values as single tokens
         let mut iter = seek_postings(&reader, "path", b"/test.txt")
@@ -508,7 +515,7 @@ mod tests {
     #[test]
     fn test_postings_compound_segment() {
         let (dir, name, id) = write_test_index(true);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         let mut iter = seek_postings(&reader, "content", b"world")
             .unwrap()
@@ -520,31 +527,30 @@ mod tests {
     #[test]
     fn test_postings_many_docs() {
         // Write 200 docs to exercise full block + VInt tail
-        let config = IndexWriterConfig::new().set_use_compound_file(false);
-        let writer = IndexWriter::with_config(config);
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
 
         for i in 0..200 {
-            let mut doc = Document::new();
-            doc.add(document::text_field("content", "common"));
+            let mut builder = DocumentBuilder::new().add_field(text("content").value("common"));
             if i % 2 == 0 {
-                doc.add(document::text_field("content", "even"));
+                builder = builder.add_field(text("content").value("even"));
             }
-            writer.add_document(doc).unwrap();
+            writer.add_document(builder.build()).unwrap();
         }
 
-        let result = writer.commit().unwrap();
-        let seg_files = result.into_segment_files().unwrap();
-        let mut mem_dir = MemoryDirectory::new();
-        for sf in &seg_files {
-            mem_dir.write_file(&sf.name, &sf.data).unwrap();
-        }
-        let dir = Box::new(mem_dir) as Box<dyn Directory>;
+        writer.commit().unwrap();
+
+        let dir = directory.lock().unwrap();
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = crate::index::segment_infos::read(dir.as_ref(), segments_file).unwrap();
+        let infos = crate::index::segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let reader = SegmentReader::open(dir.as_ref(), &seg.name, &seg.id).unwrap();
+        let reader = SegmentReader::open(&**dir, &seg.name, &seg.id).unwrap();
 
         // "common" should be in all 200 docs
         let mut iter = seek_postings(&reader, "content", b"common")
@@ -566,17 +572,19 @@ mod tests {
 
     #[test]
     fn test_missing_stored_fields_file_is_error() {
-        // Write a valid index, then remove a stored fields file
-        let (dir, name, id) = write_test_index(false);
+        // Write a valid index, then copy to memory dir without .fdt
+        let (directory, name, id) = write_test_index(false);
         let mut mem_dir = MemoryDirectory::new();
 
         // Copy all files except .fdt (stored fields data)
+        let dir = directory.lock().unwrap();
         for filename in dir.list_all().unwrap() {
             if !filename.ends_with(".fdt") {
                 let data = dir.read_file(&filename).unwrap();
                 mem_dir.write_file(&filename, &data).unwrap();
             }
         }
+        drop(dir);
 
         let result = SegmentReader::open(&mem_dir, &name, &id);
         assert!(
@@ -588,25 +596,29 @@ mod tests {
     #[test]
     fn test_segment_without_norms_has_no_norms_reader() {
         // KeywordField has omit_norms=true, no TextField => no norms
-        let config = IndexWriterConfig::new().set_use_compound_file(false);
-        let writer = IndexWriter::with_config(config);
+        use crate::newindex::field::keyword;
 
-        let mut doc = Document::new();
-        doc.add(document::keyword_field("id", "abc"));
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
+
+        let doc = DocumentBuilder::new()
+            .add_field(keyword("id").value("abc"))
+            .build();
         writer.add_document(doc).unwrap();
 
-        let result = writer.commit().unwrap();
-        let seg_files = result.into_segment_files().unwrap();
-        let mut mem_dir = MemoryDirectory::new();
-        for sf in &seg_files {
-            mem_dir.write_file(&sf.name, &sf.data).unwrap();
-        }
-        let files = mem_dir.list_all().unwrap();
+        writer.commit().unwrap();
+
+        let dir = directory.lock().unwrap();
+        let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = crate::index::segment_infos::read(&mem_dir, segments_file).unwrap();
+        let infos = crate::index::segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let reader = SegmentReader::open(&mem_dir, &seg.name, &seg.id).unwrap();
+        let reader = SegmentReader::open(&**dir, &seg.name, &seg.id).unwrap();
         assert!(
             reader.norms_reader().is_none(),
             "segment without norms should have no norms reader"
@@ -616,7 +628,7 @@ mod tests {
     #[test]
     fn test_terms_by_name() {
         let (dir, name, id) = write_test_index(false);
-        let reader = SegmentReader::open(dir.as_ref(), &name, &id).unwrap();
+        let reader = SegmentReader::open(&**dir.lock().unwrap(), &name, &id).unwrap();
 
         let terms = reader.terms("content");
         assert!(terms.is_some());

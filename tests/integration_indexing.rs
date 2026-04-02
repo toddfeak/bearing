@@ -1,992 +1,838 @@
-//! Integration tests for the bearing indexing public API.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Integration tests for the newindex indexing pipeline.
 //!
-//! These tests exercise the public API as an external consumer would,
-//! verifying that IndexWriter, Document, Field types, and Directory
-//! implementations work correctly together.
+//! Verifies the full lifecycle: IndexWriter → add documents → commit →
+//! correct segments returned with expected file lists.
 
-#[macro_use]
-extern crate assertables;
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
 
-use std::io;
-use std::thread;
-
-use bearing::document::{
-    Document, FieldValue, binary_doc_values_field, double_field, double_range_field, feature_field,
-    float_field, float_range_field, int_field, int_range_field, keyword_field, lat_lon_point,
-    long_field, long_range_field, numeric_doc_values_field, sorted_doc_values_field,
-    sorted_numeric_doc_values_field, sorted_set_doc_values_field, stored_bytes_field,
-    stored_double_field, stored_float_field, stored_int_field, stored_long_field,
-    stored_string_field, string_field, text_field,
+use assertables::*;
+use bearing::newindex::config::IndexWriterConfig;
+use bearing::newindex::document::DocumentBuilder;
+use bearing::newindex::field::{
+    TermVectorOptions, binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored,
+    string, text,
 };
-use bearing::index::{IndexWriter, IndexWriterConfig};
-use bearing::store::{Directory, FSDirectory, MemoryDirectory};
+use bearing::newindex::writer::IndexWriter;
+use bearing::store::{MemoryDirectory, SharedDirectory};
 
-/// Helper: creates a document with path, modified, and contents fields.
-fn make_simple_doc(path: &str, modified: i64, contents: &str) -> Document {
-    let mut doc = Document::new();
-    doc.add(text_field("body", contents));
-    doc.add(keyword_field("id", path));
-    doc.add(long_field("ts", modified));
-    doc
+fn shared_memory_dir() -> Arc<SharedDirectory> {
+    Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())))
 }
 
-/// Helper: creates a document with all 8 field types.
-fn make_all_fields_doc() -> Document {
-    let mut doc = Document::new();
-    doc.add(text_field("body", "the quick brown fox"));
-    doc.add(keyword_field("category", "animals"));
-    doc.add(string_field("id", "doc-1", true));
-    doc.add(long_field("timestamp", 1_700_000_000));
-    doc.add(int_field("count", 42, true));
-    doc.add(float_field("score", 3.125, true));
-    doc.add(double_field("price", 99.99, true));
-    doc.add(stored_string_field("author", "Todd"));
-    doc
-}
-
-// ---------------------------------------------------------------------------
-// Single-threaded indexing
-// ---------------------------------------------------------------------------
-
-#[test]
-fn single_threaded_index_and_commit() -> io::Result<()> {
-    let writer = IndexWriter::new();
-
-    for i in 0..10 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("document number {i}")));
-        doc.add(keyword_field("id", &format!("doc-{i}")));
-        writer.add_document(doc)?;
+fn add_stored_docs(writer: &IndexWriter, count: usize) {
+    for i in 0..count {
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("Document {i}")))
+            .add_field(stored("body").string(format!("Body text for document {i}")))
+            .build();
+        writer.add_document(doc).unwrap();
     }
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 10);
-
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files, "commit should produce segment files");
-
-    // Should have a segments_N file
-    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
-        .name
-        .starts_with("segments_"));
-    // Should have compound file entries (.cfs, .cfe)
-    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
-        .name
-        .ends_with(".cfs"));
-    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
-        .name
-        .ends_with(".cfe"));
-    // Should have segment info (.si)
-    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
-        .name
-        .ends_with(".si"));
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Multi-threaded indexing
-// ---------------------------------------------------------------------------
-
-#[test]
-fn multi_threaded_indexing() -> io::Result<()> {
-    let writer = IndexWriter::new();
-    let num_threads = 4;
-    let docs_per_thread = 25;
-
-    let handles: Vec<_> = (0..num_threads)
-        .map(|t| {
-            let w = writer.clone();
-            thread::spawn(move || {
-                for i in 0..docs_per_thread {
-                    let mut doc = Document::new();
-                    doc.add(text_field("body", &format!("thread {t} doc {i}")));
-                    doc.add(keyword_field("id", &format!("t{t}-d{i}")));
-                    w.add_document(doc).expect("add_document failed");
-                }
-            })
-        })
-        .collect();
-
-    for h in handles {
-        h.join().expect("thread panicked");
-    }
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), num_threads * docs_per_thread);
-
-    let files = result.into_segment_files()?;
-    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
-        .name
-        .starts_with("segments_"));
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// IndexWriterConfig
-// ---------------------------------------------------------------------------
-
-#[test]
-fn config_max_buffered_docs() -> io::Result<()> {
-    let config = IndexWriterConfig::new().set_max_buffered_docs(5);
-    assert_eq!(config.max_buffered_docs(), 5);
-
-    let writer = IndexWriter::with_config(config);
-
-    // Add more than max_buffered_docs to trigger at least one flush
-    for i in 0..20 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("document {i}")));
-        writer.add_document(doc)?;
-    }
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 20);
-
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-
-    Ok(())
 }
 
 #[test]
-fn config_ram_buffer_size() {
-    let config = IndexWriterConfig::new().set_ram_buffer_size_mb(32.0);
-    assert_in_delta!(config.ram_buffer_size_mb(), 32.0, f64::EPSILON);
-}
-
-#[test]
-fn config_defaults() {
-    let config = IndexWriterConfig::new();
-    assert_in_delta!(config.ram_buffer_size_mb(), 16.0, f64::EPSILON);
-    assert_eq!(config.max_buffered_docs(), -1);
-}
-
-// ---------------------------------------------------------------------------
-// Empty commit
-// ---------------------------------------------------------------------------
-
-#[test]
-fn empty_commit() -> io::Result<()> {
-    let writer = IndexWriter::new();
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 0);
-
-    let files = result.into_segment_files()?;
-    // Even an empty commit should produce a segments file
-    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
-        .name
-        .starts_with("segments_"));
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// All field factory functions
-// ---------------------------------------------------------------------------
-
-#[test]
-fn all_field_types_commit_successfully() -> io::Result<()> {
-    let writer = IndexWriter::new();
-    let doc = make_all_fields_doc();
-    writer.add_document(doc)?;
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 1);
-
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-
-    Ok(())
-}
-
-#[test]
-fn stored_only_fields_commit_successfully() -> io::Result<()> {
-    let writer = IndexWriter::new();
-
-    let mut doc = Document::new();
-    doc.add(stored_string_field("s", "hello"));
-    doc.add(stored_int_field("i", 42));
-    doc.add(stored_long_field("l", 123_456_789));
-    doc.add(stored_float_field("f", 2.75));
-    doc.add(stored_double_field("d", 3.125));
-    doc.add(stored_bytes_field("b", vec![0xDE, 0xAD, 0xBE, 0xEF]));
-    // Need at least one indexed field for the document to be valid
-    doc.add(keyword_field("id", "stored-only"));
-    writer.add_document(doc)?;
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 1);
-
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Document & Field accessors
-// ---------------------------------------------------------------------------
-
-#[test]
-fn field_accessors() {
-    let f = text_field("body", "hello world");
-    assert_eq!(f.name(), "body");
-    assert_eq!(f.string_value(), Some("hello world"));
-    assert_none!(f.numeric_value());
-
-    let f = long_field("ts", 12345);
-    assert_eq!(f.name(), "ts");
-    assert_eq!(f.numeric_value(), Some(12345));
-
-    let f = int_field("count", 7, false);
-    assert_eq!(f.name(), "count");
-    assert!(matches!(f.value(), FieldValue::Int(7)));
-
-    let f = float_field("score", 1.5, false);
-    assert_eq!(f.name(), "score");
-    assert!(matches!(f.value(), FieldValue::Float(v) if (*v - 1.5).abs() < f32::EPSILON));
-
-    let f = double_field("price", 99.99, false);
-    assert_eq!(f.name(), "price");
-    assert!(matches!(f.value(), FieldValue::Double(v) if (*v - 99.99).abs() < f64::EPSILON));
-
-    let f = keyword_field("tag", "rust");
-    assert_eq!(f.name(), "tag");
-    assert_eq!(f.string_value(), Some("rust"));
-
-    let f = string_field("id", "abc", true);
-    assert_eq!(f.name(), "id");
-    assert_eq!(f.string_value(), Some("abc"));
-}
-
-#[test]
-fn document_construction() {
-    let mut doc = Document::new();
-    assert_is_empty!(doc.fields);
-
-    doc.add(text_field("a", "hello"));
-    doc.add(keyword_field("b", "world"));
-    assert_len_eq_x!(&doc.fields, 2);
-    assert_eq!(doc.fields[0].name(), "a");
-    assert_eq!(doc.fields[1].name(), "b");
-}
-
-// ---------------------------------------------------------------------------
-// In-memory round-trip via MemoryDirectory
-// ---------------------------------------------------------------------------
-
-#[test]
-fn memory_directory_round_trip() -> io::Result<()> {
-    let writer = IndexWriter::new();
+fn single_segment_stored_fields() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..5 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("memory test {i}")));
-        doc.add(keyword_field("id", &format!("mem-{i}")));
-        writer.add_document(doc)?;
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("Document {i}")))
+            .add_field(stored("body").string(format!("Body text for document {i}")))
+            .build();
+        writer.add_document(doc).unwrap();
     }
 
-    let result = writer.commit()?;
-    let mut dir = MemoryDirectory::new();
-    let file_names = result.write_to_directory(&mut dir)?;
+    let segments = writer.commit().unwrap();
 
-    assert_not_empty!(file_names);
-    assert_any!(file_names.iter(), |n: &String| n.starts_with("segments_"));
+    // Single-threaded config produces one segment
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].doc_count, 5);
 
-    // Verify all files are accessible through the directory
-    let listed = dir.list_all()?;
-    for name in &file_names {
-        assert_contains!(listed, name);
-        let len = dir.file_length(name)?;
-        assert_gt!(len, 0, "file '{name}' should have non-zero length");
-    }
-
-    Ok(())
+    // Verify expected files are in the segment's file list
+    let files = &segments[0].file_names;
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fdt"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fdx"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fdm"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fnm"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".si"));
 }
 
-// ---------------------------------------------------------------------------
-// Segment file naming conventions
-// ---------------------------------------------------------------------------
-
 #[test]
-fn segment_file_names_follow_lucene_conventions() -> io::Result<()> {
-    let writer = IndexWriter::new();
-
-    let mut doc = Document::new();
-    doc.add(text_field("body", "naming test"));
-    writer.add_document(doc)?;
-
-    let result = writer.commit()?;
-    let files = result.into_segment_files()?;
-
-    for file in &files {
-        let name = &file.name;
-        // segments_N or _N.ext or _N_xxx.ext
-        assert!(
-            name.starts_with("segments_") || name.starts_with('_'),
-            "unexpected file name pattern: {name}"
-        );
-    }
-
-    Ok(())
+fn empty_commit_produces_no_segments() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+    let segments = writer.commit().unwrap();
+    assert_is_empty!(segments);
 }
 
-// ---------------------------------------------------------------------------
-// Filesystem round-trip via FSDirectory
-// ---------------------------------------------------------------------------
-
 #[test]
-fn fs_directory_round_trip() -> io::Result<()> {
-    let tmp_dir = std::env::temp_dir().join("bearing_integration_test_fs");
-    // Clean up from any previous run
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir)?;
+fn segment_file_names_use_segment_prefix() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    let doc = DocumentBuilder::new()
+        .add_field(stored("title").string("hello"))
+        .build();
+    writer.add_document(doc).unwrap();
+
+    let segments = writer.commit().unwrap();
+    let seg = &segments[0];
+
+    for file_name in &seg.file_names {
+        assert_starts_with!(file_name, seg.segment_id.name.as_str());
     }
-
-    let fs_dir = FSDirectory::open(&tmp_dir)?;
-    let writer = IndexWriter::with_directory(Box::new(fs_dir));
-    writer.add_document(make_simple_doc(
-        "fs-1",
-        1_000_000,
-        "filesystem test document",
-    ))?;
-    let result = writer.commit()?;
-
-    // Files are already on disk — verify via file_names()
-    let file_names = result.file_names();
-    assert_not_empty!(file_names);
-    assert_any!(file_names.iter(), |n: &String| n.starts_with("segments_"));
-
-    for name in file_names {
-        let path = tmp_dir.join(name);
-        assert!(
-            path.exists(),
-            "file should exist on disk: {}",
-            path.display()
-        );
-        let meta = std::fs::metadata(&path)?;
-        assert_gt!(meta.len(), 0, "file should be non-empty: {name}");
-    }
-
-    // Clean up
-    std::fs::remove_dir_all(&tmp_dir)?;
-
-    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Multiple segments via max_buffered_docs
-// ---------------------------------------------------------------------------
-
 #[test]
-fn multiple_segments_via_flush() -> io::Result<()> {
-    let config = IndexWriterConfig::new().set_max_buffered_docs(3);
-    let writer = IndexWriter::with_config(config);
+fn max_buffered_docs_creates_multiple_segments() {
+    let config = IndexWriterConfig {
+        max_buffered_docs: 5,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
-    // Add 10 docs with max_buffered_docs=3 -> should produce multiple segments
-    for i in 0..10 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("segment test doc {i}")));
-        doc.add(keyword_field("id", &format!("seg-{i}")));
-        writer.add_document(doc)?;
+    add_stored_docs(&writer, 12);
+
+    let segments = writer.commit().unwrap();
+
+    // 12 docs with max_buffered_docs=5 → 3 segments (5 + 5 + 2)
+    assert_eq!(segments.len(), 3);
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 12);
+    assert_eq!(segments[0].doc_count, 5);
+    assert_eq!(segments[1].doc_count, 5);
+    assert_eq!(segments[2].doc_count, 2);
+
+    // All segment names must be unique
+    let names: HashSet<_> = segments.iter().map(|s| &s.segment_id.name).collect();
+    assert_eq!(names.len(), 3);
+
+    // Each segment has stored field files
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".fdt"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".si"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".fnm"));
     }
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 10);
-
-    let files = result.into_segment_files()?;
-
-    // With max_buffered_docs=3 and 10 docs, we should have multiple .si files
-    let si_count = files.iter().filter(|f| f.name.ends_with(".si")).count();
-    assert_gt!(
-        si_count,
-        1,
-        "expected multiple segments, got {si_count} .si files"
-    );
-
-    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Mixed field types in single document
-// ---------------------------------------------------------------------------
-
 #[test]
-fn all_field_types_in_single_document() -> io::Result<()> {
-    let writer = IndexWriter::new();
-    let doc = make_all_fields_doc();
+fn multi_thread_produces_independent_segments() {
+    let config = IndexWriterConfig {
+        num_threads: 2,
+        max_buffered_docs: 1,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
-    // Verify the document has the expected number of fields
-    assert_len_eq_x!(&doc.fields, 8);
+    // With max_buffered_docs=1, every doc triggers a flush. The flush
+    // I/O gives the other thread time to pick up work from the channel.
+    // 100 docs is enough that both threads will participate.
+    add_stored_docs(&writer, 100);
 
-    writer.add_document(doc)?;
-    let result = writer.commit()?;
+    let segments = writer.commit().unwrap();
 
-    let mut dir = MemoryDirectory::new();
-    let file_names = result.write_to_directory(&mut dir)?;
+    // 100 docs with max_buffered_docs=1 → 100 segments across 2 threads
+    assert_eq!(segments.len(), 100);
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 100);
 
-    // Should produce valid index files
-    assert_any!(file_names.iter(), |n: &String| n.starts_with("segments_"));
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".si"));
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".cfs"));
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Large batch indexing
-// ---------------------------------------------------------------------------
-
-#[test]
-fn large_batch_indexing() -> io::Result<()> {
-    let writer = IndexWriter::new();
-
-    for i in 0..1000 {
-        let mut doc = Document::new();
-        doc.add(text_field(
-            "body",
-            &format!("bulk document number {i} with some extra text for variety"),
-        ));
-        doc.add(keyword_field(
-            "category",
-            if i % 2 == 0 { "even" } else { "odd" },
-        ));
-        doc.add(long_field("id", i));
-        writer.add_document(doc)?;
+    // Every segment has exactly 1 doc
+    for seg in &segments {
+        assert_eq!(seg.doc_count, 1);
     }
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 1000);
-
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-
-    Ok(())
+    // All segment names unique
+    let names: HashSet<_> = segments.iter().map(|s| &s.segment_id.name).collect();
+    assert_eq!(names.len(), 100);
 }
 
-// ---------------------------------------------------------------------------
-// Non-compound file mode
-// ---------------------------------------------------------------------------
+#[test]
+fn multi_thread_with_mid_flush() {
+    let config = IndexWriterConfig {
+        num_threads: 2,
+        max_buffered_docs: 3,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
+
+    add_stored_docs(&writer, 10);
+
+    let segments = writer.commit().unwrap();
+
+    // Multiple segments from flush + final flush across 2 threads
+    assert_ge!(segments.len(), 3);
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 10);
+
+    // All segment names unique
+    let names: HashSet<_> = segments.iter().map(|s| &s.segment_id.name).collect();
+    assert_eq!(names.len(), segments.len());
+}
 
 #[test]
-fn non_compound_mode() -> io::Result<()> {
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+fn compound_file_packaging() {
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
-    for i in 0..5 {
-        writer.add_document(make_simple_doc(
-            &format!("nc-{i}"),
-            i as i64,
-            &format!("non-compound test {i}"),
-        ))?;
-    }
+    add_stored_docs(&writer, 5);
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 5);
+    let segments = writer.commit().unwrap();
 
-    let file_names = result.file_names().to_vec();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].doc_count, 5);
 
+    // Compound packaging replaces sub-files with .cfs/.cfe
+    let files = &segments[0].file_names;
+    assert_eq!(files.len(), 3);
+    assert_any!(files.iter(), |f: &String| f.ends_with(".si"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfs"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfe"));
+}
+
+#[test]
+fn non_compound_keeps_individual_files() {
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
+
+    add_stored_docs(&writer, 5);
+
+    let segments = writer.commit().unwrap();
+
+    let files = &segments[0].file_names;
+    // Individual stored field files + .fnm + .si
+    assert_ge!(files.len(), 5);
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fdt"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fdx"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fdm"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".fnm"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".si"));
     // No compound files
-    assert!(!file_names.iter().any(|n| n.ends_with(".cfs")));
-    assert!(!file_names.iter().any(|n| n.ends_with(".cfe")));
-
-    // Individual sub-files present
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".fnm"));
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".si"));
-
-    // Can still read files via into_segment_files
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-    assert_gt!(files.len(), 4);
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// FSDirectory with non-compound mode
-// ---------------------------------------------------------------------------
-
-#[test]
-fn fs_directory_non_compound() -> io::Result<()> {
-    let tmp_dir = std::env::temp_dir().join("bearing_integration_test_fs_nc");
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir)?;
-    }
-
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let fs_dir = FSDirectory::open(&tmp_dir)?;
-    let writer = IndexWriter::with_config_and_directory(config, Box::new(fs_dir));
-
-    writer.add_document(make_simple_doc("fs-nc-1", 100, "non-compound fs test"))?;
-    let result = writer.commit()?;
-
-    let file_names = result.file_names();
-    assert!(!file_names.iter().any(|n| n.ends_with(".cfs")));
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".fnm"));
-
-    // Verify files on disk
-    for name in file_names {
-        let path = tmp_dir.join(name);
-        assert!(path.exists(), "file should exist: {}", path.display());
-    }
-
-    std::fs::remove_dir_all(&tmp_dir)?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Doc-values-only field types
-// ---------------------------------------------------------------------------
-
-#[test]
-fn doc_values_only_fields() -> io::Result<()> {
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
-
-    for i in 0..10 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("doc values test {i}")));
-        doc.add(numeric_doc_values_field("count", i * 10));
-        doc.add(binary_doc_values_field(
-            "hash",
-            vec![(i as u8) * 11, (i as u8) * 22],
-        ));
-        doc.add(sorted_doc_values_field(
-            "category",
-            format!("cat-{}", i % 3).as_bytes(),
-        ));
-        doc.add(sorted_set_doc_values_field(
-            "tag",
-            &format!("tag-{}", i % 5),
-        ));
-        doc.add(sorted_numeric_doc_values_field("priority", i % 4));
-        writer.add_document(doc)?;
-    }
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 10);
-
-    let mut dir = MemoryDirectory::new();
-    let file_names = result.write_to_directory(&mut dir)?;
-
-    // Doc values files should exist
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvm"));
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvd"));
-
-    // Verify files have content
-    for name in &file_names {
-        if name.ends_with(".dvm") || name.ends_with(".dvd") {
-            let len = dir.file_length(name)?;
-            assert_gt!(len, 0, "{name} should have non-zero length");
-        }
-    }
-
-    Ok(())
+    assert!(!files.iter().any(|f| f.ends_with(".cfs")));
+    assert!(!files.iter().any(|f| f.ends_with(".cfe")));
 }
 
 #[test]
-fn doc_values_only_fields_non_compound() -> io::Result<()> {
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+fn compound_with_multi_segment() {
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        max_buffered_docs: 5,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
+
+    add_stored_docs(&writer, 12);
+
+    let segments = writer.commit().unwrap();
+
+    assert_eq!(segments.len(), 3);
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 12);
+
+    // Every segment should be compound
+    for seg in &segments {
+        assert_eq!(seg.file_names.len(), 3);
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".cfs"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".cfe"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".si"));
+    }
+}
+
+// --- Text field (tokenized + norms + postings) tests ---
+
+fn add_text_docs_from_testdata(writer: &IndexWriter) {
+    let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
+    for entry in fs::read_dir(&docs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let contents = fs::read_to_string(&path).unwrap();
+        let doc = DocumentBuilder::new()
+            .add_field(stored("path").string(&name))
+            .add_field(text("contents").stored().value(contents))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+}
+
+#[test]
+fn stored_tokenized_fields_produce_norms_and_postings_files() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    add_text_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Norms
+    assert!(files.contains(&"_0.nvm".to_string()));
+    assert!(files.contains(&"_0.nvd".to_string()));
+    // Stored fields
+    assert!(files.contains(&"_0.fdt".to_string()));
+    assert!(files.contains(&"_0.fdx".to_string()));
+    assert!(files.contains(&"_0.fdm".to_string()));
+    // Field infos + segment info
+    assert!(files.contains(&"_0.fnm".to_string()));
+    assert!(files.contains(&"_0.si".to_string()));
+    // Postings — per-field suffix must match PerFieldPostingsFormat attributes in .fnm
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.tip".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.tmd".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.psm".to_string()));
+}
+
+#[test]
+fn stored_tokenized_fields_multi_segment() {
+    let config = IndexWriterConfig {
+        max_buffered_docs: 2,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
+
+    add_text_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+
+    // 4 docs with max_buffered_docs=2 → 2 segments
+    assert_eq!(segments.len(), 2);
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 4);
+
+    // Each segment has norms and postings files
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".nvm"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".nvd"));
+        assert_any!(seg.file_names.iter(), |f: &String| f
+            .ends_with("_Lucene103_0.tim"));
+        assert_any!(seg.file_names.iter(), |f: &String| f
+            .ends_with("_Lucene103_0.doc"));
+    }
+}
+
+#[test]
+fn text_only_fields_produce_postings_without_stored() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    // Tokenized, not stored
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(text("body").value(format!("hello world document {i}")))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Postings present
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    // Norms present (TEXT type has norms)
+    assert!(files.contains(&"_0.nvm".to_string()));
+}
+
+#[test]
+fn mixed_stored_and_stored_tokenized_fields() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..5 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("non-compound dv test {i}")));
-        doc.add(numeric_doc_values_field("count", i * 100));
-        doc.add(binary_doc_values_field("payload", vec![i as u8; 4]));
-        doc.add(sorted_doc_values_field("status", b"active"));
-        doc.add(sorted_set_doc_values_field("region", "us-east"));
-        doc.add(sorted_numeric_doc_values_field("score", i * 10));
-        writer.add_document(doc)?;
+        let doc = DocumentBuilder::new()
+            .add_field(stored("id").string(format!("{i}")))
+            .add_field(text("body").stored().value(format!("quick brown fox {i}")))
+            .build();
+        writer.add_document(doc).unwrap();
     }
 
-    let result = writer.commit()?;
-    let file_names = result.file_names().to_vec();
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
 
-    // Non-compound: .dvm and .dvd should be individual files
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvm"));
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvd"));
-
-    Ok(())
+    let files = &segments[0].file_names;
+    // Both stored fields and postings
+    assert!(files.contains(&"_0.fdt".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    assert!(files.contains(&"_0.nvm".to_string()));
 }
 
 #[test]
-fn multi_valued_sorted_numeric_and_sorted_set() -> io::Result<()> {
-    let writer = IndexWriter::new();
+fn tokenized_field_produces_same_postings_as_string() {
+    let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
 
-    for i in 0..10 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("multi-valued doc {i}")));
-
-        // Multi-valued SORTED_NUMERIC: each doc gets 1-3 values
-        doc.add(sorted_numeric_doc_values_field("priorities", i * 10));
-        if i % 2 == 0 {
-            doc.add(sorted_numeric_doc_values_field("priorities", i * 10 + 1));
-        }
-        if i % 3 == 0 {
-            doc.add(sorted_numeric_doc_values_field("priorities", i * 10 + 2));
-        }
-
-        // Multi-valued SORTED_SET: each doc gets 1-3 tags
-        doc.add(sorted_set_doc_values_field(
-            "tags",
-            &format!("tag-{}", i % 5),
-        ));
-        if i % 2 == 0 {
-            doc.add(sorted_set_doc_values_field(
-                "tags",
-                &format!("tag-{}", (i + 1) % 5),
-            ));
-        }
-        if i % 3 == 0 {
-            doc.add(sorted_set_doc_values_field(
-                "tags",
-                &format!("tag-{}", (i + 2) % 5),
-            ));
-        }
-
-        writer.add_document(doc)?;
+    // Index with tokenized_field (streaming)
+    let writer_reader = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+    for entry in fs::read_dir(&docs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let doc = DocumentBuilder::new()
+            .add_field(text("contents").value(path))
+            .build();
+        writer_reader.add_document(doc).unwrap();
     }
+    let segments_reader = writer_reader.commit().unwrap();
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 10);
+    // Index with stored_tokenized_field (string)
+    let writer_string = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+    for entry in fs::read_dir(&docs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let contents = fs::read_to_string(&path).unwrap();
+        let doc = DocumentBuilder::new()
+            .add_field(text("contents").stored().value(contents))
+            .build();
+        writer_string.add_document(doc).unwrap();
+    }
+    let segments_string = writer_string.commit().unwrap();
 
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-    assert_any!(files.iter(), |f: &bearing::store::SegmentFile| f
-        .name
-        .ends_with(".cfs"));
+    // Both should produce the same number of segments and docs
+    assert_eq!(segments_reader.len(), segments_string.len());
+    let total_reader: i32 = segments_reader.iter().map(|s| s.doc_count).sum();
+    let total_string: i32 = segments_string.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_reader, total_string);
 
-    Ok(())
+    // Reader-based index should have postings and norms
+    let files = &segments_reader[0].file_names;
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    assert!(files.contains(&"_0.nvm".to_string()));
 }
 
 #[test]
-fn lat_lon_point_fields() -> io::Result<()> {
-    let writer = IndexWriter::new();
+fn reader_field_not_stored() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    let doc = DocumentBuilder::new()
+        .add_field(stored("title").string("test"))
+        .add_field(text("contents").value("hello world document"))
+        .build();
+    writer.add_document(doc).unwrap();
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // "title" is stored → .fdt exists
+    assert!(files.contains(&"_0.fdt".to_string()));
+    // "contents" via reader → postings exist
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    // Norms exist for "contents"
+    assert!(files.contains(&"_0.nvm".to_string()));
+}
+
+#[test]
+fn stored_tokenized_field_from_file_path() {
+    // Write a temp file, then index it as stored+tokenized via PathBuf
+    let dir = std::env::temp_dir().join("bearing_test_stored_path");
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("doc.txt");
+    fs::write(&file_path, "hello world from a file").unwrap();
+
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    let doc = DocumentBuilder::new()
+        .add_field(text("contents").stored().value(file_path.clone()))
+        .build();
+    writer.add_document(doc).unwrap();
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Stored fields files exist (content stored from file)
+    assert!(files.contains(&"_0.fdt".to_string()));
+    assert!(files.contains(&"_0.fdx".to_string()));
+    assert!(files.contains(&"_0.fdm".to_string()));
+    // Postings files exist (content tokenized from file)
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    // Norms exist
+    assert!(files.contains(&"_0.nvm".to_string()));
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn string_field_produces_docs_only_postings() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(string("title").stored().value(format!("doc_{i}")))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].doc_count, 3);
+
+    let files = &segments[0].file_names;
+    // Postings files exist (DOCS-only terms)
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    // Stored fields exist
+    assert!(files.contains(&"_0.fdt".to_string()));
+    // No norms (StringField omits norms)
+    assert!(!files.iter().any(|f| f.ends_with(".nvm")));
+    // No positions file for DOCS-only fields
+    assert!(!files.iter().any(|f| f.ends_with(".pos")));
+}
+
+#[test]
+fn mixed_string_and_text_fields() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(string("title").stored().value(format!("doc_{i}")))
+            .add_field(text("body").stored().value(format!("quick brown fox {i}")))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Both fields have postings
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    // Positions exist (from tokenized "body" field)
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    // Norms exist (from tokenized "body" field)
+    assert!(files.contains(&"_0.nvm".to_string()));
+    // Stored fields exist
+    assert!(files.contains(&"_0.fdt".to_string()));
+}
+
+// --- Doc values field tests ---
+
+#[test]
+fn numeric_dv_produces_doc_values_files() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(numeric_dv("count").value(i as i64 * 10))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    assert!(files.contains(&"_0_Lucene90_0.dvm".to_string()));
+    assert!(files.contains(&"_0_Lucene90_0.dvd".to_string()));
+    assert!(files.contains(&"_0.fnm".to_string()));
+    assert!(files.contains(&"_0.si".to_string()));
+}
+
+#[test]
+fn all_dv_types_produce_files() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(numeric_dv("count").value(i as i64))
+            .add_field(binary_dv("hash").value(format!("{:04x}", i).into_bytes()))
+            .add_field(sorted_dv("category").value(format!("cat_{i}").into_bytes()))
+            .add_field(sorted_set_dv("tags").value(vec![format!("tag_{i}").into_bytes()]))
+            .add_field(sorted_numeric_dv("priority").value(vec![i as i64]))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    assert!(files.contains(&"_0_Lucene90_0.dvm".to_string()));
+    assert!(files.contains(&"_0_Lucene90_0.dvd".to_string()));
+}
+
+#[test]
+fn mixed_dv_and_stored_and_postings() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
     for i in 0..5 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("geo doc {i}")));
-        doc.add(lat_lon_point(
-            "location",
-            40.7128 + i as f64 * 0.01,
-            -74.006 + i as f64 * 0.01,
-        ));
-        writer.add_document(doc)?;
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("doc {i}")))
+            .add_field(text("body").stored().value(format!("hello world {i}")))
+            .add_field(string("id").stored().value(format!("id_{i}")))
+            .add_field(numeric_dv("count").value(i as i64 * 100))
+            .add_field(sorted_dv("sort_key").value(format!("key_{i}").into_bytes()))
+            .build();
+        writer.add_document(doc).unwrap();
     }
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 5);
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
 
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-
-    Ok(())
+    let files = &segments[0].file_names;
+    // Doc values
+    assert!(files.contains(&"_0_Lucene90_0.dvm".to_string()));
+    assert!(files.contains(&"_0_Lucene90_0.dvd".to_string()));
+    // Stored fields
+    assert!(files.contains(&"_0.fdt".to_string()));
+    // Postings
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    // Norms (from text field)
+    assert!(files.contains(&"_0.nvm".to_string()));
 }
 
 #[test]
-fn range_fields() -> io::Result<()> {
-    let writer = IndexWriter::new();
+fn dv_only_docs_no_stored_or_postings() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(numeric_dv("val").value(i as i64))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Doc values present
+    assert!(files.contains(&"_0_Lucene90_0.dvm".to_string()));
+    assert!(files.contains(&"_0_Lucene90_0.dvd".to_string()));
+    // No postings
+    assert!(!files.iter().any(|f| f.ends_with(".tim")));
+    // No norms
+    assert!(!files.iter().any(|f| f.ends_with(".nvm")));
+}
+
+#[test]
+fn dv_compound_file_packaging() {
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
+
+    for i in 0..3 {
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("doc {i}")))
+            .add_field(numeric_dv("count").value(i as i64))
+            .build();
+        writer.add_document(doc).unwrap();
+    }
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Compound packaging wraps sub-files
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfs"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfe"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".si"));
+}
+
+#[test]
+fn dv_multi_segment() {
+    let config = IndexWriterConfig {
+        max_buffered_docs: 2,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
     for i in 0..5 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("range doc {i}")));
-        doc.add(int_range_field("int_range", &[i * 10], &[i * 10 + 5]));
-        doc.add(long_range_field(
-            "long_range",
-            &[i as i64 * 100],
-            &[i as i64 * 100 + 50],
-        ));
-        doc.add(float_range_field(
-            "float_range",
-            &[i as f32 * 1.0],
-            &[i as f32 * 1.0 + 0.5],
-        ));
-        doc.add(double_range_field(
-            "double_range",
-            &[i as f64 * 10.0],
-            &[i as f64 * 10.0 + 5.0],
-        ));
-        // Multi-dimensional range
-        doc.add(int_range_field(
-            "multi_range",
-            &[i * 10, i * 20],
-            &[i * 10 + 5, i * 20 + 10],
-        ));
-        writer.add_document(doc)?;
+        let doc = DocumentBuilder::new()
+            .add_field(numeric_dv("count").value(i as i64))
+            .add_field(sorted_dv("key").value(format!("k{i}").into_bytes()))
+            .build();
+        writer.add_document(doc).unwrap();
     }
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 5);
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 3); // 2 + 2 + 1
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 5);
 
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".dvm"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".dvd"));
+    }
+}
 
-    Ok(())
+// --- Term vectors tests ---
+
+fn add_tv_docs_from_testdata(writer: &IndexWriter) {
+    let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
+    for entry in fs::read_dir(&docs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let contents = fs::read_to_string(&path).unwrap();
+        let doc = DocumentBuilder::new()
+            .add_field(stored("path").string(&name))
+            .add_field(
+                text("contents")
+                    .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+                    .stored()
+                    .value(contents),
+            )
+            .build();
+        writer.add_document(doc).unwrap();
+    }
 }
 
 #[test]
-fn feature_fields() -> io::Result<()> {
-    let writer = IndexWriter::new();
+fn term_vectors_produce_tvd_tvx_tvm_files() {
+    let writer = IndexWriter::new(IndexWriterConfig::default(), shared_memory_dir());
 
-    for i in 0..5 {
-        let mut doc = Document::new();
-        doc.add(text_field("body", &format!("feature doc {i}")));
-        doc.add(feature_field("features", "pagerank", (i + 1) as f32 * 0.5));
-        doc.add(feature_field("features", "freshness", (i + 1) as f32 * 2.0));
-        writer.add_document(doc)?;
-    }
+    add_tv_docs_from_testdata(&writer);
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 5);
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
 
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-
-    Ok(())
+    let files = &segments[0].file_names;
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tvd"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tvx"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".tvm"));
 }
 
 #[test]
-fn mixed_doc_values_and_regular_fields() -> io::Result<()> {
-    let writer = IndexWriter::new();
+fn term_vectors_multi_segment() {
+    let config = IndexWriterConfig {
+        max_buffered_docs: 2,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
-    for i in 0..5 {
-        let mut doc = Document::new();
-        // Regular fields
-        doc.add(keyword_field("id", &format!("doc-{i}")));
-        doc.add(long_field("timestamp", 1_700_000_000 + i));
-        doc.add(text_field("body", &format!("mixed field test {i}")));
-        // Doc-values-only fields
-        doc.add(numeric_doc_values_field("weight", i * 100));
-        doc.add(sorted_doc_values_field("tier", b"gold"));
-        doc.add(binary_doc_values_field("blob", vec![0xFF; 8]));
-        writer.add_document(doc)?;
+    add_tv_docs_from_testdata(&writer);
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 2);
+
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvd"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvx"));
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvm"));
     }
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 5);
-
-    let files = result.into_segment_files()?;
-    assert_not_empty!(files);
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Sparse fields (field present in some but not all documents)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn sparse_numeric_doc_values() -> io::Result<()> {
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
-
-    for i in 0..10 {
-        let mut doc = Document::new();
-        doc.add(keyword_field("id", &format!("doc-{i}")));
-        // Only even-numbered docs have the numeric doc values field
-        if i % 2 == 0 {
-            doc.add(numeric_doc_values_field("score", i * 100));
-        }
-        writer.add_document(doc)?;
-    }
-
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 10);
-
-    let mut dir = MemoryDirectory::new();
-    let file_names = result.write_to_directory(&mut dir)?;
-
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvm"));
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".dvd"));
-
-    for name in &file_names {
-        if name.ends_with(".dvm") || name.ends_with(".dvd") {
-            let len = dir.file_length(name)?;
-            assert_gt!(len, 0, "{name} should have non-zero length");
-        }
-    }
-
-    Ok(())
 }
 
 #[test]
-fn sparse_norms_text_field() -> io::Result<()> {
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+fn term_vectors_compound() {
+    let config = IndexWriterConfig {
+        use_compound_file: true,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
-    for i in 0..10 {
-        let mut doc = Document::new();
-        doc.add(keyword_field("id", &format!("doc-{i}")));
-        // Only some docs have the text field (which generates norms)
-        if i % 3 == 0 {
-            doc.add(text_field("body", &format!("sparse norms test {i}")));
-        }
-        writer.add_document(doc)?;
-    }
+    add_tv_docs_from_testdata(&writer);
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 10);
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
 
-    let mut dir = MemoryDirectory::new();
-    let file_names = result.write_to_directory(&mut dir)?;
-
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".nvm"));
-    assert_any!(file_names.iter(), |n: &String| n.ends_with(".nvd"));
-
-    for name in &file_names {
-        if name.ends_with(".nvm") || name.ends_with(".nvd") {
-            let len = dir.file_length(name)?;
-            assert_gt!(len, 0, "{name} should have non-zero length");
-        }
-    }
-
-    Ok(())
+    let files = &segments[0].file_names;
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfs"));
+    assert_any!(files.iter(), |f: &String| f.ends_with(".cfe"));
 }
 
 #[test]
-fn sparse_mixed_doc_values_types() -> io::Result<()> {
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+fn term_vectors_multi_thread() {
+    let config = IndexWriterConfig {
+        num_threads: 2,
+        max_buffered_docs: 2,
+        ..Default::default()
+    };
+    let writer = IndexWriter::new(config, shared_memory_dir());
 
-    for i in 0..10 {
-        let mut doc = Document::new();
-        doc.add(keyword_field("id", &format!("doc-{i}")));
+    add_tv_docs_from_testdata(&writer);
 
-        // Each doc values type is sparse (present in different subsets)
-        if i < 5 {
-            doc.add(numeric_doc_values_field("num", i as i64));
-        }
-        if i % 2 == 0 {
-            doc.add(binary_doc_values_field("bin", vec![i as u8; 4]));
-        }
-        if i % 3 != 0 {
-            doc.add(sorted_doc_values_field(
-                "sorted",
-                format!("val-{i}").as_bytes(),
-            ));
-        }
-        if i >= 3 {
-            doc.add(sorted_numeric_doc_values_field("sn", (i * 10) as i64));
-        }
+    let segments = writer.commit().unwrap();
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 4);
 
-        writer.add_document(doc)?;
+    for seg in &segments {
+        assert_any!(seg.file_names.iter(), |f: &String| f.ends_with(".tvd"));
     }
+}
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 10);
+// --- RAM-based flush tests ---
 
-    let mut dir = MemoryDirectory::new();
-    let file_names = result.write_to_directory(&mut dir)?;
-    assert_not_empty!(file_names);
-
-    // Verify doc values files exist and have content
-    for name in &file_names {
-        if name.ends_with(".dvm") || name.ends_with(".dvd") {
-            let len = dir.file_length(name)?;
-            assert_gt!(len, 0, "{name} should have non-zero length");
-        }
+/// Adds documents with enough text content to accumulate meaningful RAM.
+fn add_text_docs(writer: &IndexWriter, count: usize) {
+    let body = "the quick brown fox jumps over the lazy dog ".repeat(20);
+    for i in 0..count {
+        let doc = DocumentBuilder::new()
+            .add_field(stored("title").string(format!("Document {i}")))
+            .add_field(text("body").stored().value(body.clone()))
+            .build();
+        writer.add_document(doc).unwrap();
     }
-
-    Ok(())
 }
 
 #[test]
-fn sparse_fields_with_fs_directory() -> io::Result<()> {
-    let tmp_dir = std::env::temp_dir().join("bearing_integration_test_sparse_fs");
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir)?;
-    }
+fn ram_flush_produces_multiple_segments() {
+    let config = IndexWriterConfig {
+        ram_buffer_size_mb: 0.05, // very small — forces frequent flushes
+        max_buffered_docs: -1,    // disabled — only RAM triggers flushes
+        ..Default::default()
+    };
 
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let fs_dir = FSDirectory::open(&tmp_dir)?;
-    let writer = IndexWriter::with_config_and_directory(config, Box::new(fs_dir));
+    let writer = IndexWriter::new(config, shared_memory_dir());
+    add_text_docs(&writer, 500);
+    let segments = writer.commit().unwrap();
 
-    for i in 0..10 {
-        let mut doc = Document::new();
-        doc.add(keyword_field("id", &format!("doc-{i}")));
-        // Sparse text field (norms) + sparse numeric doc values
-        if i % 2 == 0 {
-            doc.add(text_field("body", &format!("fs sparse test {i}")));
-        }
-        if i % 3 == 0 {
-            doc.add(numeric_doc_values_field("count", i as i64));
-        }
-        writer.add_document(doc)?;
-    }
+    // With a 0.05 MB buffer and ~1KB per doc, should produce multiple segments.
+    assert_gt!(segments.len(), 1);
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 10);
-
-    let file_names = result.file_names();
-    assert_not_empty!(file_names);
-
-    // Verify files exist on disk
-    for name in file_names {
-        let path = tmp_dir.join(name);
-        assert!(path.exists(), "expected file {} on disk", path.display());
-    }
-
-    std::fs::remove_dir_all(&tmp_dir)?;
-    Ok(())
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 500);
 }
 
-// ---------------------------------------------------------------------------
-// Multi-threaded indexing with point fields (regression for BKD empty segment)
-// ---------------------------------------------------------------------------
+#[test]
+fn large_ram_buffer_produces_single_segment() {
+    let config = IndexWriterConfig {
+        ram_buffer_size_mb: 1000.0, // huge — should never trigger
+        max_buffered_docs: -1,
+        ..Default::default()
+    };
+
+    let writer = IndexWriter::new(config, shared_memory_dir());
+    add_text_docs(&writer, 50);
+    let segments = writer.commit().unwrap();
+
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].doc_count, 50);
+}
 
 #[test]
-fn multi_threaded_few_docs_with_points() -> io::Result<()> {
-    // 4 docs with point fields across 4 threads — some threads get empty segments.
-    // Regression test: empty/small segments with multi-dim points (LatLonPoint, ranges)
-    // previously panicked in the BKD writer.
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+fn ram_flush_multi_thread() {
+    let config = IndexWriterConfig {
+        ram_buffer_size_mb: 0.1,
+        max_buffered_docs: -1,
+        num_threads: 4,
+        ..Default::default()
+    };
 
-    let handles: Vec<_> = (0..4)
-        .map(|i| {
-            let w = writer.clone();
-            thread::spawn(move || {
-                let mut doc = Document::new();
-                doc.add(keyword_field("id", &format!("doc-{i}")));
-                doc.add(long_field("ts", 1_700_000_000 + i));
-                doc.add(int_field("count", i as i32 * 10, true));
-                doc.add(float_field("score", i as f32 * 1.5, true));
-                doc.add(double_field("price", i as f64 * 99.99, true));
-                doc.add(lat_lon_point(
-                    "location",
-                    40.7128 + i as f64 * 0.01,
-                    -74.006 + i as f64 * 0.01,
-                ));
-                doc.add(int_range_field("int_range", &[i as i32], &[i as i32 + 100]));
-                doc.add(long_range_field("long_range", &[i], &[i + 1000]));
-                doc.add(float_range_field(
-                    "float_range",
-                    &[i as f32 / 10.0],
-                    &[i as f32 / 10.0 + 1.0],
-                ));
-                doc.add(double_range_field(
-                    "double_range",
-                    &[i as f64 * 0.1],
-                    &[i as f64 * 0.1 + 1.0],
-                ));
-                w.add_document(doc).expect("add_document failed");
-            })
-        })
-        .collect();
+    let writer = IndexWriter::new(config, shared_memory_dir());
+    add_text_docs(&writer, 200);
+    let segments = writer.commit().unwrap();
 
-    for h in handles {
-        h.join().expect("thread panicked");
-    }
+    // Multiple segments from RAM-triggered flushes across 4 threads.
+    assert_gt!(segments.len(), 1);
 
-    let result = writer.commit()?;
-    assert_eq!(writer.num_docs(), 4);
-
-    let mut dir = MemoryDirectory::new();
-    let file_names = result.write_to_directory(&mut dir)?;
-    assert_not_empty!(file_names);
-
-    Ok(())
+    let total_docs: i32 = segments.iter().map(|s| s.doc_count).sum();
+    assert_eq!(total_docs, 200);
 }

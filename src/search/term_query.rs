@@ -525,39 +525,54 @@ impl Scorer for TermScorer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::document::{self, Document};
     use crate::index::directory_reader::DirectoryReader;
-    use crate::index::{IndexWriter, IndexWriterConfig};
+    use crate::newindex::config::IndexWriterConfig;
+    use crate::newindex::document::DocumentBuilder;
+    use crate::newindex::field::text;
+    use crate::newindex::writer::IndexWriter;
     use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
-    use crate::store::{Directory, MemoryDirectory};
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
-    fn build_test_index() -> (Box<dyn crate::store::Directory>, DirectoryReader) {
-        let config = IndexWriterConfig::new().set_use_compound_file(false);
-        let writer = IndexWriter::with_config(config);
+    fn build_test_index() -> (Arc<SharedDirectory>, DirectoryReader) {
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-        let mut doc = Document::new();
-        doc.add(document::text_field("content", "hello world"));
-        writer.add_document(doc).unwrap();
+        writer
+            .add_document(
+                DocumentBuilder::new()
+                    .add_field(text("content").value("hello world"))
+                    .build(),
+            )
+            .unwrap();
 
-        let mut doc = Document::new();
-        doc.add(document::text_field("content", "hello there"));
-        writer.add_document(doc).unwrap();
+        writer
+            .add_document(
+                DocumentBuilder::new()
+                    .add_field(text("content").value("hello there"))
+                    .build(),
+            )
+            .unwrap();
 
-        let mut doc = Document::new();
-        doc.add(document::text_field("content", "world peace"));
-        writer.add_document(doc).unwrap();
+        writer
+            .add_document(
+                DocumentBuilder::new()
+                    .add_field(text("content").value("world peace"))
+                    .build(),
+            )
+            .unwrap();
 
-        let result = writer.commit().unwrap();
-        let seg_files = result.into_segment_files().unwrap();
-
-        let mut mem_dir = MemoryDirectory::new();
-        for sf in &seg_files {
-            mem_dir.write_file(&sf.name, &sf.data).unwrap();
-        }
-        let dir = Box::new(mem_dir) as Box<dyn crate::store::Directory>;
-        let reader = DirectoryReader::open(dir.as_ref()).unwrap();
-        (dir, reader)
+        writer.commit().unwrap();
+        let dir = directory.lock().unwrap();
+        let reader = DirectoryReader::open(&**dir).unwrap();
+        drop(dir);
+        (directory, reader)
     }
 
     // -- TermQuery construction tests --

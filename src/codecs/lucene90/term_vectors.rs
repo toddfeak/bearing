@@ -4,8 +4,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 
-use mem_dbg::MemSize;
-
 use log::debug;
 
 use crate::codecs::codec_util;
@@ -141,24 +139,6 @@ impl TermVectorChunkWriter {
         }
         self.pending_docs.push(doc.clone());
         self.maybe_flush()
-    }
-
-    /// Returns the estimated RAM bytes used by the chunk writer's buffers.
-    ///
-    /// Covers `pending_docs` (bounded by chunk threshold), per-chunk index
-    /// vectors (`doc_bases`, `start_pointers`), and the `last_terms` map.
-    pub(crate) fn ram_bytes_used(&self) -> usize {
-        let flags = mem_dbg::SizeFlags::CAPACITY;
-        let pending = self.pending_docs.mem_size(flags);
-        let last_terms: usize = self
-            .last_terms
-            .values()
-            .map(|v| v.capacity())
-            .sum::<usize>()
-            + self.last_terms.capacity() * std::mem::size_of::<(u32, Vec<u8>)>();
-        let indices = self.doc_bases.capacity() * std::mem::size_of::<i64>()
-            + self.start_pointers.capacity() * std::mem::size_of::<i64>();
-        pending + last_terms + indices
     }
 
     /// Flushes the current chunk if it exceeds the size or doc count threshold.

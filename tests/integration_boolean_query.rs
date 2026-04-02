@@ -10,18 +10,26 @@
 //! Java Lucene 10.3.2 (StandardAnalyzer, BM25Similarity default k1=1.2 b=0.75) and
 //! running the same BooleanQuery with two MUST TermQuery clauses.
 
+use std::sync::Arc;
+
 use assertables::*;
-use bearing::document::{self, Document};
 use bearing::index::directory_reader::DirectoryReader;
-use bearing::index::{IndexWriter, IndexWriterConfig};
+use bearing::newindex::config::IndexWriterConfig;
+use bearing::newindex::document::DocumentBuilder;
+use bearing::newindex::field::text;
+use bearing::newindex::writer::IndexWriter;
 use bearing::search::*;
-use bearing::store::{Directory, MemoryDirectory};
+use bearing::store::{MemoryDirectory, SharedDirectory};
 
 /// Indexes golden-docs into an in-memory directory, returning the directory and reader.
 /// Files are indexed in sorted filename order to match the Java indexing order.
-fn build_golden_docs_index() -> (Box<dyn Directory>, DirectoryReader) {
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+fn build_golden_docs_index() -> (Arc<SharedDirectory>, DirectoryReader) {
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let docs_dir = std::path::Path::new("testdata/golden-docs");
     let mut paths: Vec<_> = std::fs::read_dir(docs_dir)
@@ -34,21 +42,16 @@ fn build_golden_docs_index() -> (Box<dyn Directory>, DirectoryReader) {
 
     for path in &paths {
         let contents = std::fs::read_to_string(path).unwrap();
-        let mut doc = Document::new();
-        doc.add(document::text_field("contents", &contents));
+        let doc = DocumentBuilder::new()
+            .add_field(text("contents").value(contents.as_str()))
+            .build();
         writer.add_document(doc).unwrap();
     }
 
-    let result = writer.commit().unwrap();
-    let seg_files = result.into_segment_files().unwrap();
+    writer.commit().unwrap();
 
-    let mut mem_dir = MemoryDirectory::new();
-    for sf in &seg_files {
-        mem_dir.write_file(&sf.name, &sf.data).unwrap();
-    }
-    let dir = Box::new(mem_dir) as Box<dyn Directory>;
-    let reader = DirectoryReader::open(dir.as_ref()).unwrap();
-    (dir, reader)
+    let reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
+    (directory, reader)
 }
 
 /// Helper to build a two-MUST boolean query.
@@ -616,12 +619,15 @@ fn test_boolean_mixed_memory_performance() {
 
 /// Builds an in-memory index with `doc_count` documents, each containing
 /// the given terms in a "content" text field.
-fn build_large_index(doc_count: usize, terms: &[&str]) -> (Box<dyn Directory>, DirectoryReader) {
-    let config = IndexWriterConfig::new().set_use_compound_file(false);
-    let writer = IndexWriter::with_config(config);
+fn build_large_index(doc_count: usize, terms: &[&str]) -> (Arc<SharedDirectory>, DirectoryReader) {
+    let config = IndexWriterConfig {
+        use_compound_file: false,
+        ..Default::default()
+    };
+    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     for i in 0..doc_count {
-        let mut doc = Document::new();
         // Each doc gets the common terms plus filler words to vary document length,
         // which produces varying BM25 scores across docs.
         let filler_count = (i % 20) + 1;
@@ -629,21 +635,17 @@ fn build_large_index(doc_count: usize, terms: &[&str]) -> (Box<dyn Directory>, D
             .map(|j| format!("word{}", j))
             .collect::<Vec<_>>()
             .join(" ");
-        let text = format!("{} {}", terms.join(" "), filler);
-        doc.add(document::text_field("content", &text));
+        let content = format!("{} {}", terms.join(" "), filler);
+        let doc = DocumentBuilder::new()
+            .add_field(text("content").value(content.as_str()))
+            .build();
         writer.add_document(doc).unwrap();
     }
 
-    let result = writer.commit().unwrap();
-    let seg_files = result.into_segment_files().unwrap();
+    writer.commit().unwrap();
 
-    let mut mem_dir = MemoryDirectory::new();
-    for sf in &seg_files {
-        mem_dir.write_file(&sf.name, &sf.data).unwrap();
-    }
-    let dir = Box::new(mem_dir) as Box<dyn Directory>;
-    let reader = DirectoryReader::open(dir.as_ref()).unwrap();
-    (dir, reader)
+    let reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
+    (directory, reader)
 }
 
 #[test]

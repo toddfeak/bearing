@@ -57,7 +57,7 @@ pub struct LeafReaderContext {
 /// which returns [`LeafReaderContext`] wrappers that include the segment's
 /// position in the overall document ID space.
 ///
-/// This is the read-side counterpart to [`super::IndexWriter`] — it opens
+/// This is the read-side counterpart to the index writer — it opens
 /// indexes that were written by either Bearing or Java Lucene.
 pub struct DirectoryReader {
     segments: Box<[LeafReaderContext]>,
@@ -137,36 +137,40 @@ impl DirectoryReader {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::document::{self, Document};
-    use crate::index::{IndexWriter, IndexWriterConfig};
-    use crate::store::MemoryDirectory;
+    use crate::newindex::config::IndexWriterConfig;
+    use crate::newindex::document::DocumentBuilder;
+    use crate::newindex::field::{string, text};
+    use crate::newindex::writer::IndexWriter;
+    use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
-    fn write_index(num_docs: usize, compound: bool) -> Box<dyn Directory> {
-        let config = IndexWriterConfig::new().set_use_compound_file(compound);
-        let writer = IndexWriter::with_config(config);
+    fn write_index(_name: &str, num_docs: usize, compound: bool) -> Arc<SharedDirectory> {
+        let config = IndexWriterConfig {
+            use_compound_file: compound,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
 
         for i in 0..num_docs {
-            let mut doc = Document::new();
-            doc.add(document::text_field("content", &format!("doc {i}")));
+            let doc = DocumentBuilder::new()
+                .add_field(text("content").value(format!("doc {i}")))
+                .build();
             writer.add_document(doc).unwrap();
         }
 
-        let result = writer.commit().unwrap();
-        let seg_files = result.into_segment_files().unwrap();
+        writer.commit().unwrap();
 
-        let mut mem_dir = MemoryDirectory::new();
-        for sf in &seg_files {
-            mem_dir.write_file(&sf.name, &sf.data).unwrap();
-        }
-        Box::new(mem_dir)
+        directory
     }
 
     #[test]
     fn test_open_single_segment() {
-        let dir = write_index(5, false);
-        let reader = DirectoryReader::open(dir.as_ref()).unwrap();
+        let directory = write_index("single", 5, false);
+        let reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
 
         assert_eq!(reader.max_doc(), 5);
         assert_eq!(reader.num_docs(), 5);
@@ -180,8 +184,8 @@ mod tests {
 
     #[test]
     fn test_open_compound() {
-        let dir = write_index(3, true);
-        let reader = DirectoryReader::open(dir.as_ref()).unwrap();
+        let directory = write_index("compound", 3, true);
+        let reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
 
         assert_eq!(reader.max_doc(), 3);
         assert_eq!(reader.leaves().len(), 1);
@@ -189,28 +193,24 @@ mod tests {
 
     #[test]
     fn test_multi_segment() {
-        // Write two separate commits to get multiple segments
-        let config = IndexWriterConfig::new()
-            .set_use_compound_file(false)
-            .set_max_buffered_docs(2);
-        let writer = IndexWriter::with_config(config);
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            max_buffered_docs: 2,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
 
         for i in 0..5 {
-            let mut doc = Document::new();
-            doc.add(document::text_field("content", &format!("doc {i}")));
+            let doc = DocumentBuilder::new()
+                .add_field(text("content").value(format!("doc {i}")))
+                .build();
             writer.add_document(doc).unwrap();
         }
 
-        let result = writer.commit().unwrap();
-        let seg_files = result.into_segment_files().unwrap();
+        writer.commit().unwrap();
 
-        let mut mem_dir = MemoryDirectory::new();
-        for sf in &seg_files {
-            mem_dir.write_file(&sf.name, &sf.data).unwrap();
-        }
-        let dir = Box::new(mem_dir) as Box<dyn Directory>;
-
-        let reader = DirectoryReader::open(dir.as_ref()).unwrap();
+        let reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
 
         // With max_buffered_docs=2, 5 docs should create multiple segments
         assert_eq!(reader.max_doc(), 5);
@@ -228,21 +228,21 @@ mod tests {
 
     #[test]
     fn test_leaf_reader_access() {
-        // Write a doc with a stored field
-        let config = IndexWriterConfig::new().set_use_compound_file(false);
-        let writer = IndexWriter::with_config(config);
-        let mut doc = Document::new();
-        doc.add(document::string_field("path", "/test.txt", true));
+        let config = IndexWriterConfig {
+            use_compound_file: false,
+            ..Default::default()
+        };
+        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let writer = IndexWriter::new(config, Arc::clone(&directory));
+
+        let doc = DocumentBuilder::new()
+            .add_field(string("path").stored().value("/test.txt"))
+            .build();
         writer.add_document(doc).unwrap();
 
-        let result = writer.commit().unwrap();
-        let seg_files = result.into_segment_files().unwrap();
-        let mut mem_dir = MemoryDirectory::new();
-        for sf in &seg_files {
-            mem_dir.write_file(&sf.name, &sf.data).unwrap();
-        }
+        writer.commit().unwrap();
 
-        let mut reader = DirectoryReader::open(&mem_dir).unwrap();
+        let mut reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
 
         // Access stored fields through the hierarchy
         let leaf = &mut reader.segments[0];
@@ -253,8 +253,8 @@ mod tests {
 
     #[test]
     fn test_empty_directory_fails() {
-        let dir = Box::new(MemoryDirectory::new()) as Box<dyn Directory>;
-        let result = DirectoryReader::open(dir.as_ref());
+        let dir = MemoryDirectory::new();
+        let result = DirectoryReader::open(&dir);
         assert_err!(result);
     }
 }

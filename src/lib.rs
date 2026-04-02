@@ -9,20 +9,24 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use bearing::document::{Document, text_field, keyword_field};
-//! use bearing::index::IndexWriter;
-//! use bearing::store::FSDirectory;
+//! use std::sync::Arc;
+//! use bearing::newindex::config::IndexWriterConfig;
+//! use bearing::newindex::document::DocumentBuilder;
+//! use bearing::newindex::field::{text, keyword};
+//! use bearing::newindex::writer::IndexWriter;
+//! use bearing::store::{FSDirectory, SharedDirectory};
 //!
-//! let writer = bearing::index::IndexWriter::new();
+//! let fs_dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
+//! let directory = Arc::new(SharedDirectory::new(Box::new(fs_dir)));
+//! let writer = IndexWriter::new(IndexWriterConfig::default(), directory);
 //!
-//! let mut doc = Document::new();
-//! doc.add(text_field("body", "the quick brown fox"));
-//! doc.add(keyword_field("category", "animals"));
+//! let doc = DocumentBuilder::new()
+//!     .add_field(text("body").value("the quick brown fox"))
+//!     .add_field(keyword("category").value("animals"))
+//!     .build();
 //! writer.add_document(doc).unwrap();
 //!
-//! let result = writer.commit().unwrap();
-//! let mut dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
-//! result.write_to_directory(&mut dir).unwrap();
+//! writer.commit().unwrap();
 //! ```
 //!
 //! # Modules

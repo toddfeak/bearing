@@ -11,6 +11,8 @@
 #   4. Index with --compound → verify .cfs/.cfe exist
 #   5. Run VerifyIndex on Rust index
 #   6. Run VerifyImpacts on Rust index
+#   7. Multi-segment, multi-thread, and compound variants with VerifyIndex
+#   8. Golden summary test
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,13 +129,38 @@ else
     fail "VerifyImpacts failed" "VerifyImpacts"
 fi
 
-# --- 6. Newindex pipeline (stored fields → Java CheckIndex) ---
-run_test "Newindex pipeline E2E"
-if "$SCRIPT_DIR/e2e_newindex.sh" 2>&1; then
-    pass
-else
-    fail "Newindex E2E failed" "NewindexE2E"
-fi
+# --- 6. Configuration variants with VerifyIndex ---
+run_variant() {
+    local name="$1"
+    shift
+    local args=("$@")
+
+    run_test "$name"
+
+    local idx_dir
+    idx_dir="$(mktemp -d)"
+
+    "$INDEXFILES" -docs "$DOCS_DIR" -index "$idx_dir" "${args[@]}"
+
+    if [ ! -f "$idx_dir/segments_1" ]; then
+        fail "segments_1 not found" "$name"
+        rm -rf "$idx_dir"
+        return
+    fi
+
+    if $GRADLE verifyIndex -PindexDir="$idx_dir" -PdocCount="$DOC_COUNT" 2>&1; then
+        pass
+    else
+        fail "VerifyIndex rejected the index" "$name"
+    fi
+
+    rm -rf "$idx_dir"
+}
+
+run_variant "Multi-segment" --max-buffered-docs 10
+run_variant "Multi-thread" --threads 2
+run_variant "Multi-thread + multi-segment" --threads 2 --max-buffered-docs 10
+run_variant "Compound + multi-segment" --max-buffered-docs 10 --compound
 
 # --- 7. Golden Summary ---
 run_test "Golden index summary"
