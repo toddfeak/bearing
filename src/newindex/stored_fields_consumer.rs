@@ -193,7 +193,6 @@ impl FieldConsumer for StoredFieldsConsumer {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
     use std::sync::Arc;
 
     use assertables::*;
@@ -237,7 +236,7 @@ mod tests {
         let mut acc = SegmentAccumulator::new();
 
         consumer.start_document(0).unwrap();
-        let field = text("not_stored").reader(Cursor::new(b"invisible".to_vec()));
+        let field = text("not_stored").value("invisible");
         consumer.start_field(0, &field, &mut acc).unwrap();
         consumer.finish_field(0, &field, &mut acc).unwrap();
         consumer.finish_document(0, &mut acc, &context).unwrap();

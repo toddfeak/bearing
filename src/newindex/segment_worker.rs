@@ -162,14 +162,11 @@ impl SegmentWorker {
             // 2b. Tokenized fields: run the analyzer once, stream tokens
             //     to only the field consumers that opted in.
             if field.field_type().is_tokenized() && !interested.is_empty() {
-                let invertable = field.field_type_mut().take_invertable();
-                let mut reader: Box<dyn std::io::Read + Send> = match invertable {
-                    Some(InvertableValue::Tokenized(r, _)) => r,
-                    Some(InvertableValue::TokenizedString(s, _)) => {
-                        Box::new(std::io::Cursor::new(s.into_bytes()))
-                    }
+                let provider = match field.field_type().invertable() {
+                    Some(InvertableValue::Tokenized(provider, _)) => provider,
                     _ => continue,
                 };
+                let mut reader = provider.open()?;
                 let mut token_buf = mem::take(&mut self.token_buf);
 
                 self.analyzer.reset();

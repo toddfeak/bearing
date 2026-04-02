@@ -111,7 +111,6 @@ impl FieldInfoRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
 
     use super::*;
     use crate::newindex::field::{stored, text};
@@ -180,7 +179,7 @@ mod tests {
         let s = stored("body").string("x");
         reg.get_or_register("body", s.field_type()).unwrap();
 
-        let t = text("body").reader(Cursor::new(b"y".to_vec()));
+        let t = text("body").value("y");
         let result = reg.get_or_register("body", t.field_type());
         assert!(result.is_err());
     }

@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 
 use assertables::*;
@@ -338,9 +337,7 @@ fn text_only_fields_produce_postings_without_stored() {
     // Tokenized, not stored
     for i in 0..3 {
         let doc = DocumentBuilder::new()
-            .add_field(text("body").reader(Cursor::new(
-                format!("hello world document {i}").into_bytes(),
-            )))
+            .add_field(text("body").value(format!("hello world document {i}")))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -386,8 +383,6 @@ fn mixed_stored_and_stored_tokenized_fields() {
 
 #[test]
 fn tokenized_field_produces_same_postings_as_string() {
-    use std::io::BufReader;
-
     let docs_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/docs");
 
     // Index with tokenized_field (streaming)
@@ -398,9 +393,8 @@ fn tokenized_field_produces_same_postings_as_string() {
     for entry in fs::read_dir(&docs_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        let file = fs::File::open(&path).unwrap();
         let doc = DocumentBuilder::new()
-            .add_field(text("contents").reader(BufReader::new(file)))
+            .add_field(text("contents").value(path))
             .build();
         writer_reader.add_document(doc).unwrap();
     }
@@ -445,7 +439,7 @@ fn reader_field_not_stored() {
 
     let doc = DocumentBuilder::new()
         .add_field(stored("title").string("test"))
-        .add_field(text("contents").reader(Cursor::new(b"hello world document".to_vec())))
+        .add_field(text("contents").value("hello world document"))
         .build();
     writer.add_document(doc).unwrap();
 
@@ -459,6 +453,42 @@ fn reader_field_not_stored() {
     assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
     // Norms exist for "contents"
     assert!(files.contains(&"_0.nvm".to_string()));
+}
+
+#[test]
+fn stored_tokenized_field_from_file_path() {
+    // Write a temp file, then index it as stored+tokenized via PathBuf
+    let dir = std::env::temp_dir().join("bearing_test_stored_path");
+    fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("doc.txt");
+    fs::write(&file_path, "hello world from a file").unwrap();
+
+    let writer = IndexWriter::new(
+        IndexWriterConfig::default(),
+        Box::new(MemoryDirectory::new()),
+    );
+
+    let doc = DocumentBuilder::new()
+        .add_field(text("contents").stored().value(file_path.clone()))
+        .build();
+    writer.add_document(doc).unwrap();
+
+    let segments = writer.commit().unwrap();
+    assert_eq!(segments.len(), 1);
+
+    let files = &segments[0].file_names;
+    // Stored fields files exist (content stored from file)
+    assert!(files.contains(&"_0.fdt".to_string()));
+    assert!(files.contains(&"_0.fdx".to_string()));
+    assert!(files.contains(&"_0.fdm".to_string()));
+    // Postings files exist (content tokenized from file)
+    assert!(files.contains(&"_0_Lucene103_0.tim".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.doc".to_string()));
+    assert!(files.contains(&"_0_Lucene103_0.pos".to_string()));
+    // Norms exist
+    assert!(files.contains(&"_0.nvm".to_string()));
+
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

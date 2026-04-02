@@ -16,17 +16,89 @@
 //! // Tokenized text field, stored
 //! let f = text("body").stored().value("hello world");
 //!
-//! // Tokenized text field, reader-backed, not stored
-//! let f = text("body").reader(file);
+//! // Tokenized text field, stored, streamed from file
+//! let f = text("body").stored().value(PathBuf::from("doc.txt"));
 //!
 //! // Tokenized text field, not stored
 //! let f = text("body").value("hello world");
+//!
+//! // Tokenized text field via PathBuf, not stored
+//! let f = text("body").value(PathBuf::from("file.txt"));
 //! ```
 
 use std::fmt;
-use std::io::Read;
+use std::fs::File;
+use std::io::{self, Cursor, Read};
+use std::path::PathBuf;
 
 use crate::document::{DocValuesType, IndexOptions};
+
+// ============================================================
+// ReadProvider — reusable reader factory for field content
+// ============================================================
+
+/// A reusable factory that produces independent readers for field content.
+///
+/// Each call to [`open`](ReadProvider::open) returns a fresh reader positioned
+/// at the start of the data. This allows multiple consumers (e.g., tokenizer
+/// and stored fields writer) to read the same field content independently
+/// without coordinating ownership or buffering the entire content in memory.
+pub trait ReadProvider: Send + Sync {
+    /// Opens a new, independent reader for the field content.
+    fn open(&self) -> io::Result<Box<dyn Read + Send>>;
+}
+
+/// Provider backed by an in-memory string.
+struct StringProvider(String);
+
+impl ReadProvider for StringProvider {
+    fn open(&self) -> io::Result<Box<dyn Read + Send>> {
+        Ok(Box::new(Cursor::new(self.0.clone().into_bytes())))
+    }
+}
+
+impl fmt::Debug for StringProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("StringProvider")
+            .field(&self.0.len())
+            .finish()
+    }
+}
+
+/// Provider backed by a file path. Each [`open`](ReadProvider::open) call
+/// opens the file from disk, enabling streaming without loading the entire
+/// file into memory.
+struct PathProvider(PathBuf);
+
+impl ReadProvider for PathProvider {
+    fn open(&self) -> io::Result<Box<dyn Read + Send>> {
+        Ok(Box::new(File::open(&self.0)?))
+    }
+}
+
+impl fmt::Debug for PathProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PathProvider").field(&self.0).finish()
+    }
+}
+
+impl From<String> for Box<dyn ReadProvider> {
+    fn from(s: String) -> Self {
+        Box::new(StringProvider(s))
+    }
+}
+
+impl From<&str> for Box<dyn ReadProvider> {
+    fn from(s: &str) -> Self {
+        Box::new(StringProvider(s.to_string()))
+    }
+}
+
+impl From<PathBuf> for Box<dyn ReadProvider> {
+    fn from(p: PathBuf) -> Self {
+        Box::new(PathProvider(p))
+    }
+}
 
 /// Value stored in the stored fields segment for later retrieval.
 ///
@@ -65,7 +137,7 @@ impl fmt::Debug for StoredValue {
 /// What term vector data to store for a tokenized field.
 ///
 /// Term vectors record the token stream per-document alongside the inverted
-/// index. Only tokenized fields (`Tokenized`/`TokenizedString`) can have term
+/// index. Only tokenized fields (`Tokenized`) can have term
 /// vectors. The enum makes invalid combinations unrepresentable — payloads
 /// always require positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,13 +189,10 @@ impl TermVectorOptions {
 /// [`TermVectorOptions`] for per-document term vector storage.
 // LOCKED
 pub enum InvertableValue {
-    /// Streaming reader run through an analyzer. Produces a token stream
-    /// with docs, freqs, and positions. Has norms. Cannot be stored.
-    Tokenized(Box<dyn Read + Send>, Option<TermVectorOptions>),
-    /// String run through an analyzer. Produces a token stream with docs,
-    /// freqs, and positions. Has norms. Can be stored (the string is
-    /// accessible before tokenization consumes it).
-    TokenizedString(String, Option<TermVectorOptions>),
+    /// Content run through an analyzer via a [`ReadProvider`]. Produces a
+    /// token stream with docs, freqs, and positions. Has norms. The provider
+    /// can be opened multiple times — once for tokenization, once for storage.
+    Tokenized(Box<dyn ReadProvider>, Option<TermVectorOptions>),
     /// Single exact-match term indexed at the DOCS level only. Omits norms.
     ExactMatch(String),
     /// Term with a feature value encoded as term frequency. Indexed at
@@ -136,9 +205,6 @@ impl fmt::Debug for InvertableValue {
         match self {
             InvertableValue::Tokenized(_, tv) => {
                 f.debug_tuple("Tokenized").field(&"...").field(tv).finish()
-            }
-            InvertableValue::TokenizedString(s, tv) => {
-                f.debug_tuple("TokenizedString").field(s).field(tv).finish()
             }
             InvertableValue::ExactMatch(s) => f.debug_tuple("ExactMatch").field(s).finish(),
             InvertableValue::Feature(name, val) => {
@@ -260,14 +326,6 @@ impl FieldType {
         self.invertable.as_ref()
     }
 
-    /// Takes ownership of the invertable value, leaving `None` in its place.
-    ///
-    /// Used by the postings consumer to consume reader-backed values during
-    /// tokenization.
-    pub fn take_invertable(&mut self) -> Option<InvertableValue> {
-        self.invertable.take()
-    }
-
     /// Returns the doc value, if this field has doc values.
     pub fn doc_value(&self) -> Option<&DocValue> {
         self.doc.as_ref()
@@ -283,9 +341,7 @@ impl FieldType {
     pub fn index_options(&self) -> IndexOptions {
         match &self.invertable {
             None => IndexOptions::None,
-            Some(InvertableValue::Tokenized(_, _) | InvertableValue::TokenizedString(_, _)) => {
-                IndexOptions::DocsAndFreqsAndPositions
-            }
+            Some(InvertableValue::Tokenized(_, _)) => IndexOptions::DocsAndFreqsAndPositions,
             Some(InvertableValue::ExactMatch(_)) => IndexOptions::Docs,
             Some(InvertableValue::Feature(_, _)) => IndexOptions::DocsAndFreqs,
         }
@@ -293,10 +349,7 @@ impl FieldType {
 
     /// Whether this field is tokenized (run through an analyzer).
     pub fn is_tokenized(&self) -> bool {
-        matches!(
-            &self.invertable,
-            Some(InvertableValue::Tokenized(_, _) | InvertableValue::TokenizedString(_, _))
-        )
+        matches!(&self.invertable, Some(InvertableValue::Tokenized(_, _)))
     }
 
     /// Whether this field computes and stores norms. Only tokenized fields
@@ -311,9 +364,7 @@ impl FieldType {
     /// non-tokenized fields and tokenized fields without term vectors.
     pub fn term_vector_options(&self) -> Option<TermVectorOptions> {
         match &self.invertable {
-            Some(InvertableValue::Tokenized(_, tv) | InvertableValue::TokenizedString(_, tv)) => {
-                *tv
-            }
+            Some(InvertableValue::Tokenized(_, tv)) => *tv,
             _ => None,
         }
     }
@@ -364,14 +415,6 @@ impl Field {
     pub fn field_type(&self) -> &FieldType {
         &self.field_type
     }
-
-    /// Returns a mutable reference to the field type.
-    ///
-    /// Used by consumers that need to take ownership of values (e.g.,
-    /// [`FieldType::take_invertable`] during tokenization).
-    pub fn field_type_mut(&mut self) -> &mut FieldType {
-        &mut self.field_type
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +431,7 @@ impl Field {
 /// ```ignore
 /// let f = text("body").value("hello world");          // not stored
 /// let f = text("body").stored().value("hello world");  // stored
-/// let f = text("body").reader(file);                   // reader-backed
+/// let f = text("body").value(PathBuf::from("file.txt")); // file-backed, not stored
 /// ```
 pub fn text(name: &str) -> TextFieldBuilder {
     TextFieldBuilder {
@@ -401,7 +444,7 @@ pub fn text(name: &str) -> TextFieldBuilder {
 ///
 /// Supports three terminal methods:
 /// - [`.value()`](TextFieldBuilder::value) — string value, not stored
-/// - [`.reader()`](TextFieldBuilder::reader) — reader-backed, not stored
+/// - [`.value(path)`](TextFieldBuilder::value) — file-backed via `PathBuf`, not stored
 /// - [`.stored()`](TextFieldBuilder::stored) — returns a
 ///   [`StoredTextFieldBuilder`] that only accepts string values
 ///
@@ -430,33 +473,16 @@ impl TextFieldBuilder {
         }
     }
 
-    /// Sets the string value and builds the field. Not stored.
-    pub fn value(self, text: impl Into<String>) -> Field {
-        let s = text.into();
-        Field {
-            name: self.name,
-            field_type: FieldType {
-                stored: None,
-                invertable: Some(InvertableValue::TokenizedString(s, self.term_vectors)),
-                doc: None,
-                points: None,
-            },
-        }
-    }
-
-    /// Sets a streaming reader value and builds the field. Not stored.
+    /// Sets the value and builds the field. Not stored.
     ///
-    /// The reader is consumed during indexing. Tokenization proceeds in
-    /// chunks without buffering the entire content in memory.
-    pub fn reader(self, reader: impl Read + Send + 'static) -> Field {
+    /// Accepts anything convertible to a [`ReadProvider`]: `String`, `&str`,
+    /// `PathBuf`, or a custom `ReadProvider` implementation.
+    pub fn value(self, v: impl Into<Box<dyn ReadProvider>>) -> Field {
         Field {
             name: self.name,
             field_type: FieldType {
                 stored: None,
-                invertable: Some(InvertableValue::Tokenized(
-                    Box::new(reader),
-                    self.term_vectors,
-                )),
+                invertable: Some(InvertableValue::Tokenized(v.into(), self.term_vectors)),
                 doc: None,
                 points: None,
             },
@@ -466,24 +492,34 @@ impl TextFieldBuilder {
 
 /// Builder for a stored tokenized text field.
 ///
-/// Created by [`TextFieldBuilder::stored()`]. Only accepts string values
-/// because reader-backed fields cannot be stored.
+/// Created by [`TextFieldBuilder::stored()`]. Accepts anything convertible
+/// to a [`ReadProvider`]. The stored fields consumer reads from the provider
+/// independently of the tokenizer.
 pub struct StoredTextFieldBuilder {
     name: String,
     term_vectors: Option<TermVectorOptions>,
 }
 
 impl StoredTextFieldBuilder {
-    /// Sets the string value and builds the stored text field.
+    /// Sets the value and builds the stored text field.
     ///
-    /// The string is both stored for retrieval and tokenized for searching.
-    pub fn value(self, text: impl Into<String>) -> Field {
-        let s = text.into();
+    /// The content is both stored for retrieval and tokenized for searching.
+    /// The stored value is read from the provider; the tokenizer opens the
+    /// provider independently.
+    ///
+    /// Accepts `String`, `&str`, `PathBuf`, or a custom `ReadProvider`.
+    pub fn value(self, v: impl Into<Box<dyn ReadProvider>>) -> Field {
+        let provider = v.into();
+        let mut text = String::new();
+        provider
+            .open()
+            .and_then(|mut r| r.read_to_string(&mut text))
+            .expect("ReadProvider must be readable for stored text fields");
         Field {
             name: self.name,
             field_type: FieldType {
-                stored: Some(StoredValue::String(s.clone())),
-                invertable: Some(InvertableValue::TokenizedString(s, self.term_vectors)),
+                stored: Some(StoredValue::String(text)),
+                invertable: Some(InvertableValue::Tokenized(provider, self.term_vectors)),
                 doc: None,
                 points: None,
             },
@@ -1352,7 +1388,7 @@ impl StringFieldBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::Read;
 
     use assertables::*;
 
@@ -1396,8 +1432,8 @@ mod tests {
     }
 
     #[test]
-    fn text_field_reader() {
-        let field = text("body").reader(Cursor::new(b"hello world".to_vec()));
+    fn text_field_value_not_stored() {
+        let field = text("body").value("hello world");
         assert_eq!(field.name(), "body");
         assert_none!(field.field_type().stored());
         assert!(matches!(
@@ -1412,26 +1448,29 @@ mod tests {
     }
 
     #[test]
-    fn text_field_take_invertable() {
-        let mut field = text("body").value("hello");
+    fn text_field_invertable_via_provider() {
+        let field = text("body").value("hello");
         assert!(field.field_type().invertable().is_some());
-
-        let taken = field.field_type_mut().take_invertable();
-        assert!(taken.is_some());
-        assert_none!(field.field_type().invertable());
+        if let Some(InvertableValue::Tokenized(provider, None)) = field.field_type().invertable() {
+            let mut reader = provider.open().unwrap();
+            let mut buf = String::new();
+            reader.read_to_string(&mut buf).unwrap();
+            assert_eq!(buf, "hello");
+        } else {
+            panic!("expected Tokenized with no TV options");
+        }
     }
 
     #[test]
-    fn text_field_reader_take_and_read() {
-        let mut field = text("body").reader(Cursor::new(b"streaming content".to_vec()));
-        let invertable = field.field_type_mut().take_invertable().unwrap();
-        match invertable {
-            InvertableValue::Tokenized(mut reader, _) => {
-                let mut buf = String::new();
-                reader.read_to_string(&mut buf).unwrap();
-                assert_eq!(buf, "streaming content");
-            }
-            _ => panic!("expected Tokenized"),
+    fn text_field_provider_open_and_read() {
+        let field = text("body").value("streaming content");
+        if let Some(InvertableValue::Tokenized(provider, _)) = field.field_type().invertable() {
+            let mut reader = provider.open().unwrap();
+            let mut buf = String::new();
+            reader.read_to_string(&mut buf).unwrap();
+            assert_eq!(buf, "streaming content");
+        } else {
+            panic!("expected Tokenized");
         }
     }
 
@@ -2094,7 +2133,10 @@ mod tests {
             .stored()
             .value("hello world");
         assert_eq!(field.name(), "body");
-        assert!(field.field_type().stored().is_some());
+        assert_eq!(
+            field.field_type().stored(),
+            Some(&StoredValue::String("hello world".to_string()))
+        );
         assert!(field.field_type().is_tokenized());
         assert_eq!(
             field.field_type().term_vector_options(),
@@ -2103,10 +2145,10 @@ mod tests {
     }
 
     #[test]
-    fn text_field_with_term_vectors_reader() {
+    fn text_field_with_term_vectors_value() {
         let field = text("body")
             .with_term_vectors(TermVectorOptions::Positions)
-            .reader(Cursor::new(b"streaming".to_vec()));
+            .value("streaming");
         assert_eq!(field.name(), "body");
         assert_none!(field.field_type().stored());
         assert!(field.field_type().is_tokenized());
@@ -2162,5 +2204,69 @@ mod tests {
             let field = text("body").with_term_vectors(tv).value("test");
             assert_eq!(field.field_type().term_vector_options(), Some(tv));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ReadProvider tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn string_provider_returns_content() {
+        let provider: Box<dyn ReadProvider> = "hello world".into();
+        let mut reader = provider.open().unwrap();
+        let mut buf = String::new();
+        reader.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, "hello world");
+    }
+
+    #[test]
+    fn string_provider_opens_multiple_times() {
+        let provider: Box<dyn ReadProvider> = "test".into();
+
+        let mut buf1 = String::new();
+        provider.open().unwrap().read_to_string(&mut buf1).unwrap();
+
+        let mut buf2 = String::new();
+        provider.open().unwrap().read_to_string(&mut buf2).unwrap();
+
+        assert_eq!(buf1, buf2);
+    }
+
+    #[test]
+    fn string_provider_from_owned_string() {
+        let s = String::from("owned");
+        let provider: Box<dyn ReadProvider> = s.into();
+        let mut buf = String::new();
+        provider.open().unwrap().read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, "owned");
+    }
+
+    #[test]
+    fn path_provider_reads_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("bearing_test_read_provider");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.txt");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"file content").unwrap();
+        drop(f);
+
+        let provider: Box<dyn ReadProvider> = path.clone().into();
+        let mut buf = String::new();
+        provider.open().unwrap().read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, "file content");
+
+        // Opens independently a second time
+        let mut buf2 = String::new();
+        provider.open().unwrap().read_to_string(&mut buf2).unwrap();
+        assert_eq!(buf2, "file content");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn path_provider_returns_error_for_missing_file() {
+        let provider: Box<dyn ReadProvider> = PathBuf::from("/nonexistent/path.txt").into();
+        assert!(provider.open().is_err());
     }
 }

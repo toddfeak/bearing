@@ -4,8 +4,8 @@
 // Field-for-field parity with indexfiles — replaces it after switchover.
 
 use std::env;
-use std::fs::{self, File};
-use std::io::{self, BufReader};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
@@ -217,14 +217,9 @@ fn make_document(path: &Path) -> bearing::newindex::document::Document {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    let contents_field = match File::open(path) {
-        Ok(file) => text("contents")
-            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
-            .reader(BufReader::new(file)),
-        Err(_) => text("contents")
-            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
-            .reader(io::empty()),
-    };
+    let contents_field = text("contents")
+        .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+        .value(path.to_path_buf());
 
     let lat = 40.7128 + (file_size % 10) as f64 * 0.01;
     let lon = -74.006 + (file_size % 10) as f64 * 0.01;
