@@ -2,9 +2,12 @@
 
 use std::io;
 
+use mem_dbg::MemSize;
+
 use crate::newindex::analyzer::Token;
 use crate::newindex::field::Field;
 use crate::newindex::segment_accumulator::SegmentAccumulator;
+use crate::newindex::segment_context::SegmentContext;
 
 /// Indicates whether a consumer wants to receive tokens for a field.
 ///
@@ -47,7 +50,7 @@ pub enum TokenInterest {
 ///       for each token from analyzer:
 ///         add_token(field_id, field, token, &mut accumulator)
 ///     finish_field(field_id, field, &mut accumulator)
-/// finish_document(doc_id, &mut accumulator)
+/// finish_document(doc_id, &mut accumulator, &context)
 /// ```
 ///
 /// # Flush
@@ -59,7 +62,7 @@ pub enum TokenInterest {
 /// during their own flush. The consumer is then dropped along with
 /// the worker.
 // LOCKED
-pub trait FieldConsumer {
+pub trait FieldConsumer: MemSize {
     /// A new document is beginning.
     fn start_document(&mut self, doc_id: i32) -> io::Result<()>;
 
@@ -117,15 +120,27 @@ pub trait FieldConsumer {
 
     /// The current document is complete. FieldConsumers may finalize
     /// per-document state (e.g., flush term vectors, store norms).
+    ///
+    /// `context` provides directory access for consumers that stream
+    /// data to codec writers incrementally (e.g., stored fields, term
+    /// vectors).
     fn finish_document(
         &mut self,
         doc_id: i32,
         accumulator: &mut SegmentAccumulator,
+        context: &SegmentContext,
     ) -> io::Result<()>;
 
     /// Write all accumulated data to segment files.
+    ///
+    /// `context` provides the directory, segment name, and segment ID
+    /// needed to create correctly named and headered codec files.
     /// The accumulator is borrowed immutably — consumers read
     /// accumulated data but do not modify it.
     /// Returns the names of the files written.
-    fn flush(&mut self, accumulator: &SegmentAccumulator) -> io::Result<Vec<String>>;
+    fn flush(
+        &mut self,
+        context: &SegmentContext,
+        accumulator: &SegmentAccumulator,
+    ) -> io::Result<Vec<String>>;
 }

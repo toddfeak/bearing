@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+use std::env;
 use std::io;
+use std::mem;
+
+use mem_dbg::{MemSize, SizeFlags};
 
 use crate::newindex::analyzer::Analyzer;
+use crate::newindex::codecs::segment_info;
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 
 use crate::newindex::document::Document;
+use crate::newindex::field::InvertableValue;
 use crate::newindex::field_info_registry::FieldInfoRegistry;
 use crate::newindex::segment::{FlushedSegment, SegmentId};
 use crate::newindex::segment_accumulator::SegmentAccumulator;
+use crate::newindex::segment_context::SegmentContext;
 
 /// Per-thread worker that accumulates documents into a single segment.
 ///
@@ -127,7 +135,7 @@ impl SegmentWorker {
     }
 
     /// Processes a single document through the indexing pipeline.
-    pub fn add_document(&mut self, doc: Document) -> io::Result<()> {
+    pub fn add_document(&mut self, mut doc: Document, context: &SegmentContext) -> io::Result<()> {
         let doc_id = self.doc_count;
 
         // 1. Start document — notify all field consumers
@@ -153,14 +161,19 @@ impl SegmentWorker {
 
             // 2b. Tokenized fields: run the analyzer once, stream tokens
             //     to only the field consumers that opted in.
-            // TODO: check field.field_type().tokenized()
-            if !interested.is_empty() {
-                // TODO: get reader from field value (string or Reader)
-                let mut reader: &[u8] = b"";
-                let mut token_buf = std::mem::take(&mut self.token_buf);
+            if field.field_type().is_tokenized() && !interested.is_empty() {
+                let invertable = field.field_type_mut().take_invertable();
+                let mut reader: Box<dyn std::io::Read + Send> = match invertable {
+                    Some(InvertableValue::Tokenized(r, _)) => r,
+                    Some(InvertableValue::TokenizedString(s, _)) => {
+                        Box::new(std::io::Cursor::new(s.into_bytes()))
+                    }
+                    _ => continue,
+                };
+                let mut token_buf = mem::take(&mut self.token_buf);
 
                 self.analyzer.reset();
-                while let Some(token) = self.analyzer.next_token(&mut reader, &mut token_buf)? {
+                while let Some(token) = self.analyzer.next_token(&mut *reader, &mut token_buf)? {
                     for &i in &interested {
                         self.field_consumers[i].add_token(
                             field_id,
@@ -182,56 +195,250 @@ impl SegmentWorker {
 
         // 3. Finish document — notify all field consumers
         for consumer in &mut self.field_consumers {
-            consumer.finish_document(doc_id, &mut self.accumulator)?;
+            consumer.finish_document(doc_id, &mut self.accumulator, context)?;
         }
 
         self.doc_count += 1;
+        self.accumulator.increment_doc_count();
 
         Ok(())
     }
 
-    /// Returns true if this worker has hit a threshold and should flush.
-    ///
-    /// Called by the thread loop after each document. Doc count is
-    /// checked directly. RAM-based flushing is coordinated externally.
-    pub fn should_flush(&self, max_buffered_docs: i32) -> bool {
-        // Doc count threshold (-1 means disabled)
-        if max_buffered_docs > 0 && self.doc_count >= max_buffered_docs {
-            return true;
-        }
-
-        // RAM-based threshold:
-        // - After each document, the worker reports its RAM usage to a
-        //   shared AtomicUsize on the coordinator.
-        // - The coordinator tracks total RAM across all workers.
-        // - If total RAM exceeds the configured limit, the coordinator
-        //   signals the worker with the most RAM to flush.
-        // - If total RAM exceeds 2x the limit, add_document stalls
-        //   (bounded channel backpressure) until flushes bring it down.
-        // - RAM measurement uses mem_dbg on consumer accumulators.
-        // TODO: implement RAM-based flush signaling
-
-        false
-    }
-
     /// Returns the estimated RAM bytes used by this worker's accumulators.
     pub fn ram_bytes_used(&self) -> usize {
-        // TODO: sum across field consumers and accumulator
-        0
+        let consumers: usize = self
+            .field_consumers
+            .iter()
+            .map(|c| c.mem_size(SizeFlags::CAPACITY))
+            .sum();
+        let accumulator = self.accumulator.mem_size(SizeFlags::CAPACITY);
+        consumers + accumulator
     }
 
     /// Flushes all accumulated data as a segment to the directory.
     /// Consumes the worker — the coordinator creates a new one for
     /// the next segment.
-    pub fn flush(mut self) -> io::Result<FlushedSegment> {
+    pub fn flush(mut self, context: &SegmentContext) -> io::Result<FlushedSegment> {
+        // 1. Flush all field consumers (stored fields, field infos, etc.)
         let mut file_names = Vec::new();
         for consumer in &mut self.field_consumers {
-            file_names.extend(consumer.flush(&self.accumulator)?);
+            file_names.extend(consumer.flush(context, &self.accumulator)?);
         }
+
+        // 2. Write .si file — must come after consumers so the file list is complete
+        let mut diagnostics = HashMap::new();
+        diagnostics.insert("source".to_string(), "flush".to_string());
+        diagnostics.insert("os.name".to_string(), env::consts::OS.to_string());
+        diagnostics.insert("os.arch".to_string(), env::consts::ARCH.to_string());
+
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "Lucene90StoredFieldsFormat.mode".to_string(),
+            "BEST_SPEED".to_string(),
+        );
+
+        let si = segment_info::SegmentInfo {
+            name: context.segment_name.clone(),
+            max_doc: self.doc_count,
+            is_compound_file: false,
+            id: context.segment_id,
+            diagnostics,
+            attributes,
+            has_blocks: false,
+        };
+        let si_name = segment_info::write(&context.directory, &si, &file_names)?;
+        file_names.push(si_name);
+
         Ok(FlushedSegment {
             segment_id: self.segment_id,
             doc_count: self.doc_count,
             file_names,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use crate::newindex::analyzer::Token;
+    use crate::newindex::consumer::FieldConsumer;
+    use crate::newindex::field::Field;
+    use crate::newindex::segment::SegmentId;
+    use crate::newindex::standard_analyzer::StandardAnalyzer;
+    use crate::store::{MemoryDirectory, SharedDirectory};
+
+    /// No-op consumer that returns an empty file list.
+    struct NoOpConsumer;
+
+    impl mem_dbg::MemSize for NoOpConsumer {
+        fn mem_size_rec(
+            &self,
+            _flags: mem_dbg::SizeFlags,
+            _refs: &mut mem_dbg::HashMap<usize, usize>,
+        ) -> usize {
+            0
+        }
+    }
+
+    impl FieldConsumer for NoOpConsumer {
+        fn start_document(&mut self, _doc_id: i32) -> io::Result<()> {
+            Ok(())
+        }
+        fn start_field(
+            &mut self,
+            _field_id: u32,
+            _field: &Field,
+            _acc: &mut SegmentAccumulator,
+        ) -> io::Result<TokenInterest> {
+            Ok(TokenInterest::NoTokens)
+        }
+        fn add_token(
+            &mut self,
+            _field_id: u32,
+            _field: &Field,
+            _token: &Token<'_>,
+            _acc: &mut SegmentAccumulator,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+        fn finish_field(
+            &mut self,
+            _field_id: u32,
+            _field: &Field,
+            _acc: &mut SegmentAccumulator,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+        fn finish_document(
+            &mut self,
+            _doc_id: i32,
+            _acc: &mut SegmentAccumulator,
+            _context: &SegmentContext,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+        fn flush(
+            &mut self,
+            _context: &SegmentContext,
+            _acc: &SegmentAccumulator,
+        ) -> io::Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
+
+    fn test_context() -> SegmentContext {
+        SegmentContext {
+            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            segment_name: "_0".to_string(),
+            segment_id: [0u8; 16],
+        }
+    }
+
+    #[test]
+    fn flush_writes_si_file() {
+        let context = test_context();
+        let segment_id = SegmentId {
+            name: "_0".to_string(),
+            id: [0u8; 16],
+        };
+        let worker = SegmentWorker::new(
+            segment_id,
+            vec![Box::new(NoOpConsumer)],
+            Box::new(StandardAnalyzer::default()),
+        );
+
+        let flushed = worker.flush(&context).unwrap();
+
+        // .si should be in the file list
+        assert!(flushed.file_names.contains(&"_0.si".to_string()));
+
+        // Verify the file exists in the directory
+        let guard = context.directory.lock().unwrap();
+        let data = guard.read_file("_0.si").unwrap();
+        // Header magic
+        assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
+    }
+
+    #[test]
+    fn flush_includes_consumer_files_in_si() {
+        /// Consumer that claims it wrote a file.
+        struct FakeConsumer;
+
+        impl mem_dbg::MemSize for FakeConsumer {
+            fn mem_size_rec(
+                &self,
+                _flags: mem_dbg::SizeFlags,
+                _refs: &mut mem_dbg::HashMap<usize, usize>,
+            ) -> usize {
+                0
+            }
+        }
+
+        impl FieldConsumer for FakeConsumer {
+            fn start_document(&mut self, _: i32) -> io::Result<()> {
+                Ok(())
+            }
+            fn start_field(
+                &mut self,
+                _: u32,
+                _: &Field,
+                _: &mut SegmentAccumulator,
+            ) -> io::Result<TokenInterest> {
+                Ok(TokenInterest::NoTokens)
+            }
+            fn add_token(
+                &mut self,
+                _: u32,
+                _: &Field,
+                _: &Token<'_>,
+                _: &mut SegmentAccumulator,
+            ) -> io::Result<()> {
+                Ok(())
+            }
+            fn finish_field(
+                &mut self,
+                _: u32,
+                _: &Field,
+                _: &mut SegmentAccumulator,
+            ) -> io::Result<()> {
+                Ok(())
+            }
+            fn finish_document(
+                &mut self,
+                _: i32,
+                _: &mut SegmentAccumulator,
+                _: &SegmentContext,
+            ) -> io::Result<()> {
+                Ok(())
+            }
+            fn flush(
+                &mut self,
+                _: &SegmentContext,
+                _: &SegmentAccumulator,
+            ) -> io::Result<Vec<String>> {
+                Ok(vec!["_0.fdt".to_string(), "_0.fdx".to_string()])
+            }
+        }
+
+        let context = test_context();
+        let segment_id = SegmentId {
+            name: "_0".to_string(),
+            id: [0u8; 16],
+        };
+        let worker = SegmentWorker::new(
+            segment_id,
+            vec![Box::new(FakeConsumer)],
+            Box::new(StandardAnalyzer::default()),
+        );
+
+        let flushed = worker.flush(&context).unwrap();
+
+        // Consumer files + .si
+        assert_eq!(flushed.file_names.len(), 3);
+        assert!(flushed.file_names.contains(&"_0.fdt".to_string()));
+        assert!(flushed.file_names.contains(&"_0.fdx".to_string()));
+        assert!(flushed.file_names.contains(&"_0.si".to_string()));
     }
 }

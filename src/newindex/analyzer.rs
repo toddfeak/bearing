@@ -3,6 +3,8 @@
 use std::io::{self, Read};
 
 /// A single token produced by the analyzer during tokenization.
+// LOCKED
+#[derive(Debug)]
 pub struct Token<'a> {
     /// The token text, borrowed from the analyzer's buffer.
     pub text: &'a str,

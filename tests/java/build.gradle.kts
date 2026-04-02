@@ -46,6 +46,7 @@ tasks.register<JavaExec>("indexAllFields") {
         (if (compound != null) listOf("--compound") else emptyList())
 }
 
+
 tasks.register<JavaExec>("generateIndexSummary") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass = "GenerateIndexSummary"

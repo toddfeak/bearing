@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// DEBT: adapted from util::bytes_ref_hash with external pool ownership
+// from the index-refactoring branch. Reconcile after switchover.
+
 //! Hash map for deduplicating byte sequences into compact integer IDs.
 //!
 //! Byte data is stored in a contiguous pool (length-prefixed), and the hash
@@ -7,21 +10,18 @@
 //! with linear probing. High bits of the hash code are stored alongside the
 //! ID for fast rejection during probing.
 
-use crate::util::byte_block_pool::{
+use crate::newindex::byte_block_pool::{
     BYTE_BLOCK_MASK, BYTE_BLOCK_SHIFT, BYTE_BLOCK_SIZE, ByteBlockPool, DirectAllocator,
 };
 
-/// Default initial capacity of the hash table.
-pub const DEFAULT_CAPACITY: usize = 16;
-
-/// Hash map that interns byte sequences into a [`ByteBlockPool`] and assigns
-/// sequential integer IDs.
+/// Hash map that interns byte sequences into an external [`ByteBlockPool`] and
+/// assigns sequential integer IDs.
 ///
 /// Each unique byte sequence gets an ID starting at 0. The bytes are stored
 /// length-prefixed in the pool (1 byte for lengths < 128, 2 bytes otherwise).
+/// The pool is owned externally and passed to methods that need it.
 #[derive(mem_dbg::MemSize)]
 pub struct BytesRefHash {
-    pool: ByteBlockPool<DirectAllocator>,
     bytes_start: Vec<i32>,
     hash_size: usize,
     hash_half_size: usize,
@@ -33,15 +33,13 @@ pub struct BytesRefHash {
 }
 
 impl BytesRefHash {
-    /// Creates a new `BytesRefHash` with the given pool and initial capacity.
+    /// Creates a new `BytesRefHash` with the given initial capacity.
     ///
-    /// The `BytesRefHash` takes ownership of the pool and uses it to store
-    /// length-prefixed term bytes. In Java, this pool is the shared `termBytePool`
-    /// passed from `TermsHash`.
+    /// The pool is owned externally and passed to methods that need it.
     ///
     /// # Panics
     /// Panics if `capacity` is not a positive power of two.
-    pub fn new(pool: ByteBlockPool<DirectAllocator>, capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than 0");
         assert!(
             capacity.is_power_of_two(),
@@ -50,7 +48,6 @@ impl BytesRefHash {
         let hash_size = capacity;
         let hash_mask = (hash_size - 1) as i32;
         Self {
-            pool,
             bytes_start: Vec::new(),
             hash_size,
             hash_half_size: hash_size >> 1,
@@ -62,18 +59,6 @@ impl BytesRefHash {
         }
     }
 
-    /// Creates a new `BytesRefHash` with the given pool and default capacity (16).
-    pub fn with_pool(pool: ByteBlockPool<DirectAllocator>) -> Self {
-        Self::new(pool, DEFAULT_CAPACITY)
-    }
-
-    /// Creates a new `BytesRefHash` that creates its own pool.
-    pub fn with_default_capacity() -> Self {
-        let mut pool = ByteBlockPool::new(DirectAllocator);
-        pool.next_buffer();
-        Self::new(pool, DEFAULT_CAPACITY)
-    }
-
     /// Returns the number of unique byte sequences in this hash.
     pub fn size(&self) -> usize {
         self.count
@@ -83,16 +68,16 @@ impl BytesRefHash {
     ///
     /// # Panics
     /// Panics if `bytes_id` is out of range.
-    pub fn get(&self, bytes_id: usize) -> &[u8] {
+    pub fn get<'a>(&self, pool: &'a ByteBlockPool<DirectAllocator>, bytes_id: usize) -> &'a [u8] {
         let start = self.bytes_start[bytes_id] as usize;
-        self.read_bytes_at(start)
+        Self::read_bytes_at_pool(pool, start)
     }
 
     /// Adds a byte sequence. Returns the new ID (>= 0) if the bytes are new,
     /// or `-(existing_id) - 1` if already present.
-    pub fn add(&mut self, bytes: &[u8]) -> i32 {
+    pub fn add(&mut self, pool: &mut ByteBlockPool<DirectAllocator>, bytes: &[u8]) -> i32 {
         let hashcode = do_hash(bytes);
-        let hash_pos = self.find_hash(bytes, hashcode);
+        let hash_pos = self.find_hash(pool, bytes, hashcode);
         let e = self.ids[hash_pos];
 
         if e == -1 {
@@ -101,26 +86,19 @@ impl BytesRefHash {
                 self.bytes_start
                     .resize(grow_size(self.bytes_start.len().max(1)), 0);
             }
-            self.bytes_start[self.count] = self.add_bytes_to_pool(bytes);
+            self.bytes_start[self.count] = Self::add_bytes_to_pool(pool, bytes);
             let new_id = self.count as i32;
             self.count += 1;
             assert!(self.ids[hash_pos] == -1);
             self.ids[hash_pos] = new_id | (hashcode & self.high_mask);
 
             if self.count == self.hash_half_size {
-                self.rehash(2 * self.hash_size, true);
+                self.rehash(Some(pool), 2 * self.hash_size, true);
             }
             return new_id;
         }
         let existing_id = e & self.hash_mask;
         -(existing_id + 1)
-    }
-
-    /// Looks up a byte sequence. Returns the ID if found, or -1 if not present.
-    pub fn find(&self, bytes: &[u8]) -> i32 {
-        let hashcode = do_hash(bytes);
-        let id = self.ids[self.find_hash(bytes, hashcode)];
-        if id == -1 { -1 } else { id & self.hash_mask }
     }
 
     /// Returns the `bytes_start` offset for the given ID.
@@ -154,24 +132,21 @@ impl BytesRefHash {
     ///
     /// This is a destructive operation. [`clear`](Self::clear) must be called
     /// before reusing.
-    pub fn sort(&mut self) -> Vec<i32> {
+    pub fn sort(&mut self, pool: &ByteBlockPool<DirectAllocator>) -> Vec<i32> {
         let compact = self.compact().to_vec();
         let mut sorted = compact;
         sorted.sort_by(|&a, &b| {
-            let a_bytes = self.get(a as usize);
-            let b_bytes = self.get(b as usize);
+            let a_bytes = self.get(pool, a as usize);
+            let b_bytes = self.get(pool, b as usize);
             a_bytes.cmp(b_bytes)
         });
         sorted
     }
 
     /// Clears the hash for reuse.
-    pub fn clear(&mut self, reset_pool: bool) {
+    pub fn clear(&mut self) {
         self.last_count = self.count as i32;
         self.count = 0;
-        if reset_pool {
-            self.pool.reset(false, false);
-        }
         self.bytes_start.clear();
         if self.last_count != -1 && self.shrink(self.last_count as usize) {
             return;
@@ -179,22 +154,25 @@ impl BytesRefHash {
         self.ids.fill(-1);
     }
 
-    /// Returns a reference to the underlying byte pool (the `termBytePool`).
-    pub fn pool(&self) -> &ByteBlockPool<DirectAllocator> {
-        &self.pool
-    }
-
-    /// Returns the estimated RAM usage in bytes.
-    pub fn ram_bytes_used(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.bytes_start.len() * std::mem::size_of::<i32>()
-            + self.ids.len() * std::mem::size_of::<i32>()
-            + self.pool.ram_bytes_used()
+    /// Reads the length-prefixed bytes at the given pool offset.
+    ///
+    /// Used when reading term bytes by pool offset rather than by term ID.
+    pub fn get_by_offset<'a>(
+        &self,
+        pool: &'a ByteBlockPool<DirectAllocator>,
+        offset: usize,
+    ) -> &'a [u8] {
+        Self::read_bytes_at_pool(pool, offset)
     }
 
     // --- Internal methods ---
 
-    fn find_hash(&self, bytes: &[u8], hashcode: i32) -> usize {
+    fn find_hash(
+        &self,
+        pool: &ByteBlockPool<DirectAllocator>,
+        bytes: &[u8],
+        hashcode: i32,
+    ) -> usize {
         let mut code = hashcode;
         let mut hash_pos = (code & self.hash_mask) as usize;
         let mut e = self.ids[hash_pos];
@@ -202,7 +180,11 @@ impl BytesRefHash {
 
         while e != -1
             && ((e & self.high_mask) != high_bits
-                || !self.pool_bytes_equal(self.bytes_start[(e & self.hash_mask) as usize], bytes))
+                || !Self::pool_bytes_equal(
+                    pool,
+                    self.bytes_start[(e & self.hash_mask) as usize],
+                    bytes,
+                ))
         {
             code = code.wrapping_add(1);
             hash_pos = (code & self.hash_mask) as usize;
@@ -212,7 +194,12 @@ impl BytesRefHash {
         hash_pos
     }
 
-    fn rehash(&mut self, new_size: usize, hash_on_data: bool) {
+    fn rehash(
+        &mut self,
+        pool: Option<&ByteBlockPool<DirectAllocator>>,
+        new_size: usize,
+        hash_on_data: bool,
+    ) {
         let new_mask = (new_size - 1) as i32;
         let new_high_mask = !new_mask;
         let mut new_hash = vec![-1i32; new_size];
@@ -224,7 +211,10 @@ impl BytesRefHash {
                 let (hashcode, mut code);
                 if hash_on_data {
                     let start = self.bytes_start[e0 as usize] as usize;
-                    let bytes = self.read_bytes_at(start);
+                    let bytes = Self::read_bytes_at_pool(
+                        pool.expect("pool required when hash_on_data is true"),
+                        start,
+                    );
                     hashcode = do_hash(bytes);
                     code = hashcode;
                 } else {
@@ -269,10 +259,10 @@ impl BytesRefHash {
     }
 
     /// Adds bytes to the pool with length prefix. Returns the start offset.
-    fn add_bytes_to_pool(&mut self, bytes: &[u8]) -> i32 {
+    fn add_bytes_to_pool(pool: &mut ByteBlockPool<DirectAllocator>, bytes: &[u8]) -> i32 {
         let length = bytes.len();
         let len2 = 2 + length;
-        if len2 + self.pool.byte_upto > BYTE_BLOCK_SIZE {
+        if len2 + pool.byte_upto > BYTE_BLOCK_SIZE {
             if len2 > BYTE_BLOCK_SIZE {
                 panic!(
                     "bytes can be at most {} in length; got {}",
@@ -280,35 +270,35 @@ impl BytesRefHash {
                     length
                 );
             }
-            self.pool.next_buffer();
+            pool.next_buffer();
         }
-        let buffer_upto = self.pool.byte_upto;
-        let text_start = buffer_upto as i32 + self.pool.byte_offset;
+        let buffer_upto = pool.byte_upto;
+        let text_start = buffer_upto as i32 + pool.byte_offset;
 
         if length < 128 {
             // 1 byte to store length
-            self.pool.current_buffer_mut()[buffer_upto] = length as u8;
-            self.pool.current_buffer_mut()[buffer_upto + 1..buffer_upto + 1 + length]
+            pool.current_buffer_mut()[buffer_upto] = length as u8;
+            pool.current_buffer_mut()[buffer_upto + 1..buffer_upto + 1 + length]
                 .copy_from_slice(bytes);
-            self.pool.byte_upto += length + 1;
+            pool.byte_upto += length + 1;
         } else {
             // 2 bytes to store length (big-endian with high bit set)
             let encoded = (length as u16) | 0x8000;
-            self.pool.current_buffer_mut()[buffer_upto] = (encoded >> 8) as u8;
-            self.pool.current_buffer_mut()[buffer_upto + 1] = encoded as u8;
-            self.pool.current_buffer_mut()[buffer_upto + 2..buffer_upto + 2 + length]
+            pool.current_buffer_mut()[buffer_upto] = (encoded >> 8) as u8;
+            pool.current_buffer_mut()[buffer_upto + 1] = encoded as u8;
+            pool.current_buffer_mut()[buffer_upto + 2..buffer_upto + 2 + length]
                 .copy_from_slice(bytes);
-            self.pool.byte_upto += length + 2;
+            pool.byte_upto += length + 2;
         }
 
         text_start
     }
 
     /// Reads the length-prefixed bytes at the given pool offset.
-    fn read_bytes_at(&self, start: usize) -> &[u8] {
+    fn read_bytes_at_pool(pool: &ByteBlockPool<DirectAllocator>, start: usize) -> &[u8] {
         let buffer_index = start >> BYTE_BLOCK_SHIFT;
         let pos = start & BYTE_BLOCK_MASK;
-        let buffer = &self.pool.buffers[buffer_index];
+        let buffer = &pool.buffers[buffer_index];
 
         if (buffer[pos] & 0x80) == 0 {
             let length = buffer[pos] as usize;
@@ -320,8 +310,55 @@ impl BytesRefHash {
     }
 
     /// Compares the bytes at `start` in the pool with `other`.
-    fn pool_bytes_equal(&self, start: i32, other: &[u8]) -> bool {
-        self.read_bytes_at(start as usize) == other
+    fn pool_bytes_equal(pool: &ByteBlockPool<DirectAllocator>, start: i32, other: &[u8]) -> bool {
+        Self::read_bytes_at_pool(pool, start as usize) == other
+    }
+}
+
+#[cfg(test)]
+impl BytesRefHash {
+    /// Looks up a byte sequence. Returns the ID if found, or -1 if not present.
+    pub fn find(&self, pool: &ByteBlockPool<DirectAllocator>, bytes: &[u8]) -> i32 {
+        let hashcode = do_hash(bytes);
+        let id = self.ids[self.find_hash(pool, bytes, hashcode)];
+        if id == -1 { -1 } else { id & self.hash_mask }
+    }
+
+    /// Adds an arbitrary int offset instead of a byte sequence.
+    ///
+    /// Used by term vectors, which don't redundantly store term bytes — they
+    /// reference the bytes already stored by the postings `BytesRefHash`. The
+    /// offset is used as both the stored value (`bytes_start[id] = offset`) and
+    /// the hash code. Rehash uses `hash_on_data=false` for this mode.
+    pub fn add_by_pool_offset(&mut self, offset: i32) -> i32 {
+        let mut code = offset;
+        let mut hash_pos = (offset & self.hash_mask) as usize;
+        let mut e = self.ids[hash_pos];
+
+        // Conflict; use linear probe to find an open slot (see LUCENE-5604):
+        while e != -1 && self.bytes_start[e as usize] != offset {
+            code = code.wrapping_add(1);
+            hash_pos = (code & self.hash_mask) as usize;
+            e = self.ids[hash_pos];
+        }
+        if e == -1 {
+            // new entry
+            if self.count >= self.bytes_start.len() {
+                self.bytes_start
+                    .resize(grow_size(self.bytes_start.len().max(1)), 0);
+            }
+            e = self.count as i32;
+            self.count += 1;
+            self.bytes_start[e as usize] = offset;
+            assert!(self.ids[hash_pos] == -1);
+            self.ids[hash_pos] = e;
+
+            if self.count == self.hash_half_size {
+                self.rehash(None, 2 * self.hash_size, false);
+            }
+            return e;
+        }
+        -(e + 1)
     }
 }
 
@@ -421,88 +458,100 @@ mod tests {
     use super::*;
     use assertables::*;
 
+    fn make_pool() -> ByteBlockPool<DirectAllocator> {
+        let mut pool = ByteBlockPool::new(DirectAllocator);
+        pool.next_buffer();
+        pool
+    }
+
     #[test]
-    fn test_add_and_find() {
-        let mut hash = BytesRefHash::with_default_capacity();
-        let id0 = hash.add(b"hello");
+    fn test_add_and_dedup() {
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
+        let id0 = hash.add(&mut pool, b"hello");
         assert_eq!(id0, 0);
-        let id1 = hash.add(b"world");
+        let id1 = hash.add(&mut pool, b"world");
         assert_eq!(id1, 1);
 
         // Adding same bytes returns negative
-        let dup = hash.add(b"hello");
+        let dup = hash.add(&mut pool, b"hello");
         assert_eq!(dup, -1); // -(id)-1 = -(0)-1 = -1
 
-        assert_eq!(hash.find(b"hello"), 0);
-        assert_eq!(hash.find(b"world"), 1);
-        assert_eq!(hash.find(b"missing"), -1);
+        let dup2 = hash.add(&mut pool, b"world");
+        assert_eq!(dup2, -2); // -(1)-1 = -2
     }
 
     #[test]
     fn test_get_bytes() {
-        let mut hash = BytesRefHash::with_default_capacity();
-        hash.add(b"foo");
-        hash.add(b"bar");
-        hash.add(b"baz");
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
+        hash.add(&mut pool, b"foo");
+        hash.add(&mut pool, b"bar");
+        hash.add(&mut pool, b"baz");
 
-        assert_eq!(hash.get(0), b"foo");
-        assert_eq!(hash.get(1), b"bar");
-        assert_eq!(hash.get(2), b"baz");
+        assert_eq!(hash.get(&pool, 0), b"foo");
+        assert_eq!(hash.get(&pool, 1), b"bar");
+        assert_eq!(hash.get(&pool, 2), b"baz");
     }
 
     #[test]
     fn test_size() {
-        let mut hash = BytesRefHash::with_default_capacity();
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
         assert_eq!(hash.size(), 0);
-        hash.add(b"a");
+        hash.add(&mut pool, b"a");
         assert_eq!(hash.size(), 1);
-        hash.add(b"b");
+        hash.add(&mut pool, b"b");
         assert_eq!(hash.size(), 2);
         // Duplicate doesn't increase size
-        hash.add(b"a");
+        hash.add(&mut pool, b"a");
         assert_eq!(hash.size(), 2);
     }
 
     #[test]
     fn test_many_entries_triggers_rehash() {
-        let mut hash = BytesRefHash::with_default_capacity();
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
         // Add enough entries to trigger multiple rehashes
         for i in 0i32..1000 {
             let key = format!("key_{i:04}");
-            let id = hash.add(key.as_bytes());
+            let id = hash.add(&mut pool, key.as_bytes());
             assert_eq!(id, i);
         }
         assert_eq!(hash.size(), 1000);
 
-        // Verify all can be found
+        // Verify all can be found via duplicate add
         for i in 0i32..1000 {
             let key = format!("key_{i:04}");
-            assert_eq!(hash.find(key.as_bytes()), i);
+            let dup = hash.add(&mut pool, key.as_bytes());
+            assert_eq!(dup, -(i + 1));
         }
     }
 
     #[test]
     fn test_sort_order() {
-        let mut hash = BytesRefHash::with_default_capacity();
-        hash.add(b"cherry");
-        hash.add(b"apple");
-        hash.add(b"banana");
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
+        hash.add(&mut pool, b"cherry");
+        hash.add(&mut pool, b"apple");
+        hash.add(&mut pool, b"banana");
 
-        let sorted = hash.sort();
+        let sorted = hash.sort(&pool);
         assert_len_eq_x!(&sorted, 3);
 
         // Verify sorted order by checking the bytes
-        assert_eq!(hash.get(sorted[0] as usize), b"apple");
-        assert_eq!(hash.get(sorted[1] as usize), b"banana");
-        assert_eq!(hash.get(sorted[2] as usize), b"cherry");
+        assert_eq!(hash.get(&pool, sorted[0] as usize), b"apple");
+        assert_eq!(hash.get(&pool, sorted[1] as usize), b"banana");
+        assert_eq!(hash.get(&pool, sorted[2] as usize), b"cherry");
     }
 
     #[test]
     fn test_compact() {
-        let mut hash = BytesRefHash::with_default_capacity();
-        hash.add(b"x");
-        hash.add(b"y");
-        hash.add(b"z");
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
+        hash.add(&mut pool, b"x");
+        hash.add(&mut pool, b"y");
+        hash.add(&mut pool, b"z");
 
         let compact = hash.compact().to_vec();
         assert_len_eq_x!(&compact, 3);
@@ -515,38 +564,39 @@ mod tests {
 
     #[test]
     fn test_clear_and_reuse() {
-        let mut hash = BytesRefHash::with_default_capacity();
-        hash.add(b"first");
-        hash.add(b"second");
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
+        hash.add(&mut pool, b"first");
+        hash.add(&mut pool, b"second");
         assert_eq!(hash.size(), 2);
 
-        hash.clear(true);
+        hash.clear();
         assert_eq!(hash.size(), 0);
-        assert_eq!(hash.find(b"first"), -1);
 
-        // Can add new entries after clear
-        let id = hash.add(b"new");
+        // Can add new entries after clear (re-adding "first" returns 0, not duplicate)
+        let id = hash.add(&mut pool, b"first");
         assert_eq!(id, 0);
         assert_eq!(hash.size(), 1);
     }
 
     #[test]
     fn test_empty_bytes() {
-        let mut hash = BytesRefHash::with_default_capacity();
-        let id = hash.add(b"");
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
+        let id = hash.add(&mut pool, b"");
         assert_eq!(id, 0);
-        assert_eq!(hash.get(0), b"");
-        assert_eq!(hash.find(b""), 0);
+        assert_eq!(hash.get(&pool, 0), b"");
     }
 
     #[test]
     fn test_long_bytes() {
-        let mut hash = BytesRefHash::with_default_capacity();
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
         // Test bytes longer than 127 (requires 2-byte length encoding)
         let long_bytes = vec![b'x'; 200];
-        let id = hash.add(&long_bytes);
+        let id = hash.add(&mut pool, &long_bytes);
         assert_eq!(id, 0);
-        assert_eq!(hash.get(0), long_bytes.as_slice());
+        assert_eq!(hash.get(&pool, 0), long_bytes.as_slice());
     }
 
     #[test]
@@ -572,15 +622,10 @@ mod tests {
 
     #[test]
     fn test_byte_start() {
-        let mut hash = BytesRefHash::with_default_capacity();
-        hash.add(b"hello");
+        let mut pool = make_pool();
+        let mut hash = BytesRefHash::new(16);
+        hash.add(&mut pool, b"hello");
         let start = hash.byte_start(0);
         assert_ge!(start, 0);
-    }
-
-    #[test]
-    fn test_ram_bytes_used() {
-        let hash = BytesRefHash::with_default_capacity();
-        assert_gt!(hash.ram_bytes_used(), 0);
     }
 }

@@ -4,11 +4,12 @@ use std::io;
 use std::sync::Arc;
 
 use crate::newindex::config::IndexWriterConfig;
-use crate::newindex::coordinator::{IndexCoordinator, WorkerFactory};
-use crate::newindex::directory::Directory;
+use crate::newindex::coordinator::IndexCoordinator;
+use crate::newindex::default_worker_factory::DefaultWorkerFactory;
 use crate::newindex::document::Document;
-use crate::newindex::id_generator::IdGenerator;
+use crate::newindex::id_generator::RandomIdGenerator;
 use crate::newindex::segment::FlushedSegment;
+use crate::store::{Directory, SharedDirectory};
 
 /// Manages the indexing pipeline: accepts documents, coordinates worker
 /// threads, and flushes segments to the directory.
@@ -18,15 +19,12 @@ pub struct IndexWriter {
 }
 
 impl IndexWriter {
-    /// Creates a new `IndexWriter` with the given configuration,
-    /// directory, ID generator, and worker factory.
-    pub fn new(
-        config: IndexWriterConfig,
-        directory: Arc<dyn Directory>,
-        id_generator: Box<dyn IdGenerator>,
-        worker_factory: Arc<dyn WorkerFactory>,
-    ) -> Self {
-        let coordinator = IndexCoordinator::new(&config, id_generator, directory, worker_factory);
+    /// Creates a new `IndexWriter` for the given directory.
+    pub fn new(config: IndexWriterConfig, directory: Box<dyn Directory>) -> Self {
+        let directory = Arc::new(SharedDirectory::new(directory));
+        let factory = Arc::new(DefaultWorkerFactory::new(Arc::clone(&directory)));
+        let coordinator =
+            IndexCoordinator::new(&config, Box::new(RandomIdGenerator), directory, factory);
         Self { coordinator }
     }
 
@@ -34,7 +32,7 @@ impl IndexWriter {
     ///
     /// The document is handed off to the internal worker pool for
     /// processing. This method is safe to call from any thread.
-    pub fn add_document(&self, doc: Document) -> io::Result<()> {
+    pub fn add_document(&self, mut doc: Document) -> io::Result<()> {
         log::debug!("add_document: {} fields", doc.fields().len());
         self.coordinator.add_document(doc)
     }

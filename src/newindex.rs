@@ -1,17 +1,36 @@
 //! Ground-up rebuild of the indexing pipeline.
 
 pub mod analyzer;
+pub(crate) mod byte_block_pool;
+pub(crate) mod bytes_ref_hash;
 pub mod channel;
+pub(crate) mod codecs;
 pub mod config;
 pub mod consumer;
 pub mod coordinator;
+pub mod default_worker_factory;
 pub mod directory;
+pub mod directory_adapter;
+pub mod doc_values_consumer;
 pub mod document;
 pub mod field;
 pub mod field_info_registry;
+pub mod field_infos_consumer;
+pub mod flush_control;
 pub mod id_generator;
+pub mod index_file_names;
+pub(crate) mod int_block_pool;
+pub mod norms_consumer;
+pub mod points_consumer;
+pub mod postings_consumer;
 pub mod segment;
 pub mod segment_accumulator;
+pub mod segment_context;
 pub mod segment_infos;
 pub mod segment_worker;
+pub mod standard_analyzer;
+pub mod stored_fields_consumer;
+pub mod term_vectors_consumer;
+pub(crate) mod term_vectors_consumer_per_field;
+pub(crate) mod terms_hash;
 pub mod writer;
