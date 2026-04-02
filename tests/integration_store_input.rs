@@ -109,7 +109,7 @@ impl Drop for DirCleanup<'_> {
 
 #[test]
 fn test_index_writer_files_readable() {
-    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::index::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
     use bearing::newindex::writer::IndexWriter;
@@ -138,7 +138,7 @@ fn test_index_writer_files_readable() {
 
 #[test]
 fn test_index_writer_codec_files_have_valid_headers() {
-    use bearing::newindex::config::IndexWriterConfig;
+    use bearing::index::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
     use bearing::newindex::writer::IndexWriter;
@@ -180,8 +180,8 @@ fn test_index_writer_codec_files_have_valid_headers() {
 
 #[test]
 fn test_read_segments_from_index_writer() {
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
     use bearing::newindex::writer::IndexWriter;
@@ -217,8 +217,8 @@ fn test_read_segments_from_index_writer() {
 
 #[test]
 fn test_read_segments_multiple_docs() {
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, long_field, text};
     use bearing::newindex::writer::IndexWriter;
@@ -253,8 +253,8 @@ fn test_read_segments_multiple_docs() {
 
 #[test]
 fn test_read_segments_memory_directory() {
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
     use bearing::newindex::writer::IndexWriter;
@@ -286,8 +286,8 @@ fn test_read_segments_memory_directory() {
 
 #[test]
 fn test_read_segments_compound_mode() {
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
     use bearing::newindex::writer::IndexWriter;
@@ -322,8 +322,8 @@ fn test_read_segments_compound_mode() {
 
 #[test]
 fn test_compound_directory_list_files() {
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
     use bearing::newindex::writer::IndexWriter;
@@ -360,8 +360,8 @@ fn test_compound_directory_list_files() {
 
 #[test]
 fn test_compound_directory_read_embedded_file() {
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
     use bearing::newindex::writer::IndexWriter;
@@ -403,8 +403,8 @@ fn test_compound_directory_read_embedded_file() {
 
 #[test]
 fn test_compound_directory_memory() {
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::{keyword, text};
     use bearing::newindex::writer::IndexWriter;
@@ -447,8 +447,8 @@ fn test_compound_directory_memory() {
 fn test_stored_fields_reader_round_trip() {
     use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
     use bearing::document::StoredValue;
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::stored;
     use bearing::newindex::writer::IndexWriter;
@@ -520,8 +520,8 @@ fn test_stored_fields_reader_round_trip() {
 fn test_stored_fields_reader_all_types() {
     use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
     use bearing::document::StoredValue;
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::stored;
     use bearing::newindex::writer::IndexWriter;
@@ -599,8 +599,8 @@ fn test_stored_fields_reader_all_types() {
 fn test_stored_fields_reader_many_docs() {
     use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
     use bearing::document::StoredValue;
+    use bearing::index::config::IndexWriterConfig;
     use bearing::index::segment_infos;
-    use bearing::newindex::config::IndexWriterConfig;
     use bearing::newindex::document::DocumentBuilder;
     use bearing::newindex::field::stored;
     use bearing::newindex::writer::IndexWriter;

@@ -683,8 +683,8 @@ mod tests {
 
     use super::*;
     use crate::document::StoredValue;
+    use crate::index::config::IndexWriterConfig;
     use crate::index::segment_infos;
-    use crate::newindex::config::IndexWriterConfig;
     use crate::newindex::document::{Document, DocumentBuilder};
     use crate::newindex::field::stored;
     use crate::newindex::writer::IndexWriter;

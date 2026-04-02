@@ -11,12 +11,12 @@ use crate::newindex::analyzer::Analyzer;
 use crate::newindex::codecs::segment_info;
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 
+use crate::index::segment::{FlushedSegment, SegmentId};
+use crate::index::segment_accumulator::SegmentAccumulator;
+use crate::index::segment_context::SegmentContext;
 use crate::newindex::document::Document;
 use crate::newindex::field::InvertableValue;
 use crate::newindex::field_info_registry::FieldInfoRegistry;
-use crate::newindex::segment::{FlushedSegment, SegmentId};
-use crate::newindex::segment_accumulator::SegmentAccumulator;
-use crate::newindex::segment_context::SegmentContext;
 
 /// Per-thread worker that accumulates documents into a single segment.
 ///
@@ -259,10 +259,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::index::segment::SegmentId;
     use crate::newindex::analyzer::Token;
     use crate::newindex::consumer::FieldConsumer;
     use crate::newindex::field::Field;
-    use crate::newindex::segment::SegmentId;
     use crate::newindex::standard_analyzer::StandardAnalyzer;
     use crate::store::{MemoryDirectory, SharedDirectory};
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/// Configuration for an [`IndexWriter`](super::writer::IndexWriter).
+/// Configuration for an [`IndexWriter`](crate::newindex::writer::IndexWriter).
 ///
 /// All fields have sensible defaults. Use the builder methods to override.
 // LOCKED

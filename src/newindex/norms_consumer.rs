@@ -4,12 +4,12 @@
 
 use std::io;
 
+use crate::index::segment_accumulator::SegmentAccumulator;
+use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::norms::{self, NormsFieldData};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::Field;
-use crate::newindex::segment_accumulator::SegmentAccumulator;
-use crate::newindex::segment_context::SegmentContext;
 use crate::util::small_float;
 
 /// Computes and writes per-field norms from token counts.

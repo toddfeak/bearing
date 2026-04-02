@@ -5,6 +5,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::index::segment::SegmentId;
+use crate::index::segment_context::SegmentContext;
 use crate::newindex::consumer::FieldConsumer;
 use crate::newindex::coordinator::WorkerFactory;
 use crate::newindex::doc_values_consumer::DocValuesConsumer;
@@ -12,8 +14,6 @@ use crate::newindex::field_infos_consumer::FieldInfosConsumer;
 use crate::newindex::norms_consumer::NormsConsumer;
 use crate::newindex::points_consumer::PointsConsumer;
 use crate::newindex::postings_consumer::PostingsConsumer;
-use crate::newindex::segment::SegmentId;
-use crate::newindex::segment_context::SegmentContext;
 use crate::newindex::segment_worker::SegmentWorker;
 use crate::newindex::standard_analyzer::StandardAnalyzer;
 use crate::newindex::stored_fields_consumer::StoredFieldsConsumer;

@@ -6,12 +6,12 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::document::DocValuesType;
+use crate::index::segment_accumulator::SegmentAccumulator;
+use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Token;
 use crate::newindex::codecs::doc_values::{self, DocValuesAccumulator, DocValuesFieldData};
 use crate::newindex::consumer::{FieldConsumer, TokenInterest};
 use crate::newindex::field::{DocValue, Field};
-use crate::newindex::segment_accumulator::SegmentAccumulator;
-use crate::newindex::segment_context::SegmentContext;
 use crate::util::BytesRef;
 
 /// Per-field state for accumulating doc values during indexing.

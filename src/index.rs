@@ -6,7 +6,13 @@
 //! [`SegmentInfo`], [`SegmentCommitInfo`]) and readers for opening and
 //! querying indexes ([`directory_reader`], [`segment_reader`]).
 
+pub mod config;
+pub mod flush_control;
+pub mod id_generator;
 pub(crate) mod index_file_names;
+pub mod segment;
+pub mod segment_accumulator;
+pub mod segment_context;
 
 pub use segment_infos::{SegmentEntry, SegmentInfosRead};
 pub mod directory_reader;

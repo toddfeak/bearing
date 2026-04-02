@@ -3,8 +3,8 @@
 use std::io;
 use std::sync::Arc;
 
+use crate::index::segment::FlushedSegment;
 use crate::newindex::codecs::segment_infos;
-use crate::newindex::segment::FlushedSegment;
 use crate::store::SharedDirectory;
 
 /// Collects flushed segments and writes the `segments_N` commit point.
@@ -54,7 +54,7 @@ impl SegmentInfos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::segment::SegmentId;
+    use crate::index::segment::SegmentId;
     use crate::store::MemoryDirectory;
 
     fn test_directory() -> Arc<SharedDirectory> {

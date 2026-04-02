@@ -10,7 +10,7 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use bearing::newindex::config::IndexWriterConfig;
+//! use bearing::index::config::IndexWriterConfig;
 //! use bearing::newindex::document::DocumentBuilder;
 //! use bearing::newindex::field::{text, keyword};
 //! use bearing::newindex::writer::IndexWriter;

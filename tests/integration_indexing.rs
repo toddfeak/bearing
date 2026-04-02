@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use assertables::*;
-use bearing::newindex::config::IndexWriterConfig;
+use bearing::index::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
 use bearing::newindex::field::{
     TermVectorOptions, binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored,

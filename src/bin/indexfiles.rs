@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use log::error;
 
-use bearing::newindex::config::IndexWriterConfig;
+use bearing::index::config::IndexWriterConfig;
 use bearing::newindex::document::DocumentBuilder;
 use bearing::newindex::field::{
     TermVectorOptions, binary_dv, double_field, double_range, feature, float_field, float_range,

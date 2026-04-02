@@ -10,8 +10,8 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::index::segment::FlushedSegment;
 use crate::newindex::index_file_names;
-use crate::newindex::segment::FlushedSegment;
 use crate::store::SharedDirectory;
 use crate::util::string_helper;
 
@@ -147,7 +147,7 @@ pub(crate) fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::segment::SegmentId;
+    use crate::index::segment::SegmentId;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
