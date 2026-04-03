@@ -12,7 +12,7 @@
 use std::io;
 
 use crate::codecs::lucene90::term_vectors::TermVectorChunkWriter;
-use crate::newindex::terms_hash::{
+use crate::index::terms_hash::{
     BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
     oversize,
 };

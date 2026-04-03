@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
-// DEBT: adapted from index::terms_hash_per_field and index::indexing_chain —
-// reconcile after switchover into a single shared implementation.
-
 //! Shared term hashing infrastructure for per-field term accumulation.
 //!
 //! [`TermsHashPerFieldTrait`] matches Java's abstract `TermsHashPerField`

@@ -17,9 +17,9 @@ use crate::index::index_file_names;
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::index::term_vectors_consumer_per_field::TermVectorsConsumerPerField;
+use crate::index::terms_hash::{TermsHash, TermsHashPerFieldTrait};
 use crate::newindex::analyzer::Token;
 use crate::newindex::field::Field;
-use crate::newindex::terms_hash::{TermsHash, TermsHashPerFieldTrait};
 
 /// Accumulates per-document term vector data during indexing and writes
 /// `.tvd`/`.tvx`/`.tvm` files at flush time.

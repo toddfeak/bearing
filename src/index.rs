@@ -28,6 +28,7 @@ pub mod segment_worker;
 pub mod stored_fields_consumer;
 pub mod term_vectors_consumer;
 pub(crate) mod term_vectors_consumer_per_field;
+pub(crate) mod terms_hash;
 pub mod writer;
 
 pub use segment_infos::{SegmentEntry, SegmentInfosRead};

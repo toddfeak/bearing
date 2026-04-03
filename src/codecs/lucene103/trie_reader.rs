@@ -507,8 +507,8 @@ mod tests {
     use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
     use crate::document::IndexOptions;
+    use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
-    use crate::newindex::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::store::memory::MemoryDirectory;
     use crate::store::{Directory, SharedDirectory};
 

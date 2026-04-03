@@ -14,9 +14,9 @@ use crate::document::IndexOptions;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
+use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 use crate::newindex::analyzer::Token;
 use crate::newindex::field::{Field, InvertableValue};
-use crate::newindex::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 
 /// Accumulates postings (terms, frequencies, positions) for indexed fields
 /// and writes them at flush time via the block tree + postings codecs.
