@@ -9,18 +9,19 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 
+use crate::codecs::lucene94::field_infos_format;
+use crate::codecs::lucene94::field_infos_format::FieldInfosFieldData;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Token;
-use crate::newindex::codecs::field_infos::{self, FieldInfo, FieldInfos};
 use crate::newindex::field::{Field, PointsValue};
 
 /// Tracks field metadata from `start_field` calls and writes the `.fnm`
 /// file at flush time.
 #[derive(Default, mem_dbg::MemSize)]
 pub struct FieldInfosConsumer {
-    fields: HashMap<u32, FieldInfo>,
+    fields: HashMap<u32, FieldInfosFieldData>,
 }
 
 impl fmt::Debug for FieldInfosConsumer {
@@ -69,17 +70,19 @@ impl FieldConsumer for FieldInfosConsumer {
                 (d, d, *bytes_per_dim as u32)
             }
         };
-        self.fields.entry(field_id).or_insert_with(|| FieldInfo {
-            name: field.name().to_string(),
-            number: field_id,
-            store_term_vectors: field.field_type().term_vector_options().is_some(),
-            has_norms: field.field_type().has_norms(),
-            index_options: field.field_type().index_options() as u8,
-            doc_values_type: field.field_type().doc_values_type(),
-            point_dimension_count: pdim,
-            point_index_dimension_count: pidx,
-            point_num_bytes: pbytes,
-        });
+        self.fields
+            .entry(field_id)
+            .or_insert_with(|| FieldInfosFieldData {
+                name: field.name().to_string(),
+                number: field_id,
+                store_term_vectors: field.field_type().term_vector_options().is_some(),
+                has_norms: field.field_type().has_norms(),
+                index_options: field.field_type().index_options() as u8,
+                doc_values_type: field.field_type().doc_values_type(),
+                point_dimension_count: pdim,
+                point_index_dimension_count: pidx,
+                point_num_bytes: pbytes,
+            });
         Ok(TokenInterest::NoTokens)
     }
 
@@ -116,15 +119,14 @@ impl FieldConsumer for FieldInfosConsumer {
         context: &SegmentContext,
         _accumulator: &SegmentAccumulator,
     ) -> io::Result<Vec<String>> {
-        let mut fields: Vec<FieldInfo> = self.fields.values().cloned().collect();
+        let mut fields: Vec<FieldInfosFieldData> = self.fields.values().cloned().collect();
         fields.sort_by_key(|f| f.number);
-        let fis = FieldInfos::new(fields);
-        let name = field_infos::write(
+        let name = field_infos_format::write(
             &context.directory,
             &context.segment_name,
             "",
             &context.segment_id,
-            &fis,
+            &fields,
         )?;
         Ok(vec![name])
     }

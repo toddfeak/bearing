@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Field infos format writer for per-field metadata (index options, doc values type, etc.).
+//! Field infos format (.fnm) writer and reader for per-field metadata.
 
+use std::collections::HashMap;
 use std::io;
 
 use log::debug;
@@ -8,107 +9,134 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::document::{DocValuesType, IndexOptions};
 use crate::index::index_file_names;
-use crate::index::{FieldInfos, SegmentInfo};
-use crate::store::SharedDirectory;
-
-use crate::index::{FieldInfo, PointDimensionConfig};
+use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig, SegmentInfo};
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory};
+use crate::store::{DataInput, Directory, SharedDirectory};
 
 const CODEC_NAME: &str = "Lucene94FieldInfos";
 const FORMAT_CURRENT: i32 = 2; // FORMAT_DOCVALUE_SKIPPER
 const EXTENSION: &str = "fnm";
 
 // Field bit flags
-const STORE_TERMVECTOR: u8 = 0x1;
-const OMIT_NORMS: u8 = 0x2;
-const STORE_PAYLOADS: u8 = 0x4;
-const SOFT_DELETES_FIELD: u8 = 0x8;
-const PARENT_FIELD_FIELD: u8 = 0x10;
+const STORE_TERMVECTOR: u8 = 0b0000_0001;
+const OMIT_NORMS: u8 = 0b0000_0010;
+const STORE_PAYLOADS: u8 = 0b0000_0100;
+const SOFT_DELETES_FIELD: u8 = 0b0000_1000;
+const PARENT_FIELD_FIELD: u8 = 0b0001_0000;
 
-/// Writes the .fnm (field infos) file to the directory.
-/// Returns the file name written.
-pub fn write(
+/// Per-field metadata for writing the .fnm file.
+#[derive(Debug, Clone, mem_dbg::MemSize)]
+pub(crate) struct FieldInfosFieldData {
+    /// Field name.
+    pub name: String,
+    /// Field number (unique within a segment).
+    pub number: u32,
+    /// Whether this field stores term vectors.
+    pub store_term_vectors: bool,
+    /// Whether this field has norms.
+    pub has_norms: bool,
+    /// Index options as a raw byte (0=None, 1=Docs, 2=DocsAndFreqs, etc.).
+    pub index_options: u8,
+    /// Doc values type for this field.
+    pub doc_values_type: DocValuesType,
+    /// Number of point dimensions (0 if not a point field).
+    pub point_dimension_count: u32,
+    /// Number of point index dimensions.
+    pub point_index_dimension_count: u32,
+    /// Bytes per point dimension value.
+    pub point_num_bytes: u32,
+}
+
+/// Writes the .fnm file for a segment. Returns the file name written.
+pub(crate) fn write(
     directory: &SharedDirectory,
-    segment_info: &SegmentInfo,
+    segment_name: &str,
     segment_suffix: &str,
-    field_infos: &FieldInfos,
+    segment_id: &[u8; 16],
+    fields: &[FieldInfosFieldData],
 ) -> io::Result<String> {
-    let file_name =
-        index_file_names::segment_file_name(&segment_info.name, segment_suffix, EXTENSION);
+    let file_name = index_file_names::segment_file_name(segment_name, segment_suffix, EXTENSION);
     let mut output = directory.lock().unwrap().create_output(&file_name)?;
 
     codec_util::write_index_header(
         &mut *output,
         CODEC_NAME,
         FORMAT_CURRENT,
-        &segment_info.id,
+        segment_id,
         segment_suffix,
     )?;
 
-    output.write_vint(field_infos.len() as i32)?;
+    output.write_vint(fields.len() as i32)?;
 
-    for fi in field_infos.iter() {
+    for fi in fields {
         debug!(
-            "field_infos: field={:?} #{}, index_options={:?}, dv_type={:?}, omit_norms={}",
-            fi.name(),
-            fi.number(),
-            fi.index_options(),
-            fi.doc_values_type(),
-            fi.omit_norms()
+            "field_infos: field={:?} #{}, has_norms={}, index_options={}",
+            fi.name, fi.number, fi.has_norms, fi.index_options
         );
-        output.write_string(fi.name())?;
-        output.write_vint(fi.number() as i32)?;
+
+        // Field name
+        output.write_string(&fi.name)?;
+
+        // Field number
+        output.write_vint(fi.number as i32)?;
 
         // Field bits
         let mut bits: u8 = 0;
-        if fi.store_term_vector() {
+        if fi.store_term_vectors {
             bits |= STORE_TERMVECTOR;
         }
-        if fi.omit_norms() {
+        if !fi.has_norms {
             bits |= OMIT_NORMS;
-        }
-        if fi.store_payloads() {
-            bits |= STORE_PAYLOADS;
-        }
-        if fi.soft_deletes_field() {
-            bits |= SOFT_DELETES_FIELD;
-        }
-        if fi.is_parent_field() {
-            bits |= PARENT_FIELD_FIELD;
         }
         output.write_byte(bits)?;
 
-        // Index options (byte)
-        output.write_byte(index_options_byte(fi.index_options()))?;
+        // Index options
+        output.write_byte(fi.index_options)?;
 
-        // Doc values type (byte) — uses custom encoding, NOT enum ordinal
-        output.write_byte(doc_values_byte(fi.doc_values_type()))?;
+        // Doc values type — custom encoding, NOT enum ordinal
+        output.write_byte(doc_values_byte(fi.doc_values_type))?;
 
-        // Doc values skip index type (FORMAT >= 2)
-        output.write_byte(0)?; // NONE for our MVP
-
-        // Doc values gen
-        output.write_le_long(fi.dv_gen())?;
-
-        // Attributes map
-        output.write_map_of_strings(fi.attributes())?;
-
-        // Point dimensions
-        let pc = fi.point_config();
-        output.write_vint(pc.dimension_count as i32)?;
-        if pc.dimension_count != 0 {
-            output.write_vint(pc.index_dimension_count as i32)?;
-            output.write_vint(pc.num_bytes as i32)?;
-        }
-
-        // Vector dimension
-        output.write_vint(fi.vector_dimension() as i32)?;
-
-        // Vector encoding (byte) — 0 = BYTE
+        // Doc values skip index type: 0 = NONE
         output.write_byte(0)?;
 
-        // Vector similarity function (byte) — 0 = EUCLIDEAN
+        // Doc values gen: -1 (no per-gen doc values)
+        output.write_le_long(-1)?;
+
+        // Attributes: per-field format metadata
+        let mut attrs = HashMap::new();
+        if fi.index_options > 0 {
+            attrs.insert(
+                "PerFieldPostingsFormat.format".to_string(),
+                "Lucene103".to_string(),
+            );
+            attrs.insert("PerFieldPostingsFormat.suffix".to_string(), "0".to_string());
+        }
+        if fi.doc_values_type != DocValuesType::None {
+            attrs.insert(
+                "PerFieldDocValuesFormat.format".to_string(),
+                "Lucene90".to_string(),
+            );
+            attrs.insert(
+                "PerFieldDocValuesFormat.suffix".to_string(),
+                "0".to_string(),
+            );
+        }
+        output.write_map_of_strings(&attrs)?;
+
+        // Point dimensions
+        output.write_vint(fi.point_dimension_count as i32)?;
+        if fi.point_dimension_count > 0 {
+            output.write_vint(fi.point_index_dimension_count as i32)?;
+            output.write_vint(fi.point_num_bytes as i32)?;
+        }
+
+        // Vector dimension: 0
+        output.write_vint(0)?;
+
+        // Vector encoding: 0 = BYTE
+        output.write_byte(0)?;
+
+        // Vector similarity: 0 = EUCLIDEAN
         output.write_byte(0)?;
     }
 
@@ -228,16 +256,6 @@ pub fn read(
     Ok(FieldInfos::new(fields))
 }
 
-fn index_options_byte(opts: IndexOptions) -> u8 {
-    match opts {
-        IndexOptions::None => 0,
-        IndexOptions::Docs => 1,
-        IndexOptions::DocsAndFreqs => 2,
-        IndexOptions::DocsAndFreqsAndPositions => 3,
-        IndexOptions::DocsAndFreqsAndPositionsAndOffsets => 4,
-    }
-}
-
 /// Encodes DocValuesType to the byte used in .fnm files.
 /// NOTE: This is NOT the same as the enum ordinal!
 /// SORTED_SET=4, SORTED_NUMERIC=5 in .fnm (swapped vs Java enum ordinals).
@@ -281,50 +299,77 @@ fn byte_to_doc_values_type(b: u8) -> io::Result<DocValuesType> {
 mod tests {
     use super::*;
     use crate::store::{MemoryDirectory, SharedDirectory};
-    use std::collections::HashMap;
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    // Ported from org.apache.lucene.codecs.lucene94.TestLucene94FieldInfosFormat
+    fn index_options_byte(opts: IndexOptions) -> u8 {
+        match opts {
+            IndexOptions::None => 0,
+            IndexOptions::Docs => 1,
+            IndexOptions::DocsAndFreqs => 2,
+            IndexOptions::DocsAndFreqsAndPositions => 3,
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets => 4,
+        }
+    }
 
+    const SEGMENT_NAME: &str = "_0";
+    const SEGMENT_ID: [u8; 16] = [0u8; 16];
+
+    fn stored_only(name: &str, number: u32) -> FieldInfosFieldData {
+        FieldInfosFieldData {
+            name: name.to_string(),
+            number,
+            store_term_vectors: false,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::None,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }
+    }
+
+    fn indexed_with_norms(name: &str, number: u32) -> FieldInfosFieldData {
+        FieldInfosFieldData {
+            name: name.to_string(),
+            number,
+            store_term_vectors: false,
+            has_norms: true,
+            index_options: 3, // DocsAndFreqsAndPositions
+            doc_values_type: DocValuesType::None,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }
+    }
+
+    /// Helper to create a SegmentInfo for read() calls in roundtrip tests.
     fn make_test_segment() -> SegmentInfo {
         SegmentInfo::new(
-            "_0".to_string(),
+            SEGMENT_NAME.to_string(),
             3,
             true,
-            [0u8; 16],
+            SEGMENT_ID,
             HashMap::new(),
             HashMap::new(),
         )
     }
 
-    #[test]
-    fn test_write_single_field() {
-        let dir = test_directory();
-        let si = make_test_segment();
-        let fi = FieldInfo::new(
-            "test".to_string(),
-            0,
-            false,
-            false,
-            IndexOptions::DocsAndFreqsAndPositions,
-            DocValuesType::None,
-            PointDimensionConfig::default(),
-        );
-        let fis = FieldInfos::new(vec![fi]);
+    // --- Write-side tests ---
 
-        let name = write(&dir, &si, "", &fis).unwrap();
+    #[test]
+    fn write_produces_fnm_file() {
+        let dir = test_directory();
+        let fields = vec![stored_only("title", 0), stored_only("body", 1)];
+        let name = write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
         assert_eq!(name, "_0.fnm");
 
         let data = dir.lock().unwrap().read_file(&name).unwrap();
-        assert_not_empty!(data);
-
-        // Verify header magic (first 4 bytes, BE)
+        // Header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
-
-        // Verify footer magic (last 16 bytes)
+        // Footer magic
         let footer_start = data.len() - 16;
         assert_eq!(
             &data[footer_start..footer_start + 4],
@@ -333,95 +378,232 @@ mod tests {
     }
 
     #[test]
-    fn test_write_three_demo_fields() {
-        let si = make_test_segment();
-
-        // "path": KeywordField — DOCS, omitNorms, SortedSet DV
-        let mut fi_path = FieldInfo::new(
-            "path".to_string(),
-            0,
-            false,
-            true,
-            IndexOptions::Docs,
-            DocValuesType::SortedSet,
-            PointDimensionConfig::default(),
-        );
-        fi_path.put_attribute(
-            "PerFieldPostingsFormat.format".to_string(),
-            "Lucene103".to_string(),
-        );
-        fi_path.put_attribute("PerFieldPostingsFormat.suffix".to_string(), "0".to_string());
-        fi_path.put_attribute(
-            "PerFieldDocValuesFormat.format".to_string(),
-            "Lucene90".to_string(),
-        );
-        fi_path.put_attribute(
-            "PerFieldDocValuesFormat.suffix".to_string(),
-            "0".to_string(),
-        );
-
-        // "modified": LongField — no index, SortedNumeric DV, points
-        let mut fi_modified = FieldInfo::new(
-            "modified".to_string(),
-            1,
-            false,
-            false,
-            IndexOptions::None,
-            DocValuesType::SortedNumeric,
-            PointDimensionConfig {
-                dimension_count: 1,
-                index_dimension_count: 1,
-                num_bytes: 8,
-            },
-        );
-        fi_modified.put_attribute(
-            "PerFieldDocValuesFormat.format".to_string(),
-            "Lucene90".to_string(),
-        );
-        fi_modified.put_attribute(
-            "PerFieldDocValuesFormat.suffix".to_string(),
-            "0".to_string(),
-        );
-
-        // "contents": TextField — DOCS_AND_FREQS_AND_POSITIONS
-        let mut fi_contents = FieldInfo::new(
-            "contents".to_string(),
-            2,
-            false,
-            false,
-            IndexOptions::DocsAndFreqsAndPositions,
-            DocValuesType::None,
-            PointDimensionConfig::default(),
-        );
-        fi_contents.put_attribute(
-            "PerFieldPostingsFormat.format".to_string(),
-            "Lucene103".to_string(),
-        );
-        fi_contents.put_attribute("PerFieldPostingsFormat.suffix".to_string(), "0".to_string());
-
-        let fis = FieldInfos::new(vec![fi_path, fi_modified, fi_contents]);
+    fn write_encodes_field_count_and_names() {
         let dir = test_directory();
-        let name = write(&dir, &si, "", &fis).unwrap();
+        let fields = vec![stored_only("title", 0), stored_only("body", 1)];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        assert_eq!(name, "_0.fnm");
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
 
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
-        assert_not_empty!(data);
+        // Header = 4(magic) + 1+18(codec "Lucene94FieldInfos") + 4(version) + 16(id) + 1(suffix) = 44
+        let offset = 44;
 
-        // Basic structural checks:
-        // Header + 3 fields + footer, should be substantial
-        assert_gt!(data.len(), 100);
+        // Field count = 2 (VInt)
+        assert_eq!(data[offset], 2);
+
+        // First field name: VInt length(5) + "title"
+        assert_eq!(data[offset + 1], 5); // length
+        assert_eq!(&data[offset + 2..offset + 7], b"title");
+
+        // File should be substantial (2 fields with all metadata)
+        assert_gt!(data.len(), 80);
+    }
+
+    #[test]
+    fn stored_only_field_has_omit_norms() {
+        let dir = test_directory();
+        let fields = vec![stored_only("f", 0)];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "f"(1) + field_number(1) = 48
+        let bits_offset = 48;
+
+        // bits byte: OMIT_NORMS = 0x02 (stored-ness is not in the bits byte)
+        assert_eq!(data[bits_offset], 0b0000_0010);
+
+        // index options byte: NONE = 0
+        assert_eq!(data[bits_offset + 1], 0);
+
+        // doc values type byte: NONE = 0
+        assert_eq!(data[bits_offset + 2], 0);
+    }
+
+    #[test]
+    fn indexed_field_with_norms() {
+        let dir = test_directory();
+        let fields = vec![indexed_with_norms("body", 0)];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "body"(4) + field_number(1) = 51
+        let bits_offset = 51;
+
+        // bits byte: no OMIT_NORMS = 0x00
+        assert_eq!(data[bits_offset], 0b0000_0000);
+
+        // index options byte: 3 = DocsAndFreqsAndPositions
+        assert_eq!(data[bits_offset + 1], 3);
+    }
+
+    #[test]
+    fn indexed_field_has_postings_format_attributes() {
+        let dir = test_directory();
+        let fields = vec![indexed_with_norms("body", 0)];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let content = String::from_utf8_lossy(&data);
+
+        assert!(content.contains("PerFieldPostingsFormat.format"));
+        assert!(content.contains("Lucene103"));
+        assert!(content.contains("PerFieldPostingsFormat.suffix"));
+    }
+
+    #[test]
+    fn stored_only_field_has_no_postings_format_attributes() {
+        let dir = test_directory();
+        let fields = vec![stored_only("title", 0)];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let content = String::from_utf8_lossy(&data);
+
+        assert!(!content.contains("PerFieldPostingsFormat"));
+    }
+
+    #[test]
+    fn dv_only_field_writes_correct_type_byte() {
+        let dir = test_directory();
+        let fields = vec![FieldInfosFieldData {
+            name: "count".to_string(),
+            number: 0,
+            store_term_vectors: false,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::Numeric,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "count"(5) + field_number(1) = 52
+        let bits_offset = 52;
+
+        // bits byte: OMIT_NORMS
+        assert_eq!(data[bits_offset], 0b0000_0010);
+        // index options: NONE
+        assert_eq!(data[bits_offset + 1], 0);
+        // doc values type: Numeric = 1
+        assert_eq!(data[bits_offset + 2], 1);
+    }
+
+    #[test]
+    fn dv_sorted_set_writes_byte_4() {
+        let dir = test_directory();
+        let fields = vec![FieldInfosFieldData {
+            name: "tags".to_string(),
+            number: 0,
+            store_term_vectors: false,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::SortedSet,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "tags"(4) + field_number(1) = 51
+        let bits_offset = 51;
+
+        // doc values type: SortedSet = 4 in .fnm format
+        assert_eq!(data[bits_offset + 2], 4);
+    }
+
+    #[test]
+    fn dv_sorted_numeric_writes_byte_5() {
+        let dir = test_directory();
+        let fields = vec![FieldInfosFieldData {
+            name: "vals".to_string(),
+            number: 0,
+            store_term_vectors: false,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::SortedNumeric,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+
+        // Header(44) + field_count(1) + name_len(1) + "vals"(4) + field_number(1) = 51
+        let bits_offset = 51;
+
+        // doc values type: SortedNumeric = 5 in .fnm format
+        assert_eq!(data[bits_offset + 2], 5);
+    }
+
+    #[test]
+    fn dv_field_has_doc_values_format_attributes() {
+        let dir = test_directory();
+        let fields = vec![FieldInfosFieldData {
+            name: "count".to_string(),
+            number: 0,
+            store_term_vectors: false,
+            has_norms: false,
+            index_options: 0,
+            doc_values_type: DocValuesType::SortedNumeric,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let content = String::from_utf8_lossy(&data);
+
+        assert!(content.contains("PerFieldDocValuesFormat.format"));
+        assert!(content.contains("Lucene90"));
+        assert!(content.contains("PerFieldDocValuesFormat.suffix"));
+        // No postings format for DV-only field
+        assert!(!content.contains("PerFieldPostingsFormat"));
+    }
+
+    #[test]
+    fn dv_type_none_has_no_dv_attributes() {
+        let dir = test_directory();
+        let fields = vec![stored_only("title", 0)];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let content = String::from_utf8_lossy(&data);
+
+        assert!(!content.contains("PerFieldDocValuesFormat"));
     }
 
     #[test]
     fn test_doc_values_byte_encoding() {
-        // Verify the .fnm uses different ordinals than the Rust enum
         assert_eq!(doc_values_byte(DocValuesType::None), 0);
         assert_eq!(doc_values_byte(DocValuesType::Numeric), 1);
         assert_eq!(doc_values_byte(DocValuesType::Binary), 2);
         assert_eq!(doc_values_byte(DocValuesType::Sorted), 3);
-        assert_eq!(doc_values_byte(DocValuesType::SortedSet), 4); // NOT 5
-        assert_eq!(doc_values_byte(DocValuesType::SortedNumeric), 5); // NOT 4
+        assert_eq!(doc_values_byte(DocValuesType::SortedSet), 4);
+        assert_eq!(doc_values_byte(DocValuesType::SortedNumeric), 5);
+    }
+
+    #[test]
+    fn test_index_options_byte_encoding() {
+        assert_eq!(index_options_byte(IndexOptions::None), 0);
+        assert_eq!(index_options_byte(IndexOptions::Docs), 1);
+        assert_eq!(index_options_byte(IndexOptions::DocsAndFreqs), 2);
+        assert_eq!(
+            index_options_byte(IndexOptions::DocsAndFreqsAndPositions),
+            3
+        );
+        assert_eq!(
+            index_options_byte(IndexOptions::DocsAndFreqsAndPositionsAndOffsets),
+            4
+        );
     }
 
     // --- Read round-trip tests ---
@@ -430,17 +612,18 @@ mod tests {
     fn test_read_roundtrip_single_field() {
         let dir = test_directory();
         let si = make_test_segment();
-        let fi = FieldInfo::new(
-            "test".to_string(),
-            0,
-            false,
-            false,
-            IndexOptions::DocsAndFreqsAndPositions,
-            DocValuesType::None,
-            PointDimensionConfig::default(),
-        );
-        let fis = FieldInfos::new(vec![fi]);
-        write(&dir, &si, "", &fis).unwrap();
+        let fields = vec![FieldInfosFieldData {
+            name: "test".to_string(),
+            number: 0,
+            store_term_vectors: false,
+            has_norms: true,
+            index_options: 3, // DocsAndFreqsAndPositions
+            doc_values_type: DocValuesType::None,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
         let dir_guard = dir.lock().unwrap();
         let read_fis = read(&**dir_guard, &si, "").unwrap();
@@ -460,101 +643,93 @@ mod tests {
         let dir = test_directory();
         let si = make_test_segment();
 
-        let fi_keyword = FieldInfo::new(
-            "path".to_string(),
-            0,
-            false,
-            true,
-            IndexOptions::Docs,
-            DocValuesType::SortedSet,
-            PointDimensionConfig::default(),
-        );
-        let fi_text = FieldInfo::new(
-            "body".to_string(),
-            1,
-            true,
-            false,
-            IndexOptions::DocsAndFreqsAndPositions,
-            DocValuesType::None,
-            PointDimensionConfig::default(),
-        );
-        let fi_point = FieldInfo::new(
-            "location".to_string(),
-            2,
-            false,
-            true,
-            IndexOptions::None,
-            DocValuesType::None,
-            PointDimensionConfig {
-                dimension_count: 2,
-                index_dimension_count: 2,
-                num_bytes: 4,
+        let fields = vec![
+            FieldInfosFieldData {
+                name: "path".to_string(),
+                number: 0,
+                store_term_vectors: false,
+                has_norms: false,
+                index_options: 1, // Docs
+                doc_values_type: DocValuesType::SortedSet,
+                point_dimension_count: 0,
+                point_index_dimension_count: 0,
+                point_num_bytes: 0,
             },
-        );
-        let fis = FieldInfos::new(vec![fi_keyword, fi_text, fi_point]);
-        write(&dir, &si, "", &fis).unwrap();
+            FieldInfosFieldData {
+                name: "body".to_string(),
+                number: 1,
+                store_term_vectors: true,
+                has_norms: true,
+                index_options: 3, // DocsAndFreqsAndPositions
+                doc_values_type: DocValuesType::None,
+                point_dimension_count: 0,
+                point_index_dimension_count: 0,
+                point_num_bytes: 0,
+            },
+            FieldInfosFieldData {
+                name: "location".to_string(),
+                number: 2,
+                store_term_vectors: false,
+                has_norms: false,
+                index_options: 0, // None
+                doc_values_type: DocValuesType::None,
+                point_dimension_count: 2,
+                point_index_dimension_count: 2,
+                point_num_bytes: 4,
+            },
+        ];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
         let dir_guard = dir.lock().unwrap();
         let read_fis = read(&**dir_guard, &si, "").unwrap();
 
         assert_eq!(read_fis.len(), 3);
-        let fields: Vec<_> = read_fis.iter().collect();
+        let read_fields: Vec<_> = read_fis.iter().collect();
 
-        assert_eq!(fields[0].name(), "path");
-        assert!(fields[0].omit_norms());
-        assert_eq!(fields[0].doc_values_type(), DocValuesType::SortedSet);
+        assert_eq!(read_fields[0].name(), "path");
+        assert!(read_fields[0].omit_norms());
+        assert_eq!(read_fields[0].doc_values_type(), DocValuesType::SortedSet);
 
-        assert_eq!(fields[1].name(), "body");
-        assert!(fields[1].store_term_vector());
+        assert_eq!(read_fields[1].name(), "body");
+        assert!(read_fields[1].store_term_vector());
         assert_eq!(
-            fields[1].index_options(),
+            read_fields[1].index_options(),
             IndexOptions::DocsAndFreqsAndPositions
         );
 
-        assert_eq!(fields[2].name(), "location");
-        assert_eq!(fields[2].point_config().dimension_count, 2);
-        assert_eq!(fields[2].point_config().num_bytes, 4);
+        assert_eq!(read_fields[2].name(), "location");
+        assert_eq!(read_fields[2].point_config().dimension_count, 2);
+        assert_eq!(read_fields[2].point_config().num_bytes, 4);
     }
 
     #[test]
     fn test_read_roundtrip_with_attributes() {
         let dir = test_directory();
         let si = make_test_segment();
-        let mut fi = FieldInfo::new(
-            "test".to_string(),
-            0,
-            false,
-            false,
-            IndexOptions::Docs,
-            DocValuesType::Numeric,
-            PointDimensionConfig::default(),
-        );
-        fi.put_attribute("format".to_string(), "Lucene90".to_string());
-        fi.put_attribute("suffix".to_string(), "0".to_string());
-        let fis = FieldInfos::new(vec![fi]);
-        write(&dir, &si, "", &fis).unwrap();
+        // Indexed field with doc values — write() generates postings + DV attributes
+        let fields = vec![FieldInfosFieldData {
+            name: "test".to_string(),
+            number: 0,
+            store_term_vectors: false,
+            has_norms: true,
+            index_options: 1, // Docs
+            doc_values_type: DocValuesType::Numeric,
+            point_dimension_count: 0,
+            point_index_dimension_count: 0,
+            point_num_bytes: 0,
+        }];
+        write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
         let dir_guard = dir.lock().unwrap();
         let read_fis = read(&**dir_guard, &si, "").unwrap();
         let f = read_fis.iter().next().unwrap();
-        assert_eq!(f.attributes().get("format").unwrap(), "Lucene90");
-        assert_eq!(f.attributes().get("suffix").unwrap(), "0");
-    }
-
-    // --- Write-side tests ---
-
-    #[test]
-    fn test_index_options_byte_encoding() {
-        assert_eq!(index_options_byte(IndexOptions::None), 0);
-        assert_eq!(index_options_byte(IndexOptions::Docs), 1);
-        assert_eq!(index_options_byte(IndexOptions::DocsAndFreqs), 2);
         assert_eq!(
-            index_options_byte(IndexOptions::DocsAndFreqsAndPositions),
-            3
+            f.get_attribute("PerFieldPostingsFormat.format").unwrap(),
+            "Lucene103"
         );
         assert_eq!(
-            index_options_byte(IndexOptions::DocsAndFreqsAndPositionsAndOffsets),
-            4
+            f.get_attribute("PerFieldDocValuesFormat.format").unwrap(),
+            "Lucene90"
         );
     }
 }
