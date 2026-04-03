@@ -18,7 +18,7 @@ use crate::codecs::lucene103::postings_format::{
 use crate::document::IndexOptions;
 use crate::encoding::pfor::{self, BLOCK_SIZE};
 use crate::encoding::zigzag;
-use crate::newindex::index_file_names::segment_file_name;
+use crate::index::index_file_names::segment_file_name;
 use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 
 /// Buffers position deltas and PFOR-encodes them in blocks of 128.

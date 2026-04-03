@@ -11,7 +11,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::newindex::index_file_names;
+use crate::index::index_file_names;
 use crate::store::SharedDirectory;
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";

@@ -12,6 +12,7 @@ use std::fmt;
 use std::io;
 
 use crate::index::consumer::{FieldConsumer, TokenInterest};
+use crate::index::index_file_names;
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::index::term_vectors_consumer_per_field::TermVectorsConsumerPerField;
@@ -191,7 +192,7 @@ impl FieldConsumer for TermVectorsConsumer {
 
         // Lazy-create the writer
         if self.writer.is_none() {
-            let tvd_name = crate::newindex::index_file_names::segment_file_name(
+            let tvd_name = index_file_names::segment_file_name(
                 &context.segment_name,
                 "",
                 term_vectors::VECTORS_EXTENSION,

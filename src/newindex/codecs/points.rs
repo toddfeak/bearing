@@ -10,7 +10,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::newindex::index_file_names;
+use crate::index::index_file_names;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 
 // File extensions

@@ -16,7 +16,7 @@ use crate::codecs::packed_writers::{DirectMonotonicWriter, DirectWriter};
 use crate::document::DocValuesType;
 use crate::encoding::lz4::{self, FastHashTable};
 use crate::encoding::packed::unsigned_bits_required;
-use crate::newindex::index_file_names;
+use crate::index::index_file_names;
 use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;

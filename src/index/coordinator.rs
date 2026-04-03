@@ -13,12 +13,12 @@ use crate::index::channel::{self, Receiver, Sender};
 use crate::index::config::IndexWriterConfig;
 use crate::index::flush_control::FlushControl;
 use crate::index::id_generator::IdGenerator;
+use crate::index::index_file_names::{self, radix36 as radix_fmt};
 use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_context::SegmentContext;
 use crate::index::segment_worker::SegmentWorker;
 use crate::newindex::codecs::segment_info;
 use crate::newindex::document::Document;
-use crate::newindex::index_file_names::{self, radix_fmt};
 use crate::newindex::segment_infos::SegmentInfos;
 use crate::store::{self, SharedDirectory};
 

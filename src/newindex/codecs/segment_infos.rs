@@ -10,8 +10,8 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::index::index_file_names;
 use crate::index::segment::FlushedSegment;
-use crate::newindex::index_file_names;
 use crate::store::SharedDirectory;
 use crate::util::string_helper;
 
@@ -32,7 +32,7 @@ pub(crate) fn write(
     segments: &[FlushedSegment],
     generation: u64,
 ) -> io::Result<String> {
-    let gen_suffix = index_file_names::radix_fmt(generation);
+    let gen_suffix = index_file_names::radix36(generation);
     let pending_name = format!("pending_segments_{gen_suffix}");
     let final_name = format!("segments_{gen_suffix}");
     let id = string_helper::random_id();
