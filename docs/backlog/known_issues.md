@@ -197,3 +197,15 @@ The write path wraps `store::Directory` in `SharedDirectory` (a `Mutex`) for all
 **Current state:** The newindex `Directory` trait and its `DirectoryAdapter` have been deleted. Everything uses `store::Directory` through `SharedDirectory`. This works but means all file I/O is serialized through a single mutex.
 
 **Fix:** Consider whether `store::Directory` should adopt `&self` semantics (with interior mutability in implementations) to enable concurrent file creation. This would eliminate the `SharedDirectory` wrapper. Lower priority — the mutex is not a bottleneck since file I/O is infrequent relative to in-memory indexing work.
+
+---
+
+## 8. Level1 Skip Data for Write Path
+
+**Severity:** Correctness — posting lists with >4096 docs cannot be written
+
+The postings writer (`PostingsWriter`) currently panics if a term has more than `LEVEL1_NUM_DOCS` (4096) documents. Level1 skip data is required for terms that span multiple level0 blocks (each block = 128 docs × 32 blocks = 4096 docs). Without it, the writer cannot produce valid postings for high-frequency terms in large indexes.
+
+The read path (`PostingsReader`) already handles level1 skip data — the `level1_last_doc_id`, `level1_doc_end_fp`, and `level1_doc_count_upto` fields are in place, and the `next_doc`/`advance` methods have level1 branching logic. The gap is the write side.
+
+**Fix:** In `PostingsWriter::write_term`, when `doc_count` reaches `LEVEL1_NUM_DOCS`, emit level1 skip metadata (aggregate doc count, file pointers, impact data) and reset the level0 block counter. Match Java's `Lucene103PostingsWriter.encodeTerm` level1 encoding.

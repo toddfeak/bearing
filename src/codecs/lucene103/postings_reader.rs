@@ -1069,12 +1069,14 @@ mod tests {
 
     use crate::codecs::competitive_impact::NormsLookup;
     use crate::codecs::lucene103::postings_writer::PostingsWriter;
-    use crate::document::DocumentBuilder;
-    use crate::document::IndexOptions;
+    use crate::codecs::{lucene94, lucene99};
+    use crate::document::{DocValuesType, DocumentBuilder, IndexOptions};
     use crate::index::config::IndexWriterConfig;
     use crate::index::field::text;
+    use crate::index::segment_infos;
     use crate::index::writer::IndexWriter;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
+    use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
@@ -1130,7 +1132,7 @@ mod tests {
             false,
             false,
             IndexOptions::Docs,
-            crate::document::DocValuesType::None,
+            DocValuesType::None,
             PointDimensionConfig::default(),
         )
     }
@@ -1170,13 +1172,11 @@ mod tests {
 
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = crate::index::segment_infos::read(&**dir, segments_file).unwrap();
+        let infos = segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let si =
-            crate::codecs::lucene99::segment_info_format::read(&**dir, &seg.name, &seg.id).unwrap();
-        let field_infos =
-            crate::codecs::lucene94::field_infos_format::read(&**dir, &si, "").unwrap();
+        let si = lucene99::segment_info_format::read(&**dir, &seg.name, &seg.id).unwrap();
+        let field_infos = lucene94::field_infos_format::read(&**dir, &si, "").unwrap();
 
         let suffix = field_infos
             .iter()
@@ -1394,8 +1394,7 @@ mod tests {
     fn test_read_vint15() {
         // Values < 0x8000 are stored as a single LE short
         let data = vec![0x42u8, 0x00]; // 0x0042 = 66
-        let mut input =
-            crate::store::byte_slice_input::ByteSliceIndexInput::new("test".to_string(), data);
+        let mut input = ByteSliceIndexInput::new("test".to_string(), data);
         let val = read_vint15(&mut input).unwrap();
         assert_eq!(val, 66);
     }
@@ -1465,5 +1464,47 @@ mod tests {
 
         // Verify continued iteration works
         assert_eq!(iter.next_doc().unwrap(), 129);
+    }
+
+    #[test]
+    fn test_freq_returns_one_for_docs_only() {
+        let doc_ids: Vec<i32> = (0..5).collect();
+        let (state, dir) =
+            write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
+        let reader = open_reader(dir.as_ref()).unwrap();
+        let mut iter = reader.postings(&state, true, false, false, false).unwrap();
+
+        assert_eq!(iter.next_doc().unwrap(), 0);
+        // Each doc has freq=1 since write_single_term uses freq=1
+        assert_eq!(iter.freq().unwrap(), 1);
+        assert_eq!(iter.next_doc().unwrap(), 1);
+        assert_eq!(iter.freq().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_freq_full_block() {
+        // 128+ docs triggers full block encoding — freq() must PFor-decode
+        let doc_ids: Vec<i32> = (0..200).collect();
+        let (state, dir) =
+            write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
+        let reader = open_reader(dir.as_ref()).unwrap();
+        let mut iter = reader.postings(&state, true, false, false, false).unwrap();
+
+        // Read into the packed block
+        for expected in 0..128 {
+            assert_eq!(iter.next_doc().unwrap(), expected);
+            assert_eq!(iter.freq().unwrap(), 1);
+        }
+        // Continue into vint tail
+        assert_eq!(iter.next_doc().unwrap(), 128);
+        assert_eq!(iter.freq().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_int_block_term_state_default() {
+        let state = postings_format::IntBlockTermState::default();
+        assert_eq!(state.doc_freq, 0);
+        assert_eq!(state.singleton_doc_id, -1);
+        assert_eq!(state.last_pos_block_offset, -1);
     }
 }

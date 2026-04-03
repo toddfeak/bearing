@@ -469,6 +469,8 @@ impl BulkSimScorer for BM25BulkSimScorer {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use super::*;
     use assertables::*;
 
@@ -710,7 +712,7 @@ mod tests {
         let coll = test_collection_stats();
         let ts = test_term_stats();
 
-        let scorer1 = sim.scorer(1.0, &coll, std::slice::from_ref(&ts));
+        let scorer1 = sim.scorer(1.0, &coll, slice::from_ref(&ts));
         let scorer2 = sim.scorer(2.0, &coll, &[ts]);
 
         let norm: i64 = 10;

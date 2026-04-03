@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stored fields writer with LZ4 block compression.
 
+use std::cmp;
+use std::fmt;
 use std::io;
 
 use log::debug;
@@ -187,8 +189,8 @@ pub(crate) struct Lucene90StoredFieldsWriter {
     lz4_ht: lz4::FastHashTable,
 }
 
-impl std::fmt::Debug for Lucene90StoredFieldsWriter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Lucene90StoredFieldsWriter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Lucene90StoredFieldsWriter")
             .field("doc_base", &self.doc_base)
             .field("num_buffered_docs", &self.num_buffered_docs)
@@ -313,7 +315,7 @@ impl Lucene90StoredFieldsWriter {
             let capacity = self.buffered_docs.len();
             let mut compressed = 0;
             while compressed < capacity {
-                let l = std::cmp::min(self.chunk_size as usize, capacity - compressed);
+                let l = cmp::min(self.chunk_size as usize, capacity - compressed);
                 compress_lz4_preset_dict_reuse(
                     &self.buffered_docs[compressed..compressed + l],
                     &mut **self.fields_stream.as_mut().unwrap(),
@@ -493,7 +495,7 @@ fn compress_lz4_preset_dict_reuse(
     lz4_ht: &mut lz4::FastHashTable,
 ) -> io::Result<()> {
     let len = data.len();
-    let dict_length = std::cmp::min(LZ4_MAX_DISTANCE, len / (NUM_SUB_BLOCKS * DICT_SIZE_FACTOR));
+    let dict_length = cmp::min(LZ4_MAX_DISTANCE, len / (NUM_SUB_BLOCKS * DICT_SIZE_FACTOR));
     let block_length = if len <= dict_length {
         0
     } else {
@@ -515,7 +517,7 @@ fn compress_lz4_preset_dict_reuse(
 
         let mut start = dict_length;
         while start < len {
-            let l = std::cmp::min(block_length, len - start);
+            let l = cmp::min(block_length, len - start);
             buffer.truncate(dict_length);
             buffer.extend_from_slice(&data[start..start + l]);
 

@@ -10,6 +10,8 @@
 //! Java Lucene 10.3.2 (StandardAnalyzer, BM25Similarity default k1=1.2 b=0.75) and
 //! running the same BooleanQuery with two MUST TermQuery clauses.
 
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use assertables::*;
@@ -31,8 +33,8 @@ fn build_golden_docs_index() -> (Arc<SharedDirectory>, DirectoryReader) {
     let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
-    let docs_dir = std::path::Path::new("testdata/golden-docs");
-    let mut paths: Vec<_> = std::fs::read_dir(docs_dir)
+    let docs_dir = Path::new("testdata/golden-docs");
+    let mut paths: Vec<_> = fs::read_dir(docs_dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "txt"))
@@ -41,7 +43,7 @@ fn build_golden_docs_index() -> (Arc<SharedDirectory>, DirectoryReader) {
     paths.sort();
 
     for path in &paths {
-        let contents = std::fs::read_to_string(path).unwrap();
+        let contents = fs::read_to_string(path).unwrap();
         let doc = DocumentBuilder::new()
             .add_field(text("contents").value(contents.as_str()))
             .build();

@@ -7,6 +7,7 @@
 //! documents are indexed. Only a single document's fields are held in
 //! memory at a time.
 
+use std::fmt;
 use std::io;
 
 use crate::analysis::Token;
@@ -28,8 +29,8 @@ pub struct StoredFieldsConsumer {
     last_doc: i32,
 }
 
-impl std::fmt::Debug for StoredFieldsConsumer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for StoredFieldsConsumer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StoredFieldsConsumer")
             .field("has_writer", &self.writer.is_some())
             .field("current_doc_fields", &self.current_doc_fields.len())
@@ -304,5 +305,40 @@ mod tests {
         // Streaming consumer doesn't accumulate — MemSize should be small
         // (only current_doc_fields which was cleared after each doc)
         assert_lt!(consumer.mem_size(SizeFlags::CAPACITY), 200);
+    }
+
+    #[test]
+    fn debug_format() {
+        let consumer = StoredFieldsConsumer::new();
+        let debug = format!("{consumer:?}");
+        assert_contains!(debug, "StoredFieldsConsumer");
+        assert_contains!(debug, "has_writer");
+        assert_contains!(debug, "last_doc");
+    }
+
+    #[test]
+    fn default_creates_new() {
+        let consumer = StoredFieldsConsumer::default();
+        assert_eq!(consumer.last_doc, -1);
+    }
+
+    #[test]
+    fn fill_gaps_writes_empty_docs() {
+        let context = test_context();
+        let mut consumer = StoredFieldsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        // Skip doc 0, write doc 2 — should fill gaps for docs 0 and 1
+        consumer.start_document(2).unwrap();
+        let field = stored("title").string("doc 2");
+        consumer.start_field(0, &field, &mut acc).unwrap();
+        consumer.finish_field(0, &field, &mut acc).unwrap();
+        consumer.finish_document(2, &mut acc, &context).unwrap();
+        acc.increment_doc_count();
+        acc.increment_doc_count();
+        acc.increment_doc_count();
+
+        let names = consumer.flush(&context, &acc).unwrap();
+        assert_len_eq_x!(&names, 3);
     }
 }

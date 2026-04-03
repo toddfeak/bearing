@@ -466,7 +466,7 @@ fn write_flushed_segments(
     }
 
     // User data (empty map)
-    output.write_map_of_strings(&std::collections::HashMap::new())?;
+    output.write_map_of_strings(&HashMap::new())?;
 
     // Footer
     codec_util::write_footer(&mut *output)?;
@@ -536,6 +536,7 @@ mod tests {
     use crate::codecs::codec_util::{CODEC_MAGIC, FOOTER_LENGTH, FOOTER_MAGIC};
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig, SegmentInfo};
+    use crate::store::MemoryDirectory;
     use crate::test_util::TestDataReader;
 
     fn make_test_segment_commit_info(
@@ -750,7 +751,7 @@ mod tests {
         let file = write(&[], 1, 1, 0, &user_data).unwrap();
 
         // Put the segments_N file into a directory
-        let mut dir = crate::store::MemoryDirectory::new();
+        let mut dir = MemoryDirectory::new();
         dir.write_file(&file.name, &file.data).unwrap();
 
         let result = read(&dir, &file.name).unwrap();
@@ -769,7 +770,7 @@ mod tests {
         let user_data = HashMap::new();
         let file = write(&[&sci], 1, 1, 1, &user_data).unwrap();
 
-        let mut dir = crate::store::MemoryDirectory::new();
+        let mut dir = MemoryDirectory::new();
         dir.write_file(&file.name, &file.data).unwrap();
 
         let result = read(&dir, &file.name).unwrap();
@@ -930,7 +931,6 @@ mod tests {
     // --- write_flushed_segments tests ---
 
     use crate::index::segment::SegmentId;
-    use crate::store::MemoryDirectory;
 
     fn test_shared_directory() -> Arc<SharedDirectory> {
         Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())))

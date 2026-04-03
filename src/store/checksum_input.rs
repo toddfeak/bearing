@@ -6,7 +6,7 @@
 use std::io;
 
 use crate::store::checksum::CRC32;
-use crate::store::{DataInput, IndexInput};
+use crate::store::{DataInput, IndexInput, RandomAccessInput};
 
 /// An [`IndexInput`] wrapper that computes a CRC32 checksum over all bytes read.
 ///
@@ -95,7 +95,7 @@ impl IndexInput for ChecksumIndexInput {
         ))
     }
 
-    fn random_access(&self) -> io::Result<Box<dyn crate::store::RandomAccessInput>> {
+    fn random_access(&self) -> io::Result<Box<dyn RandomAccessInput>> {
         Err(io::Error::other(
             "ChecksumIndexInput does not support random_access",
         ))
@@ -106,6 +106,8 @@ impl IndexInput for ChecksumIndexInput {
 mod tests {
     use super::*;
     use crate::store::byte_slice_input::ByteSliceIndexInput;
+    use crate::store::memory::MemoryIndexOutput;
+    use crate::store::{DataOutput, IndexOutput};
 
     fn make_checksum_input(data: &[u8]) -> ChecksumIndexInput {
         let inner = ByteSliceIndexInput::new("test".into(), data.to_vec());
@@ -192,9 +194,6 @@ mod tests {
 
     #[test]
     fn test_checksum_matches_index_output() {
-        use crate::store::memory::MemoryIndexOutput;
-        use crate::store::{DataOutput, IndexOutput};
-
         let mut out = MemoryIndexOutput::new("test".into());
         out.write_bytes(b"test data here").unwrap();
         let expected_checksum = out.checksum();

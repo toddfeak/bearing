@@ -521,6 +521,9 @@ impl<A: Allocator> io::Read for ByteSliceReader<'_, A> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::panic;
+
     use super::*;
     use assertables::*;
 
@@ -651,7 +654,7 @@ mod tests {
         let mut overflowed = false;
         // i32::MAX / BYTE_BLOCK_SIZE + 1 iterations to overflow byte_offset
         for _ in 0..i32::MAX as usize / BYTE_BLOCK_SIZE + 1 {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                 pool.next_buffer();
             }));
             if result.is_err() {
@@ -757,7 +760,6 @@ mod tests {
         let end = upto + buf_idx * BYTE_BLOCK_SIZE;
 
         // Read all via io::Read
-        use std::io::Read;
         let mut reader = ByteSliceReader::new(&pool, upto_start, end);
         let mut result = Vec::new();
         reader.read_to_end(&mut result).unwrap();

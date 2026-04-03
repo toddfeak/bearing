@@ -26,6 +26,11 @@ pub use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::Mutex;
+
+use crate::encoding::group_vint;
+use crate::encoding::string;
+use crate::encoding::varint;
 
 /// A named in-memory file produced by codec writers during indexing.
 #[derive(Clone, Debug)]
@@ -59,27 +64,27 @@ pub trait DataOutput {
 
     /// Writes a variable-length integer (1-5 bytes). High bit = continuation.
     fn write_vint(&mut self, i: i32) -> io::Result<()> {
-        crate::encoding::varint::write_vint(&mut DataOutputWriter(self), i)
+        varint::write_vint(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a variable-length long (1-9 bytes). High bit = continuation.
     fn write_vlong(&mut self, i: i64) -> io::Result<()> {
-        crate::encoding::varint::write_vlong(&mut DataOutputWriter(self), i)
+        varint::write_vlong(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a zigzag-encoded variable-length int.
     fn write_zint(&mut self, i: i32) -> io::Result<()> {
-        crate::encoding::varint::write_zint(&mut DataOutputWriter(self), i)
+        varint::write_zint(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a zigzag-encoded variable-length long.
     fn write_zlong(&mut self, i: i64) -> io::Result<()> {
-        crate::encoding::varint::write_zlong(&mut DataOutputWriter(self), i)
+        varint::write_zlong(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a variable-length long that may be negative (used by writeZLong).
     fn write_signed_vlong(&mut self, i: i64) -> io::Result<()> {
-        crate::encoding::varint::write_signed_vlong(&mut DataOutputWriter(self), i)
+        varint::write_signed_vlong(&mut DataOutputWriter(self), i)
     }
 
     /// Writes a 32-bit integer in **big-endian** byte order.
@@ -96,17 +101,17 @@ pub trait DataOutput {
 
     /// Writes a string as VInt-encoded byte length followed by UTF-8 bytes.
     fn write_string(&mut self, s: &str) -> io::Result<()> {
-        crate::encoding::string::write_string(&mut DataOutputWriter(self), s)
+        string::write_string(&mut DataOutputWriter(self), s)
     }
 
     /// Writes a set of strings: VInt count followed by each string.
     fn write_set_of_strings(&mut self, set: &[String]) -> io::Result<()> {
-        crate::encoding::string::write_set_of_strings(&mut DataOutputWriter(self), set)
+        string::write_set_of_strings(&mut DataOutputWriter(self), set)
     }
 
     /// Writes a map of strings: VInt count followed by key-value pairs.
     fn write_map_of_strings(&mut self, map: &HashMap<String, String>) -> io::Result<()> {
-        crate::encoding::string::write_map_of_strings(&mut DataOutputWriter(self), map)
+        string::write_map_of_strings(&mut DataOutputWriter(self), map)
     }
 
     /// Writes integers using group-varint encoding.
@@ -114,7 +119,7 @@ pub trait DataOutput {
     /// followed by the ints in LE with variable byte widths.
     /// Remaining values (< 4) are written as regular VInts.
     fn write_group_vints(&mut self, values: &[i32], limit: usize) -> io::Result<()> {
-        crate::encoding::group_vint::write_group_vints(&mut DataOutputWriter(self), values, limit)
+        group_vint::write_group_vints(&mut DataOutputWriter(self), values, limit)
     }
 }
 
@@ -196,22 +201,22 @@ pub trait DataInput {
 
     /// Reads a variable-length integer (1-5 bytes). High bit = continuation.
     fn read_vint(&mut self) -> io::Result<i32> {
-        crate::encoding::varint::read_vint(&mut DataInputReader(self))
+        varint::read_vint(&mut DataInputReader(self))
     }
 
     /// Reads a variable-length long (1-9 bytes). High bit = continuation.
     fn read_vlong(&mut self) -> io::Result<i64> {
-        crate::encoding::varint::read_vlong(&mut DataInputReader(self))
+        varint::read_vlong(&mut DataInputReader(self))
     }
 
     /// Reads a zigzag-encoded variable-length int.
     fn read_zint(&mut self) -> io::Result<i32> {
-        crate::encoding::varint::read_zint(&mut DataInputReader(self))
+        varint::read_zint(&mut DataInputReader(self))
     }
 
     /// Reads a zigzag-encoded variable-length long.
     fn read_zlong(&mut self) -> io::Result<i64> {
-        crate::encoding::varint::read_zlong(&mut DataInputReader(self))
+        varint::read_zlong(&mut DataInputReader(self))
     }
 
     /// Reads a 32-bit integer in **big-endian** byte order.
@@ -232,22 +237,22 @@ pub trait DataInput {
 
     /// Reads a string: VInt-encoded byte length followed by UTF-8 bytes.
     fn read_string(&mut self) -> io::Result<String> {
-        crate::encoding::string::read_string(&mut DataInputReader(self))
+        string::read_string(&mut DataInputReader(self))
     }
 
     /// Reads a set of strings: VInt count followed by each string.
     fn read_set_of_strings(&mut self) -> io::Result<Vec<String>> {
-        crate::encoding::string::read_set_of_strings(&mut DataInputReader(self))
+        string::read_set_of_strings(&mut DataInputReader(self))
     }
 
     /// Reads a map of strings: VInt count followed by key-value pairs.
     fn read_map_of_strings(&mut self) -> io::Result<HashMap<String, String>> {
-        crate::encoding::string::read_map_of_strings(&mut DataInputReader(self))
+        string::read_map_of_strings(&mut DataInputReader(self))
     }
 
     /// Reads integers using group-varint encoding.
     fn read_group_vints(&mut self, values: &mut [i32], limit: usize) -> io::Result<()> {
-        crate::encoding::group_vint::read_group_vints(&mut DataInputReader(self), values, limit)
+        group_vint::read_group_vints(&mut DataInputReader(self), values, limit)
     }
 }
 
@@ -277,14 +282,14 @@ impl<T: DataInput + ?Sized> io::Read for DataInputReader<'_, T> {
 ///
 /// High bit = continuation.
 pub fn read_vint(reader: &mut impl io::Read) -> io::Result<i32> {
-    crate::encoding::varint::read_vint(reader)
+    varint::read_vint(reader)
 }
 
 /// Writes a variable-length integer (1-5 bytes) to any `io::Write` sink.
 ///
 /// High bit = continuation.
 pub fn encode_vint(writer: &mut impl io::Write, val: i32) -> io::Result<()> {
-    crate::encoding::varint::write_vint(writer, val)
+    varint::write_vint(writer, val)
 }
 
 /// Trait for index file input with position tracking and random access.
@@ -361,8 +366,8 @@ pub(crate) fn align_offset(offset: u64, alignment: usize) -> u64 {
     (offset + a - 1) & !(a - 1)
 }
 
-/// A [`Directory`] behind a [`Mutex`](std::sync::Mutex) for shared concurrent access.
-pub type SharedDirectory = std::sync::Mutex<Box<dyn Directory>>;
+/// A [`Directory`] behind a [`Mutex`] for shared concurrent access.
+pub type SharedDirectory = Mutex<Box<dyn Directory>>;
 
 /// Trait for a directory that can create and manage index files.
 pub trait Directory: Send {

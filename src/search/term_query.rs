@@ -4,8 +4,10 @@
 
 use std::fmt;
 use std::io;
+use std::slice;
 
 use crate::codecs::lucene103::postings_reader::BlockPostingsEnum;
+use crate::document::IndexOptions;
 use crate::index::directory_reader::LeafReaderContext;
 use crate::index::numeric_doc_values::NumericDocValues;
 use crate::search::collector::{DocAndFloatFeatureBuffer, ScoreMode};
@@ -15,7 +17,7 @@ use crate::search::query::{
     BatchScoreBulkScorer, BulkScorer, DefaultBulkScorer, Query, ScorerSupplier, Weight,
 };
 use crate::search::scorable::Scorable;
-use crate::search::scorer::Scorer;
+use crate::search::scorer::{MaxScoreCache, Scorer};
 use crate::search::similarity::{CollectionStatistics, SimScorer, TermStatistics};
 use crate::search::term_states::TermStates;
 use crate::util::BytesRef;
@@ -96,11 +98,11 @@ impl Query for TermQuery {
         // Java: L75-94 — create simScorer once, or null if term doesn't exist
         let sim_scorer = match (&collection_stats, &term_stats) {
             (Some(cs), Some(ts)) if score_mode.needs_scores() => {
-                Some(similarity.scorer(boost, cs, std::slice::from_ref(ts)))
+                Some(similarity.scorer(boost, cs, slice::from_ref(ts)))
             }
             (Some(cs), Some(ts)) => {
                 // Not scoring — assign a dummy scorer to avoid unnecessary allocations
-                Some(similarity.scorer(boost, cs, std::slice::from_ref(ts)))
+                Some(similarity.scorer(boost, cs, slice::from_ref(ts)))
             }
             _ => None,
         };
@@ -172,8 +174,8 @@ impl Weight for TermWeight {
 
         let index_has_freq = field_info.index_options().has_freqs();
         let index_has_pos = field_info.index_options().has_positions();
-        let index_has_offsets = field_info.index_options()
-            >= crate::document::IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
+        let index_has_offsets =
+            field_info.index_options() >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
         let index_has_offsets_or_payloads = index_has_offsets || field_info.has_payloads();
         let needs_freq = self.score_mode.needs_scores();
         let postings_enum = if self.score_mode == ScoreMode::TopScores {
@@ -288,7 +290,7 @@ impl ScorerSupplier for TermScorerSupplier {
 pub struct TermScorer {
     postings_enum: BlockPostingsEnum,
     sim_scorer: Box<dyn SimScorer>,
-    max_score_cache: crate::search::scorer::MaxScoreCache,
+    max_score_cache: MaxScoreCache,
     norms: Option<Box<dyn NumericDocValues>>,
     norm_values: Vec<i64>,
     // ImpactsDISI state (inlined — see Java ImpactsDISI)
@@ -315,7 +317,7 @@ impl TermScorer {
         _score_mode: ScoreMode,
         top_level_scoring_clause: bool,
     ) -> Self {
-        let max_score_cache = crate::search::scorer::MaxScoreCache::new(sim_scorer.as_ref());
+        let max_score_cache = MaxScoreCache::new(sim_scorer.as_ref());
         Self {
             postings_enum,
             sim_scorer,
@@ -525,6 +527,7 @@ impl Scorer for TermScorer {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use super::*;
@@ -533,6 +536,7 @@ mod tests {
     use crate::index::directory_reader::DirectoryReader;
     use crate::index::field::text;
     use crate::index::writer::IndexWriter;
+    use crate::search::collector::{LeafCollector, ScoreContext};
     use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
@@ -777,11 +781,8 @@ mod tests {
         struct CollectedDoc {
             docs: Vec<i32>,
         }
-        impl crate::search::collector::LeafCollector for CollectedDoc {
-            fn set_scorer(
-                &mut self,
-                _score_context: std::rc::Rc<crate::search::collector::ScoreContext>,
-            ) -> io::Result<()> {
+        impl LeafCollector for CollectedDoc {
+            fn set_scorer(&mut self, _score_context: Rc<ScoreContext>) -> io::Result<()> {
                 Ok(())
             }
             fn collect(&mut self, doc: i32) -> io::Result<()> {
@@ -820,11 +821,8 @@ mod tests {
         struct CollectedDoc {
             docs: Vec<i32>,
         }
-        impl crate::search::collector::LeafCollector for CollectedDoc {
-            fn set_scorer(
-                &mut self,
-                _score_context: std::rc::Rc<crate::search::collector::ScoreContext>,
-            ) -> io::Result<()> {
+        impl LeafCollector for CollectedDoc {
+            fn set_scorer(&mut self, _score_context: Rc<ScoreContext>) -> io::Result<()> {
                 Ok(())
             }
             fn collect(&mut self, doc: i32) -> io::Result<()> {

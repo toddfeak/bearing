@@ -1349,7 +1349,8 @@ impl StringFieldBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
+    use std::{env, fs};
 
     use assertables::*;
 
@@ -2204,11 +2205,10 @@ mod tests {
 
     #[test]
     fn path_provider_reads_file() {
-        use std::io::Write;
-        let dir = std::env::temp_dir().join("bearing_test_read_provider");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = env::temp_dir().join("bearing_test_read_provider");
+        fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.txt");
-        let mut f = std::fs::File::create(&path).unwrap();
+        let mut f = File::create(&path).unwrap();
         f.write_all(b"file content").unwrap();
         drop(f);
 
@@ -2222,7 +2222,7 @@ mod tests {
         provider.open().unwrap().read_to_string(&mut buf2).unwrap();
         assert_eq!(buf2, "file content");
 
-        std::fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

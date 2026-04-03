@@ -14,7 +14,9 @@
 //! Implementors:
 //! - [`FreqProxTermsWriterPerField`] — doc/freq/position/offset encoding
 
+use std::fmt;
 use std::io;
+use std::mem;
 
 use crate::document::IndexOptions;
 use crate::util::byte_block_pool::{
@@ -29,7 +31,7 @@ use crate::util::int_block_pool::{INT_BLOCK_MASK, INT_BLOCK_SHIFT, INT_BLOCK_SIZ
 // ---------------------------------------------------------------------------
 
 /// Bytes per posting in the base array (3 ints = 12 bytes).
-pub(crate) const BYTES_PER_POSTING: usize = 3 * std::mem::size_of::<i32>();
+pub(crate) const BYTES_PER_POSTING: usize = 3 * mem::size_of::<i32>();
 
 /// Computes a grow size matching Java's `ArrayUtil.oversize`.
 pub(crate) fn oversize(min_size: usize, bytes_per_posting: usize) -> usize {
@@ -157,15 +159,15 @@ impl FreqProxPostingsArray {
     pub(crate) fn bytes_per_posting(&self) -> usize {
         let mut bytes = self.base.bytes_per_posting();
         // lastDocIDs + lastDocCodes always present
-        bytes += 2 * std::mem::size_of::<i32>();
+        bytes += 2 * mem::size_of::<i32>();
         if self.term_freqs.is_some() {
-            bytes += std::mem::size_of::<i32>();
+            bytes += mem::size_of::<i32>();
         }
         if self.last_positions.is_some() {
-            bytes += std::mem::size_of::<i32>();
+            bytes += mem::size_of::<i32>();
         }
         if self.last_offsets.is_some() {
-            bytes += std::mem::size_of::<i32>();
+            bytes += mem::size_of::<i32>();
         }
         bytes
     }
@@ -240,8 +242,8 @@ impl Default for TermsHash {
     }
 }
 
-impl std::fmt::Debug for TermsHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for TermsHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TermsHash")
             .field("int_pool_buffers", &self.int_pool.buffers.len())
             .field("byte_pool_buffers", &self.byte_pool.buffers.len())
@@ -260,9 +262,9 @@ impl mem_dbg::MemSize for TermsHash {
             .int_pool
             .buffers
             .iter()
-            .map(|b| b.capacity() * std::mem::size_of::<i32>())
+            .map(|b| b.capacity() * mem::size_of::<i32>())
             .sum::<usize>()
-            + self.int_pool.buffers.capacity() * std::mem::size_of::<Vec<i32>>();
+            + self.int_pool.buffers.capacity() * mem::size_of::<Vec<i32>>();
         int_pool_size + self.byte_pool.mem_size_rec(flags, refs)
     }
 }
@@ -282,7 +284,6 @@ pub(crate) struct TermsHashPerField {
     pub(crate) stream_address_offset: usize,
     pub(crate) stream_count: usize,
     field_name: String,
-    index_options: IndexOptions,
     pub(crate) bytes_hash: BytesRefHash,
     sorted_term_ids: Option<Vec<i32>>,
     pub(crate) last_doc_id: i32, // assertion-only
@@ -307,7 +308,6 @@ impl TermsHashPerField {
             stream_address_offset: 0,
             stream_count,
             field_name,
-            index_options,
             bytes_hash,
             sorted_term_ids: None,
             last_doc_id: -1,
@@ -341,20 +341,9 @@ impl TermsHashPerField {
         self.bytes_hash.size()
     }
 
-    /// Returns true if terms have already been sorted.
-    pub(crate) fn is_sorted(&self) -> bool {
-        self.sorted_term_ids.is_some()
-    }
-
     /// Returns the field name.
     pub(crate) fn field_name(&self) -> &str {
         &self.field_name
-    }
-
-    /// Returns the index options.
-    #[expect(dead_code)]
-    pub(crate) fn index_options(&self) -> IndexOptions {
-        self.index_options
     }
 
     /// Returns the bytes for a given term ID (from the shared byte pool).
@@ -437,8 +426,8 @@ impl TermsHashPerField {
     }
 }
 
-impl std::fmt::Debug for TermsHashPerField {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for TermsHashPerField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TermsHashPerField")
             .field("field_name", &self.field_name)
             .field("stream_count", &self.stream_count)
@@ -696,12 +685,6 @@ impl FreqProxTermsWriterPerField {
         self.base.sort_terms(byte_pool);
     }
 
-    /// Returns true if terms have already been sorted.
-    #[expect(dead_code)]
-    pub(crate) fn is_sorted(&self) -> bool {
-        self.base.is_sorted()
-    }
-
     /// Returns sorted term IDs.
     pub(crate) fn sorted_term_ids(&self) -> &[i32] {
         self.base.sorted_term_ids()
@@ -837,8 +820,8 @@ impl FreqProxTermsWriterPerField {
     }
 }
 
-impl std::fmt::Debug for FreqProxTermsWriterPerField {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for FreqProxTermsWriterPerField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FreqProxTermsWriterPerField")
             .field("field_name", &self.base.field_name)
             .field("num_terms", &self.base.bytes_hash.size())
@@ -855,7 +838,7 @@ impl mem_dbg::MemSize for FreqProxTermsWriterPerField {
         flags: mem_dbg::SizeFlags,
         refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
-        std::mem::size_of::<Self>()
+        mem::size_of::<Self>()
             + self.base.bytes_hash.mem_size_rec(flags, refs)
             + self.postings_array.size() * self.postings_array.bytes_per_posting()
     }
@@ -993,13 +976,11 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
 mod tests {
     use super::*;
     use crate::store;
-    use crate::util::byte_block_pool::ByteSliceReader;
+    use crate::util::byte_block_pool::{Allocator, ByteSliceReader};
     use assertables::*;
 
     /// Helper to read a VInt from a byte slice reader.
-    fn read_vint<A: crate::util::byte_block_pool::Allocator>(
-        reader: &mut ByteSliceReader<'_, A>,
-    ) -> i32 {
+    fn read_vint<A: Allocator>(reader: &mut ByteSliceReader<'_, A>) -> i32 {
         store::read_vint(reader).unwrap()
     }
 
@@ -1224,5 +1205,146 @@ mod tests {
         field.add_at(&mut th, b"a", 0, 2, 4, 5).unwrap();
 
         assert_eq!(field.unique_term_count, 2);
+    }
+
+    #[test]
+    fn test_oversize_aligns_to_bytes_per_posting() {
+        // When remainder != 0, oversize rounds up
+        let result = oversize(3, 12);
+        assert_eq!(result % 12, 0);
+        assert_ge!(result, 3);
+    }
+
+    #[test]
+    fn test_terms_hash_reset() {
+        let mut th = TermsHash::new();
+        let mut field =
+            FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
+        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
+
+        th.reset();
+        // After reset, pools are cleared — new terms can be added
+        let mut field2 =
+            FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
+        field2.add_at(&mut th, b"world", 0, 0, 0, 5).unwrap();
+        assert_eq!(field2.num_terms(), 1);
+    }
+
+    #[test]
+    fn test_terms_hash_default() {
+        let th = TermsHash::default();
+        assert_is_empty!(&th.int_pool.buffers);
+    }
+
+    #[test]
+    fn test_terms_hash_debug() {
+        let th = TermsHash::new();
+        let debug = format!("{th:?}");
+        assert_contains!(debug, "TermsHash");
+        assert_contains!(debug, "int_pool_buffers");
+    }
+
+    #[test]
+    fn test_terms_hash_per_field_debug() {
+        let thpf = TermsHashPerField::new(1, "body".to_string(), IndexOptions::DocsAndFreqs);
+        let debug = format!("{thpf:?}");
+        assert_contains!(debug, "TermsHashPerField");
+        assert_contains!(debug, "body");
+    }
+
+    #[test]
+    fn test_freq_prox_debug() {
+        let field =
+            FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
+        let debug = format!("{field:?}");
+        assert_contains!(debug, "FreqProxTermsWriterPerField");
+        assert_contains!(debug, "body");
+        assert_contains!(debug, "has_freq");
+    }
+
+    #[test]
+    fn test_freq_prox_mem_size() {
+        use mem_dbg::{MemSize, SizeFlags};
+        let field =
+            FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
+        let size = field.mem_size(SizeFlags::CAPACITY);
+        assert_gt!(size, 0);
+    }
+
+    #[test]
+    fn test_positions_and_offsets() {
+        let mut th = TermsHash::new();
+        let mut field = FreqProxTermsWriterPerField::new(
+            "body".to_string(),
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+        );
+
+        // "hello" at position 0 with offsets [0, 5)
+        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
+        // "hello" at position 3 with offsets [18, 23)
+        field.add_at(&mut th, b"hello", 0, 3, 18, 23).unwrap();
+
+        assert_eq!(field.num_terms(), 1);
+        assert!(field.has_offsets);
+
+        let hello_id = field.base.bytes_hash.find(&th.byte_pool, b"hello") as usize;
+
+        // Read prox stream (stream 1) — positions and offsets interleaved
+        let (start, end) = field.get_stream_range(&th.int_pool, hello_id, 1);
+        let mut reader = ByteSliceReader::new(&th.byte_pool, start, end);
+
+        // Position 0: proxCode = 0 << 1 = 0
+        let pos0 = read_vint(&mut reader);
+        assert_eq!(pos0, 0);
+        // Offset for position 0: start_offset = 0, length = 5
+        let off0_start = read_vint(&mut reader);
+        assert_eq!(off0_start, 0);
+        let off0_len = read_vint(&mut reader);
+        assert_eq!(off0_len, 5);
+
+        // Position 3: delta = (3 - 0) << 1 = 6
+        let pos1 = read_vint(&mut reader);
+        assert_eq!(pos1, 6);
+        // Offset for position 3: start_offset delta = 18 - 0 = 18, length = 5
+        let off1_start_delta = read_vint(&mut reader);
+        assert_eq!(off1_start_delta, 18);
+        let off1_len = read_vint(&mut reader);
+        assert_eq!(off1_len, 5);
+    }
+
+    #[test]
+    fn test_offsets_across_documents() {
+        let mut th = TermsHash::new();
+        let mut field = FreqProxTermsWriterPerField::new(
+            "body".to_string(),
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+        );
+
+        // Doc 0: "hello" at pos 0, offsets [0, 5)
+        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
+        // Doc 1: "hello" at pos 0, offsets [0, 5) — offsets reset per new doc
+        field.add_at(&mut th, b"hello", 1, 0, 0, 5).unwrap();
+
+        let hello_id = field.base.bytes_hash.find(&th.byte_pool, b"hello") as usize;
+
+        // Read prox stream — doc 0 prox data should be there
+        let (start, end) = field.get_stream_range(&th.int_pool, hello_id, 1);
+        let mut reader = ByteSliceReader::new(&th.byte_pool, start, end);
+
+        // Doc 0, position 0
+        let pos0 = read_vint(&mut reader);
+        assert_eq!(pos0, 0);
+        let off_start = read_vint(&mut reader);
+        assert_eq!(off_start, 0);
+        let off_len = read_vint(&mut reader);
+        assert_eq!(off_len, 5);
+
+        // Doc 1, position 0 — offset reset to 0 for new doc
+        let pos1 = read_vint(&mut reader);
+        assert_eq!(pos1, 0);
+        let off1_start = read_vint(&mut reader);
+        assert_eq!(off1_start, 0);
+        let off1_len = read_vint(&mut reader);
+        assert_eq!(off1_len, 5);
     }
 }

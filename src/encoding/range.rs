@@ -5,13 +5,15 @@
 //! Encodes min/max pairs for 1-4 dimensions as sortable byte arrays.
 //! Used by `IntRange`, `LongRange`, `FloatRange`, and `DoubleRange` fields.
 
+use std::fmt;
+
 use crate::encoding::sortable_bytes::{from_double, from_float, from_int, from_long};
 
 /// Encodes a range as sortable bytes: `[min1..minN, max1..maxN]`.
 ///
 /// Each min/max value is converted to sortable bytes via `encode_fn`, then
 /// packed into a single byte array with mins first, then maxs.
-fn encode_range<T: PartialOrd + std::fmt::Display + Copy>(
+fn encode_range<T: PartialOrd + fmt::Display + Copy>(
     mins: &[T],
     maxs: &[T],
     elem_size: usize,

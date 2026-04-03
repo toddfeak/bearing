@@ -10,6 +10,7 @@
 //! are kept open for lazy term enumeration at query time.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 
 use crate::codecs::codec_util;
@@ -290,8 +291,8 @@ impl BlockTreeTermsReader {
     }
 }
 
-impl std::fmt::Debug for FieldReader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for FieldReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FieldReader")
             .field("field_number", &self.field_number)
             .field("num_terms", &self.num_terms)
@@ -399,9 +400,11 @@ mod tests {
     use super::*;
     use crate::codecs::competitive_impact::NormsLookup;
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
-    use crate::document::IndexOptions;
+    use crate::document::{DocValuesType, IndexOptions};
     use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
+    use crate::store::SharedDirectory;
+    use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::memory::MemoryDirectory;
     use assertables::*;
 
@@ -412,7 +415,7 @@ mod tests {
             false, // store_term_vector
             false, // omit_norms
             index_options,
-            crate::document::DocValuesType::None,
+            DocValuesType::None,
             PointDimensionConfig::default(),
         )
     }
@@ -480,7 +483,7 @@ mod tests {
 
         let has_positions = fields_data.iter().any(|(_, opts, _)| opts.has_positions());
 
-        let shared_dir = crate::store::SharedDirectory::new(Box::new(MemoryDirectory::new()));
+        let shared_dir = SharedDirectory::new(Box::new(MemoryDirectory::new()));
 
         {
             let mut writer = BlockTreeTermsWriter::new(
@@ -660,10 +663,7 @@ mod tests {
     }
 
     fn dummy_index_input() -> Box<dyn IndexInput> {
-        Box::new(crate::store::byte_slice_input::ByteSliceIndexInput::new(
-            "dummy".into(),
-            vec![0u8; 16],
-        ))
+        Box::new(ByteSliceIndexInput::new("dummy".into(), vec![0u8; 16]))
     }
 
     #[test]

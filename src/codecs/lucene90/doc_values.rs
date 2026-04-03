@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
+use std::mem;
 
 use log::debug;
 
@@ -675,7 +676,7 @@ fn gcd_compute(a: i64, b: i64) -> i64 {
             break;
         }
         if (a as u64) > (b as u64) || a == i64::MIN {
-            std::mem::swap(&mut a, &mut b);
+            mem::swap(&mut a, &mut b);
         }
         if a == 1 {
             break;

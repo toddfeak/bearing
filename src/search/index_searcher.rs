@@ -10,7 +10,7 @@ use crate::search::collector::{Collector, CollectorManager, LeafCollector, Score
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
 use crate::search::query::{Query, Weight};
 use crate::search::similarity::{BM25Similarity, CollectionStatistics, Similarity, TermStatistics};
-use crate::search::top_docs::TopDocs;
+use crate::search::top_docs::{ScoreDoc, TopDocs};
 use crate::search::top_score_doc_collector::TopScoreDocCollectorManager;
 use crate::util::BytesRef;
 
@@ -78,7 +78,7 @@ impl<'a> IndexSearcher<'a> {
     /// for efficient deep-paging across potentially large result sets.
     pub fn search_after(
         &self,
-        after: Option<crate::search::top_docs::ScoreDoc>,
+        after: Option<ScoreDoc>,
         query: &dyn Query,
         num_hits: i32,
     ) -> io::Result<TopDocs> {

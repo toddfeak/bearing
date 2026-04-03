@@ -5,7 +5,10 @@
 #[macro_use]
 extern crate assertables;
 
-use std::path::Path;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Arc;
 
 use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory, SharedDirectory};
@@ -93,9 +96,9 @@ fn test_open_input_skip_bytes() {
     assert_eq!(input.read_byte().unwrap(), 6);
 }
 
-fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("bearing_test_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = env::temp_dir().join(format!("bearing_test_{name}_{}", process::id()));
+    let _ = fs::remove_dir_all(&dir);
     dir
 }
 
@@ -103,7 +106,7 @@ struct DirCleanup<'a>(&'a Path);
 
 impl Drop for DirCleanup<'_> {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.0);
+        let _ = fs::remove_dir_all(self.0);
     }
 }
 

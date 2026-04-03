@@ -16,7 +16,7 @@ use crate::codecs::lucene90::norms::{
     DATA_CODEC, DATA_EXTENSION, META_CODEC, META_EXTENSION, VERSION,
 };
 use crate::index::numeric_doc_values::NumericDocValues;
-use crate::index::{FieldInfos, index_file_names};
+use crate::index::{FieldInfo, FieldInfos, index_file_names};
 use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{DataInput, Directory, IndexInput, RandomAccessInput};
 
@@ -134,7 +134,7 @@ impl NormsProducer {
     /// it wraps an [`IndexedDISI`] for presence checks.
     pub fn get_norms(
         &self,
-        field_info: &crate::index::FieldInfo,
+        field_info: &FieldInfo,
     ) -> io::Result<Option<Box<dyn NumericDocValues>>> {
         let entry = match self.entry(field_info.number()) {
             Some(e) => e,
@@ -355,10 +355,11 @@ mod tests {
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::test_util;
     use assertables::*;
 
     fn make_field_info(name: &str, number: u32, has_norms: bool) -> FieldInfo {
-        crate::test_util::make_field_info(
+        test_util::make_field_info(
             name,
             number,
             !has_norms,

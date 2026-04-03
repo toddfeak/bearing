@@ -354,11 +354,12 @@ mod tests {
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::test_util;
     use crate::util::BytesRef;
     use assertables::*;
 
     fn make_field_info(name: &str, number: u32, dv_type: DocValuesType) -> FieldInfo {
-        crate::test_util::make_field_info(name, number, true, IndexOptions::None, dv_type)
+        test_util::make_field_info(name, number, true, IndexOptions::None, dv_type)
     }
 
     fn test_directory() -> SharedDirectory {

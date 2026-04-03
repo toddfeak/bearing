@@ -306,7 +306,7 @@ impl TermVectorChunkWriter {
                         let payload_length = store::read_vint(pos_reader).unwrap();
                         for _ in 0..payload_length {
                             let mut buf = [0u8; 1];
-                            std::io::Read::read_exact(pos_reader, &mut buf).unwrap();
+                            io::Read::read_exact(pos_reader, &mut buf).unwrap();
                         }
                     }
                     let pos_delta = code >> 1;
@@ -872,13 +872,15 @@ fn shared_prefix_length(a: &[u8], b: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use assertables::*;
 
     use super::*;
     use crate::store::memory::MemoryDirectory;
 
     fn make_directory() -> SharedDirectory {
-        std::sync::Mutex::new(Box::new(MemoryDirectory::new()))
+        Mutex::new(Box::new(MemoryDirectory::new()))
     }
 
     fn make_segment_id() -> [u8; 16] {

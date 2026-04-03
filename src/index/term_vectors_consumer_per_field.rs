@@ -9,7 +9,9 @@
 //! Stream 0: positions + payloads
 //! Stream 1: offsets
 
+use std::fmt;
 use std::io;
+use std::mem;
 
 use crate::codecs::lucene90::term_vectors::TermVectorChunkWriter;
 use crate::index::terms_hash::{
@@ -219,12 +221,6 @@ impl TermVectorsConsumerPerField {
         self.base.bytes_hash.size()
     }
 
-    /// Returns the field name.
-    #[expect(dead_code)]
-    pub(crate) fn field_name(&self) -> &str {
-        self.base.field_name()
-    }
-
     /// Clears the term hash and resets state for reuse between documents.
     pub(crate) fn reset(&mut self) {
         self.base.reset();
@@ -268,8 +264,8 @@ impl TermVectorsConsumerPerField {
     }
 }
 
-impl std::fmt::Debug for TermVectorsConsumerPerField {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for TermVectorsConsumerPerField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TermVectorsConsumerPerField")
             .field("field_name", &self.base.field_name())
             .field("num_terms", &self.base.bytes_hash.size())
@@ -360,7 +356,7 @@ impl TermVectorsPostingsArray {
 
     /// Returns bytes per posting (base + 3 int fields).
     pub(crate) fn bytes_per_posting(&self) -> usize {
-        BYTES_PER_POSTING + 3 * std::mem::size_of::<i32>()
+        BYTES_PER_POSTING + 3 * mem::size_of::<i32>()
     }
 
     /// Grows the arrays to accommodate at least one more entry.
@@ -382,14 +378,17 @@ impl TermVectorsPostingsArray {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::codecs::lucene90::term_vectors::TermVectorChunkWriter;
     use crate::store;
+    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::util::byte_block_pool::Allocator;
     use assertables::*;
 
     /// Helper to read a VInt from a byte slice reader.
-    fn read_vint<A: crate::util::byte_block_pool::Allocator>(
-        reader: &mut ByteSliceReader<'_, A>,
-    ) -> i32 {
+    fn read_vint<A: Allocator>(reader: &mut ByteSliceReader<'_, A>) -> i32 {
         store::read_vint(reader).unwrap()
     }
 
@@ -537,5 +536,122 @@ mod tests {
         assert_eq!(arr.size(), 2);
         let grown = arr.grow();
         assert_gt!(grown.size(), 2);
+    }
+
+    #[test]
+    fn test_debug_format() {
+        let tv = TermVectorsConsumerPerField::new("body".to_string());
+        let debug = format!("{tv:?}");
+        assert_contains!(debug, "TermVectorsConsumerPerField");
+        assert_contains!(debug, "body");
+    }
+
+    #[test]
+    fn test_has_data_false_when_no_vectors() {
+        let tv = TermVectorsConsumerPerField::new("body".to_string());
+        assert!(!tv.has_data());
+    }
+
+    #[test]
+    fn test_has_data_true_when_terms_added() {
+        let mut tv_th = TermsHash::new();
+        let mut tv = TermVectorsConsumerPerField::new("body".to_string());
+        tv.do_vectors = true;
+        tv.do_vector_positions = true;
+
+        tv.current_position = 0;
+        tv.current_start_offset = 0;
+        tv.current_end_offset = 5;
+        TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
+        assert!(tv.has_data());
+    }
+
+    #[test]
+    fn test_ensure_postings_capacity_grows() {
+        let mut tv = TermVectorsConsumerPerField::new("body".to_string());
+        assert_eq!(tv.postings_array.size(), 2);
+        tv.ensure_postings_capacity(10);
+        assert_ge!(tv.postings_array.size(), 11);
+    }
+
+    #[test]
+    fn test_finish_document_self_owned() {
+        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let tvd = {
+            let mut guard = dir.lock().unwrap();
+            guard.create_output("_0.tvd").unwrap()
+        };
+        let segment_id = [0u8; 16];
+        let mut writer = TermVectorChunkWriter::new(tvd, &segment_id, "").unwrap();
+
+        let mut tv_th = TermsHash::new();
+        let mut tv = TermVectorsConsumerPerField::new("body".to_string());
+        tv.do_vectors = true;
+        tv.do_vector_positions = true;
+        tv.do_vector_offsets = true;
+
+        // Add two terms
+        tv.current_position = 0;
+        tv.current_start_offset = 0;
+        tv.current_end_offset = 5;
+        TermsHashPerFieldTrait::add(&mut tv, &mut tv_th, b"hello", 0);
+
+        tv.current_position = 1;
+        tv.current_start_offset = 6;
+        tv.current_end_offset = 11;
+        TermsHashPerFieldTrait::add(&mut tv, &mut tv_th, b"world", 0);
+
+        // Flush via finish_document_self_owned
+        writer.start_document(1);
+        tv.finish_document_self_owned(0, &tv_th, &mut writer)
+            .unwrap();
+        writer.finish_document().unwrap();
+
+        // After finish, state should be reset
+        assert_eq!(tv.num_terms(), 0);
+        assert!(!tv.do_vectors);
+    }
+
+    #[test]
+    fn test_positions_and_offsets_combined() {
+        let mut tv_th = TermsHash::new();
+        let mut tv = TermVectorsConsumerPerField::new("body".to_string());
+        tv.do_vectors = true;
+        tv.do_vector_positions = true;
+        tv.do_vector_offsets = true;
+
+        // Term at position 0 with offsets [0, 5)
+        tv.current_position = 0;
+        tv.current_start_offset = 0;
+        tv.current_end_offset = 5;
+        TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
+
+        // Same term at position 2 with offsets [10, 15)
+        tv.current_position = 2;
+        tv.current_start_offset = 10;
+        tv.current_end_offset = 15;
+        TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
+
+        assert_eq!(tv.postings_array.freqs[0], 2);
+
+        // Read position stream (stream 0)
+        let (start, end) = tv.get_stream_range(&tv_th.int_pool, 0, 0);
+        let mut reader = ByteSliceReader::new(&tv_th.byte_pool, start, end);
+        let pos0 = read_vint(&mut reader);
+        assert_eq!(pos0, 0); // position 0 << 1
+        let pos1 = read_vint(&mut reader);
+        assert_eq!(pos1, 4); // delta 2 << 1
+
+        // Read offset stream (stream 1)
+        let (start, end) = tv.get_stream_range(&tv_th.int_pool, 0, 1);
+        let mut reader = ByteSliceReader::new(&tv_th.byte_pool, start, end);
+        let off0_start = read_vint(&mut reader);
+        assert_eq!(off0_start, 0);
+        let off0_len = read_vint(&mut reader);
+        assert_eq!(off0_len, 5);
+        let off1_start = read_vint(&mut reader);
+        assert_eq!(off1_start, 5); // delta: 10 - 5
+        let off1_len = read_vint(&mut reader);
+        assert_eq!(off1_len, 5);
     }
 }

@@ -134,10 +134,12 @@ impl FieldConsumer for FieldInfosConsumer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::index::field::stored;
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use std::mem;
     use std::sync::Arc;
+
+    use super::*;
+    use crate::index::field::{int_range, lat_lon, stored};
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_context() -> SegmentContext {
         SegmentContext {
@@ -228,7 +230,55 @@ mod tests {
         let consumer = FieldInfosConsumer::new();
         assert_eq!(
             consumer.mem_size(SizeFlags::CAPACITY),
-            std::mem::size_of::<FieldInfosConsumer>()
+            mem::size_of::<FieldInfosConsumer>()
         );
+    }
+
+    #[test]
+    fn debug_format() {
+        let consumer = FieldInfosConsumer::new();
+        let debug = format!("{consumer:?}");
+        assert_contains!(debug, "FieldInfosConsumer");
+        assert_contains!(debug, "field_count");
+    }
+
+    #[test]
+    fn tracks_point_field_single() {
+        let context = test_context();
+        let mut consumer = FieldInfosConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        consumer.start_document(0).unwrap();
+        let field = lat_lon("location").value(40.7128, -74.0060);
+        consumer.start_field(0, &field, &mut acc).unwrap();
+        consumer.finish_field(0, &field, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
+
+        let info = consumer.fields.get(&0).unwrap();
+        assert_gt!(info.point_dimension_count, 0);
+        assert_gt!(info.point_num_bytes, 0);
+
+        let names = consumer.flush(&context, &acc).unwrap();
+        assert_eq!(names, vec!["_0.fnm"]);
+    }
+
+    #[test]
+    fn tracks_point_field_range() {
+        let context = test_context();
+        let mut consumer = FieldInfosConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        consumer.start_document(0).unwrap();
+        let field = int_range("range").value(&[1], &[10]);
+        consumer.start_field(0, &field, &mut acc).unwrap();
+        consumer.finish_field(0, &field, &mut acc).unwrap();
+        consumer.finish_document(0, &mut acc, &context).unwrap();
+
+        let info = consumer.fields.get(&0).unwrap();
+        // Range doubles the dims (min + max)
+        assert_gt!(info.point_dimension_count, 0);
+
+        let names = consumer.flush(&context, &acc).unwrap();
+        assert_eq!(names, vec!["_0.fnm"]);
     }
 }

@@ -10,14 +10,15 @@
 //! [`super::trie_reader::TrieReader`] and scan within them to find exact terms
 //! and decode their metadata ([`IntBlockTermState`]).
 
+use std::cmp::Ordering;
 use std::io;
 
 use crate::codecs::lucene103::postings_format::IntBlockTermState;
 use crate::codecs::lucene103::trie_reader::TrieReader;
 use crate::document::IndexOptions;
-use crate::encoding::{lowercase_ascii, lz4, zigzag};
+use crate::encoding::{lowercase_ascii, lz4, pfor, zigzag};
 use crate::index::terms::TermsEnum;
-use crate::store::{DataInput, IndexInput};
+use crate::store::{DataInput, DataInputReader, IndexInput};
 
 const COMPRESSION_NONE: u32 = 0;
 const COMPRESSION_LOWERCASE_ASCII: u32 = 1;
@@ -286,16 +287,16 @@ fn scan_block(
         let cmp = suffix.cmp(target_suffix);
 
         match cmp {
-            std::cmp::Ordering::Equal => {
+            Ordering::Equal => {
                 // Found it! Decode stats and metadata up to term_ord
                 let state = decode_term_state(&stats_bytes, &meta_bytes, term_ord, index_options)?;
                 return Ok(ScanResult::Found(state));
             }
-            std::cmp::Ordering::Greater => {
+            Ordering::Greater => {
                 // Past the target — term doesn't exist in this block
                 return Ok(ScanResult::NotFound);
             }
-            std::cmp::Ordering::Less => {
+            Ordering::Less => {
                 // Haven't reached the target yet — advance term_ord
                 term_ord += 1;
             }
@@ -386,7 +387,7 @@ fn decode_term_meta(
 
     if has_positions {
         state.pos_start_fp = last_state.pos_start_fp + reader.read_vlong()?;
-        if state.total_term_freq > crate::encoding::pfor::BLOCK_SIZE as i64 {
+        if state.total_term_freq > pfor::BLOCK_SIZE as i64 {
             state.last_pos_block_offset = reader.read_vlong()?;
         } else {
             state.last_pos_block_offset = -1;
@@ -409,11 +410,11 @@ fn read_compressed(
             Ok(buf)
         }
         COMPRESSION_LZ4 => {
-            let mut reader = crate::store::DataInputReader(input);
+            let mut reader = DataInputReader(input);
             Ok(lz4::decompress_from_reader(&mut reader, uncompressed_len)?)
         }
         COMPRESSION_LOWERCASE_ASCII => {
-            let mut reader = crate::store::DataInputReader(input);
+            let mut reader = DataInputReader(input);
             Ok(lowercase_ascii::decompress_from_reader(
                 &mut reader,
                 uncompressed_len,
@@ -441,11 +442,11 @@ impl<'a> SliceReader<'a> {
     }
 
     fn read_vint(&mut self) -> io::Result<i32> {
-        crate::store::DataInput::read_vint(self)
+        DataInput::read_vint(self)
     }
 
     fn read_vlong(&mut self) -> io::Result<i64> {
-        crate::store::DataInput::read_vlong(self)
+        DataInput::read_vlong(self)
     }
 }
 
@@ -476,6 +477,7 @@ mod tests {
     use crate::codecs::competitive_impact::NormsLookup;
     use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
+    use crate::document::DocValuesType;
     use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::memory::MemoryDirectory;
@@ -489,7 +491,7 @@ mod tests {
             false,
             false,
             index_options,
-            crate::document::DocValuesType::None,
+            DocValuesType::None,
             PointDimensionConfig::default(),
         )
     }

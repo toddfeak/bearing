@@ -6,6 +6,7 @@
 //! correct segments returned with expected file lists.
 
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -435,7 +436,7 @@ fn reader_field_not_stored() {
 #[test]
 fn stored_tokenized_field_from_file_path() {
     // Write a temp file, then index it as stored+tokenized via PathBuf
-    let dir = std::env::temp_dir().join("bearing_test_stored_path");
+    let dir = env::temp_dir().join("bearing_test_stored_path");
     fs::create_dir_all(&dir).unwrap();
     let file_path = dir.join("doc.txt");
     fs::write(&file_path, "hello world from a file").unwrap();

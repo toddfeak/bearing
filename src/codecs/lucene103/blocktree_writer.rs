@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::io;
+use std::str;
 
 use log::debug;
 
@@ -166,7 +167,7 @@ impl BlockTreeTermsWriter {
         for &sorted_id in &sorted_ids[..num_terms] {
             let term_id = sorted_id as usize;
             let term_bytes = per_field.term_bytes(&terms_hash.byte_pool, term_id);
-            let term_str = std::str::from_utf8(term_bytes).expect("term bytes must be valid UTF-8");
+            let term_str = str::from_utf8(term_bytes).expect("term bytes must be valid UTF-8");
 
             let decoded = per_field.decode_term(terms_hash, term_id)?;
 
@@ -1661,14 +1662,8 @@ mod tests {
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
         let tmd_bytes = dir.lock().unwrap().read_file(tmd_name).unwrap();
 
-        let meta_hdr_len = codec_util::index_header_length(
-            crate::codecs::lucene103::postings_format::TERMS_META_CODEC_NAME,
-            "",
-        );
-        let terms_hdr_len = codec_util::index_header_length(
-            crate::codecs::lucene103::postings_format::TERMS_CODEC,
-            "",
-        );
+        let meta_hdr_len = codec_util::index_header_length(TERMS_META_CODEC_NAME, "");
+        let terms_hdr_len = codec_util::index_header_length(TERMS_CODEC, "");
         let mut pos = meta_hdr_len + terms_hdr_len;
         let (_, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
@@ -1721,14 +1716,8 @@ mod tests {
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
         let tmd_bytes = dir.lock().unwrap().read_file(tmd_name).unwrap();
 
-        let meta_hdr_len = codec_util::index_header_length(
-            crate::codecs::lucene103::postings_format::TERMS_META_CODEC_NAME,
-            "",
-        );
-        let terms_hdr_len = codec_util::index_header_length(
-            crate::codecs::lucene103::postings_format::TERMS_CODEC,
-            "",
-        );
+        let meta_hdr_len = codec_util::index_header_length(TERMS_META_CODEC_NAME, "");
+        let terms_hdr_len = codec_util::index_header_length(TERMS_CODEC, "");
         let mut pos = meta_hdr_len + terms_hdr_len;
         let (_, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
@@ -1753,8 +1742,8 @@ mod tests {
         pos += n;
         let max_term = &tmd_bytes[pos..pos + max_len as usize];
 
-        assert_eq!(std::str::from_utf8(min_term).unwrap(), "apple");
-        assert_eq!(std::str::from_utf8(max_term).unwrap(), "cherry");
+        assert_eq!(str::from_utf8(min_term).unwrap(), "apple");
+        assert_eq!(str::from_utf8(max_term).unwrap(), "cherry");
     }
 
     fn read_vint(bytes: &[u8]) -> (i32, usize) {

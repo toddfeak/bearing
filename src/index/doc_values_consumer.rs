@@ -3,6 +3,7 @@
 //! [`FieldConsumer`] that buffers doc values data and writes `.dvm`, `.dvd`.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 
 use crate::analysis::Token;
@@ -21,8 +22,8 @@ struct PerFieldState {
     accumulator: DocValuesAccumulator,
 }
 
-impl std::fmt::Debug for PerFieldState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for PerFieldState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PerFieldState")
             .field("field_name", &self.field_name)
             .finish_non_exhaustive()

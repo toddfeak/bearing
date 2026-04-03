@@ -260,8 +260,9 @@ mod tests {
 
     use crate::analysis::StandardAnalyzer;
     use crate::analysis::Token;
+    use crate::document::DocumentBuilder;
     use crate::index::consumer::FieldConsumer;
-    use crate::index::field::Field;
+    use crate::index::field::{Field, text};
     use crate::index::segment::SegmentId;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
@@ -436,5 +437,105 @@ mod tests {
         assert!(flushed.file_names.contains(&"_0.fdt".to_string()));
         assert!(flushed.file_names.contains(&"_0.fdx".to_string()));
         assert!(flushed.file_names.contains(&"_0.si".to_string()));
+    }
+
+    #[test]
+    fn add_document_with_tokenized_field() {
+        /// Consumer that accepts and counts tokens.
+        struct TokenCountingConsumer {
+            token_count: usize,
+        }
+
+        impl mem_dbg::MemSize for TokenCountingConsumer {
+            fn mem_size_rec(
+                &self,
+                _flags: mem_dbg::SizeFlags,
+                _refs: &mut mem_dbg::HashMap<usize, usize>,
+            ) -> usize {
+                0
+            }
+        }
+
+        impl FieldConsumer for TokenCountingConsumer {
+            fn start_document(&mut self, _: i32) -> io::Result<()> {
+                Ok(())
+            }
+            fn start_field(
+                &mut self,
+                _: u32,
+                _: &Field,
+                _: &mut SegmentAccumulator,
+            ) -> io::Result<TokenInterest> {
+                Ok(TokenInterest::WantsTokens)
+            }
+            fn add_token(
+                &mut self,
+                _: u32,
+                _: &Field,
+                _: &Token<'_>,
+                _: &mut SegmentAccumulator,
+            ) -> io::Result<()> {
+                self.token_count += 1;
+                Ok(())
+            }
+            fn finish_field(
+                &mut self,
+                _: u32,
+                _: &Field,
+                _: &mut SegmentAccumulator,
+            ) -> io::Result<()> {
+                Ok(())
+            }
+            fn finish_document(
+                &mut self,
+                _: i32,
+                _: &mut SegmentAccumulator,
+                _: &SegmentContext,
+            ) -> io::Result<()> {
+                Ok(())
+            }
+            fn flush(
+                &mut self,
+                _: &SegmentContext,
+                _: &SegmentAccumulator,
+            ) -> io::Result<Vec<String>> {
+                Ok(vec![])
+            }
+        }
+
+        let context = test_context();
+        let segment_id = SegmentId {
+            name: "_0".to_string(),
+            id: [0u8; 16],
+        };
+        let consumer = TokenCountingConsumer { token_count: 0 };
+        let mut worker = SegmentWorker::new(
+            segment_id,
+            vec![Box::new(consumer)],
+            Box::new(StandardAnalyzer::default()),
+        );
+
+        let doc = DocumentBuilder::new()
+            .add_field(text("body").value("hello world"))
+            .build();
+        worker.add_document(doc, &context).unwrap();
+
+        // add_document ran through the tokenization path without error
+        assert_eq!(worker.doc_count, 1);
+    }
+
+    #[test]
+    fn ram_bytes_used_includes_consumers() {
+        let segment_id = SegmentId {
+            name: "_0".to_string(),
+            id: [0u8; 16],
+        };
+        let worker = SegmentWorker::new(
+            segment_id,
+            vec![Box::new(NoOpConsumer)],
+            Box::new(StandardAnalyzer::default()),
+        );
+        let ram = worker.ram_bytes_used();
+        assert_gt!(ram, 0);
     }
 }

@@ -8,11 +8,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 
 use log::error;
 
-use bearing::document::DocumentBuilder;
+use bearing::document::{Document, DocumentBuilder};
 use bearing::index::config::IndexWriterConfig;
 use bearing::index::field::{
     TermVectorOptions, binary_dv, double_field, double_range, feature, float_field, float_range,
@@ -220,7 +220,7 @@ fn main() {
 }
 
 /// Creates a Document from a file path with all supported field types.
-fn make_document(path: &Path) -> bearing::document::Document {
+fn make_document(path: &Path) -> Document {
     let path_str = path.to_string_lossy().to_string();
     let file_name = path
         .file_name()
@@ -236,7 +236,7 @@ fn make_document(path: &Path) -> bearing::document::Document {
     let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
     let modified = metadata
         .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 

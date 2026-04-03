@@ -165,6 +165,9 @@ impl FlushControl {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::thread;
+
     use super::*;
     use assertables::*;
 
@@ -308,9 +311,6 @@ mod tests {
 
     #[test]
     fn concurrent_updates() {
-        use std::sync::Arc;
-        use std::thread;
-
         let fc = Arc::new(FlushControl::new(4, 1.0, -1));
         let mut handles = Vec::new();
 

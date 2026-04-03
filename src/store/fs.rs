@@ -13,7 +13,7 @@ use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::store::checksum::CRC32;
-use crate::store::{DataInput, DataOutput, Directory, IndexInput, IndexOutput};
+use crate::store::{DataInput, DataOutput, Directory, IndexInput, IndexOutput, RandomAccessInput};
 
 // ============================================================
 // Shared filesystem helpers used by both FSDirectory and MmapDirectory
@@ -346,7 +346,7 @@ impl IndexInput for FSIndexInput {
         }))
     }
 
-    fn random_access(&self) -> io::Result<Box<dyn crate::store::RandomAccessInput>> {
+    fn random_access(&self) -> io::Result<Box<dyn RandomAccessInput>> {
         let mut input = FSIndexInput::new(
             format!("{} [random]", self.name),
             BufReader::new(File::open(&self.path)?),
@@ -358,7 +358,7 @@ impl IndexInput for FSIndexInput {
     }
 }
 
-impl crate::store::RandomAccessInput for FSIndexInput {
+impl RandomAccessInput for FSIndexInput {
     fn read_byte_at(&self, pos: u64) -> io::Result<u8> {
         if pos >= self.len {
             return Err(io::Error::new(
@@ -418,11 +418,13 @@ impl crate::store::RandomAccessInput for FSIndexInput {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::process;
+
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("rustlucene_test_fs_{name}_{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("rustlucene_test_fs_{name}_{}", process::id()));
         // Clean up any leftover from a previous run
         let _ = fs::remove_dir_all(&dir);
         dir

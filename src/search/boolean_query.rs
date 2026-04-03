@@ -244,10 +244,10 @@ mod tests {
     impl Query for DummyQuery {
         fn create_weight(
             &self,
-            _searcher: &crate::search::IndexSearcher,
-            _score_mode: crate::search::ScoreMode,
+            _searcher: &IndexSearcher,
+            _score_mode: ScoreMode,
             _boost: f32,
-        ) -> std::io::Result<Box<dyn crate::search::Weight>> {
+        ) -> io::Result<Box<dyn Weight>> {
             unimplemented!()
         }
     }

@@ -33,6 +33,8 @@ cargo clippy --all-targets     # lint (lib, tests, integration tests)
 ./tests/e2e_all.sh             # all e2e tests (indexing, impacts, compression)
 ```
 
+Project-specific clippy lints are configured in `Cargo.toml` under `[lints.clippy]`. Currently enforced: `absolute_paths = "warn"` (requires `use` imports instead of inline qualified paths).
+
 **Before any commit**, run `cargo test`, `cargo fmt`, `cargo clippy --all-targets`, and `./tests/e2e_all.sh`. All must pass.
 
 ## Conventions

@@ -133,11 +133,14 @@ impl FieldConsumer for NormsConsumer {
 
 #[cfg(test)]
 mod tests {
+    use std::mem;
+    use std::sync::Arc;
+
+    use assertables::*;
+
     use super::*;
     use crate::index::field::{stored, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
-    use assertables::*;
-    use std::sync::Arc;
 
     fn test_context() -> SegmentContext {
         SegmentContext {
@@ -282,7 +285,7 @@ mod tests {
         let consumer = NormsConsumer::new();
         assert_eq!(
             consumer.mem_size(SizeFlags::CAPACITY),
-            std::mem::size_of::<NormsConsumer>()
+            mem::size_of::<NormsConsumer>()
         );
     }
 }

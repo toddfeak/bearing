@@ -5,6 +5,9 @@
 //! Values are accumulated into fixed-size pages. When a page fills, values are
 //! delta-encoded (value - min) and bit-packed at the minimum required BPV.
 
+use std::fmt;
+use std::mem;
+
 use crate::encoding::packed;
 
 /// Default page size (number of values per page).
@@ -130,14 +133,14 @@ impl PackedLongValues {
 
     /// Returns the estimated RAM usage in bytes.
     pub fn ram_bytes_used(&self) -> usize {
-        std::mem::size_of::<Self>()
+        mem::size_of::<Self>()
             + self.pages.iter().map(|p| p.ram_bytes_used()).sum::<usize>()
-            + self.mins.len() * std::mem::size_of::<i64>()
+            + self.mins.len() * mem::size_of::<i64>()
     }
 }
 
-impl std::fmt::Debug for PackedLongValues {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for PackedLongValues {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PackedLongValues")
             .field("size", &self.size)
             .field("pages", &self.pages.len())
@@ -256,10 +259,10 @@ impl DeltaPackedBuilder {
 
     /// Returns the estimated RAM usage of the builder in bytes.
     pub fn ram_bytes_used(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.pending.len() * std::mem::size_of::<i64>()
+        mem::size_of::<Self>()
+            + self.pending.len() * mem::size_of::<i64>()
             + self.pages.iter().map(|p| p.ram_bytes_used()).sum::<usize>()
-            + self.mins.len() * std::mem::size_of::<i64>()
+            + self.mins.len() * mem::size_of::<i64>()
     }
 
     /// Builds the immutable [`PackedLongValues`]. This is a destructive operation.
@@ -323,8 +326,8 @@ impl DeltaPackedBuilder {
     }
 }
 
-impl std::fmt::Debug for DeltaPackedBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for DeltaPackedBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DeltaPackedBuilder")
             .field("size", &self.size)
             .field("pages", &self.values_off)

@@ -11,6 +11,10 @@
 //! are recorded as delta-encoded exceptions. Compression fails if the input is too
 //! short (<8 bytes) or has too many exceptions (>len/32).
 
+use std::io;
+
+use crate::encoding::varint;
+
 /// Returns whether a byte value is compressible (maps to a 6-bit value).
 fn is_compressible(b: u8) -> bool {
     let high3 = (b.wrapping_add(1)) & !0x1F;
@@ -73,7 +77,7 @@ pub fn compress(input: &[u8], len: usize) -> Option<Vec<u8>> {
     out.extend_from_slice(&tmp[..compressed_len]);
 
     // Write exception count as VInt
-    crate::encoding::varint::write_vint(&mut out, num_exceptions as i32).unwrap();
+    varint::write_vint(&mut out, num_exceptions as i32).unwrap();
 
     if num_exceptions > 0 {
         previous_exception_index = 0;
@@ -103,10 +107,7 @@ pub fn compress(input: &[u8], len: usize) -> Option<Vec<u8>> {
 ///
 /// `len` is the original uncompressed length. Reads compressed bytes from the
 /// reader and restores the original byte values.
-pub fn decompress_from_reader(
-    reader: &mut impl std::io::Read,
-    len: usize,
-) -> std::io::Result<Vec<u8>> {
+pub fn decompress_from_reader(reader: &mut impl io::Read, len: usize) -> io::Result<Vec<u8>> {
     let saved = len >> 2;
     let compressed_len = len - saved;
 
@@ -127,7 +128,7 @@ pub fn decompress_from_reader(
     }
 
     // 4. Restore exceptions
-    let num_exceptions = crate::encoding::varint::read_vint(reader)?;
+    let num_exceptions = varint::read_vint(reader)?;
     let mut byte = [0u8; 1];
     let mut i = 0usize;
     for _ in 0..num_exceptions {
@@ -167,7 +168,7 @@ fn decompress(compressed: &[u8], len: usize) -> Vec<u8> {
     // 4. Restore exceptions
     let mut pos = compressed_len;
     let mut cursor = &compressed[pos..];
-    let num_exceptions = crate::encoding::varint::read_vint(&mut cursor).unwrap();
+    let num_exceptions = varint::read_vint(&mut cursor).unwrap();
     pos += (compressed.len() - pos) - cursor.len();
 
     let mut i: usize = 0;
@@ -183,6 +184,9 @@ fn decompress(compressed: &[u8], len: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     use super::*;
 
     fn round_trip(input: &[u8]) -> bool {
@@ -237,9 +241,6 @@ mod tests {
 
     #[test]
     fn test_random_compressible_ascii() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         for iter in 0..100 {
             let len = 8 + (iter * 7) % 200;
             let mut bytes = vec![0u8; len];
@@ -258,9 +259,6 @@ mod tests {
 
     #[test]
     fn test_random_compressible_with_exceptions() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         for iter in 0..100 {
             let len = 64 + (iter * 13) % 500;
             let max_exceptions = len >> 5;

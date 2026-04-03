@@ -73,11 +73,13 @@ impl BulkScorer for ReqExclBulkScorer {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::*;
     use crate::search::collector::{LeafCollector, ScoreContext};
     use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
+    use crate::search::scorable::Scorable;
     use assertables::*;
-    use std::rc::Rc;
 
     // -----------------------------------------------------------------------
     // Mock BulkScorer: collects all docs in [min, max) into a shared vec
@@ -173,7 +175,7 @@ mod tests {
         }
     }
 
-    impl crate::search::scorable::Scorable for MockExclScorer {
+    impl Scorable for MockExclScorer {
         fn score(&mut self) -> io::Result<f32> {
             Ok(0.0)
         }

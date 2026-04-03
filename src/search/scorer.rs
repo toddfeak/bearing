@@ -4,13 +4,14 @@
 //! and `DocScoreEncoder`.
 
 use std::fmt;
+use std::io;
+use std::sync::atomic;
 
 use crate::codecs::competitive_impact::Impact;
 use crate::search::collector::DocAndFloatFeatureBuffer;
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
 use crate::search::scorable::Scorable;
 use crate::search::similarity::SimScorer;
-use std::io;
 
 // ---------------------------------------------------------------------------
 // Impacts / ImpactsSource
@@ -290,7 +291,7 @@ pub struct ImpactsDISI<I: DocIdSetIterator> {
 #[derive(Debug)]
 pub struct MaxScoreAccumulator {
     /// We use 2^10-1 to check the remainder with a bitwise operation.
-    acc: std::sync::atomic::AtomicI64,
+    acc: atomic::AtomicI64,
     /// The interval at which to check for global min competitive score updates.
     pub(crate) mod_interval: i64,
 }
@@ -302,20 +303,19 @@ impl MaxScoreAccumulator {
     /// Sole constructor.
     pub fn new() -> Self {
         Self {
-            acc: std::sync::atomic::AtomicI64::new(i64::MIN),
+            acc: atomic::AtomicI64::new(i64::MIN),
             mod_interval: DEFAULT_INTERVAL,
         }
     }
 
     /// Accumulate a new (doc, score) encoded as a long.
     pub fn accumulate(&self, code: i64) {
-        self.acc
-            .fetch_max(code, std::sync::atomic::Ordering::Relaxed);
+        self.acc.fetch_max(code, atomic::Ordering::Relaxed);
     }
 
     /// Get the current raw accumulated value.
     pub fn get_raw(&self) -> i64 {
-        self.acc.load(std::sync::atomic::Ordering::Relaxed)
+        self.acc.load(atomic::Ordering::Relaxed)
     }
 }
 
@@ -493,12 +493,12 @@ mod tests {
 
     /// Simple SimScorer for testing: score = freq / max(norm, 1).
     struct TestSimScorer;
-    impl crate::search::similarity::SimScorer for TestSimScorer {
+    impl SimScorer for TestSimScorer {
         fn score(&self, freq: f32, norm: i64) -> f32 {
             freq / norm.max(1) as f32
         }
 
-        fn box_clone(&self) -> Box<dyn crate::search::similarity::SimScorer> {
+        fn box_clone(&self) -> Box<dyn SimScorer> {
             Box::new(TestSimScorer)
         }
     }

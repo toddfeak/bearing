@@ -5,6 +5,7 @@
 //! set for encoding in `.doc` skip blocks. This allows readers to skip blocks that
 //! cannot contribute to top-K results during scoring.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 /// Per-document scoring factors: term frequency and norm factor.
@@ -20,7 +21,7 @@ pub struct Impact {
 }
 
 impl Ord for Impact {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.freq
             .cmp(&other.freq)
             .then_with(|| (other.norm as u64).cmp(&(self.norm as u64)))
@@ -28,7 +29,7 @@ impl Ord for Impact {
 }
 
 impl PartialOrd for Impact {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }

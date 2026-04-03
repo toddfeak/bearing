@@ -13,6 +13,9 @@ categories = ["text-processing"]
 rust-version = "1.88"
 include = ["/src/", "/tests/*.rs", "/Cargo.toml", "/LICENSE", "/NOTICE", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md"]
 
+[lints.clippy]
+absolute_paths = "warn"
+
 [lib]
 path = "src/lib.rs"
 

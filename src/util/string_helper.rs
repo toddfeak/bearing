@@ -2,6 +2,7 @@
 //! String and ID utilities: random ID generation and byte sorting helpers.
 
 use std::sync::Mutex;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Length of segment IDs in bytes.
@@ -21,7 +22,7 @@ pub fn random_id() -> [u8; ID_LENGTH] {
             .unwrap_or_default();
         let seed_hi = now.as_nanos() as u64;
         let seed_lo = {
-            let tid = format!("{:?}", std::thread::current().id());
+            let tid = format!("{:?}", thread::current().id());
             tid.bytes()
                 .fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64))
                 | 1

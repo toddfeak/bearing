@@ -7,6 +7,8 @@
 //! with linear probing. High bits of the hash code are stored alongside the
 //! ID for fast rejection during probing.
 
+use std::fmt;
+
 use crate::util::byte_block_pool::{
     BYTE_BLOCK_MASK, BYTE_BLOCK_SHIFT, BYTE_BLOCK_SIZE, ByteBlockPool, DirectAllocator,
 };
@@ -359,8 +361,8 @@ impl BytesRefHash {
     }
 }
 
-impl std::fmt::Debug for BytesRefHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for BytesRefHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BytesRefHash")
             .field("count", &self.count)
             .field("hash_size", &self.hash_size)

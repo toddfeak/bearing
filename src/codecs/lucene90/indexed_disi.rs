@@ -653,6 +653,8 @@ pub fn create_jump_table(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::store::DataOutput;
     use crate::store::byte_slice_input::ByteSliceIndexInput;
@@ -951,7 +953,7 @@ mod tests {
     /// Verify advance_exact() returns true for set docs and false for unset docs.
     fn assert_advance_exact(doc_ids: &[i32], max_doc: i32) {
         let mut disi = write_and_read(doc_ids, max_doc);
-        let doc_set: std::collections::HashSet<i32> = doc_ids.iter().copied().collect();
+        let doc_set: HashSet<i32> = doc_ids.iter().copied().collect();
 
         // Forward-only check: advance_exact can only go forward
         let check_limit = max_doc.min(200_000);

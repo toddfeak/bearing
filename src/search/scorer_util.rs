@@ -150,9 +150,13 @@ fn ulp_f32(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assertables::*;
     use std::fmt;
+
+    use super::*;
+    use crate::search::collector::DocAndFloatFeatureBuffer;
+    use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
+    use crate::search::scorable::Scorable;
+    use assertables::*;
 
     #[test]
     fn test_ulp_f32_one() {
@@ -270,10 +274,6 @@ mod tests {
 
     #[test]
     fn test_apply_required_clause() {
-        use crate::search::collector::DocAndFloatFeatureBuffer;
-        use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
-        use crate::search::scorable::Scorable;
-
         // Mock scorer that matches docs 1, 3, 5 with score 0.5
         struct MockScorer {
             docs: Vec<i32>,

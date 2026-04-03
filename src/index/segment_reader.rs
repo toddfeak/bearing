@@ -35,6 +35,7 @@ use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
 use crate::codecs::lucene103::postings_reader::PostingsReader;
+use crate::index::numeric_doc_values::NumericDocValues;
 use crate::index::terms::Terms;
 use crate::index::{FieldInfos, SegmentInfo};
 use crate::store::Directory;
@@ -226,14 +227,11 @@ impl SegmentReader {
         self.norms_reader.as_ref()
     }
 
-    /// Returns a lazy [`NumericDocValues`](crate::index::numeric_doc_values::NumericDocValues) for the given field's norms, or `None`
+    /// Returns a lazy [`NumericDocValues`] for the given field's norms, or `None`
     /// if no norms exist for this field.
     ///
     /// Matches Java's `LeafReader.getNormValues(String field)`.
-    pub fn get_norm_values(
-        &self,
-        field: &str,
-    ) -> io::Result<Option<Box<dyn crate::index::numeric_doc_values::NumericDocValues>>> {
+    pub fn get_norm_values(&self, field: &str) -> io::Result<Option<Box<dyn NumericDocValues>>> {
         let field_info = match self.field_infos.field_info_by_name(field) {
             Some(fi) => fi,
             None => return Ok(None),
@@ -293,10 +291,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::document::DocumentBuilder;
+    use crate::codecs::lucene103::postings_reader::BlockPostingsEnum;
+    use crate::document::{DocumentBuilder, IndexOptions};
     use crate::index::config::IndexWriterConfig;
     use crate::index::field::{string, text};
+    use crate::index::segment_infos;
     use crate::index::writer::IndexWriter;
+    use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn write_test_index(compound: bool) -> (Arc<SharedDirectory>, String, [u8; 16]) {
@@ -325,7 +326,7 @@ mod tests {
         let dir = directory.lock().unwrap();
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = crate::index::segment_infos::read(&**dir, segments_file).unwrap();
+        let infos = segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
         let name = seg.name.clone();
         let id = seg.id;
@@ -394,7 +395,7 @@ mod tests {
         reader: &SegmentReader,
         field: &str,
         term: &[u8],
-    ) -> io::Result<Option<crate::codecs::lucene103::postings_reader::BlockPostingsEnum>> {
+    ) -> io::Result<Option<BlockPostingsEnum>> {
         let field_info = match reader.field_infos().field_info_by_name(field) {
             Some(fi) => fi,
             None => return Ok(None),
@@ -414,8 +415,8 @@ mod tests {
         let state = terms_enum.term_state()?;
         let index_has_freq = field_info.index_options().has_freqs();
         let index_has_pos = field_info.index_options().has_positions();
-        let index_has_offsets = field_info.index_options()
-            >= crate::document::IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
+        let index_has_offsets =
+            field_info.index_options() >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
         let index_has_offsets_or_payloads = index_has_offsets || field_info.has_payloads();
         let iter = postings_reader.postings(
             &state,
@@ -427,10 +428,7 @@ mod tests {
         Ok(Some(iter))
     }
 
-    fn collect_docs(
-        iter: &mut crate::codecs::lucene103::postings_reader::BlockPostingsEnum,
-    ) -> Vec<i32> {
-        use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
+    fn collect_docs(iter: &mut BlockPostingsEnum) -> Vec<i32> {
         let mut docs = Vec::new();
         loop {
             let doc = iter.next_doc().unwrap();
@@ -547,7 +545,7 @@ mod tests {
         let dir = directory.lock().unwrap();
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = crate::index::segment_infos::read(&**dir, segments_file).unwrap();
+        let infos = segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
         let reader = SegmentReader::open(&**dir, &seg.name, &seg.id).unwrap();
@@ -615,7 +613,7 @@ mod tests {
         let dir = directory.lock().unwrap();
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = crate::index::segment_infos::read(&**dir, segments_file).unwrap();
+        let infos = segment_infos::read(&**dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
         let reader = SegmentReader::open(&**dir, &seg.name, &seg.id).unwrap();

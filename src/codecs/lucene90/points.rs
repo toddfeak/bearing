@@ -2,6 +2,7 @@
 //! BKD tree writer for multi-dimensional point indexing.
 
 use std::io;
+use std::mem;
 
 use log::debug;
 
@@ -645,7 +646,7 @@ fn get_num_left_leaf_nodes(num_leaves: usize) -> usize {
 
 /// Flushes the write buffer contents into the blocks list and returns the block size.
 fn append_block(write_buffer: &mut Vec<u8>, blocks: &mut Vec<Vec<u8>>) -> usize {
-    let block = std::mem::take(write_buffer);
+    let block = mem::take(write_buffer);
     let len = block.len();
     blocks.push(block);
     len
@@ -868,7 +869,7 @@ fn recurse_pack_index(
         debug_assert_eq!(left_num_bytes, 0);
     }
 
-    let bytes2 = std::mem::take(write_buffer);
+    let bytes2 = mem::take(write_buffer);
     blocks[idx_sav] = bytes2;
 
     negative_deltas[split_dim] = false;

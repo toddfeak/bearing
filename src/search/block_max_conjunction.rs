@@ -253,6 +253,7 @@ impl BulkScorer for BlockMaxConjunctionBulkScorer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::collector::DocIdStream;
     use crate::search::doc_id_set_iterator::DocIdSetIterator;
     use crate::search::scorable::Scorable;
     use assertables::*;
@@ -400,10 +401,7 @@ mod tests {
             Ok(())
         }
 
-        fn collect_stream(
-            &mut self,
-            _stream: &mut dyn crate::search::collector::DocIdStream,
-        ) -> io::Result<()> {
+        fn collect_stream(&mut self, _stream: &mut dyn DocIdStream) -> io::Result<()> {
             todo!()
         }
 
@@ -574,10 +572,7 @@ mod tests {
                 }
                 Ok(())
             }
-            fn collect_stream(
-                &mut self,
-                _stream: &mut dyn crate::search::collector::DocIdStream,
-            ) -> io::Result<()> {
+            fn collect_stream(&mut self, _stream: &mut dyn DocIdStream) -> io::Result<()> {
                 todo!()
             }
             fn competitive_iterator(&self) -> Option<Box<dyn DocIdSetIterator>> {

@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::mem;
 
 use crate::analysis::Token;
 use crate::codecs::lucene90::term_vectors::{self, TermVectorChunkWriter};
@@ -60,7 +61,7 @@ impl mem_dbg::MemSize for TermVectorsConsumer {
         _refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
         // TV pools are reset per-document, so baseline is small
-        std::mem::size_of::<Self>()
+        mem::size_of::<Self>()
     }
 }
 
@@ -323,5 +324,156 @@ mod tests {
         use mem_dbg::{MemSize, SizeFlags};
         let consumer = TermVectorsConsumer::new();
         assert_lt!(consumer.mem_size(SizeFlags::CAPACITY), 1000);
+    }
+
+    #[test]
+    fn default_creates_new() {
+        let consumer = TermVectorsConsumer::default();
+        assert!(consumer.writer.is_none());
+    }
+
+    #[test]
+    fn debug_format() {
+        let consumer = TermVectorsConsumer::new();
+        let debug = format!("{consumer:?}");
+        assert_contains!(debug, "TermVectorsConsumer");
+        assert_contains!(debug, "has_vectors");
+    }
+
+    #[test]
+    fn full_pipeline_add_token_finish_flush() {
+        let context = test_context();
+        let mut consumer = TermVectorsConsumer::new();
+        let mut accum = SegmentAccumulator::new();
+
+        let field = text("contents")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("hello world");
+
+        // Doc 0 with term vectors
+        consumer.start_document(0).unwrap();
+        consumer.start_field(0, &field, &mut accum).unwrap();
+
+        let token1 = Token {
+            text: "hello",
+            position_increment: 1,
+            start_offset: 0,
+            end_offset: 5,
+        };
+        consumer.add_token(0, &field, &token1, &mut accum).unwrap();
+
+        let token2 = Token {
+            text: "world",
+            position_increment: 1,
+            start_offset: 6,
+            end_offset: 11,
+        };
+        consumer.add_token(0, &field, &token2, &mut accum).unwrap();
+
+        consumer.finish_field(0, &field, &mut accum).unwrap();
+        consumer.finish_document(0, &mut accum, &context).unwrap();
+        accum.increment_doc_count();
+
+        // Writer should have been lazily created
+        assert!(consumer.writer.is_some());
+
+        // Flush
+        let files = consumer.flush(&context, &accum).unwrap();
+        assert!(!files.is_empty());
+
+        // Verify files exist in the directory
+        let guard = context.directory.lock().unwrap();
+        for name in &files {
+            let data = guard.read_file(name).unwrap();
+            assert_not_empty!(data);
+        }
+    }
+
+    #[test]
+    fn flush_fills_gap_docs() {
+        let context = test_context();
+        let mut consumer = TermVectorsConsumer::new();
+        let mut accum = SegmentAccumulator::new();
+
+        let field = text("contents")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("hello");
+
+        // Doc 0: no term vectors
+        consumer.start_document(0).unwrap();
+        let plain = text("contents").value("no tv");
+        consumer.start_field(0, &plain, &mut accum).unwrap();
+        consumer.finish_field(0, &plain, &mut accum).unwrap();
+        consumer.finish_document(0, &mut accum, &context).unwrap();
+        accum.increment_doc_count();
+
+        // Doc 1: has term vectors — will trigger gap fill for doc 0
+        consumer.start_document(1).unwrap();
+        consumer.start_field(0, &field, &mut accum).unwrap();
+        let token = Token {
+            text: "hello",
+            position_increment: 1,
+            start_offset: 0,
+            end_offset: 5,
+        };
+        consumer.add_token(0, &field, &token, &mut accum).unwrap();
+        consumer.finish_field(0, &field, &mut accum).unwrap();
+        consumer.finish_document(1, &mut accum, &context).unwrap();
+        accum.increment_doc_count();
+
+        let files = consumer.flush(&context, &accum).unwrap();
+        assert!(!files.is_empty());
+    }
+
+    #[test]
+    fn flush_no_tv_returns_empty() {
+        let context = test_context();
+        let mut consumer = TermVectorsConsumer::new();
+        let accum = SegmentAccumulator::new();
+        let files = consumer.flush(&context, &accum).unwrap();
+        assert_is_empty!(&files);
+    }
+
+    #[test]
+    fn multiple_fields_sorted_by_number() {
+        let context = test_context();
+        let mut consumer = TermVectorsConsumer::new();
+        let mut accum = SegmentAccumulator::new();
+
+        let field_a = text("zzz")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("alpha");
+        let field_b = text("aaa")
+            .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
+            .value("beta");
+
+        consumer.start_document(0).unwrap();
+
+        // Field 5 first, then field 2 — should be sorted by field number
+        consumer.start_field(5, &field_a, &mut accum).unwrap();
+        let t1 = Token {
+            text: "alpha",
+            position_increment: 1,
+            start_offset: 0,
+            end_offset: 5,
+        };
+        consumer.add_token(5, &field_a, &t1, &mut accum).unwrap();
+        consumer.finish_field(5, &field_a, &mut accum).unwrap();
+
+        consumer.start_field(2, &field_b, &mut accum).unwrap();
+        let t2 = Token {
+            text: "beta",
+            position_increment: 1,
+            start_offset: 0,
+            end_offset: 4,
+        };
+        consumer.add_token(2, &field_b, &t2, &mut accum).unwrap();
+        consumer.finish_field(2, &field_b, &mut accum).unwrap();
+
+        consumer.finish_document(0, &mut accum, &context).unwrap();
+        accum.increment_doc_count();
+
+        let files = consumer.flush(&context, &accum).unwrap();
+        assert!(!files.is_empty());
     }
 }

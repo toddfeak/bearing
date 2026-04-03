@@ -10,7 +10,7 @@ use std::io;
 use crate::codecs::codec_util;
 use crate::index::index_file_names;
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::{DataInput, Directory, IndexInput, IndexOutput};
 
 const ENTRIES_EXTENSION: &str = "cfe";
 const DATA_EXTENSION: &str = "cfs";
@@ -89,7 +89,7 @@ impl CompoundDirectory {
 }
 
 impl Directory for CompoundDirectory {
-    fn create_output(&mut self, _name: &str) -> io::Result<Box<dyn crate::store::IndexOutput>> {
+    fn create_output(&mut self, _name: &str) -> io::Result<Box<dyn IndexOutput>> {
         Err(io::Error::other(
             "CompoundDirectory is read-only: cannot create output",
         ))

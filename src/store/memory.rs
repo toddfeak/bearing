@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::mem;
 use std::sync::{Arc, Mutex};
 
 use crate::store::byte_slice_input::ByteSliceIndexInput;
@@ -150,8 +151,8 @@ impl MemoryDirectoryOutput {
 
 impl Drop for MemoryDirectoryOutput {
     fn drop(&mut self) {
-        let buf = std::mem::take(&mut self.buf);
-        let name = std::mem::take(&mut self.name);
+        let buf = mem::take(&mut self.buf);
+        let name = mem::take(&mut self.name);
         self.files.lock().unwrap().insert(name, buf);
     }
 }

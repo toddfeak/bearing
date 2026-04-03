@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::str;
+
 use crate::document::{DocValuesType, IndexOptions};
 use crate::index::{FieldInfo, PointDimensionConfig};
 
@@ -119,7 +121,7 @@ impl<'a> TestDataReader<'a> {
 
     pub fn read_string(&mut self) -> String {
         let len = self.read_vint() as usize;
-        let s = std::str::from_utf8(&self.data[self.pos..self.pos + len])
+        let s = str::from_utf8(&self.data[self.pos..self.pos + len])
             .unwrap()
             .to_string();
         self.pos += len;

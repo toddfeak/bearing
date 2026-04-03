@@ -6,6 +6,7 @@
 //! produced by the Lucene90 compressing stored fields writer.
 
 use std::io;
+use std::str;
 
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::stored_fields::{
@@ -439,7 +440,7 @@ fn decode_fields(data: &[u8], num_fields: usize) -> io::Result<Vec<StoredField>>
         let value = match type_code {
             TYPE_STRING => {
                 let len = reader.read_vint()? as usize;
-                let s = std::str::from_utf8(reader.read_slice(len)?)
+                let s = str::from_utf8(reader.read_slice(len)?)
                     .map_err(|e| io::Error::other(format!("invalid utf-8: {e}")))?;
                 StoredValue::String(s.to_string())
             }
@@ -679,6 +680,7 @@ impl DataInput for SliceReader<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::PI;
     use std::sync::Arc;
 
     use super::*;
@@ -982,7 +984,7 @@ mod tests {
     #[test]
     fn test_read_zdouble_positive_non_integer() {
         // A value that cannot be represented as f32 uses the positive double path
-        let val = std::f64::consts::PI; // high precision, not float-representable
+        let val = PI; // high precision, not float-representable
         assert_in_delta!(zdouble_round_trip(val), val, 1e-10);
     }
 
