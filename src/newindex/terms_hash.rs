@@ -26,9 +26,7 @@ use crate::util::byte_block_pool::{
     DirectAllocator, FIRST_LEVEL_SIZE,
 };
 use crate::util::bytes_ref_hash::BytesRefHash;
-use crate::util::int_block_pool::{
-    INT_BLOCK_MASK, INT_BLOCK_SHIFT, INT_BLOCK_SIZE, IntBlockPool,
-};
+use crate::util::int_block_pool::{INT_BLOCK_MASK, INT_BLOCK_SHIFT, INT_BLOCK_SIZE, IntBlockPool};
 
 // ---------------------------------------------------------------------------
 // ParallelPostingsArray / FreqProxPostingsArray — per-term posting metadata
@@ -760,8 +758,8 @@ impl FreqProxTermsWriterPerField {
         terms_hash: &TermsHash,
         term_id: usize,
     ) -> io::Result<Vec<(i32, i32, Vec<i32>)>> {
-        use crate::util::byte_block_pool::ByteSliceReader;
         use crate::store;
+        use crate::util::byte_block_pool::ByteSliceReader;
 
         let (start, end) = self.get_stream_range(&terms_hash.int_pool, term_id, 0);
         let mut reader = ByteSliceReader::new(&terms_hash.byte_pool, start, end);
@@ -998,8 +996,8 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::byte_block_pool::ByteSliceReader;
     use crate::store;
+    use crate::util::byte_block_pool::ByteSliceReader;
     use assertables::*;
 
     /// Helper to read a VInt from a byte slice reader.

@@ -2,7 +2,7 @@
 
 //! Norms reader for the Lucene90 norms format.
 //!
-//! Reads `.nvm` (metadata) and `.nvd` (data) files written by [`super::norms::write`].
+//! Reads `.nvm` (metadata) and `.nvd` (data) files written by the norms writer.
 //! Metadata is read eagerly during construction; norm values are read lazily from
 //! the `.nvd` data file on demand.
 
@@ -351,13 +351,11 @@ fn read_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::norms;
+    use crate::codecs::lucene90::norms::{self, NormsFieldData};
     use crate::document::{DocValuesType, IndexOptions};
-    use crate::index::indexing_chain::PerFieldData;
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
-    use std::collections::HashMap;
 
     fn make_field_info(name: &str, number: u32, has_norms: bool) -> FieldInfo {
         crate::test_util::make_field_info(
@@ -369,11 +367,18 @@ mod tests {
         )
     }
 
-    fn make_per_field_data(norms_vals: Vec<i64>, norms_docs: Vec<i32>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.norms = norms_vals;
-        pfd.norms_docs = norms_docs;
-        pfd
+    fn make_norms_field(
+        name: &str,
+        number: u32,
+        norms_vals: Vec<i64>,
+        norms_docs: Vec<i32>,
+    ) -> NormsFieldData {
+        NormsFieldData {
+            field_name: name.to_string(),
+            field_number: number,
+            norms: norms_vals,
+            docs: norms_docs,
+        }
     }
 
     fn test_directory() -> SharedDirectory {
@@ -382,22 +387,13 @@ mod tests {
 
     /// Writes norms and opens a reader, returning the reader.
     fn write_and_read(
+        fields: &[NormsFieldData],
         field_infos: &FieldInfos,
-        per_field: &HashMap<String, PerFieldData>,
         num_docs: i32,
     ) -> NormsProducer {
         let segment_id = [0u8; 16];
         let dir = test_directory();
-        norms::write(
-            &dir,
-            "_0",
-            "",
-            &segment_id,
-            field_infos,
-            per_field,
-            num_docs,
-        )
-        .unwrap();
+        norms::write(&dir, "_0", "", &segment_id, fields, num_docs).unwrap();
         let guard = dir.lock().unwrap();
         NormsProducer::open(guard.as_ref(), "_0", "", &segment_id, field_infos, num_docs).unwrap()
     }
@@ -420,17 +416,16 @@ mod tests {
     #[test]
     fn test_all_constant() {
         // ALL pattern with constant norms (bytes_per_norm=0)
-        let fi = make_field_info("contents", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "contents".to_string(),
-            make_per_field_data(vec![42, 42, 42], vec![0, 1, 2]),
-        );
+        let fields = vec![make_norms_field(
+            "contents",
+            0,
+            vec![42, 42, 42],
+            vec![0, 1, 2],
+        )];
+        let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 3);
+        let reader = write_and_read(&fields, &field_infos, 3);
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
 
@@ -443,17 +438,16 @@ mod tests {
     #[test]
     fn test_all_variable_1byte() {
         // ALL pattern with 1-byte variable norms
-        let fi = make_field_info("contents", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "contents".to_string(),
-            make_per_field_data(vec![12, 8, 10], vec![0, 1, 2]),
-        );
+        let fields = vec![make_norms_field(
+            "contents",
+            0,
+            vec![12, 8, 10],
+            vec![0, 1, 2],
+        )];
+        let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 3);
+        let reader = write_and_read(&fields, &field_infos, 3);
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(12));
@@ -464,17 +458,16 @@ mod tests {
     #[test]
     fn test_all_variable_2byte() {
         // ALL pattern with 2-byte norms (values outside i8 range)
-        let fi = make_field_info("f", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "f".to_string(),
-            make_per_field_data(vec![1000, -500, 32000], vec![0, 1, 2]),
-        );
+        let fields = vec![make_norms_field(
+            "f",
+            0,
+            vec![1000, -500, 32000],
+            vec![0, 1, 2],
+        )];
+        let field_infos = FieldInfos::new(vec![make_field_info("f", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 3);
+        let reader = write_and_read(&fields, &field_infos, 3);
 
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(1000));
         assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-500));
@@ -484,17 +477,16 @@ mod tests {
     #[test]
     fn test_all_variable_4byte() {
         // ALL pattern with 4-byte norms
-        let fi = make_field_info("f", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "f".to_string(),
-            make_per_field_data(vec![100_000, -100_000], vec![0, 1]),
-        );
+        let fields = vec![make_norms_field(
+            "f",
+            0,
+            vec![100_000, -100_000],
+            vec![0, 1],
+        )];
+        let field_infos = FieldInfos::new(vec![make_field_info("f", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 2);
+        let reader = write_and_read(&fields, &field_infos, 2);
 
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(100_000));
         assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-100_000));
@@ -503,17 +495,16 @@ mod tests {
     #[test]
     fn test_all_variable_8byte() {
         // ALL pattern with 8-byte norms
-        let fi = make_field_info("f", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "f".to_string(),
-            make_per_field_data(vec![i64::MAX, i64::MIN], vec![0, 1]),
-        );
+        let fields = vec![make_norms_field(
+            "f",
+            0,
+            vec![i64::MAX, i64::MIN],
+            vec![0, 1],
+        )];
+        let field_infos = FieldInfos::new(vec![make_field_info("f", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 2);
+        let reader = write_and_read(&fields, &field_infos, 2);
 
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(i64::MAX));
         assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(i64::MIN));
@@ -522,14 +513,11 @@ mod tests {
     #[test]
     fn test_empty_pattern() {
         // EMPTY: field has norms but no documents contributed
-        let fi = make_field_info("contents", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert("contents".to_string(), make_per_field_data(vec![], vec![]));
+        let fields = vec![make_norms_field("contents", 0, vec![], vec![])];
+        let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 3);
+        let reader = write_and_read(&fields, &field_infos, 3);
 
         assert_eq!(reader.num_docs_with_field(0), Some(0));
         assert_none!(get_norm(&reader, fi, 0).unwrap());
@@ -539,17 +527,11 @@ mod tests {
     #[test]
     fn test_sparse_variable() {
         // SPARSE: 2 of 5 docs have norms
-        let fi = make_field_info("contents", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "contents".to_string(),
-            make_per_field_data(vec![12, 8], vec![1, 3]),
-        );
+        let fields = vec![make_norms_field("contents", 0, vec![12, 8], vec![1, 3])];
+        let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 5);
+        let reader = write_and_read(&fields, &field_infos, 5);
 
         assert_eq!(reader.num_docs_with_field(0), Some(2));
         assert_none!(get_norm(&reader, fi, 0).unwrap());
@@ -562,17 +544,16 @@ mod tests {
     #[test]
     fn test_sparse_constant() {
         // SPARSE with constant value: 3 of 5 docs, all same norm
-        let fi = make_field_info("title", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "title".to_string(),
-            make_per_field_data(vec![42, 42, 42], vec![0, 2, 4]),
-        );
+        let fields = vec![make_norms_field(
+            "title",
+            0,
+            vec![42, 42, 42],
+            vec![0, 2, 4],
+        )];
+        let field_infos = FieldInfos::new(vec![make_field_info("title", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 5);
+        let reader = write_and_read(&fields, &field_infos, 5);
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(42));
@@ -585,23 +566,18 @@ mod tests {
     #[test]
     fn test_multiple_fields_mixed_patterns() {
         // Field 0: ALL constant, Field 1: SPARSE variable
-        let fi_a = make_field_info("alpha", 0, true);
-        let fi_b = make_field_info("beta", 1, true);
-        let field_infos = FieldInfos::new(vec![fi_a, fi_b]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "alpha".to_string(),
-            make_per_field_data(vec![5, 5, 5], vec![0, 1, 2]),
-        );
-        per_field.insert(
-            "beta".to_string(),
-            make_per_field_data(vec![10, 20], vec![0, 2]),
-        );
+        let fields = vec![
+            make_norms_field("alpha", 0, vec![5, 5, 5], vec![0, 1, 2]),
+            make_norms_field("beta", 1, vec![10, 20], vec![0, 2]),
+        ];
+        let field_infos = FieldInfos::new(vec![
+            make_field_info("alpha", 0, true),
+            make_field_info("beta", 1, true),
+        ]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
         let fi1 = field_infos.field_info_by_number(1).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 3);
+        let reader = write_and_read(&fields, &field_infos, 3);
 
         // alpha: ALL constant
         assert_eq!(reader.num_docs_with_field(0), Some(3));
@@ -618,16 +594,10 @@ mod tests {
 
     #[test]
     fn test_nonexistent_field() {
-        let fi = make_field_info("contents", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
+        let fields = vec![make_norms_field("contents", 0, vec![10], vec![0])];
+        let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "contents".to_string(),
-            make_per_field_data(vec![10], vec![0]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 1);
+        let reader = write_and_read(&fields, &field_infos, 1);
 
         assert_none!(reader.num_docs_with_field(99));
     }
@@ -635,17 +605,16 @@ mod tests {
     #[test]
     fn test_negative_norm_values() {
         // Norms can be negative (signed byte range)
-        let fi = make_field_info("f", 0, true);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "f".to_string(),
-            make_per_field_data(vec![-128, -1, 0, 127], vec![0, 1, 2, 3]),
-        );
+        let fields = vec![make_norms_field(
+            "f",
+            0,
+            vec![-128, -1, 0, 127],
+            vec![0, 1, 2, 3],
+        )];
+        let field_infos = FieldInfos::new(vec![make_field_info("f", 0, true)]);
 
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&field_infos, &per_field, 4);
+        let reader = write_and_read(&fields, &field_infos, 4);
 
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(-128));
         assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-1));

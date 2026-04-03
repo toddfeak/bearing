@@ -12,15 +12,15 @@
 use std::io;
 
 use crate::newindex::codecs::term_vectors::TermVectorChunkWriter;
+use crate::newindex::terms_hash::{
+    BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
+    oversize,
+};
 use crate::util::byte_block_pool::{
     ByteBlockPool, ByteSliceReader, DirectAllocator, FIRST_LEVEL_SIZE,
 };
 use crate::util::bytes_ref_hash::BytesRefHash;
 use crate::util::int_block_pool::{INT_BLOCK_MASK, INT_BLOCK_SHIFT, IntBlockPool};
-use crate::newindex::terms_hash::{
-    BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
-    oversize,
-};
 
 use crate::document::IndexOptions;
 
