@@ -1152,10 +1152,7 @@ mod tests {
 
     #[test]
     fn test_open_postings_reader() {
-        let config = IndexWriterConfig {
-            use_compound_file: false,
-            ..Default::default()
-        };
+        let config = IndexWriterConfig::default();
         let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 

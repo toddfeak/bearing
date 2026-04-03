@@ -276,18 +276,18 @@ impl IndexCoordinator {
         directory: Arc<SharedDirectory>,
         worker_factory: Arc<dyn WorkerFactory>,
     ) -> Self {
-        let queue_capacity = config.num_threads;
+        let queue_capacity = config.get_num_threads();
         let (sender, receiver) = channel::bounded(queue_capacity);
         let worker_source = Arc::new(WorkerSource::new(id_generator, worker_factory));
         let flush_control = Arc::new(FlushControl::new(
-            config.num_threads,
-            config.ram_buffer_size_mb,
-            config.max_buffered_docs,
+            config.get_num_threads(),
+            config.get_ram_buffer_size_mb(),
+            config.get_max_buffered_docs(),
         ));
 
-        let mut workers = Vec::with_capacity(config.num_threads);
+        let mut workers = Vec::with_capacity(config.get_num_threads());
 
-        for worker_id in 0..config.num_threads {
+        for worker_id in 0..config.get_num_threads() {
             let rx = receiver.clone();
             let source = Arc::clone(&worker_source);
             let fc = Arc::clone(&flush_control);
@@ -299,7 +299,7 @@ impl IndexCoordinator {
         Self {
             sender,
             workers,
-            use_compound_file: config.use_compound_file,
+            use_compound_file: config.get_use_compound_file(),
             directory,
             segment_infos: SegmentInfos::new(),
             flush_control,

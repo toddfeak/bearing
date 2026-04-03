@@ -66,17 +66,7 @@ Rust: (split into "12" and "1")
 
 ---
 
-## 3. IndexWriterConfig Builder
-
-**Severity:** API ergonomics
-
-`IndexWriterConfig` is a plain struct with public fields. Callers construct it with struct literals and `..Default::default()`. This works but is fragile — adding a new field with no sensible default is a silent breaking change (callers using `..Default::default()` compile but get wrong behavior).
-
-**Fix:** Add a builder (either convert to builder pattern or add a separate `IndexWriterConfigBuilder`). The builder validates at construction time and makes the API self-documenting.
-
----
-
-## 4. StandardAnalyzer Buffers All Tokens
+## 3. StandardAnalyzer Buffers All Tokens
 
 **Severity:** High for large-document corpora
 

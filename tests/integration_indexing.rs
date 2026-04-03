@@ -88,10 +88,7 @@ fn segment_file_names_use_segment_prefix() {
 
 #[test]
 fn max_buffered_docs_creates_multiple_segments() {
-    let config = IndexWriterConfig {
-        max_buffered_docs: 5,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().max_buffered_docs(5);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 12);
@@ -120,11 +117,9 @@ fn max_buffered_docs_creates_multiple_segments() {
 
 #[test]
 fn multi_thread_produces_independent_segments() {
-    let config = IndexWriterConfig {
-        num_threads: 2,
-        max_buffered_docs: 1,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default()
+        .num_threads(2)
+        .max_buffered_docs(1);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     // With max_buffered_docs=1, every doc triggers a flush. The flush
@@ -151,11 +146,9 @@ fn multi_thread_produces_independent_segments() {
 
 #[test]
 fn multi_thread_with_mid_flush() {
-    let config = IndexWriterConfig {
-        num_threads: 2,
-        max_buffered_docs: 3,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default()
+        .num_threads(2)
+        .max_buffered_docs(3);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 10);
@@ -174,10 +167,7 @@ fn multi_thread_with_mid_flush() {
 
 #[test]
 fn compound_file_packaging() {
-    let config = IndexWriterConfig {
-        use_compound_file: true,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().use_compound_file(true);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 5);
@@ -197,10 +187,7 @@ fn compound_file_packaging() {
 
 #[test]
 fn non_compound_keeps_individual_files() {
-    let config = IndexWriterConfig {
-        use_compound_file: false,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default();
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 5);
@@ -222,11 +209,9 @@ fn non_compound_keeps_individual_files() {
 
 #[test]
 fn compound_with_multi_segment() {
-    let config = IndexWriterConfig {
-        use_compound_file: true,
-        max_buffered_docs: 5,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default()
+        .use_compound_file(true)
+        .max_buffered_docs(5);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_stored_docs(&writer, 12);
@@ -294,10 +279,7 @@ fn stored_tokenized_fields_produce_norms_and_postings_files() {
 
 #[test]
 fn stored_tokenized_fields_multi_segment() {
-    let config = IndexWriterConfig {
-        max_buffered_docs: 2,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().max_buffered_docs(2);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_text_docs_from_testdata(&writer);
@@ -623,10 +605,7 @@ fn dv_only_docs_no_stored_or_postings() {
 
 #[test]
 fn dv_compound_file_packaging() {
-    let config = IndexWriterConfig {
-        use_compound_file: true,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().use_compound_file(true);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     for i in 0..3 {
@@ -649,10 +628,7 @@ fn dv_compound_file_packaging() {
 
 #[test]
 fn dv_multi_segment() {
-    let config = IndexWriterConfig {
-        max_buffered_docs: 2,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().max_buffered_docs(2);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     for i in 0..5 {
@@ -713,10 +689,7 @@ fn term_vectors_produce_tvd_tvx_tvm_files() {
 
 #[test]
 fn term_vectors_multi_segment() {
-    let config = IndexWriterConfig {
-        max_buffered_docs: 2,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().max_buffered_docs(2);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_tv_docs_from_testdata(&writer);
@@ -733,10 +706,7 @@ fn term_vectors_multi_segment() {
 
 #[test]
 fn term_vectors_compound() {
-    let config = IndexWriterConfig {
-        use_compound_file: true,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().use_compound_file(true);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_tv_docs_from_testdata(&writer);
@@ -751,11 +721,9 @@ fn term_vectors_compound() {
 
 #[test]
 fn term_vectors_multi_thread() {
-    let config = IndexWriterConfig {
-        num_threads: 2,
-        max_buffered_docs: 2,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default()
+        .num_threads(2)
+        .max_buffered_docs(2);
     let writer = IndexWriter::new(config, shared_memory_dir());
 
     add_tv_docs_from_testdata(&writer);
@@ -785,11 +753,7 @@ fn add_text_docs(writer: &IndexWriter, count: usize) {
 
 #[test]
 fn ram_flush_produces_multiple_segments() {
-    let config = IndexWriterConfig {
-        ram_buffer_size_mb: 0.05, // very small — forces frequent flushes
-        max_buffered_docs: -1,    // disabled — only RAM triggers flushes
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().ram_buffer_size_mb(0.05); // very small — forces frequent flushes
 
     let writer = IndexWriter::new(config, shared_memory_dir());
     add_text_docs(&writer, 500);
@@ -804,11 +768,7 @@ fn ram_flush_produces_multiple_segments() {
 
 #[test]
 fn large_ram_buffer_produces_single_segment() {
-    let config = IndexWriterConfig {
-        ram_buffer_size_mb: 1000.0, // huge — should never trigger
-        max_buffered_docs: -1,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default().ram_buffer_size_mb(1000.0); // huge — should never trigger
 
     let writer = IndexWriter::new(config, shared_memory_dir());
     add_text_docs(&writer, 50);
@@ -820,12 +780,9 @@ fn large_ram_buffer_produces_single_segment() {
 
 #[test]
 fn ram_flush_multi_thread() {
-    let config = IndexWriterConfig {
-        ram_buffer_size_mb: 0.1,
-        max_buffered_docs: -1,
-        num_threads: 4,
-        ..Default::default()
-    };
+    let config = IndexWriterConfig::default()
+        .ram_buffer_size_mb(0.1)
+        .num_threads(4);
 
     let writer = IndexWriter::new(config, shared_memory_dir());
     add_text_docs(&writer, 200);

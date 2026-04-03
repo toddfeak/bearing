@@ -148,10 +148,7 @@ mod tests {
     use assertables::*;
 
     fn write_index(_name: &str, num_docs: usize, compound: bool) -> Arc<SharedDirectory> {
-        let config = IndexWriterConfig {
-            use_compound_file: compound,
-            ..Default::default()
-        };
+        let config = IndexWriterConfig::default().use_compound_file(compound);
         let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -193,11 +190,7 @@ mod tests {
 
     #[test]
     fn test_multi_segment() {
-        let config = IndexWriterConfig {
-            use_compound_file: false,
-            max_buffered_docs: 2,
-            ..Default::default()
-        };
+        let config = IndexWriterConfig::default().max_buffered_docs(2);
         let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -228,10 +221,7 @@ mod tests {
 
     #[test]
     fn test_leaf_reader_access() {
-        let config = IndexWriterConfig {
-            use_compound_file: false,
-            ..Default::default()
-        };
+        let config = IndexWriterConfig::default();
         let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 

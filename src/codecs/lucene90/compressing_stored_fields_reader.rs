@@ -696,10 +696,7 @@ mod tests {
     /// Write a simple index and read stored fields back via CompressingStoredFieldsReader.
     fn write_and_read_stored(docs: Vec<Document>) -> (Arc<SharedDirectory>, Vec<Vec<StoredField>>) {
         let num_docs = docs.len();
-        let config = IndexWriterConfig {
-            use_compound_file: false,
-            ..Default::default()
-        };
+        let config = IndexWriterConfig::default();
         let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
@@ -1092,10 +1089,7 @@ mod tests {
             docs.push(doc);
         }
 
-        let config = IndexWriterConfig {
-            use_compound_file: false,
-            ..Default::default()
-        };
+        let config = IndexWriterConfig::default();
         let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
@@ -1146,10 +1140,7 @@ mod tests {
             docs.push(doc);
         }
 
-        let config = IndexWriterConfig {
-            use_compound_file: false,
-            ..Default::default()
-        };
+        let config = IndexWriterConfig::default();
         let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {

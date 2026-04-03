@@ -170,14 +170,12 @@ fn main() {
     let mut doc_paths = Vec::new();
     walk_docs(&doc_dir, &mut doc_paths);
 
-    let mut config = IndexWriterConfig {
-        num_threads: args.num_threads,
-        max_buffered_docs: args.max_buffered_docs,
-        use_compound_file: args.use_compound_file,
-        ..Default::default()
-    };
+    let mut config = IndexWriterConfig::default()
+        .num_threads(args.num_threads)
+        .max_buffered_docs(args.max_buffered_docs)
+        .use_compound_file(args.use_compound_file);
     if args.ram_buffer_size_mb >= 0.0 {
-        config.ram_buffer_size_mb = args.ram_buffer_size_mb;
+        config = config.ram_buffer_size_mb(args.ram_buffer_size_mb);
     }
 
     let fs_dir = FSDirectory::open_with_file_handles(index_dir).unwrap();

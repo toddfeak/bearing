@@ -606,10 +606,7 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn build_test_index() -> (Arc<SharedDirectory>, DirectoryReader) {
-        let config = IndexWriterConfig {
-            use_compound_file: false,
-            ..Default::default()
-        };
+        let config = IndexWriterConfig::default();
         let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
