@@ -3,7 +3,7 @@
 //! Term vectors reader for the Lucene90 compressing term vectors format.
 //!
 //! Reads `.tvm` (metadata), `.tvx` (index), and `.tvd` (data) files written
-//! by [`super::term_vectors::write`]. Metadata and chunk index are read eagerly;
+//! by [`super::term_vectors`]. Metadata and chunk index are read eagerly;
 //! chunk data in `.tvd` is available via the retained `vectors_stream` handle.
 
 use std::io;
@@ -159,8 +159,9 @@ impl CompressingTermVectorsReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::term_vectors;
-    use crate::index::indexing_chain::TermVectorDoc;
+    use crate::codecs::lucene90::term_vectors::{
+        self, OffsetBuffers, TermVectorDoc, TermVectorField, TermVectorTerm,
+    };
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
@@ -169,8 +170,6 @@ mod tests {
     }
 
     fn make_tv_doc(field_number: u32, terms: Vec<&str>) -> TermVectorDoc {
-        use crate::index::indexing_chain::{OffsetBuffers, TermVectorField, TermVectorTerm};
-
         let tv_terms: Vec<TermVectorTerm> = terms
             .into_iter()
             .map(|t| TermVectorTerm {
@@ -219,8 +218,6 @@ mod tests {
 
     #[test]
     fn test_multiple_docs_multiple_fields() {
-        use crate::index::indexing_chain::{TermVectorField, TermVectorTerm};
-
         let docs: Vec<TermVectorDoc> = (0..5)
             .map(|_| TermVectorDoc {
                 fields: vec![

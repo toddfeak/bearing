@@ -3,6 +3,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
+use std::mem;
+
+use mem_dbg::MemSize;
 
 use log::debug;
 
@@ -11,8 +14,40 @@ use crate::codecs::packed_writers::{BlockPackedWriter, DirectMonotonicWriter, Di
 use crate::encoding::lz4;
 use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_bits_required};
 use crate::index::index_file_names;
-use crate::index::indexing_chain::TermVectorDoc;
-use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{self, DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
+use crate::util::byte_block_pool::{ByteSliceReader, DirectAllocator};
+
+/// Offset data for a single term occurrence in a term vector.
+#[derive(Debug, Clone, MemSize)]
+pub(crate) struct OffsetBuffers {
+    pub start_offsets: Vec<i32>,
+    pub end_offsets: Vec<i32>,
+}
+
+/// A single term in a term vector field.
+#[derive(Debug, Clone, MemSize)]
+pub(crate) struct TermVectorTerm {
+    pub term: String,
+    pub freq: i32,
+    pub positions: Vec<i32>,
+    pub offsets: Option<Box<OffsetBuffers>>,
+}
+
+/// A single field's term vector data for one document.
+#[derive(Debug, Clone, MemSize)]
+pub(crate) struct TermVectorField {
+    pub field_number: u32,
+    pub has_positions: bool,
+    pub has_offsets: bool,
+    pub has_payloads: bool,
+    pub terms: Vec<TermVectorTerm>,
+}
+
+/// All term vector data for one document.
+#[derive(Debug, Clone, MemSize)]
+pub(crate) struct TermVectorDoc {
+    pub fields: Vec<TermVectorField>,
+}
 
 // File extensions
 pub(crate) const VECTORS_EXTENSION: &str = "tvd";
@@ -42,7 +77,8 @@ const FLAGS_BITS: u32 = 4;
 /// Writes term vector files (`.tvd`, `.tvx`, `.tvm`) for a segment.
 ///
 /// Returns the names of the files written.
-pub fn write(
+#[cfg(test)]
+pub(crate) fn write(
     directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
@@ -99,6 +135,20 @@ pub(crate) struct TermVectorChunkWriter {
     num_dirty_chunks: i64,
     /// Number of documents in dirty chunks.
     num_dirty_docs: i64,
+    // -- Streaming state for per-document building --
+    num_docs: i32,
+    cur_fields: Vec<TermVectorField>,
+    cur_field_number: u32,
+    cur_field_has_positions: bool,
+    cur_field_has_offsets: bool,
+    cur_field_has_payloads: bool,
+    cur_field_terms: Vec<TermVectorTerm>,
+    cur_term_text: Vec<u8>,
+    cur_term_freq: i32,
+    cur_term_positions: Vec<i32>,
+    cur_term_start_offsets: Vec<i32>,
+    cur_term_end_offsets: Vec<i32>,
+    last_term: Vec<u8>,
 }
 
 impl TermVectorChunkWriter {
@@ -120,11 +170,25 @@ impl TermVectorChunkWriter {
             num_chunks: 0,
             num_dirty_chunks: 0,
             num_dirty_docs: 0,
+            num_docs: 0,
+            cur_fields: Vec::new(),
+            cur_field_number: 0,
+            cur_field_has_positions: false,
+            cur_field_has_offsets: false,
+            cur_field_has_payloads: false,
+            cur_field_terms: Vec::new(),
+            cur_term_text: Vec::new(),
+            cur_term_freq: 0,
+            cur_term_positions: Vec::new(),
+            cur_term_start_offsets: Vec::new(),
+            cur_term_end_offsets: Vec::new(),
+            last_term: Vec::new(),
         })
     }
 
     /// Adds a document's term vector data to the current chunk.
     /// Flushes the chunk first if the threshold is reached.
+    #[cfg(test)]
     pub(crate) fn add_doc(&mut self, doc: &TermVectorDoc) -> io::Result<()> {
         // Compute actual suffix bytes by tracking prefix compression per field
         for field in &doc.fields {
@@ -139,6 +203,136 @@ impl TermVectorChunkWriter {
         }
         self.pending_docs.push(doc.clone());
         self.maybe_flush()
+    }
+
+    // -- Streaming interface --
+
+    /// Begins a new document with the given number of vector fields.
+    pub(crate) fn start_document(&mut self, _num_vector_fields: i32) {
+        self.cur_fields.clear();
+    }
+
+    /// Finishes the current document, triggering a chunk flush if thresholds are met.
+    pub(crate) fn finish_document(&mut self) -> io::Result<()> {
+        let doc = TermVectorDoc {
+            fields: mem::take(&mut self.cur_fields),
+        };
+        // Track suffix bytes for chunk threshold
+        for field in &doc.fields {
+            let last_term = self.last_terms.entry(field.field_number).or_default();
+            for term_data in &field.terms {
+                let term_bytes = term_data.term.as_bytes();
+                let prefix_len = shared_prefix_length(last_term, term_bytes);
+                self.chunk_suffix_bytes += term_bytes.len() - prefix_len;
+                last_term.clear();
+                last_term.extend_from_slice(term_bytes);
+            }
+        }
+        self.pending_docs.push(doc);
+        self.num_docs += 1;
+        self.maybe_flush()
+    }
+
+    /// Begins a new field within the current document.
+    pub(crate) fn start_field(
+        &mut self,
+        field_number: u32,
+        _num_terms: i32,
+        positions: bool,
+        offsets: bool,
+        payloads: bool,
+    ) {
+        self.cur_field_number = field_number;
+        self.cur_field_has_positions = positions;
+        self.cur_field_has_offsets = offsets;
+        self.cur_field_has_payloads = payloads;
+        self.cur_field_terms.clear();
+        self.last_term.clear();
+    }
+
+    /// Finishes the current field.
+    pub(crate) fn finish_field(&mut self) {
+        self.cur_fields.push(TermVectorField {
+            field_number: self.cur_field_number,
+            has_positions: self.cur_field_has_positions,
+            has_offsets: self.cur_field_has_offsets,
+            has_payloads: self.cur_field_has_payloads,
+            terms: mem::take(&mut self.cur_field_terms),
+        });
+    }
+
+    /// Begins a new term with the given frequency.
+    pub(crate) fn start_term(&mut self, term: &[u8], freq: i32) {
+        self.cur_term_text.clear();
+        self.cur_term_text.extend_from_slice(term);
+        self.cur_term_freq = freq;
+        self.cur_term_positions.clear();
+        self.cur_term_start_offsets.clear();
+        self.cur_term_end_offsets.clear();
+    }
+
+    /// Finishes the current term, collecting positions and offsets.
+    pub(crate) fn finish_term(&mut self) {
+        let offsets = if self.cur_field_has_offsets {
+            Some(Box::new(OffsetBuffers {
+                start_offsets: mem::take(&mut self.cur_term_start_offsets),
+                end_offsets: mem::take(&mut self.cur_term_end_offsets),
+            }))
+        } else {
+            None
+        };
+        let term_text = String::from_utf8(mem::take(&mut self.cur_term_text)).unwrap_or_default();
+        self.cur_field_terms.push(TermVectorTerm {
+            term: term_text,
+            freq: self.cur_term_freq,
+            positions: mem::take(&mut self.cur_term_positions),
+            offsets,
+        });
+    }
+
+    /// Reads position/offset data from byte slice readers and decodes them
+    /// into absolute positions and offsets for the current term.
+    pub(crate) fn add_prox(
+        &mut self,
+        num_prox: i32,
+        positions: Option<&mut ByteSliceReader<'_, DirectAllocator>>,
+        offsets: Option<&mut ByteSliceReader<'_, DirectAllocator>>,
+    ) {
+        if let Some(pos_reader) = positions {
+            if self.cur_field_has_payloads {
+                for _ in 0..num_prox {
+                    let code = store::read_vint(pos_reader).unwrap();
+                    if (code & 1) != 0 {
+                        let payload_length = store::read_vint(pos_reader).unwrap();
+                        for _ in 0..payload_length {
+                            let mut buf = [0u8; 1];
+                            std::io::Read::read_exact(pos_reader, &mut buf).unwrap();
+                        }
+                    }
+                    let pos_delta = code >> 1;
+                    let last_pos = self.cur_term_positions.last().copied().unwrap_or(0);
+                    self.cur_term_positions.push(last_pos + pos_delta);
+                }
+            } else {
+                for _ in 0..num_prox {
+                    let code = store::read_vint(pos_reader).unwrap();
+                    let pos_delta = code >> 1;
+                    let last_pos = self.cur_term_positions.last().copied().unwrap_or(0);
+                    self.cur_term_positions.push(last_pos + pos_delta);
+                }
+            }
+        }
+
+        if let Some(off_reader) = offsets {
+            let mut last_end_offset = 0i32;
+            for _ in 0..num_prox {
+                let start_offset = last_end_offset + store::read_vint(off_reader).unwrap();
+                let end_offset = start_offset + store::read_vint(off_reader).unwrap();
+                last_end_offset = end_offset;
+                self.cur_term_start_offsets.push(start_offset);
+                self.cur_term_end_offsets.push(end_offset);
+            }
+        }
     }
 
     /// Flushes the current chunk if it exceeds the size or doc count threshold.
@@ -657,7 +851,7 @@ fn flush_payload_lengths(docs: &[TermVectorDoc], output: &mut dyn DataOutput) ->
 }
 
 /// Computes the flags byte for a term vector field.
-fn field_flags_value(field: &crate::index::indexing_chain::TermVectorField) -> i32 {
+fn field_flags_value(field: &TermVectorField) -> i32 {
     let mut flags = 0i32;
     if field.has_positions {
         flags |= POSITIONS as i32;
@@ -678,8 +872,9 @@ fn shared_prefix_length(a: &[u8], b: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use assertables::*;
+
     use super::*;
-    use crate::index::indexing_chain::{OffsetBuffers, TermVectorField, TermVectorTerm};
     use crate::store::memory::MemoryDirectory;
 
     fn make_directory() -> SharedDirectory {
@@ -1019,7 +1214,6 @@ mod tests {
 
     /// Verifies multi-chunk output when exceeding MAX_DOCS_PER_CHUNK (128 docs).
     /// Uses the TermVectorChunkWriter directly to inspect chunk metadata.
-    // Ported from org.apache.lucene.codecs.compressing.TestCompressingTermVectorsFormat
     #[test]
     fn test_multi_chunk_by_doc_count() {
         let dir = make_directory();
@@ -1062,7 +1256,6 @@ mod tests {
     }
 
     /// Verifies multi-chunk output when exceeding CHUNK_SIZE (4096 bytes of term data).
-    // Ported from org.apache.lucene.codecs.compressing.TestCompressingTermVectorsFormat
     #[test]
     fn test_multi_chunk_by_term_bytes() {
         let dir = make_directory();
