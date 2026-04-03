@@ -7,5 +7,4 @@
 // reconcile with the originals into a single set of writers.
 
 pub(crate) mod blocktree_writer;
-pub(crate) mod doc_values;
 pub(crate) mod postings_writer;

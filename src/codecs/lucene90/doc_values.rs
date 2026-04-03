@@ -9,15 +9,35 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::indexed_disi;
 use crate::codecs::packed_writers::{DirectMonotonicWriter, DirectWriter};
+use crate::document::DocValuesType;
 use crate::encoding::lz4::{self, FastHashTable};
 use crate::encoding::packed::unsigned_bits_required;
-use crate::index::FieldInfos;
 use crate::index::index_file_names;
-use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
 use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
 use crate::util::string_helper;
+
+/// Per-field doc values accumulation state.
+#[derive(mem_dbg::MemSize)]
+pub(crate) enum DocValuesAccumulator {
+    #[expect(dead_code)]
+    None,
+    Numeric(Vec<(i32, i64)>),
+    Binary(Vec<(i32, Vec<u8>)>),
+    Sorted(Vec<(i32, BytesRef)>),
+    SortedNumeric(Vec<(i32, Vec<i64>)>),
+    SortedSet(Vec<(i32, Vec<BytesRef>)>),
+}
+
+/// Per-field data passed to the doc values writer.
+pub(crate) struct DocValuesFieldData {
+    pub name: String,
+    pub number: u32,
+    #[expect(dead_code)]
+    pub doc_values_type: DocValuesType,
+    pub doc_values: DocValuesAccumulator,
+}
 
 // File extensions
 pub(crate) const DATA_EXTENSION: &str = "dvd";
@@ -45,14 +65,14 @@ const TERMS_DICT_REVERSE_INDEX_MASK: usize = TERMS_DICT_REVERSE_INDEX_SIZE - 1;
 pub(crate) const DIRECT_MONOTONIC_BLOCK_SHIFT: u32 = 16;
 
 /// Writes doc values files (.dvm, .dvd) for a segment.
-/// Returns the names of the files written.
-pub fn write(
+///
+/// `fields` must be sorted by field number.
+pub(crate) fn write(
     directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
-    field_infos: &FieldInfos,
-    per_field: &HashMap<String, PerFieldData>,
+    fields: &[DocValuesFieldData],
     num_docs: i32,
 ) -> io::Result<Vec<String>> {
     let dvm_name =
@@ -68,69 +88,60 @@ pub fn write(
     codec_util::write_index_header(&mut *meta, META_CODEC, VERSION, segment_id, segment_suffix)?;
     codec_util::write_index_header(&mut *data, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
 
-    // Iterate fields in field-number order
-    for fi in field_infos.iter() {
-        if !fi.has_doc_values() {
-            continue;
-        }
-
-        let Some(pfd) = per_field.get(fi.name()) else {
-            continue;
-        };
-
-        match &pfd.doc_values {
+    for field in fields {
+        match &field.doc_values {
             DocValuesAccumulator::Numeric(vals) => {
                 debug!(
                     "doc_values: field={:?} (#{}) -> NUMERIC, {} docs",
-                    fi.name(),
-                    fi.number(),
+                    field.name,
+                    field.number,
                     vals.len()
                 );
-                meta.write_le_int(fi.number() as i32)?;
+                meta.write_le_int(field.number as i32)?;
                 meta.write_byte(NUMERIC)?;
                 add_numeric_field(&mut *meta, &mut *data, vals, num_docs)?;
             }
             DocValuesAccumulator::Binary(vals) => {
                 debug!(
                     "doc_values: field={:?} (#{}) -> BINARY, {} docs",
-                    fi.name(),
-                    fi.number(),
+                    field.name,
+                    field.number,
                     vals.len()
                 );
-                meta.write_le_int(fi.number() as i32)?;
+                meta.write_le_int(field.number as i32)?;
                 meta.write_byte(BINARY)?;
                 add_binary_field(&mut *meta, &mut *data, vals, num_docs)?;
             }
             DocValuesAccumulator::Sorted(vals) => {
                 debug!(
                     "doc_values: field={:?} (#{}) -> SORTED, {} docs",
-                    fi.name(),
-                    fi.number(),
+                    field.name,
+                    field.number,
                     vals.len()
                 );
-                meta.write_le_int(fi.number() as i32)?;
+                meta.write_le_int(field.number as i32)?;
                 meta.write_byte(SORTED)?;
                 add_sorted_field(&mut *meta, &mut *data, vals, num_docs)?;
             }
             DocValuesAccumulator::SortedNumeric(vals) => {
                 debug!(
                     "doc_values: field={:?} (#{}) -> SORTED_NUMERIC, {} docs",
-                    fi.name(),
-                    fi.number(),
+                    field.name,
+                    field.number,
                     vals.len()
                 );
-                meta.write_le_int(fi.number() as i32)?;
+                meta.write_le_int(field.number as i32)?;
                 meta.write_byte(SORTED_NUMERIC)?;
                 add_sorted_numeric_field(&mut *meta, &mut *data, vals, num_docs)?;
             }
             DocValuesAccumulator::SortedSet(vals) => {
                 debug!(
                     "doc_values: field={:?} (#{}) -> SORTED_SET, {} docs",
-                    fi.name(),
-                    fi.number(),
+                    field.name,
+                    field.number,
                     vals.len()
                 );
-                meta.write_le_int(fi.number() as i32)?;
+                meta.write_le_int(field.number as i32)?;
                 meta.write_byte(SORTED_SET)?;
                 add_sorted_set_field(&mut *meta, &mut *data, vals, num_docs)?;
             }
@@ -848,50 +859,78 @@ fn write_terms_index(
 mod tests {
     use super::*;
     use crate::codecs::codec_util::{FOOTER_LENGTH, index_header_length};
-    use crate::document::{DocValuesType, IndexOptions};
-    use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
-    use crate::index::{FieldInfo, FieldInfos};
+    use crate::document::DocValuesType;
     use crate::store::{MemoryDirectory, SharedDirectory};
-    use crate::test_util::{self, TestDataReader};
+    use crate::test_util::TestDataReader;
     use assertables::{assert_ge, assert_gt};
-    use std::collections::HashMap;
 
     fn make_test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    fn make_field_info(name: &str, number: u32, dv_type: DocValuesType) -> FieldInfo {
-        test_util::make_field_info(name, number, true, IndexOptions::None, dv_type)
+    fn make_field_data_numeric(
+        name: &str,
+        number: u32,
+        values: Vec<(i32, i64)>,
+    ) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::Numeric,
+            doc_values: DocValuesAccumulator::Numeric(values),
+        }
     }
 
-    fn make_per_field_data_sorted_numeric(values: Vec<(i32, Vec<i64>)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::SortedNumeric(values);
-        pfd
+    fn make_field_data_binary(
+        name: &str,
+        number: u32,
+        values: Vec<(i32, Vec<u8>)>,
+    ) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::Binary,
+            doc_values: DocValuesAccumulator::Binary(values),
+        }
     }
 
-    fn make_per_field_data_sorted_set(values: Vec<(i32, Vec<BytesRef>)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::SortedSet(values);
-        pfd
+    fn make_field_data_sorted(
+        name: &str,
+        number: u32,
+        values: Vec<(i32, BytesRef)>,
+    ) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::Sorted,
+            doc_values: DocValuesAccumulator::Sorted(values),
+        }
     }
 
-    fn make_per_field_data_numeric(values: Vec<(i32, i64)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::Numeric(values);
-        pfd
+    fn make_field_data_sorted_numeric(
+        name: &str,
+        number: u32,
+        values: Vec<(i32, Vec<i64>)>,
+    ) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::SortedNumeric,
+            doc_values: DocValuesAccumulator::SortedNumeric(values),
+        }
     }
 
-    fn make_per_field_data_binary(values: Vec<(i32, Vec<u8>)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::Binary(values);
-        pfd
-    }
-
-    fn make_per_field_data_sorted(values: Vec<(i32, BytesRef)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::Sorted(values);
-        pfd
+    fn make_field_data_sorted_set(
+        name: &str,
+        number: u32,
+        values: Vec<(i32, Vec<BytesRef>)>,
+    ) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::SortedSet,
+            doc_values: DocValuesAccumulator::SortedSet(values),
+        }
     }
 
     #[test]
@@ -924,27 +963,15 @@ mod tests {
     #[test]
     fn test_sorted_numeric_constant() {
         // 3 docs all with value 42 → bpv=0, min=42
-        let fi = make_field_info("modified", 1, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "modified".to_string(),
-            make_per_field_data_sorted_numeric(vec![(0, vec![42]), (1, vec![42]), (2, vec![42])]),
-        );
+        let fields = vec![make_field_data_sorted_numeric(
+            "modified",
+            1,
+            vec![(0, vec![42]), (1, vec![42]), (2, vec![42])],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         assert_len_eq_x!(&result, 2);
         assert_eq!(result[0], "_0_Lucene90_0.dvm");
@@ -994,31 +1021,15 @@ mod tests {
     #[test]
     fn test_sorted_numeric_different() {
         // 3 docs with distinct timestamps
-        let fi = make_field_info("modified", 1, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "modified".to_string(),
-            make_per_field_data_sorted_numeric(vec![
-                (0, vec![1000]),
-                (1, vec![2000]),
-                (2, vec![3000]),
-            ]),
-        );
+        let fields = vec![make_field_data_sorted_numeric(
+            "modified",
+            1,
+            vec![(0, vec![1000]), (1, vec![2000]), (2, vec![3000])],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
@@ -1050,31 +1061,19 @@ mod tests {
     #[test]
     fn test_sorted_set_single_valued() {
         // 3 docs with distinct path values
-        let fi = make_field_info("path", 0, DocValuesType::SortedSet);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "path".to_string(),
-            make_per_field_data_sorted_set(vec![
+        let fields = vec![make_field_data_sorted_set(
+            "path",
+            0,
+            vec![
                 (0, vec![BytesRef::from_utf8("/a.txt")]),
                 (1, vec![BytesRef::from_utf8("/b.txt")]),
                 (2, vec![BytesRef::from_utf8("/c.txt")]),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
@@ -1108,27 +1107,15 @@ mod tests {
     #[test]
     fn test_header_footer_eof() {
         // Test that the EOF marker (-1 as i32) appears before the footer
-        let fi = make_field_info("modified", 0, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "modified".to_string(),
-            make_per_field_data_sorted_numeric(vec![(0, vec![1])]),
-        );
+        let fields = vec![make_field_data_sorted_numeric(
+            "modified",
+            0,
+            vec![(0, vec![1])],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            1,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "", &segment_id, &fields, 1).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
 
@@ -1154,40 +1141,26 @@ mod tests {
     #[test]
     fn test_two_fields_combined() {
         // Test writing both field types together (like the real indexer)
-        let fi_path = make_field_info("path", 0, DocValuesType::SortedSet);
-        let fi_mod = make_field_info("modified", 1, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi_path, fi_mod]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "path".to_string(),
-            make_per_field_data_sorted_set(vec![
-                (0, vec![BytesRef::from_utf8("/a.txt")]),
-                (1, vec![BytesRef::from_utf8("/b.txt")]),
-                (2, vec![BytesRef::from_utf8("/c.txt")]),
-            ]),
-        );
-        per_field.insert(
-            "modified".to_string(),
-            make_per_field_data_sorted_numeric(vec![
-                (0, vec![1000]),
-                (1, vec![2000]),
-                (2, vec![3000]),
-            ]),
-        );
+        let fields = vec![
+            make_field_data_sorted_set(
+                "path",
+                0,
+                vec![
+                    (0, vec![BytesRef::from_utf8("/a.txt")]),
+                    (1, vec![BytesRef::from_utf8("/b.txt")]),
+                    (2, vec![BytesRef::from_utf8("/c.txt")]),
+                ],
+            ),
+            make_field_data_sorted_numeric(
+                "modified",
+                1,
+                vec![(0, vec![1000]), (1, vec![2000]), (2, vec![3000])],
+            ),
+        ];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         assert_len_eq_x!(&result, 2);
         assert_eq!(result[0], "_0_Lucene90_0.dvm");
@@ -1332,40 +1305,26 @@ mod tests {
     fn test_two_fields_dvm_parseable_like_java() {
         // Regression test: verifies that SORTED_SET does NOT write an extra
         // numDocsWithField int, which would shift all subsequent field reads.
-        let fi_path = make_field_info("path", 0, DocValuesType::SortedSet);
-        let fi_mod = make_field_info("modified", 1, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi_path, fi_mod]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "path".to_string(),
-            make_per_field_data_sorted_set(vec![
-                (0, vec![BytesRef::from_utf8("/a.txt")]),
-                (1, vec![BytesRef::from_utf8("/b.txt")]),
-                (2, vec![BytesRef::from_utf8("/c.txt")]),
-            ]),
-        );
-        per_field.insert(
-            "modified".to_string(),
-            make_per_field_data_sorted_numeric(vec![
-                (0, vec![1000]),
-                (1, vec![2000]),
-                (2, vec![3000]),
-            ]),
-        );
+        let fields = vec![
+            make_field_data_sorted_set(
+                "path",
+                0,
+                vec![
+                    (0, vec![BytesRef::from_utf8("/a.txt")]),
+                    (1, vec![BytesRef::from_utf8("/b.txt")]),
+                    (2, vec![BytesRef::from_utf8("/c.txt")]),
+                ],
+            ),
+            make_field_data_sorted_numeric(
+                "modified",
+                1,
+                vec![(0, vec![1000]), (1, vec![2000]), (2, vec![3000])],
+            ),
+        ];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
 
         // Parse the .dvm like Java's Lucene90DocValuesProducer.readFields()
@@ -1400,31 +1359,15 @@ mod tests {
     #[test]
     fn test_sorted_numeric_with_gcd() {
         // Values with GCD: 100, 200, 300 → GCD=100 (from first_value diff)
-        let fi = make_field_info("field", 0, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "field".to_string(),
-            make_per_field_data_sorted_numeric(vec![
-                (0, vec![100]),
-                (1, vec![200]),
-                (2, vec![300]),
-            ]),
-        );
+        let fields = vec![make_field_data_sorted_numeric(
+            "field",
+            0,
+            vec![(0, vec![100]), (1, vec![200]), (2, vec![300])],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
 
         // Should complete without error
         assert_len_eq_x!(&result, 2);
@@ -1433,57 +1376,33 @@ mod tests {
     #[test]
     fn test_sorted_set_identical_paths() {
         // All docs have the same path → ordinals are all 0 → constant
-        let fi = make_field_info("path", 0, DocValuesType::SortedSet);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "path".to_string(),
-            make_per_field_data_sorted_set(vec![
+        let fields = vec![make_field_data_sorted_set(
+            "path",
+            0,
+            vec![
                 (0, vec![BytesRef::from_utf8("/same.txt")]),
                 (1, vec![BytesRef::from_utf8("/same.txt")]),
                 (2, vec![BytesRef::from_utf8("/same.txt")]),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
         assert_len_eq_x!(&result, 2);
     }
 
     #[test]
     fn test_numeric_constant() {
-        let fi = make_field_info("count", 0, DocValuesType::Numeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "count".to_string(),
-            make_per_field_data_numeric(vec![(0, 42), (1, 42), (2, 42)]),
-        );
+        let fields = vec![make_field_data_numeric(
+            "count",
+            0,
+            vec![(0, 42), (1, 42), (2, 42)],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1507,27 +1426,15 @@ mod tests {
 
     #[test]
     fn test_numeric_different_values() {
-        let fi = make_field_info("score", 0, DocValuesType::Numeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "score".to_string(),
-            make_per_field_data_numeric(vec![(0, 10), (1, 20), (2, 30)]),
-        );
+        let fields = vec![make_field_data_numeric(
+            "score",
+            0,
+            vec![(0, 10), (1, 20), (2, 30)],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
@@ -1538,27 +1445,15 @@ mod tests {
     #[test]
     fn test_numeric_no_num_docs_with_field() {
         // NUMERIC must NOT write numDocsWithField — verify by parsing the metadata
-        let fi = make_field_info("count", 0, DocValuesType::Numeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "count".to_string(),
-            make_per_field_data_numeric(vec![(0, 100), (1, 200), (2, 300)]),
-        );
+        let fields = vec![make_field_data_numeric(
+            "count",
+            0,
+            vec![(0, 100), (1, 200), (2, 300)],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1581,31 +1476,19 @@ mod tests {
 
     #[test]
     fn test_sorted_field() {
-        let fi = make_field_info("category", 0, DocValuesType::Sorted);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "category".to_string(),
-            make_per_field_data_sorted(vec![
+        let fields = vec![make_field_data_sorted(
+            "category",
+            0,
+            vec![
                 (0, BytesRef::from_utf8("alpha")),
                 (1, BytesRef::from_utf8("beta")),
                 (2, BytesRef::from_utf8("alpha")),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1620,31 +1503,19 @@ mod tests {
     #[test]
     fn test_sorted_parseable() {
         // Verify SORTED metadata is parseable (no multiValued byte, unlike SORTED_SET)
-        let fi = make_field_info("category", 0, DocValuesType::Sorted);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "category".to_string(),
-            make_per_field_data_sorted(vec![
+        let fields = vec![make_field_data_sorted(
+            "category",
+            0,
+            vec![
                 (0, BytesRef::from_utf8("x")),
                 (1, BytesRef::from_utf8("y")),
                 (2, BytesRef::from_utf8("z")),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1662,31 +1533,19 @@ mod tests {
 
     #[test]
     fn test_binary_fixed_length() {
-        let fi = make_field_info("hash", 0, DocValuesType::Binary);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "hash".to_string(),
-            make_per_field_data_binary(vec![
+        let fields = vec![make_field_data_binary(
+            "hash",
+            0,
+            vec![
                 (0, vec![0xAA, 0xBB, 0xCC, 0xDD]),
                 (1, vec![0x11, 0x22, 0x33, 0x44]),
                 (2, vec![0xFF, 0xEE, 0xDD, 0xCC]),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1698,31 +1557,15 @@ mod tests {
 
     #[test]
     fn test_binary_parseable() {
-        let fi = make_field_info("data", 0, DocValuesType::Binary);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "data".to_string(),
-            make_per_field_data_binary(vec![
-                (0, vec![1, 2, 3]),
-                (1, vec![4, 5, 6]),
-                (2, vec![7, 8, 9]),
-            ]),
-        );
+        let fields = vec![make_field_data_binary(
+            "data",
+            0,
+            vec![(0, vec![1, 2, 3]), (1, vec![4, 5, 6]), (2, vec![7, 8, 9])],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1740,27 +1583,15 @@ mod tests {
 
     #[test]
     fn test_binary_variable_length() {
-        let fi = make_field_info("payload", 0, DocValuesType::Binary);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "payload".to_string(),
-            make_per_field_data_binary(vec![(0, vec![1]), (1, vec![2, 3, 4]), (2, vec![5, 6])]),
-        );
+        let fields = vec![make_field_data_binary(
+            "payload",
+            0,
+            vec![(0, vec![1]), (1, vec![2, 3, 4]), (2, vec![5, 6])],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1782,59 +1613,41 @@ mod tests {
     #[test]
     fn test_all_dv_types_combined() {
         // Write all 5 doc values types in one segment and verify parseability
-        let fi0 = make_field_info("num", 0, DocValuesType::Numeric);
-        let fi1 = make_field_info("bin", 1, DocValuesType::Binary);
-        let fi2 = make_field_info("sort", 2, DocValuesType::Sorted);
-        let fi3 = make_field_info("sortset", 3, DocValuesType::SortedSet);
-        let fi4 = make_field_info("sortnum", 4, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi0, fi1, fi2, fi3, fi4]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "num".to_string(),
-            make_per_field_data_numeric(vec![(0, 10), (1, 20), (2, 30)]),
-        );
-        per_field.insert(
-            "bin".to_string(),
-            make_per_field_data_binary(vec![(0, vec![0xAA]), (1, vec![0xBB]), (2, vec![0xCC])]),
-        );
-        per_field.insert(
-            "sort".to_string(),
-            make_per_field_data_sorted(vec![
-                (0, BytesRef::from_utf8("a")),
-                (1, BytesRef::from_utf8("b")),
-                (2, BytesRef::from_utf8("c")),
-            ]),
-        );
-        per_field.insert(
-            "sortset".to_string(),
-            make_per_field_data_sorted_set(vec![
-                (0, vec![BytesRef::from_utf8("x")]),
-                (1, vec![BytesRef::from_utf8("y")]),
-                (2, vec![BytesRef::from_utf8("z")]),
-            ]),
-        );
-        per_field.insert(
-            "sortnum".to_string(),
-            make_per_field_data_sorted_numeric(vec![
-                (0, vec![100]),
-                (1, vec![200]),
-                (2, vec![300]),
-            ]),
-        );
+        let fields = vec![
+            make_field_data_numeric("num", 0, vec![(0, 10), (1, 20), (2, 30)]),
+            make_field_data_binary(
+                "bin",
+                1,
+                vec![(0, vec![0xAA]), (1, vec![0xBB]), (2, vec![0xCC])],
+            ),
+            make_field_data_sorted(
+                "sort",
+                2,
+                vec![
+                    (0, BytesRef::from_utf8("a")),
+                    (1, BytesRef::from_utf8("b")),
+                    (2, BytesRef::from_utf8("c")),
+                ],
+            ),
+            make_field_data_sorted_set(
+                "sortset",
+                3,
+                vec![
+                    (0, vec![BytesRef::from_utf8("x")]),
+                    (1, vec![BytesRef::from_utf8("y")]),
+                    (2, vec![BytesRef::from_utf8("z")]),
+                ],
+            ),
+            make_field_data_sorted_numeric(
+                "sortnum",
+                4,
+                vec![(0, vec![100]), (1, vec![200]), (2, vec![300])],
+            ),
+        ];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1872,31 +1685,19 @@ mod tests {
     #[test]
     fn test_sorted_numeric_multi_valued() {
         // 3 docs with varying value counts: 1, 2, 3 values
-        let fi = make_field_info("tags", 0, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tags".to_string(),
-            make_per_field_data_sorted_numeric(vec![
+        let fields = vec![make_field_data_sorted_numeric(
+            "tags",
+            0,
+            vec![
                 (0, vec![100]),
                 (1, vec![300, 200]),      // unsorted — should be sorted by codec
                 (2, vec![600, 400, 500]), // unsorted — should be sorted by codec
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
@@ -1917,31 +1718,19 @@ mod tests {
         // Verify that values are sorted within each doc by checking the flattened
         // data output: for doc1=[300,200] and doc2=[600,400,500], the flattened
         // values should be [100, 200, 300, 400, 500, 600].
-        let fi = make_field_info("nums", 0, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "nums".to_string(),
-            make_per_field_data_sorted_numeric(vec![
+        let fields = vec![make_field_data_sorted_numeric(
+            "nums",
+            0,
+            vec![
                 (0, vec![100]),
                 (1, vec![300, 200]),
                 (2, vec![600, 400, 500]),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         // The .dvm metadata should have numValues=6 (total across all docs)
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
@@ -1957,40 +1746,26 @@ mod tests {
     #[test]
     fn test_two_fields_multi_valued_sorted_numeric_dvm_parseable() {
         // Two-field test: multi-valued SORTED_SET (single-valued) + multi-valued SORTED_NUMERIC
-        let fi_path = make_field_info("path", 0, DocValuesType::SortedSet);
-        let fi_counts = make_field_info("counts", 1, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi_path, fi_counts]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "path".to_string(),
-            make_per_field_data_sorted_set(vec![
-                (0, vec![BytesRef::from_utf8("/a.txt")]),
-                (1, vec![BytesRef::from_utf8("/b.txt")]),
-                (2, vec![BytesRef::from_utf8("/c.txt")]),
-            ]),
-        );
-        per_field.insert(
-            "counts".to_string(),
-            make_per_field_data_sorted_numeric(vec![
-                (0, vec![10, 20]),
-                (1, vec![30]),
-                (2, vec![40, 50, 60]),
-            ]),
-        );
+        let fields = vec![
+            make_field_data_sorted_set(
+                "path",
+                0,
+                vec![
+                    (0, vec![BytesRef::from_utf8("/a.txt")]),
+                    (1, vec![BytesRef::from_utf8("/b.txt")]),
+                    (2, vec![BytesRef::from_utf8("/c.txt")]),
+                ],
+            ),
+            make_field_data_sorted_numeric(
+                "counts",
+                1,
+                vec![(0, vec![10, 20]), (1, vec![30]), (2, vec![40, 50, 60])],
+            ),
+        ];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -2013,13 +1788,10 @@ mod tests {
     #[test]
     fn test_sorted_set_multi_valued() {
         // 3 docs with 1, 2, 3 values respectively
-        let fi = make_field_info("tags", 0, DocValuesType::SortedSet);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tags".to_string(),
-            make_per_field_data_sorted_set(vec![
+        let fields = vec![make_field_data_sorted_set(
+            "tags",
+            0,
+            vec![
                 (0, vec![BytesRef::from_utf8("alpha")]),
                 (
                     1,
@@ -2033,21 +1805,12 @@ mod tests {
                         BytesRef::from_utf8("gamma"),
                     ],
                 ),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
@@ -2066,13 +1829,10 @@ mod tests {
     #[test]
     fn test_sorted_set_multi_valued_dedup() {
         // Doc with duplicate terms should produce unique ordinals
-        let fi = make_field_info("tags", 0, DocValuesType::SortedSet);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tags".to_string(),
-            make_per_field_data_sorted_set(vec![
+        let fields = vec![make_field_data_sorted_set(
+            "tags",
+            0,
+            vec![
                 (
                     0,
                     vec![
@@ -2085,21 +1845,12 @@ mod tests {
                     1,
                     vec![BytesRef::from_utf8("beta"), BytesRef::from_utf8("beta")],
                 ),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            2,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 2).unwrap();
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
@@ -2118,40 +1869,26 @@ mod tests {
     #[test]
     fn test_two_fields_multi_valued_sorted_set_and_sorted_numeric() {
         // Two multi-valued fields: SORTED_SET + SORTED_NUMERIC
-        let fi_tags = make_field_info("tags", 0, DocValuesType::SortedSet);
-        let fi_nums = make_field_info("nums", 1, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi_tags, fi_nums]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tags".to_string(),
-            make_per_field_data_sorted_set(vec![
-                (0, vec![BytesRef::from_utf8("a"), BytesRef::from_utf8("b")]),
-                (1, vec![BytesRef::from_utf8("c")]),
-                (2, vec![BytesRef::from_utf8("a"), BytesRef::from_utf8("c")]),
-            ]),
-        );
-        per_field.insert(
-            "nums".to_string(),
-            make_per_field_data_sorted_numeric(vec![
-                (0, vec![10, 20]),
-                (1, vec![30]),
-                (2, vec![40, 50, 60]),
-            ]),
-        );
+        let fields = vec![
+            make_field_data_sorted_set(
+                "tags",
+                0,
+                vec![
+                    (0, vec![BytesRef::from_utf8("a"), BytesRef::from_utf8("b")]),
+                    (1, vec![BytesRef::from_utf8("c")]),
+                    (2, vec![BytesRef::from_utf8("a"), BytesRef::from_utf8("c")]),
+                ],
+            ),
+            make_field_data_sorted_numeric(
+                "nums",
+                1,
+                vec![(0, vec![10, 20]), (1, vec![30]), (2, vec![40, 50, 60])],
+            ),
+        ];
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(
-            &directory,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -2174,18 +1911,15 @@ mod tests {
     #[test]
     fn test_sparse_numeric_field() {
         // 3 docs with values out of 10 total — SPARSE pattern
-        let fi = make_field_info("score", 0, DocValuesType::Numeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "score".to_string(),
-            make_per_field_data_numeric(vec![(1, 100), (5, 200), (8, 300)]),
-        );
+        let fields = vec![make_field_data_numeric(
+            "score",
+            0,
+            vec![(1, 100), (5, 200), (8, 300)],
+        )];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 10).unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields, 10).unwrap();
 
         let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let dvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
@@ -2233,18 +1967,15 @@ mod tests {
     #[test]
     fn test_sparse_binary_field() {
         // 2 docs with values out of 5 total — SPARSE pattern
-        let fi = make_field_info("tag", 0, DocValuesType::Binary);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tag".to_string(),
-            make_per_field_data_binary(vec![(1, b"hello".to_vec()), (3, b"world".to_vec())]),
-        );
+        let fields = vec![make_field_data_binary(
+            "tag",
+            0,
+            vec![(1, b"hello".to_vec()), (3, b"world".to_vec())],
+        )];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 5).unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
         let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
 
@@ -2279,21 +2010,18 @@ mod tests {
     #[test]
     fn test_sparse_sorted_field() {
         // 2 docs with values out of 5 total — SPARSE sorted
-        let fi = make_field_info("category", 0, DocValuesType::Sorted);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "category".to_string(),
-            make_per_field_data_sorted(vec![
+        let fields = vec![make_field_data_sorted(
+            "category",
+            0,
+            vec![
                 (0, BytesRef::new(b"alpha".to_vec())),
                 (3, BytesRef::new(b"beta".to_vec())),
-            ]),
-        );
+            ],
+        )];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 5).unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
         let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
 
@@ -2320,18 +2048,15 @@ mod tests {
     #[test]
     fn test_sparse_sorted_numeric_field() {
         // 2 docs with values out of 5 total — SPARSE sorted numeric
-        let fi = make_field_info("counts", 0, DocValuesType::SortedNumeric);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "counts".to_string(),
-            make_per_field_data_sorted_numeric(vec![(1, vec![10, 20]), (4, vec![30])]),
-        );
+        let fields = vec![make_field_data_sorted_numeric(
+            "counts",
+            0,
+            vec![(1, vec![10, 20]), (4, vec![30])],
+        )];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 5).unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
         let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
 

@@ -2,7 +2,7 @@
 
 //! Doc values metadata reader for the Lucene90 doc values format.
 //!
-//! Reads `.dvm` (metadata) and `.dvd` (data) files written by [`super::doc_values::write`].
+//! Reads `.dvm` (metadata) and `.dvd` (data) files written by [`super::doc_values`].
 //! Metadata is read eagerly during construction; value data is read lazily from
 //! the `.dvd` data file on demand.
 
@@ -350,14 +350,12 @@ fn skip_terms_dict(meta: &mut dyn DataInput) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::doc_values;
+    use crate::codecs::lucene90::doc_values::{self, DocValuesAccumulator, DocValuesFieldData};
     use crate::document::{DocValuesType, IndexOptions};
-    use crate::index::indexing_chain::{DocValuesAccumulator, PerFieldData};
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::util::BytesRef;
     use assertables::*;
-    use std::collections::HashMap;
 
     fn make_field_info(name: &str, number: u32, dv_type: DocValuesType) -> FieldInfo {
         crate::test_util::make_field_info(name, number, true, IndexOptions::None, dv_type)
@@ -367,55 +365,69 @@ mod tests {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    fn make_per_field_numeric(values: Vec<(i32, i64)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::Numeric(values);
-        pfd
+    fn make_dv_numeric(name: &str, number: u32, values: Vec<(i32, i64)>) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::Numeric,
+            doc_values: DocValuesAccumulator::Numeric(values),
+        }
     }
 
-    fn make_per_field_binary(values: Vec<(i32, Vec<u8>)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::Binary(values);
-        pfd
+    fn make_dv_binary(name: &str, number: u32, values: Vec<(i32, Vec<u8>)>) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::Binary,
+            doc_values: DocValuesAccumulator::Binary(values),
+        }
     }
 
-    fn make_per_field_sorted(values: Vec<(i32, BytesRef)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::Sorted(values);
-        pfd
+    fn make_dv_sorted(name: &str, number: u32, values: Vec<(i32, BytesRef)>) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::Sorted,
+            doc_values: DocValuesAccumulator::Sorted(values),
+        }
     }
 
-    fn make_per_field_sorted_numeric(values: Vec<(i32, Vec<i64>)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::SortedNumeric(values);
-        pfd
+    fn make_dv_sorted_numeric(
+        name: &str,
+        number: u32,
+        values: Vec<(i32, Vec<i64>)>,
+    ) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::SortedNumeric,
+            doc_values: DocValuesAccumulator::SortedNumeric(values),
+        }
     }
 
-    fn make_per_field_sorted_set(values: Vec<(i32, Vec<BytesRef>)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.doc_values = DocValuesAccumulator::SortedSet(values);
-        pfd
+    fn make_dv_sorted_set(
+        name: &str,
+        number: u32,
+        values: Vec<(i32, Vec<BytesRef>)>,
+    ) -> DocValuesFieldData {
+        DocValuesFieldData {
+            name: name.to_string(),
+            number,
+            doc_values_type: DocValuesType::SortedSet,
+            doc_values: DocValuesAccumulator::SortedSet(values),
+        }
     }
 
     /// Writes doc values and opens a reader.
     fn write_and_read(
         field_infos: &FieldInfos,
-        per_field: &HashMap<String, PerFieldData>,
+        fields: &[DocValuesFieldData],
         num_docs: i32,
         suffix: &str,
     ) -> DocValuesProducer {
         let segment_id = [0u8; 16];
         let dir = test_directory();
-        doc_values::write(
-            &dir,
-            "_0",
-            suffix,
-            &segment_id,
-            field_infos,
-            per_field,
-            num_docs,
-        )
-        .unwrap();
+        doc_values::write(&dir, "_0", suffix, &segment_id, fields, num_docs).unwrap();
         let guard = dir.lock().unwrap();
         DocValuesProducer::open(guard.as_ref(), "_0", suffix, &segment_id, field_infos).unwrap()
     }
@@ -424,14 +436,9 @@ mod tests {
     fn test_numeric_all_docs() {
         let fi = make_field_info("count", 0, DocValuesType::Numeric);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_numeric("count", 0, vec![(0, 10), (1, 20), (2, 30)])];
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "count".to_string(),
-            make_per_field_numeric(vec![(0, 10), (1, 20), (2, 30)]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
         assert_gt!(reader.data().length(), 0);
     }
@@ -440,14 +447,9 @@ mod tests {
     fn test_numeric_sparse() {
         let fi = make_field_info("count", 0, DocValuesType::Numeric);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_numeric("count", 0, vec![(1, 10), (3, 20)])];
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "count".to_string(),
-            make_per_field_numeric(vec![(1, 10), (3, 20)]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 5, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 5, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(2));
     }
 
@@ -455,11 +457,9 @@ mod tests {
     fn test_numeric_empty() {
         let fi = make_field_info("count", 0, DocValuesType::Numeric);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_numeric("count", 0, vec![])];
 
-        let mut per_field = HashMap::new();
-        per_field.insert("count".to_string(), make_per_field_numeric(vec![]));
-
-        let reader = write_and_read(&field_infos, &per_field, 5, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 5, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(0));
     }
 
@@ -467,18 +467,17 @@ mod tests {
     fn test_binary_all_docs() {
         let fi = make_field_info("hash", 0, DocValuesType::Binary);
         let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "hash".to_string(),
-            make_per_field_binary(vec![
+        let fields = [make_dv_binary(
+            "hash",
+            0,
+            vec![
                 (0, b"abc".to_vec()),
                 (1, b"def".to_vec()),
                 (2, b"ghi".to_vec()),
-            ]),
-        );
+            ],
+        )];
 
-        let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
     }
 
@@ -486,17 +485,13 @@ mod tests {
     fn test_binary_variable_length() {
         let fi = make_field_info("data", 0, DocValuesType::Binary);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_binary(
+            "data",
+            0,
+            vec![(0, b"short".to_vec()), (1, b"a longer value here".to_vec())],
+        )];
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "data".to_string(),
-            make_per_field_binary(vec![
-                (0, b"short".to_vec()),
-                (1, b"a longer value here".to_vec()),
-            ]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 2, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 2, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(2));
     }
 
@@ -504,14 +499,13 @@ mod tests {
     fn test_binary_sparse() {
         let fi = make_field_info("data", 0, DocValuesType::Binary);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_binary(
+            "data",
+            0,
+            vec![(1, b"abc".to_vec()), (3, b"def".to_vec())],
+        )];
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "data".to_string(),
-            make_per_field_binary(vec![(1, b"abc".to_vec()), (3, b"def".to_vec())]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 5, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 5, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(2));
     }
 
@@ -519,18 +513,17 @@ mod tests {
     fn test_sorted() {
         let fi = make_field_info("category", 0, DocValuesType::Sorted);
         let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "category".to_string(),
-            make_per_field_sorted(vec![
+        let fields = [make_dv_sorted(
+            "category",
+            0,
+            vec![
                 (0, BytesRef::new(b"alpha".to_vec())),
                 (1, BytesRef::new(b"beta".to_vec())),
                 (2, BytesRef::new(b"alpha".to_vec())),
-            ]),
-        );
+            ],
+        )];
 
-        let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
     }
 
@@ -538,14 +531,13 @@ mod tests {
     fn test_sorted_numeric_single_valued() {
         let fi = make_field_info("priority", 0, DocValuesType::SortedNumeric);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_sorted_numeric(
+            "priority",
+            0,
+            vec![(0, vec![100]), (1, vec![200]), (2, vec![300])],
+        )];
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "priority".to_string(),
-            make_per_field_sorted_numeric(vec![(0, vec![100]), (1, vec![200]), (2, vec![300])]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
     }
 
@@ -553,14 +545,13 @@ mod tests {
     fn test_sorted_numeric_multi_valued() {
         let fi = make_field_info("tags", 0, DocValuesType::SortedNumeric);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_sorted_numeric(
+            "tags",
+            0,
+            vec![(0, vec![1, 2, 3]), (1, vec![4]), (2, vec![5, 6])],
+        )];
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tags".to_string(),
-            make_per_field_sorted_numeric(vec![(0, vec![1, 2, 3]), (1, vec![4]), (2, vec![5, 6])]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
     }
 
@@ -568,14 +559,13 @@ mod tests {
     fn test_sorted_numeric_sparse() {
         let fi = make_field_info("tags", 0, DocValuesType::SortedNumeric);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_sorted_numeric(
+            "tags",
+            0,
+            vec![(1, vec![10, 20]), (3, vec![30])],
+        )];
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tags".to_string(),
-            make_per_field_sorted_numeric(vec![(1, vec![10, 20]), (3, vec![30])]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 5, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 5, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(2));
     }
 
@@ -583,18 +573,17 @@ mod tests {
     fn test_sorted_set_single_valued() {
         let fi = make_field_info("tag", 0, DocValuesType::SortedSet);
         let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tag".to_string(),
-            make_per_field_sorted_set(vec![
+        let fields = [make_dv_sorted_set(
+            "tag",
+            0,
+            vec![
                 (0, vec![BytesRef::new(b"a".to_vec())]),
                 (1, vec![BytesRef::new(b"b".to_vec())]),
                 (2, vec![BytesRef::new(b"c".to_vec())]),
-            ]),
-        );
+            ],
+        )];
 
-        let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
     }
 
@@ -602,11 +591,10 @@ mod tests {
     fn test_sorted_set_multi_valued() {
         let fi = make_field_info("tags", 0, DocValuesType::SortedSet);
         let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "tags".to_string(),
-            make_per_field_sorted_set(vec![
+        let fields = [make_dv_sorted_set(
+            "tags",
+            0,
+            vec![
                 (
                     0,
                     vec![BytesRef::new(b"a".to_vec()), BytesRef::new(b"b".to_vec())],
@@ -616,10 +604,10 @@ mod tests {
                     2,
                     vec![BytesRef::new(b"a".to_vec()), BytesRef::new(b"d".to_vec())],
                 ),
-            ]),
-        );
+            ],
+        )];
 
-        let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
     }
 
@@ -629,22 +617,13 @@ mod tests {
         let fi_bin = make_field_info("hash", 1, DocValuesType::Binary);
         let fi_sn = make_field_info("priority", 2, DocValuesType::SortedNumeric);
         let field_infos = FieldInfos::new(vec![fi_num, fi_bin, fi_sn]);
+        let fields = [
+            make_dv_numeric("count", 0, vec![(0, 10), (1, 20), (2, 30)]),
+            make_dv_binary("hash", 1, vec![(0, b"abc".to_vec()), (1, b"def".to_vec())]),
+            make_dv_sorted_numeric("priority", 2, vec![(0, vec![1]), (2, vec![3])]),
+        ];
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "count".to_string(),
-            make_per_field_numeric(vec![(0, 10), (1, 20), (2, 30)]),
-        );
-        per_field.insert(
-            "hash".to_string(),
-            make_per_field_binary(vec![(0, b"abc".to_vec()), (1, b"def".to_vec())]),
-        );
-        per_field.insert(
-            "priority".to_string(),
-            make_per_field_sorted_numeric(vec![(0, vec![1]), (2, vec![3])]),
-        );
-
-        let reader = write_and_read(&field_infos, &per_field, 3, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
         assert_eq!(reader.num_docs_with_field(1), Some(2));
         assert_eq!(reader.num_docs_with_field(2), Some(2));
@@ -654,11 +633,9 @@ mod tests {
     fn test_nonexistent_field() {
         let fi = make_field_info("count", 0, DocValuesType::Numeric);
         let field_infos = FieldInfos::new(vec![fi]);
+        let fields = [make_dv_numeric("count", 0, vec![(0, 10)])];
 
-        let mut per_field = HashMap::new();
-        per_field.insert("count".to_string(), make_per_field_numeric(vec![(0, 10)]));
-
-        let reader = write_and_read(&field_infos, &per_field, 1, "Lucene90_0");
+        let reader = write_and_read(&field_infos, &fields, 1, "Lucene90_0");
         assert_none!(reader.num_docs_with_field(99));
     }
 }
