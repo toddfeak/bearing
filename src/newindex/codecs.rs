@@ -9,7 +9,6 @@
 pub(crate) mod blocktree_writer;
 pub(crate) mod doc_values;
 pub(crate) mod field_infos;
-pub(crate) mod points;
 pub(crate) mod postings_writer;
 pub(crate) mod segment_info;
 pub(crate) mod segment_infos;

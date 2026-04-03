@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! BKD tree writer for multi-dimensional point indexing.
 
-use std::collections::HashMap;
 use std::io;
 
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::index::FieldInfos;
 use crate::index::index_file_names;
-use crate::index::indexing_chain::PerFieldData;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 
 // File extensions
@@ -36,17 +33,31 @@ const BITSET_IDS: u8 = 0xFF; // -1 as byte
 const DELTA_BPV_16: u8 = 16;
 const BPV_32: u8 = 32;
 
+/// Per-field point data for the points writer.
+#[derive(Debug)]
+pub(crate) struct PointsFieldData {
+    /// Field name.
+    pub field_name: String,
+    /// Field number.
+    pub field_number: u32,
+    /// Number of dimensions.
+    pub dimension_count: u32,
+    /// Number of index dimensions.
+    pub index_dimension_count: u32,
+    /// Bytes per dimension.
+    pub bytes_per_dim: u32,
+    /// (doc_id, packed_value) pairs.
+    pub points: Vec<(i32, Vec<u8>)>,
+}
+
 /// Writes points files (.kdd, .kdi, .kdm) for a segment.
 /// Returns a list of file names written.
-///
-pub fn write(
+pub(crate) fn write(
     directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
-    field_infos: &FieldInfos,
-    per_field: &HashMap<String, PerFieldData>,
-    _num_docs: i32,
+    fields: &[PointsFieldData],
 ) -> io::Result<Vec<String>> {
     let kdd_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
@@ -87,37 +98,30 @@ pub fn write(
         segment_suffix,
     )?;
 
-    // Iterate fields sorted by field number (FieldInfos.iter() is in insertion order,
-    // which is by field number)
-    for fi in field_infos.iter() {
-        if !fi.has_point_values() {
+    // Iterate fields (caller provides them sorted by field number)
+    for field in fields {
+        if field.points.is_empty() {
             continue;
         }
 
-        let points = match per_field.get(fi.name()) {
-            Some(pfd) if !pfd.points.is_empty() => &pfd.points,
-            _ => continue,
-        };
-
         debug!(
             "points: field={:?} (#{}) num_points={}",
-            fi.name(),
-            fi.number(),
-            points.len()
+            field.field_name,
+            field.field_number,
+            field.points.len()
         );
 
         // Write field number to meta
-        meta.write_le_int(fi.number() as i32)?;
+        meta.write_le_int(field.field_number as i32)?;
 
-        let pc = fi.point_config();
         write_bkd_field(
             &mut *data,
             &mut *index,
             &mut *meta,
-            points,
-            pc.dimension_count,
-            pc.index_dimension_count,
-            pc.num_bytes,
+            &field.points,
+            field.dimension_count,
+            field.index_dimension_count,
+            field.bytes_per_dim,
         )?;
     }
 
@@ -629,7 +633,6 @@ fn compute_cardinality(sorted_points: &[(i32, Vec<u8>)]) -> usize {
 }
 
 /// Computes the number of leaves in the left subtree of a semi-balanced BKD tree.
-/// Direct port of Java BKDWriter.getNumLeftLeafNodes() (line 877).
 fn get_num_left_leaf_nodes(num_leaves: usize) -> usize {
     assert!(num_leaves > 1);
     let last_full_level = 31 - (num_leaves as u32).leading_zeros();
@@ -744,7 +747,6 @@ fn pack_index(
 }
 
 /// Recursively encodes the BKD tree index using prefix-coded split values.
-/// Direct port of BKDWriter.recursePackIndex() (line 1121).
 ///
 /// lastSplitValues is per-dimension split value previously seen; we use this to
 /// prefix-code the split byte[] on each inner node.
@@ -898,11 +900,7 @@ fn recurse_pack_index(
 mod tests {
     use super::*;
     use crate::codecs::codec_util::{FOOTER_LENGTH, header_length, index_header_length};
-    use crate::document::{DocValuesType, IndexOptions};
-    use crate::index::indexing_chain::PerFieldData;
-    use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
-    use std::collections::HashMap;
 
     fn make_test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
@@ -914,26 +912,26 @@ mod tests {
         flipped.to_be_bytes().to_vec()
     }
 
-    fn make_point_field_info(name: &str, number: u32) -> FieldInfo {
-        FieldInfo::new(
-            name.to_string(),
-            number,
-            false,
-            false,
-            IndexOptions::None, // point fields are typically not indexed as text
-            DocValuesType::SortedNumeric,
-            PointDimensionConfig {
-                dimension_count: 1,
-                index_dimension_count: 1,
-                num_bytes: 8,
-            },
-        )
+    fn make_points_field_data(
+        name: &str,
+        number: u32,
+        dimension_count: u32,
+        index_dimension_count: u32,
+        bytes_per_dim: u32,
+        points: Vec<(i32, Vec<u8>)>,
+    ) -> PointsFieldData {
+        PointsFieldData {
+            field_name: name.to_string(),
+            field_number: number,
+            dimension_count,
+            index_dimension_count,
+            bytes_per_dim,
+            points,
+        }
     }
 
-    fn make_per_field_with_points(points: Vec<(i32, Vec<u8>)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.points = points;
-        pfd
+    fn make_1d_long_field(name: &str, number: u32, points: Vec<(i32, Vec<u8>)>) -> PointsFieldData {
+        make_points_field_data(name, number, 1, 1, 8, points)
     }
 
     #[test]
@@ -1054,30 +1052,17 @@ mod tests {
     #[test]
     fn test_bkd_metadata() {
         // Verify BKD metadata fields in .kdm
-        let fi = make_point_field_info("modified", 1);
-        let field_infos = FieldInfos::new(vec![fi]);
-
         let points: Vec<(i32, Vec<u8>)> = vec![
             (0, long_to_sortable_bytes(1000)),
             (1, long_to_sortable_bytes(2000)),
             (2, long_to_sortable_bytes(3000)),
         ];
 
-        let mut per_field = HashMap::new();
-        per_field.insert("modified".to_string(), make_per_field_with_points(points));
+        let fields = vec![make_1d_long_field("modified", 1, points)];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(
-            &dir,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let names = write(&dir, "_0", "Lucene90_0", &segment_id, &fields).unwrap();
 
         assert_len_eq_x!(&names, 3);
         let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
@@ -1161,30 +1146,17 @@ mod tests {
 
     #[test]
     fn test_file_headers_footers() {
-        let fi = make_point_field_info("modified", 1);
-        let field_infos = FieldInfos::new(vec![fi]);
-
         let points: Vec<(i32, Vec<u8>)> = vec![
             (0, long_to_sortable_bytes(100)),
             (1, long_to_sortable_bytes(200)),
             (2, long_to_sortable_bytes(300)),
         ];
 
-        let mut per_field = HashMap::new();
-        per_field.insert("modified".to_string(), make_per_field_with_points(points));
+        let fields = vec![make_1d_long_field("modified", 1, points)];
 
         let segment_id = [0xABu8; 16];
         let dir = make_test_directory();
-        let names = write(
-            &dir,
-            "_0",
-            "Lucene90_0",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            3,
-        )
-        .unwrap();
+        let names = write(&dir, "_0", "Lucene90_0", &segment_id, &fields).unwrap();
 
         // Check file names
         assert_eq!(names[0], "_0_Lucene90_0.kdd");
@@ -1245,15 +1217,11 @@ mod tests {
         assert_eq!(sorted[2].0, 2); // doc 2 (value 3000)
 
         // Write through the full pipeline and verify it works
-        let fi = make_point_field_info("modified", 1);
-        let field_infos = FieldInfos::new(vec![fi]);
-
-        let mut per_field = HashMap::new();
-        per_field.insert("modified".to_string(), make_per_field_with_points(points));
+        let fields = vec![make_1d_long_field("modified", 1, points)];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
         assert_len_eq_x!(&names, 3);
 
         // Verify the .kdd leaf block contains correctly sorted data
@@ -1286,21 +1254,17 @@ mod tests {
     #[test]
     fn test_kdm_total_sizes() {
         // Verify that .kdm contains total .kdi and .kdd sizes before its footer
-        let fi = make_point_field_info("modified", 1);
-        let field_infos = FieldInfos::new(vec![fi]);
-
         let points: Vec<(i32, Vec<u8>)> = vec![
             (0, long_to_sortable_bytes(1000)),
             (1, long_to_sortable_bytes(2000)),
             (2, long_to_sortable_bytes(3000)),
         ];
 
-        let mut per_field = HashMap::new();
-        per_field.insert("modified".to_string(), make_per_field_with_points(points));
+        let fields = vec![make_1d_long_field("modified", 1, points)];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
 
         let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let kdi = dir.lock().unwrap().read_file(&names[1]).unwrap();
@@ -1328,27 +1292,22 @@ mod tests {
 
     #[test]
     fn test_no_point_fields_skipped() {
-        // A field without points should be skipped entirely
-        let fi_text = FieldInfo::new(
-            "contents".to_string(),
-            0,
-            false,
-            false,
-            IndexOptions::DocsAndFreqsAndPositions,
-            DocValuesType::None,
-            PointDimensionConfig::default(), // no points
-        );
-        let fi_point = make_point_field_info("modified", 1);
-        let field_infos = FieldInfos::new(vec![fi_text, fi_point]);
-
-        let points: Vec<(i32, Vec<u8>)> = vec![(0, long_to_sortable_bytes(100))];
-
-        let mut per_field = HashMap::new();
-        per_field.insert("modified".to_string(), make_per_field_with_points(points));
+        // A field with empty points should be skipped entirely
+        let fields = vec![
+            PointsFieldData {
+                field_name: "contents".to_string(),
+                field_number: 0,
+                dimension_count: 1,
+                index_dimension_count: 1,
+                bytes_per_dim: 8,
+                points: vec![], // no points
+            },
+            make_1d_long_field("modified", 1, vec![(0, long_to_sortable_bytes(100))]),
+        ];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 1).unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
 
         // Should succeed and produce 3 files
         assert_len_eq_x!(&names, 3);
@@ -1413,7 +1372,6 @@ mod tests {
     }
 
     // --- Multi-leaf BKD tests ---
-    // Ported from org.apache.lucene.util.bkd.TestBKD
 
     #[test]
     fn test_get_num_left_leaf_nodes() {
@@ -1431,28 +1389,15 @@ mod tests {
 
     /// Helper to build a BKD via the full write() pipeline and return the 3 file byte vecs.
     fn write_bkd_with_n_points(n: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        let fi = make_point_field_info("modified", 1);
-        let field_infos = FieldInfos::new(vec![fi]);
-
         let points: Vec<(i32, Vec<u8>)> = (0..n)
             .map(|i| (i as i32, long_to_sortable_bytes(i as i64 * 1000)))
             .collect();
 
-        let mut per_field = HashMap::new();
-        per_field.insert("modified".to_string(), make_per_field_with_points(points));
+        let fields = vec![make_1d_long_field("modified", 1, points)];
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(
-            &dir,
-            "_0",
-            "",
-            &segment_id,
-            &field_infos,
-            &per_field,
-            n as i32,
-        )
-        .unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
         let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let kdi = dir.lock().unwrap().read_file(&names[1]).unwrap();
         let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
@@ -1585,20 +1530,8 @@ mod tests {
         bytes
     }
 
-    fn make_2d_point_field_info(name: &str, number: u32) -> FieldInfo {
-        FieldInfo::new(
-            name.to_string(),
-            number,
-            false,
-            false,
-            IndexOptions::None,
-            DocValuesType::None,
-            PointDimensionConfig {
-                dimension_count: 2,
-                index_dimension_count: 2,
-                num_bytes: 4,
-            },
-        )
+    fn make_2d_field(name: &str, number: u32, points: Vec<(i32, Vec<u8>)>) -> PointsFieldData {
+        make_points_field_data(name, number, 2, 2, 4, points)
     }
 
     #[test]
@@ -1682,21 +1615,17 @@ mod tests {
     // Full write_bkd_field test with 2D points
     #[test]
     fn test_write_bkd_2d_single_leaf() {
-        let fi = make_2d_point_field_info("location", 0);
-        let field_infos = FieldInfos::new(vec![fi]);
-
         let points = vec![
             (0, make_2d_point(100, 200)),
             (1, make_2d_point(100, 200)),
             (2, make_2d_point(100, 200)),
         ];
 
-        let mut per_field = HashMap::new();
-        per_field.insert("location".to_string(), make_per_field_with_points(points));
+        let fields = vec![make_2d_field("location", 0, points)];
 
         let dir = make_test_directory();
         let segment_id = [0u8; 16];
-        let names = write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 3).unwrap();
+        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
         assert_len_eq_x!(&names, 3);
     }
 }

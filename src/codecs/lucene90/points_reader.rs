@@ -3,7 +3,7 @@
 //! Points/BKD reader for the Lucene90 points format.
 //!
 //! Reads `.kdm` (metadata), `.kdi` (index), and `.kdd` (data) files written by
-//! [`super::points::write`]. Metadata is read eagerly from `.kdm`; tree and
+//! `super::points::write()`. Metadata is read eagerly from `.kdm`; tree and
 //! leaf data in `.kdi`/`.kdd` are available via retained file handles.
 
 use std::io;
@@ -206,13 +206,11 @@ fn read_bkd_entry(meta: &mut dyn DataInput) -> io::Result<BkdEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::points;
+    use crate::codecs::lucene90::points::{self, PointsFieldData};
     use crate::document::{DocValuesType, IndexOptions};
-    use crate::index::indexing_chain::PerFieldData;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
-    use std::collections::HashMap;
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
@@ -240,29 +238,28 @@ mod tests {
         )
     }
 
-    fn make_point_data(values: Vec<(i32, Vec<u8>)>) -> PerFieldData {
-        let mut pfd = PerFieldData::new();
-        pfd.points = values;
-        pfd
+    fn make_points_field(
+        name: &str,
+        number: u32,
+        dims: u32,
+        index_dims: u32,
+        num_bytes: u32,
+        values: Vec<(i32, Vec<u8>)>,
+    ) -> PointsFieldData {
+        PointsFieldData {
+            field_name: name.to_string(),
+            field_number: number,
+            dimension_count: dims,
+            index_dimension_count: index_dims,
+            bytes_per_dim: num_bytes,
+            points: values,
+        }
     }
 
-    fn write_and_read(
-        field_infos: &FieldInfos,
-        per_field: &HashMap<String, PerFieldData>,
-        num_docs: i32,
-    ) -> PointsReader {
+    fn write_and_read(field_infos: &FieldInfos, fields: &[PointsFieldData]) -> PointsReader {
         let segment_id = [0u8; 16];
         let dir = test_directory();
-        points::write(
-            &dir,
-            "_0",
-            "",
-            &segment_id,
-            field_infos,
-            per_field,
-            num_docs,
-        )
-        .unwrap();
+        points::write(&dir, "_0", "", &segment_id, fields).unwrap();
         let guard = dir.lock().unwrap();
         PointsReader::open(guard.as_ref(), "_0", "", &segment_id, field_infos).unwrap()
     }
@@ -272,17 +269,20 @@ mod tests {
         let fi = make_point_field("size", 0, 1, 1, 4);
         let field_infos = FieldInfos::new(vec![fi]);
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "size".to_string(),
-            make_point_data(vec![
+        let fields = vec![make_points_field(
+            "size",
+            0,
+            1,
+            1,
+            4,
+            vec![
                 (0, 100i32.to_be_bytes().to_vec()),
                 (1, 200i32.to_be_bytes().to_vec()),
                 (2, 300i32.to_be_bytes().to_vec()),
-            ]),
-        );
+            ],
+        )];
 
-        let reader = write_and_read(&field_infos, &per_field, 3);
+        let reader = write_and_read(&field_infos, &fields);
         assert_eq!(reader.point_count(0), Some(3));
         assert_eq!(reader.doc_count(0), Some(3));
     }
@@ -292,7 +292,6 @@ mod tests {
         let fi = make_point_field("location", 0, 2, 2, 4);
         let field_infos = FieldInfos::new(vec![fi]);
 
-        let mut per_field = HashMap::new();
         let mut point1 = Vec::new();
         point1.extend_from_slice(&10i32.to_be_bytes());
         point1.extend_from_slice(&20i32.to_be_bytes());
@@ -300,12 +299,16 @@ mod tests {
         point2.extend_from_slice(&30i32.to_be_bytes());
         point2.extend_from_slice(&40i32.to_be_bytes());
 
-        per_field.insert(
-            "location".to_string(),
-            make_point_data(vec![(0, point1), (1, point2)]),
-        );
+        let fields = vec![make_points_field(
+            "location",
+            0,
+            2,
+            2,
+            4,
+            vec![(0, point1), (1, point2)],
+        )];
 
-        let reader = write_and_read(&field_infos, &per_field, 2);
+        let reader = write_and_read(&field_infos, &fields);
         assert_eq!(reader.point_count(0), Some(2));
         assert_eq!(reader.doc_count(0), Some(2));
         assert_eq!(reader.num_leaves(0), Some(1));
@@ -317,24 +320,26 @@ mod tests {
         let fi_loc = make_point_field("location", 1, 2, 2, 4);
         let field_infos = FieldInfos::new(vec![fi_size, fi_loc]);
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "size".to_string(),
-            make_point_data(vec![
-                (0, 100i32.to_be_bytes().to_vec()),
-                (1, 200i32.to_be_bytes().to_vec()),
-            ]),
-        );
-
         let mut loc_point = Vec::new();
         loc_point.extend_from_slice(&10i32.to_be_bytes());
         loc_point.extend_from_slice(&20i32.to_be_bytes());
-        per_field.insert(
-            "location".to_string(),
-            make_point_data(vec![(0, loc_point)]),
-        );
 
-        let reader = write_and_read(&field_infos, &per_field, 2);
+        let fields = vec![
+            make_points_field(
+                "size",
+                0,
+                1,
+                1,
+                4,
+                vec![
+                    (0, 100i32.to_be_bytes().to_vec()),
+                    (1, 200i32.to_be_bytes().to_vec()),
+                ],
+            ),
+            make_points_field("location", 1, 2, 2, 4, vec![(0, loc_point)]),
+        ];
+
+        let reader = write_and_read(&field_infos, &fields);
         assert_eq!(reader.point_count(0), Some(2));
         assert_eq!(reader.doc_count(0), Some(2));
         assert_eq!(reader.point_count(1), Some(1));
@@ -346,13 +351,16 @@ mod tests {
         let fi = make_point_field("size", 0, 1, 1, 4);
         let field_infos = FieldInfos::new(vec![fi]);
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "size".to_string(),
-            make_point_data(vec![(0, 42i32.to_be_bytes().to_vec())]),
-        );
+        let fields = vec![make_points_field(
+            "size",
+            0,
+            1,
+            1,
+            4,
+            vec![(0, 42i32.to_be_bytes().to_vec())],
+        )];
 
-        let reader = write_and_read(&field_infos, &per_field, 1);
+        let reader = write_and_read(&field_infos, &fields);
         assert_none!(reader.point_count(99));
         assert_none!(reader.doc_count(99));
     }
@@ -362,16 +370,19 @@ mod tests {
         let fi = make_point_field("modified", 0, 1, 1, 8);
         let field_infos = FieldInfos::new(vec![fi]);
 
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "modified".to_string(),
-            make_point_data(vec![
+        let fields = vec![make_points_field(
+            "modified",
+            0,
+            1,
+            1,
+            8,
+            vec![
                 (0, 1000i64.to_be_bytes().to_vec()),
                 (1, 2000i64.to_be_bytes().to_vec()),
-            ]),
-        );
+            ],
+        )];
 
-        let reader = write_and_read(&field_infos, &per_field, 2);
+        let reader = write_and_read(&field_infos, &fields);
         assert_eq!(reader.point_count(0), Some(2));
         assert_eq!(reader.doc_count(0), Some(2));
         assert_eq!(reader.num_leaves(0), Some(1));
@@ -384,12 +395,15 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = test_directory();
-        let mut per_field = HashMap::new();
-        per_field.insert(
-            "size".to_string(),
-            make_point_data(vec![(0, 42i32.to_be_bytes().to_vec())]),
-        );
-        points::write(&dir, "_0", "", &segment_id, &field_infos, &per_field, 1).unwrap();
+        let fields = vec![make_points_field(
+            "size",
+            0,
+            1,
+            1,
+            4,
+            vec![(0, 42i32.to_be_bytes().to_vec())],
+        )];
+        points::write(&dir, "_0", "", &segment_id, &fields).unwrap();
 
         // Truncate the .kdd file
         let mut mem_dir = MemoryDirectory::new();
