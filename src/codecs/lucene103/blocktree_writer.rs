@@ -8,19 +8,18 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::NormsLookup;
-use crate::document::IndexOptions;
-use crate::encoding::{lowercase_ascii, lz4};
-use crate::index::index_file_names::segment_file_name;
-use crate::index::indexing_chain::{PostingsArray, PostingsBuffer};
-use crate::index::{FieldInfo, FieldInfos};
-use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
-use crate::util::BytesRef;
-
-use super::postings_format::{
+use crate::codecs::lucene103::postings_format::{
     self, BLOCKTREE_VERSION_CURRENT, DEFAULT_MAX_BLOCK_SIZE, DEFAULT_MIN_BLOCK_SIZE,
     IntBlockTermState, TERMS_CODEC, TERMS_CODEC_NAME, TERMS_EXTENSION, TERMS_INDEX_CODEC_NAME,
     TERMS_INDEX_EXTENSION, TERMS_META_CODEC_NAME, TERMS_META_EXTENSION, VERSION_CURRENT,
 };
+use crate::document::IndexOptions;
+use crate::encoding::{lowercase_ascii, lz4};
+use crate::index::index_file_names::segment_file_name;
+use crate::newindex::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
+use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
+use crate::util::BytesRef;
+
 use super::postings_writer::PostingsWriter;
 
 // ============================================================================
@@ -39,10 +38,24 @@ struct BlockSpec {
 }
 
 /// Groups field-level context needed when writing blocks to output.
-struct FieldWriteContext<'a> {
-    field_info: &'a FieldInfo,
-    write_freqs: bool,
-    write_positions: bool,
+pub(crate) struct FieldWriteContext {
+    pub field_name: String,
+    pub field_number: u32,
+    pub write_freqs: bool,
+    pub write_positions: bool,
+}
+
+impl FieldWriteContext {
+    /// Derives `IndexOptions` from the write_freqs/write_positions flags.
+    fn index_options(&self) -> IndexOptions {
+        if self.write_positions {
+            IndexOptions::DocsAndFreqsAndPositions
+        } else if self.write_freqs {
+            IndexOptions::DocsAndFreqs
+        } else {
+            IndexOptions::Docs
+        }
+    }
 }
 
 // ============================================================================
@@ -50,7 +63,7 @@ struct FieldWriteContext<'a> {
 // ============================================================================
 
 /// Writes .tim, .tip, .tmd files plus delegates to PostingsWriter for .doc/.pos/.psm.
-pub struct BlockTreeTermsWriter {
+pub(crate) struct BlockTreeTermsWriter {
     terms_out: Box<dyn IndexOutput>,
     index_out: Box<dyn IndexOutput>,
     meta_out: Box<dyn IndexOutput>,
@@ -67,7 +80,7 @@ impl BlockTreeTermsWriter {
         segment: &str,
         suffix: &str,
         id: &[u8; 16],
-        field_infos: &FieldInfos,
+        has_positions: bool,
     ) -> io::Result<Self> {
         // Create outputs from directory
         let tim_name = segment_file_name(segment, suffix, TERMS_EXTENSION);
@@ -106,7 +119,6 @@ impl BlockTreeTermsWriter {
         )?;
 
         // Create PostingsWriter (which creates .doc, .pos, .psm)
-        let has_positions = field_infos.has_prox();
         let postings_writer = PostingsWriter::new(directory, segment, suffix, id, has_positions)?;
 
         // Write postings header into .tmd
@@ -130,48 +142,47 @@ impl BlockTreeTermsWriter {
     /// Terms must be pre-sorted by byte order.
     pub fn write_field(
         &mut self,
-        field_info: &FieldInfo,
-        sorted_terms: &[(&str, usize)],
-        postings: &PostingsArray,
+        field_ctx: &FieldWriteContext,
+        per_field: &FreqProxTermsWriterPerField,
+        terms_hash: &TermsHash,
         norms: &NormsLookup,
     ) -> io::Result<()> {
-        if sorted_terms.is_empty() {
+        let num_terms = per_field.num_terms();
+        if num_terms == 0 {
             return Ok(());
         }
 
+        let sorted_ids = per_field.sorted_term_ids();
+
         debug!(
             "blocktree_writer: write_field name={} num_terms={}",
-            field_info.name(),
-            sorted_terms.len()
+            field_ctx.field_name, num_terms
         );
 
-        let write_freqs = field_info.index_options().has_freqs();
-        let write_positions = field_info.index_options().has_positions();
-
-        let mut tw = TermsWriter::new(
-            field_info,
-            write_freqs,
-            write_positions,
-            self.min_items_in_block,
-            self.max_items_in_block,
-        );
+        let mut tw = TermsWriter::new(field_ctx, self.min_items_in_block, self.max_items_in_block);
 
         let mut docs_seen = HashSet::new();
-        let mut buf = PostingsBuffer::new();
 
-        for &(term_str, term_id) in sorted_terms {
-            postings.decode_into(term_id, &mut buf)?;
+        for &sorted_id in &sorted_ids[..num_terms] {
+            let term_id = sorted_id as usize;
+            let term_bytes = per_field.term_bytes(&terms_hash.byte_pool, term_id);
+            let term_str = std::str::from_utf8(term_bytes).expect("term bytes must be valid UTF-8");
+
+            let decoded = per_field.decode_term(terms_hash, term_id)?;
 
             // Accumulate unique doc IDs for doc_count
-            for &doc_id in &buf.doc_ids {
+            for &(doc_id, _, _) in &decoded {
                 docs_seen.insert(doc_id);
             }
 
-            let postings_data = buf.as_postings_data();
+            let postings_data: Vec<(i32, i32, &[i32])> = decoded
+                .iter()
+                .map(|(doc_id, freq, positions)| (*doc_id, *freq, positions.as_slice()))
+                .collect();
 
             let state = self.postings_writer.write_term(
                 &postings_data,
-                field_info.index_options(),
+                field_ctx.index_options(),
                 norms,
             )?;
 
@@ -181,7 +192,7 @@ impl BlockTreeTermsWriter {
                 state,
                 &mut *self.terms_out,
                 &self.postings_writer,
-                field_info,
+                field_ctx,
             )?;
         }
 
@@ -191,7 +202,7 @@ impl BlockTreeTermsWriter {
             &mut *self.terms_out,
             &mut *self.index_out,
             &self.postings_writer,
-            field_info,
+            field_ctx,
             &mut self.field_metas,
         )?;
 
@@ -271,7 +282,6 @@ struct PendingBlock {
 /// Accumulates terms for a single field and builds blocks.
 struct TermsWriter {
     write_freqs: bool,
-    write_positions: bool,
     min_items_in_block: usize,
     max_items_in_block: usize,
     pending: Vec<PendingEntry>,
@@ -288,15 +298,13 @@ struct TermsWriter {
 
 impl TermsWriter {
     fn new(
-        _field_info: &FieldInfo,
-        write_freqs: bool,
-        write_positions: bool,
+        field_ctx: &FieldWriteContext,
         min_items_in_block: usize,
         max_items_in_block: usize,
     ) -> Self {
+        let write_freqs = field_ctx.write_freqs;
         Self {
             write_freqs,
-            write_positions,
             min_items_in_block,
             max_items_in_block,
             pending: Vec::new(),
@@ -318,7 +326,7 @@ impl TermsWriter {
         state: IntBlockTermState,
         terms_out: &mut dyn IndexOutput,
         postings_writer: &PostingsWriter,
-        field_info: &FieldInfo,
+        field_ctx: &FieldWriteContext,
     ) -> io::Result<()> {
         self.sum_doc_freq += state.doc_freq as i64;
         if self.write_freqs {
@@ -334,7 +342,7 @@ impl TermsWriter {
         self.last_term_bytes.extend_from_slice(&term.bytes);
 
         let term_bytes = term.bytes.clone();
-        self.push_term(&term_bytes, terms_out, postings_writer, field_info)?;
+        self.push_term(&term_bytes, terms_out, postings_writer, field_ctx)?;
 
         self.pending
             .push(PendingEntry::Term(PendingTerm { term_bytes, state }));
@@ -348,7 +356,7 @@ impl TermsWriter {
         text: &[u8],
         terms_out: &mut dyn IndexOutput,
         postings_writer: &PostingsWriter,
-        field_info: &FieldInfo,
+        field_ctx: &FieldWriteContext,
     ) -> io::Result<()> {
         let prefix_length = mismatch(&self.last_term, text);
 
@@ -364,7 +372,7 @@ impl TermsWriter {
                     prefix_top_size,
                     terms_out,
                     postings_writer,
-                    field_info,
+                    field_ctx,
                 )?;
                 self.prefix_starts[i] = self.prefix_starts[i].saturating_sub(prefix_top_size - 1);
             }
@@ -393,7 +401,7 @@ impl TermsWriter {
         count: usize,
         terms_out: &mut dyn IndexOutput,
         postings_writer: &PostingsWriter,
-        field_info: &FieldInfo,
+        field_ctx: &FieldWriteContext,
     ) -> io::Result<()> {
         let start = self.pending.len() - count;
         let end = self.pending.len();
@@ -467,22 +475,19 @@ impl TermsWriter {
         }
 
         // Write each block to terms_out
-        let field_ctx = FieldWriteContext {
-            field_info,
-            write_freqs: self.write_freqs,
-            write_positions: self.write_positions,
-        };
         let mut new_blocks: Vec<PendingBlock> = Vec::new();
 
         for spec in &block_specs {
             let block = write_block_to_output(
-                &self.pending,
-                &self.last_term,
-                prefix_length,
+                &BlockWriteInput {
+                    pending: &self.pending,
+                    last_term: &self.last_term,
+                    prefix_length,
+                },
                 spec,
                 terms_out,
                 postings_writer,
-                &field_ctx,
+                field_ctx,
                 &mut self.lz4_ht,
             )?;
             new_blocks.push(block);
@@ -552,7 +557,7 @@ impl TermsWriter {
         terms_out: &mut dyn IndexOutput,
         index_out: &mut dyn IndexOutput,
         postings_writer: &PostingsWriter,
-        field_info: &FieldInfo,
+        field_ctx: &FieldWriteContext,
         field_metas: &mut Vec<Vec<u8>>,
     ) -> io::Result<()> {
         if self.num_terms == 0 {
@@ -560,12 +565,12 @@ impl TermsWriter {
         }
 
         // Add empty term to force closing of all final blocks
-        self.push_term(&[], terms_out, postings_writer, field_info)?;
-        self.push_term(&[], terms_out, postings_writer, field_info)?;
+        self.push_term(&[], terms_out, postings_writer, field_ctx)?;
+        self.push_term(&[], terms_out, postings_writer, field_ctx)?;
 
         // Write all remaining pending entries as root block
         let pending_count = self.pending.len();
-        self.write_blocks(0, pending_count, terms_out, postings_writer, field_info)?;
+        self.write_blocks(0, pending_count, terms_out, postings_writer, field_ctx)?;
 
         // The last pending entry should be a single root block
         assert!(
@@ -586,9 +591,9 @@ impl TermsWriter {
         let mut meta_buf = Vec::new();
         {
             let mut meta = VecOutput(&mut meta_buf);
-            meta.write_vint(field_info.number() as i32)?;
+            meta.write_vint(field_ctx.field_number as i32)?;
             meta.write_vlong(self.num_terms as i64)?;
-            if field_info.index_options() != IndexOptions::Docs {
+            if self.write_freqs {
                 meta.write_vlong(self.sum_total_term_freq)?;
             }
             meta.write_vlong(self.sum_doc_freq)?;
@@ -618,28 +623,32 @@ impl TermsWriter {
 
         debug!(
             "blocktree_writer: finish field={} num_terms={} sum_doc_freq={} doc_count={}",
-            field_info.name(),
-            self.num_terms,
-            self.sum_doc_freq,
-            doc_count
+            field_ctx.field_name, self.num_terms, self.sum_doc_freq, doc_count
         );
 
         Ok(())
     }
 }
 
-/// Write a single block to .tim output.
-#[allow(clippy::too_many_arguments)]
-fn write_block_to_output(
-    pending: &[PendingEntry],
-    last_term: &[u8],
+/// Groups the accumulated terms state passed into block writing.
+struct BlockWriteInput<'a> {
+    pending: &'a [PendingEntry],
+    last_term: &'a [u8],
     prefix_length: usize,
+}
+
+/// Write a single block to .tim output.
+fn write_block_to_output(
+    input: &BlockWriteInput<'_>,
     spec: &BlockSpec,
     terms_out: &mut dyn IndexOutput,
     postings_writer: &PostingsWriter,
     field_ctx: &FieldWriteContext,
     lz4_ht: &mut lz4::HighCompressionHashTable,
 ) -> io::Result<PendingBlock> {
+    let pending = input.pending;
+    let last_term = input.last_term;
+    let prefix_length = input.prefix_length;
     let start_fp = terms_out.file_pointer();
     let has_floor_lead_label = spec.is_floor && spec.floor_lead_label != -1;
 
@@ -684,7 +693,6 @@ fn write_block_to_output(
                 let ref_state = if absolute { &empty_state } else { &last_state };
                 postings_writer.encode_term(
                     &mut meta_bytes,
-                    field_ctx.field_info,
                     &term.state,
                     ref_state,
                     field_ctx.write_positions,
@@ -710,7 +718,6 @@ fn write_block_to_output(
                     let ref_state = if absolute { &empty_state } else { &last_state };
                     postings_writer.encode_term(
                         &mut meta_bytes,
-                        field_ctx.field_info,
                         &term.state,
                         ref_state,
                         field_ctx.write_positions,
@@ -1272,80 +1279,68 @@ fn choose_child_save_strategy(min_label: u8, max_label: u8, label_cnt: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::DocValuesType;
-    use crate::index::PointDimensionConfig;
+    use crate::document::IndexOptions;
     use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    /// Test helper: a collection of terms and their PostingsArray.
+    /// Test helper: builds terms and postings using FreqProxTermsWriterPerField.
+    ///
+    /// Unlike the old PerFieldPostings-based helper, this requires terms to be
+    /// added in document order (all tokens for doc 0 before doc 1, etc.) because
+    /// FreqProxTermsWriterPerField uses a shared last_doc_id assertion.
     struct TestTerms {
-        term_ids: Vec<(String, usize)>,
-        postings: PostingsArray,
+        writer: FreqProxTermsWriterPerField,
+        terms_hash: TermsHash,
     }
 
     impl TestTerms {
         fn new(has_positions: bool) -> Self {
-            let has_freqs = true;
+            let opts = if has_positions {
+                IndexOptions::DocsAndFreqsAndPositions
+            } else {
+                IndexOptions::DocsAndFreqs
+            };
             Self {
-                term_ids: Vec::new(),
-                postings: PostingsArray::new(has_freqs, has_positions, false, false, false),
+                writer: FreqProxTermsWriterPerField::new("test".to_string(), opts),
+                terms_hash: TermsHash::new(),
             }
         }
 
-        /// Adds a term with the given postings data.
-        fn insert(&mut self, term: &str, data: &[(i32, i32, &[i32])]) {
-            let tid = self.postings.add_term();
-            for &(doc_id, freq, positions) in data {
-                // Use record_occurrence for the first position to start the doc,
-                // then for subsequent positions to increment freq.
-                if positions.is_empty() {
-                    self.postings.start_doc_explicit(tid, doc_id);
-                    self.postings.set_freq(tid, freq);
-                } else {
-                    for (i, &pos) in positions.iter().enumerate() {
-                        if i == 0 {
-                            // First occurrence starts the doc (freq=1)
-                            self.postings.record_occurrence(tid, doc_id, pos, 0, 0);
-                            // If freq > positions.len(), set it explicitly after
-                        } else {
-                            self.postings.record_occurrence(tid, doc_id, pos, 0, 0);
-                        }
-                    }
-                    // If freq doesn't match positions count, override it
-                    if freq != positions.len() as i32 {
-                        self.postings.set_freq(tid, freq);
-                    }
-                }
-            }
-            self.postings.finalize_current_doc(tid);
-            self.term_ids.push((term.to_string(), tid));
+        /// Add a single term occurrence at the given doc/position.
+        fn add(&mut self, term: &str, doc_id: i32, position: i32) {
+            self.writer.current_position = position;
+            self.writer.current_start_offset = 0;
+            self.writer.current_end_offset = 0;
+            self.writer
+                .add(&mut self.terms_hash, term.as_bytes(), doc_id)
+                .unwrap();
         }
 
-        /// Returns sorted terms for write_field.
-        fn sorted(&self) -> Vec<(&str, usize)> {
-            let mut pairs: Vec<(&str, usize)> = self
-                .term_ids
-                .iter()
-                .map(|(term, id)| (term.as_str(), *id))
-                .collect();
-            pairs.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
-            pairs
+        fn finalize(&mut self) {
+            self.writer.flush_pending_docs(&mut self.terms_hash);
+            self.writer.sort_terms(&self.terms_hash.byte_pool);
         }
     }
 
-    fn make_field_info(name: &str, number: u32, index_options: IndexOptions) -> FieldInfo {
-        FieldInfo::new(
-            name.to_string(),
-            number,
-            false,
-            false,
-            index_options,
-            DocValuesType::None,
-            PointDimensionConfig::default(),
-        )
+    fn freq_field_ctx(name: &str) -> FieldWriteContext {
+        FieldWriteContext {
+            field_name: name.to_string(),
+            field_number: 0,
+            write_freqs: true,
+            write_positions: false,
+        }
+    }
+
+    fn positions_field_ctx(name: &str) -> FieldWriteContext {
+        FieldWriteContext {
+            field_name: name.to_string(),
+            field_number: 0,
+            write_freqs: true,
+            write_positions: true,
+        }
     }
 
     #[test]
@@ -1532,19 +1527,29 @@ mod tests {
 
     #[test]
     fn test_write_field_simple() {
-        let fi = make_field_info("test", 0, IndexOptions::DocsAndFreqs);
-        let field_infos = FieldInfos::new(vec![fi.clone()]);
-
         let mut tt = TestTerms::new(false);
-        tt.insert("apple", &[(0, 2, &[])]);
-        tt.insert("banana", &[(0, 1, &[]), (1, 3, &[])]);
-        tt.insert("cherry", &[(2, 1, &[])]);
+        // Doc 0: apple x2, banana x1
+        tt.add("apple", 0, 0);
+        tt.add("apple", 0, 0);
+        tt.add("banana", 0, 0);
+        // Doc 1: banana x3
+        tt.add("banana", 1, 0);
+        tt.add("banana", 1, 0);
+        tt.add("banana", 1, 0);
+        // Doc 2: cherry x1
+        tt.add("cherry", 2, 0);
+        tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
-            .unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
+        btw.write_field(
+            &freq_field_ctx("test"),
+            &tt.writer,
+            &tt.terms_hash,
+            &NormsLookup::no_norms(),
+        )
+        .unwrap();
         let names = btw.finish().unwrap();
 
         assert_ge!(
@@ -1569,18 +1574,25 @@ mod tests {
 
     #[test]
     fn test_write_field_with_positions() {
-        let fi = make_field_info("contents", 0, IndexOptions::DocsAndFreqsAndPositions);
-        let field_infos = FieldInfos::new(vec![fi.clone()]);
-
         let mut tt = TestTerms::new(true);
-        tt.insert("hello", &[(0, 2, &[0, 5]), (1, 1, &[3])]);
-        tt.insert("world", &[(0, 1, &[1])]);
+        // Doc 0: hello@0, world@1, hello@5
+        tt.add("hello", 0, 0);
+        tt.add("world", 0, 1);
+        tt.add("hello", 0, 5);
+        // Doc 1: hello@3
+        tt.add("hello", 1, 3);
+        tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
-            .unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
+        btw.write_field(
+            &positions_field_ctx("contents"),
+            &tt.writer,
+            &tt.terms_hash,
+            &NormsLookup::no_norms(),
+        )
+        .unwrap();
         let names = btw.finish().unwrap();
 
         assert!(
@@ -1589,29 +1601,31 @@ mod tests {
         );
     }
 
-    /// Regression test for usize overflow in push_term when processing many terms
-    /// with shared prefixes.
     #[test]
     fn test_push_term_many_terms_no_overflow() {
-        let fi = make_field_info("contents", 0, IndexOptions::DocsAndFreqsAndPositions);
-        let field_infos = FieldInfos::new(vec![fi.clone()]);
-
         let mut tt = TestTerms::new(true);
+        // All in doc 0 — positions just need to be distinct per term
         for i in 0..30 {
-            tt.insert(&format!("aaa_{i:02}"), &[(0, 1, &[i])]);
+            tt.add(&format!("aaa_{i:02}"), 0, i);
         }
         for i in 0..30 {
-            tt.insert(&format!("bbb_{i:02}"), &[(0, 1, &[30 + i])]);
+            tt.add(&format!("bbb_{i:02}"), 0, 30 + i);
         }
         for i in 0..30 {
-            tt.insert(&format!("ccc_{i:02}"), &[(0, 1, &[60 + i])]);
+            tt.add(&format!("ccc_{i:02}"), 0, 60 + i);
         }
+        tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
-            .unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
+        btw.write_field(
+            &positions_field_ctx("contents"),
+            &tt.writer,
+            &tt.terms_hash,
+            &NormsLookup::no_norms(),
+        )
+        .unwrap();
         let names = btw.finish().unwrap();
 
         assert!(
@@ -1622,18 +1636,26 @@ mod tests {
 
     #[test]
     fn test_doc_count_computed_correctly() {
-        let fi = make_field_info("test", 0, IndexOptions::DocsAndFreqs);
-        let field_infos = FieldInfos::new(vec![fi.clone()]);
-
         let mut tt = TestTerms::new(false);
-        tt.insert("alpha", &[(0, 1, &[]), (1, 1, &[])]);
-        tt.insert("beta", &[(1, 1, &[]), (2, 1, &[])]);
+        // Doc 0: alpha
+        tt.add("alpha", 0, 0);
+        // Doc 1: alpha, beta
+        tt.add("alpha", 1, 0);
+        tt.add("beta", 1, 0);
+        // Doc 2: beta
+        tt.add("beta", 2, 0);
+        tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
-            .unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
+        btw.write_field(
+            &freq_field_ctx("test"),
+            &tt.writer,
+            &tt.terms_hash,
+            &NormsLookup::no_norms(),
+        )
+        .unwrap();
         let names = btw.finish().unwrap();
 
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
@@ -1669,23 +1691,31 @@ mod tests {
         assert_eq!(doc_count, 3, "doc_count should be 3 (unique docs: 0, 1, 2)");
     }
 
-    /// Regression: first_term_bytes was never captured because num_terms was
-    /// incremented before the `== 0` check, so min term was always empty.
     #[test]
     fn test_min_max_terms_written_to_tmd() {
-        let fi = make_field_info("test", 0, IndexOptions::DocsAndFreqs);
-        let field_infos = FieldInfos::new(vec![fi.clone()]);
-
         let mut tt = TestTerms::new(false);
-        tt.insert("apple", &[(0, 2, &[])]);
-        tt.insert("banana", &[(0, 1, &[]), (1, 3, &[])]);
-        tt.insert("cherry", &[(2, 1, &[])]);
+        // Doc 0: apple x2, banana x1
+        tt.add("apple", 0, 0);
+        tt.add("apple", 0, 0);
+        tt.add("banana", 0, 0);
+        // Doc 1: banana x3
+        tt.add("banana", 1, 0);
+        tt.add("banana", 1, 0);
+        tt.add("banana", 1, 0);
+        // Doc 2: cherry x1
+        tt.add("cherry", 2, 0);
+        tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
-            .unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
+        btw.write_field(
+            &freq_field_ctx("test"),
+            &tt.writer,
+            &tt.terms_hash,
+            &NormsLookup::no_norms(),
+        )
+        .unwrap();
         let names = btw.finish().unwrap();
 
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
@@ -1762,27 +1792,31 @@ mod tests {
     /// Regression test: write_blocks must not corrupt PendingBlock prefix data.
     #[test]
     fn test_pending_block_prefix_preserved_after_write_blocks() {
-        let fi = make_field_info("contents", 0, IndexOptions::DocsAndFreqsAndPositions);
-        let field_infos = FieldInfos::new(vec![fi.clone()]);
-
         let mut tt = TestTerms::new(true);
         let mut p = 0i32;
 
+        // All in doc 0 — different terms at different positions
         for group in b'a'..=b'z' {
             for i in 0..30 {
-                tt.insert(&format!("a{}{i:02}", group as char), &[(0, 1, &[p])]);
+                tt.add(&format!("a{}{i:02}", group as char), 0, p);
                 p += 1;
             }
         }
         for i in 0..30 {
-            tt.insert(&format!("b_{i:02}"), &[(0, 1, &[p + i])]);
+            tt.add(&format!("b_{i:02}"), 0, p + i);
         }
+        tt.finalize();
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, &field_infos).unwrap();
-        btw.write_field(&fi, &tt.sorted(), &tt.postings, &NormsLookup::no_norms())
-            .unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
+        btw.write_field(
+            &positions_field_ctx("contents"),
+            &tt.writer,
+            &tt.terms_hash,
+            &NormsLookup::no_norms(),
+        )
+        .unwrap();
         let names = btw.finish().unwrap();
 
         assert!(

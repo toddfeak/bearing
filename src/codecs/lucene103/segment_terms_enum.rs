@@ -475,9 +475,9 @@ mod tests {
     use super::*;
     use crate::codecs::competitive_impact::NormsLookup;
     use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
-    use crate::codecs::lucene103::blocktree_writer::BlockTreeTermsWriter;
-    use crate::index::indexing_chain::PostingsArray;
+    use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
+    use crate::newindex::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::store::memory::MemoryDirectory;
     use crate::store::{Directory, SharedDirectory};
     use assertables::*;
@@ -494,25 +494,49 @@ mod tests {
         )
     }
 
-    fn make_postings<'a>(
-        terms: &'a [(&str, &[i32])],
-        has_freqs: bool,
-        has_positions: bool,
-    ) -> (Vec<(&'a str, usize)>, PostingsArray) {
-        let mut postings = PostingsArray::new(has_freqs, has_positions, false, false, false);
-        let mut sorted_terms = Vec::new();
+    struct TestTerms {
+        writer: FreqProxTermsWriterPerField,
+        terms_hash: TermsHash,
+    }
 
-        for (term, doc_ids) in terms {
-            let term_id = postings.add_term();
-            for &doc_id in *doc_ids {
-                postings.record_occurrence(term_id, doc_id, 0, 0, 0);
+    impl TestTerms {
+        fn new(field_name: &str, index_options: IndexOptions) -> Self {
+            Self {
+                writer: FreqProxTermsWriterPerField::new(field_name.to_string(), index_options),
+                terms_hash: TermsHash::new(),
             }
-            sorted_terms.push((*term, term_id));
         }
 
-        sorted_terms.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-        postings.finalize_all();
-        (sorted_terms, postings)
+        fn add(&mut self, term: &str, doc_id: i32, position: i32) {
+            self.writer.current_position = position;
+            self.writer.current_start_offset = 0;
+            self.writer.current_end_offset = 0;
+            self.writer
+                .add(&mut self.terms_hash, term.as_bytes(), doc_id)
+                .unwrap();
+        }
+
+        fn finalize(&mut self) {
+            self.writer.flush_pending_docs(&mut self.terms_hash);
+            self.writer.sort_terms(&self.terms_hash.byte_pool);
+        }
+    }
+
+    /// Add terms in doc-major order from term-major test data.
+    fn add_terms_doc_major(tt: &mut TestTerms, terms: &[(&str, &[i32])]) {
+        let max_doc = terms
+            .iter()
+            .flat_map(|(_, docs)| docs.iter())
+            .copied()
+            .max()
+            .unwrap_or(-1);
+        for doc_id in 0..=max_doc {
+            for (term, doc_ids) in terms {
+                if doc_ids.contains(&doc_id) {
+                    tt.add(term, doc_id, 0);
+                }
+            }
+        }
     }
 
     /// Write terms and return (directory, field_infos, segment_id).
@@ -528,20 +552,27 @@ mod tests {
         let shared_dir = SharedDirectory::new(Box::new(MemoryDirectory::new()));
 
         {
+            let has_positions = index_options.has_positions();
             let mut writer = BlockTreeTermsWriter::new(
                 &shared_dir,
                 segment_name,
                 segment_suffix,
                 &segment_id,
-                &field_infos,
+                has_positions,
             )?;
 
-            let fi = field_infos.field_info_by_name("f").unwrap();
-            let has_freqs = index_options.has_freqs();
-            let has_positions = index_options.has_positions();
-            let (sorted_terms, postings) = make_postings(&terms, has_freqs, has_positions);
+            let mut tt = TestTerms::new("f", index_options);
+            add_terms_doc_major(&mut tt, &terms);
+            tt.finalize();
+
+            let ctx = FieldWriteContext {
+                field_name: "f".to_string(),
+                field_number: 0,
+                write_freqs: index_options.has_freqs(),
+                write_positions: index_options.has_positions(),
+            };
             let norms = NormsLookup::no_norms();
-            writer.write_field(fi, &sorted_terms, &postings, &norms)?;
+            writer.write_field(&ctx, &tt.writer, &tt.terms_hash, &norms)?;
 
             writer.finish()?;
         }

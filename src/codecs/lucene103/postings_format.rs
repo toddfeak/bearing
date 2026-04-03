@@ -1,17 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Postings format constants and term state for the Lucene 10.3 codec.
 
-use std::collections::HashMap;
-use std::io;
-
-use crate::codecs::competitive_impact::NormsLookup;
-use crate::document::IndexOptions;
-use crate::index::indexing_chain::PerFieldData;
-use crate::index::{FieldInfos, SegmentInfo};
-use crate::store::SharedDirectory;
-
-use super::blocktree_writer::BlockTreeTermsWriter;
-
 // --- Postings format constants ---
 
 pub const BLOCK_SIZE: usize = 128;
@@ -76,45 +65,4 @@ impl Default for IntBlockTermState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Write all postings files for the given fields to the directory.
-/// Returns the file names written.
-pub fn write(
-    directory: &SharedDirectory,
-    segment_info: &SegmentInfo,
-    segment_suffix: &str,
-    field_infos: &FieldInfos,
-    per_field: &HashMap<String, PerFieldData>,
-) -> io::Result<Vec<String>> {
-    let mut btw = BlockTreeTermsWriter::new(
-        directory,
-        &segment_info.name,
-        segment_suffix,
-        &segment_info.id,
-        field_infos,
-    )?;
-
-    // Process fields in lexicographic name order (matching Java's FieldsConsumer)
-    let mut indexed_fields: Vec<_> = field_infos
-        .iter()
-        .filter(|fi| fi.index_options() != IndexOptions::None)
-        .collect();
-    indexed_fields.sort_by_key(|fi| fi.name().to_string());
-
-    for fi in indexed_fields {
-        if let Some(pfd) = per_field.get(fi.name())
-            && pfd.has_postings()
-        {
-            let sorted = pfd.sorted_postings();
-            let norms = if fi.omit_norms() {
-                NormsLookup::no_norms()
-            } else {
-                NormsLookup::new(&pfd.norms, &pfd.norms_docs)
-            };
-            btw.write_field(fi, &sorted, &pfd.postings, &norms)?;
-        }
-    }
-
-    btw.finish()
 }

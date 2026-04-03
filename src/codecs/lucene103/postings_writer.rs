@@ -7,17 +7,15 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::{CompetitiveImpactAccumulator, Impact, NormsLookup};
-use crate::document::IndexOptions;
-use crate::encoding::zigzag;
-use crate::index::FieldInfo;
-use crate::index::index_file_names::segment_file_name;
-use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
-
-use super::postings_format::{
+use crate::codecs::lucene103::postings_format::{
     self, DOC_CODEC, DOC_EXTENSION, IntBlockTermState, META_CODEC, META_EXTENSION, POS_CODEC,
     POS_EXTENSION, VERSION_CURRENT,
 };
+use crate::document::IndexOptions;
 use crate::encoding::pfor::{self, BLOCK_SIZE};
+use crate::encoding::zigzag;
+use crate::index::index_file_names::segment_file_name;
+use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 
 /// Buffers position deltas and PFOR-encodes them in blocks of 128.
 /// Extracts the repeated pattern from singleton, VInt, and block encoding paths.
@@ -229,6 +227,16 @@ impl BlockFlushState {
     }
 }
 
+/// Groups per-term context for the block encoding path.
+struct TermWriteContext {
+    doc_freq: i32,
+    total_term_freq: i64,
+    doc_start_fp: i64,
+    pos_start_fp: i64,
+    write_freqs: bool,
+    write_positions: bool,
+}
+
 /// Writes postings (.doc, .pos, .psm) files.
 pub struct PostingsWriter {
     doc_out: Box<dyn IndexOutput>,
@@ -350,12 +358,14 @@ impl PostingsWriter {
             debug!("postings_writer: block encoding, doc_freq={}", doc_freq);
             self.write_term_blocks(
                 postings,
-                doc_freq,
-                total_term_freq,
-                doc_start_fp,
-                pos_start_fp,
-                write_freqs,
-                write_positions,
+                &TermWriteContext {
+                    doc_freq,
+                    total_term_freq,
+                    doc_start_fp,
+                    pos_start_fp,
+                    write_freqs,
+                    write_positions,
+                },
                 norms,
             )
         } else {
@@ -412,18 +422,18 @@ impl PostingsWriter {
     }
 
     /// Write a term with docFreq >= BLOCK_SIZE using block encoding with skip data.
-    #[allow(clippy::too_many_arguments)]
     fn write_term_blocks(
         &mut self,
         postings: &[(i32, i32, &[i32])],
-        doc_freq: i32,
-        total_term_freq: i64,
-        doc_start_fp: i64,
-        pos_start_fp: i64,
-        write_freqs: bool,
-        write_positions: bool,
+        ctx: &TermWriteContext,
         norms: &NormsLookup,
     ) -> io::Result<IntBlockTermState> {
+        let doc_freq = ctx.doc_freq;
+        let total_term_freq = ctx.total_term_freq;
+        let doc_start_fp = ctx.doc_start_fp;
+        let pos_start_fp = ctx.pos_start_fp;
+        let write_freqs = ctx.write_freqs;
+        let write_positions = ctx.write_positions;
         let mut doc_delta_buffer = [0i32; BLOCK_SIZE];
         let mut freq_buffer = [0i32; BLOCK_SIZE];
         let mut doc_buffer_upto = 0usize;
@@ -535,7 +545,6 @@ impl PostingsWriter {
     pub fn encode_term(
         &self,
         out: &mut Vec<u8>,
-        _field_info: &FieldInfo,
         state: &IntBlockTermState,
         last_state: &IntBlockTermState,
         write_positions: bool,
@@ -707,7 +716,6 @@ fn write_vint_block_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::PointDimensionConfig;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
@@ -1092,15 +1100,6 @@ mod tests {
     fn test_encode_term_singleton() {
         let dir = test_directory();
         let pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let fi = FieldInfo::new(
-            "test".to_string(),
-            0,
-            false,
-            false,
-            IndexOptions::DocsAndFreqs,
-            crate::document::DocValuesType::None,
-            PointDimensionConfig::default(),
-        );
 
         let empty = IntBlockTermState::new();
         let state = IntBlockTermState {
@@ -1113,8 +1112,7 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-        pw.encode_term(&mut buf, &fi, &state, &empty, false)
-            .unwrap();
+        pw.encode_term(&mut buf, &state, &empty, false).unwrap();
 
         // First VLong: (doc_start_fp_delta << 1) = (0 << 1) = 0
         assert_eq!(buf[0], 0);
