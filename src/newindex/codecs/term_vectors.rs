@@ -17,7 +17,7 @@ use crate::codecs::codec_util;
 use crate::codecs::packed_writers::{BlockPackedWriter, DirectMonotonicWriter, DirectWriter};
 use crate::encoding::lz4;
 use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_bits_required};
-use crate::newindex::byte_block_pool::{ByteSliceReader, DirectAllocator};
+use crate::util::byte_block_pool::{ByteSliceReader, DirectAllocator};
 use crate::newindex::index_file_names;
 use crate::store::{self, DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 

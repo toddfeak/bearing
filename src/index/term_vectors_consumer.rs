@@ -21,7 +21,7 @@ use crate::newindex::field::Field;
 use crate::newindex::terms_hash::{TermsHash, TermsHashPerFieldTrait};
 
 /// Accumulates per-document term vector data during indexing and writes
-/// `.tvd`/`.tvx`/`.tvm` files at flush time via the DEBT codec copy.
+/// `.tvd`/`.tvx`/`.tvm` files at flush time.
 ///
 /// Owns a per-document `TermsHash` (TV pools) that is reset after each
 /// document is written to the codec writer.

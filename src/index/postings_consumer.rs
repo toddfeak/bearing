@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// DEBT: parallel to the postings accumulation + flush in index::indexing_chain —
-// reconcile after switchover.
-
 //! [`FieldConsumer`] that accumulates terms and postings, then flushes via
 //! the block tree terms dictionary and postings codecs.
 

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Adapts the existing `store::Directory` to the `newindex::Directory` trait.
-//!
-// DEBT: this adapter bridges store::Directory (&mut self) to newindex::Directory
-// (&self via Mutex). After switchover, reconcile the two Directory traits.
 
 use std::fmt;
 use std::io::{self, Write};

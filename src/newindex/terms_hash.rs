@@ -21,12 +21,12 @@
 use std::io;
 
 use crate::document::IndexOptions;
-use crate::newindex::byte_block_pool::{
+use crate::util::byte_block_pool::{
     BYTE_BLOCK_MASK, BYTE_BLOCK_SHIFT, BYTE_BLOCK_SIZE, ByteBlockPool, ByteSlicePool,
     DirectAllocator, FIRST_LEVEL_SIZE,
 };
-use crate::newindex::bytes_ref_hash::BytesRefHash;
-use crate::newindex::int_block_pool::{
+use crate::util::bytes_ref_hash::BytesRefHash;
+use crate::util::int_block_pool::{
     INT_BLOCK_MASK, INT_BLOCK_SHIFT, INT_BLOCK_SIZE, IntBlockPool,
 };
 
@@ -760,7 +760,7 @@ impl FreqProxTermsWriterPerField {
         terms_hash: &TermsHash,
         term_id: usize,
     ) -> io::Result<Vec<(i32, i32, Vec<i32>)>> {
-        use crate::newindex::byte_block_pool::ByteSliceReader;
+        use crate::util::byte_block_pool::ByteSliceReader;
         use crate::store;
 
         let (start, end) = self.get_stream_range(&terms_hash.int_pool, term_id, 0);
@@ -998,12 +998,12 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::byte_block_pool::ByteSliceReader;
+    use crate::util::byte_block_pool::ByteSliceReader;
     use crate::store;
     use assertables::*;
 
     /// Helper to read a VInt from a byte slice reader.
-    fn read_vint<A: crate::newindex::byte_block_pool::Allocator>(
+    fn read_vint<A: crate::util::byte_block_pool::Allocator>(
         reader: &mut ByteSliceReader<'_, A>,
     ) -> i32 {
         store::read_vint(reader).unwrap()

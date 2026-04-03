@@ -17,8 +17,6 @@ pub trait IdGenerator: Send {
 /// Generates random 16-byte segment identifiers.
 ///
 /// Wraps the shared `string_helper::random_id()` utility.
-// DEBT: index::segment_worker generates IDs inline via the same call —
-// reconcile ID generation into a single approach after switchover
 #[derive(Debug)]
 pub struct RandomIdGenerator;
 

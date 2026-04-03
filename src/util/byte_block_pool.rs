@@ -4,12 +4,10 @@
 //!
 //! [`ByteBlockPool`] manages contiguous 32 KB blocks of memory. [`ByteSlicePool`]
 //! allocates variable-length slices within the pool, growing through defined levels
-//! with forwarding addresses. [`ByteSliceWriter`] and [`ByteSliceReader`] provide
-//! cursor-based write and read access over the slice chain.
+//! with forwarding addresses. [`ByteSliceReader`] provides cursor-based read access
+//! over the slice chain.
 
-use std::cell::Cell;
 use std::io;
-use std::rc::Rc;
 
 use mem_dbg::MemSize;
 
@@ -48,116 +46,12 @@ impl Allocator for DirectAllocator {
     fn recycle_byte_blocks(&mut self, _blocks: &mut [Vec<u8>]) {}
 }
 
-/// Allocator that tracks total allocated bytes via a shared counter.
-#[derive(Debug, Clone)]
-pub struct DirectTrackingAllocator {
-    bytes_used: Rc<Cell<usize>>,
-}
-
-impl DirectTrackingAllocator {
-    /// Create a new tracking allocator sharing the given counter.
-    pub fn new(bytes_used: Rc<Cell<usize>>) -> Self {
-        Self { bytes_used }
-    }
-}
-
-impl Allocator for DirectTrackingAllocator {
-    fn get_byte_block(&mut self) -> Vec<u8> {
-        self.bytes_used.set(self.bytes_used.get() + BYTE_BLOCK_SIZE);
-        vec![0u8; BYTE_BLOCK_SIZE]
-    }
-
-    fn recycle_byte_blocks(&mut self, blocks: &mut [Vec<u8>]) {
-        self.bytes_used
-            .set(self.bytes_used.get() - blocks.len() * BYTE_BLOCK_SIZE);
-    }
-}
-
-/// Default maximum number of buffered (recycled) blocks.
-const DEFAULT_BUFFERED_BLOCKS: usize = 64;
-
-/// Allocator that recycles unused byte blocks in a free list for reuse.
-///
-/// On [`recycle_byte_blocks`](Allocator::recycle_byte_blocks), blocks are stashed
-/// up to `max_buffered_blocks`. On [`get_byte_block`](Allocator::get_byte_block),
-/// a recycled block is returned if available, avoiding reallocation. Tracks total
-/// allocated bytes via a shared counter.
-#[derive(Debug)]
-pub struct RecyclingByteBlockAllocator {
-    free_byte_blocks: Vec<Vec<u8>>,
-    max_buffered_blocks: usize,
-    bytes_used: Rc<Cell<usize>>,
-}
-
-impl RecyclingByteBlockAllocator {
-    /// Create a new recycling allocator with a maximum free list size and shared counter.
-    pub fn new(max_buffered_blocks: usize, bytes_used: Rc<Cell<usize>>) -> Self {
-        Self {
-            free_byte_blocks: Vec::with_capacity(max_buffered_blocks),
-            max_buffered_blocks,
-            bytes_used,
-        }
-    }
-
-    /// Create a new recycling allocator with default settings.
-    pub fn with_defaults(bytes_used: Rc<Cell<usize>>) -> Self {
-        Self::new(DEFAULT_BUFFERED_BLOCKS, bytes_used)
-    }
-
-    /// Number of currently buffered (recyclable) blocks.
-    pub fn num_buffered_blocks(&self) -> usize {
-        self.free_byte_blocks.len()
-    }
-
-    /// Total bytes currently tracked by this allocator.
-    pub fn bytes_used(&self) -> usize {
-        self.bytes_used.get()
-    }
-
-    /// Remove up to `num` blocks from the free list, returning how many were freed.
-    pub fn free_blocks(&mut self, num: usize) -> usize {
-        let count = num.min(self.free_byte_blocks.len());
-        self.free_byte_blocks
-            .truncate(self.free_byte_blocks.len() - count);
-        self.bytes_used
-            .set(self.bytes_used.get() - count * BYTE_BLOCK_SIZE);
-        count
-    }
-}
-
-impl Allocator for RecyclingByteBlockAllocator {
-    fn get_byte_block(&mut self) -> Vec<u8> {
-        if let Some(block) = self.free_byte_blocks.pop() {
-            block
-        } else {
-            self.bytes_used.set(self.bytes_used.get() + BYTE_BLOCK_SIZE);
-            vec![0u8; BYTE_BLOCK_SIZE]
-        }
-    }
-
-    fn recycle_byte_blocks(&mut self, blocks: &mut [Vec<u8>]) {
-        let space = self.max_buffered_blocks - self.free_byte_blocks.len();
-        let to_recycle = space.min(blocks.len());
-
-        for block in blocks.iter_mut().take(to_recycle) {
-            self.free_byte_blocks.push(std::mem::take(block));
-        }
-
-        // Blocks beyond the cap are dropped
-        let dropped = blocks.len() - to_recycle;
-        self.bytes_used
-            .set(self.bytes_used.get() - dropped * BYTE_BLOCK_SIZE);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // ByteBlockPool
 // ---------------------------------------------------------------------------
 
-/// A pool of fixed-size byte buffers with append and random-access read support.
+/// A pool of fixed-size byte buffers with sequential and slice-based access.
 ///
-/// Bytes are written sequentially via [`append`](Self::append) and can be read
-/// back with [`read_byte`](Self::read_byte) or [`read_bytes`](Self::read_bytes).
 /// The pool grows by allocating new buffers from the [`Allocator`].
 #[derive(Debug, MemSize)]
 pub struct ByteBlockPool<A: Allocator> {
@@ -203,6 +97,57 @@ impl<A: Allocator> ByteBlockPool<A> {
             .expect("ByteBlockPool byte_offset overflow");
     }
 
+    /// Reset the pool, optionally zero-filling and reusing the first buffer.
+    pub fn reset(&mut self, zero_fill: bool, reuse_first: bool) {
+        if self.buffer_upto == -1 {
+            return;
+        }
+
+        if zero_fill {
+            for i in 0..self.buffer_upto as usize {
+                self.buffers[i].fill(0);
+            }
+            // Partial zero fill the final buffer
+            let last = self.buffer_upto as usize;
+            self.buffers[last][..self.byte_upto].fill(0);
+        }
+
+        if self.buffer_upto > 0 || !reuse_first {
+            let start = if reuse_first { 1 } else { 0 };
+            let end = (1 + self.buffer_upto) as usize;
+            self.allocator
+                .recycle_byte_blocks(&mut self.buffers[start..end]);
+        }
+
+        if reuse_first {
+            self.buffer_upto = 0;
+            self.byte_upto = 0;
+            self.byte_offset = 0;
+        } else {
+            self.buffer_upto = -1;
+            self.byte_upto = BYTE_BLOCK_SIZE;
+            self.byte_offset = -(BYTE_BLOCK_SIZE as i32);
+        }
+    }
+
+    /// Global byte offset of the start of the current head buffer.
+    pub fn byte_offset(&self) -> i32 {
+        self.byte_offset
+    }
+
+    /// Returns the index of the current head buffer.
+    pub fn current_buffer_index(&self) -> usize {
+        self.buffer_upto as usize
+    }
+
+    /// Returns a mutable reference to the current head buffer.
+    pub fn current_buffer_mut(&mut self) -> &mut [u8] {
+        &mut self.buffers[self.buffer_upto as usize]
+    }
+}
+
+#[cfg(test)]
+impl<A: Allocator> ByteBlockPool<A> {
     /// Read a single byte at the given global offset.
     pub fn read_byte(&self, offset: usize) -> u8 {
         let buffer_index = offset >> BYTE_BLOCK_SHIFT;
@@ -252,67 +197,9 @@ impl<A: Allocator> ByteBlockPool<A> {
         }
     }
 
-    /// Reset the pool, optionally zero-filling and reusing the first buffer.
-    pub fn reset(&mut self, zero_fill: bool, reuse_first: bool) {
-        if self.buffer_upto == -1 {
-            return;
-        }
-
-        if zero_fill {
-            for i in 0..self.buffer_upto as usize {
-                self.buffers[i].fill(0);
-            }
-            // Partial zero fill the final buffer
-            let last = self.buffer_upto as usize;
-            self.buffers[last][..self.byte_upto].fill(0);
-        }
-
-        if self.buffer_upto > 0 || !reuse_first {
-            let start = if reuse_first { 1 } else { 0 };
-            let end = (1 + self.buffer_upto) as usize;
-            self.allocator
-                .recycle_byte_blocks(&mut self.buffers[start..end]);
-        }
-
-        if reuse_first {
-            self.buffer_upto = 0;
-            self.byte_upto = 0;
-            self.byte_offset = 0;
-        } else {
-            self.buffer_upto = -1;
-            self.byte_upto = BYTE_BLOCK_SIZE;
-            self.byte_offset = -(BYTE_BLOCK_SIZE as i32);
-        }
-    }
-
     /// Current global write position.
     pub fn position(&self) -> usize {
         (self.buffer_upto as usize) * BYTE_BLOCK_SIZE + self.byte_upto
-    }
-
-    /// Get an immutable reference to the buffer at the given index.
-    pub fn get_buffer(&self, index: usize) -> &[u8] {
-        &self.buffers[index]
-    }
-
-    /// Global byte offset of the start of the current head buffer.
-    pub fn byte_offset(&self) -> i32 {
-        self.byte_offset
-    }
-
-    /// Number of allocated buffers in the pool.
-    pub fn num_buffers(&self) -> usize {
-        self.buffers.len()
-    }
-
-    /// Returns a mutable reference to the current head buffer.
-    pub fn current_buffer_mut(&mut self) -> &mut [u8] {
-        &mut self.buffers[self.buffer_upto as usize]
-    }
-
-    /// Returns the estimated RAM usage in bytes.
-    pub fn ram_bytes_used(&self) -> usize {
-        std::mem::size_of::<Self>() + self.buffers.iter().map(|b| b.capacity()).sum::<usize>()
     }
 }
 
@@ -565,17 +452,6 @@ impl<'a, A: Allocator> ByteSliceReader<'a, A> {
         self.upto + self.buffer_offset == self.end_index
     }
 
-    /// Read a single byte, advancing the cursor.
-    pub fn read_byte(&mut self) -> u8 {
-        debug_assert!(!self.eof());
-        if self.upto == self.limit {
-            self.next_slice();
-        }
-        let b = self.pool.buffers[self.buffer_upto][self.upto];
-        self.upto += 1;
-        b
-    }
-
     /// Read `dest.len()` bytes into `dest`.
     pub fn read_bytes(&mut self, dest: &mut [u8]) {
         let mut offset = 0;
@@ -597,41 +473,6 @@ impl<'a, A: Allocator> ByteSliceReader<'a, A> {
                 break;
             }
         }
-    }
-
-    /// Skip `n` bytes forward.
-    pub fn skip_bytes(&mut self, mut n: usize) {
-        while n > 0 {
-            let available = self.limit - self.upto;
-            if available < n {
-                n -= available;
-                self.next_slice();
-            } else {
-                self.upto += n;
-                break;
-            }
-        }
-    }
-
-    /// Write all remaining data to the given writer. Returns bytes written.
-    pub fn write_to(&mut self, out: &mut dyn io::Write) -> io::Result<usize> {
-        let mut size = 0;
-        loop {
-            if self.limit + self.buffer_offset == self.end_index {
-                // Final slice
-                let count = self.limit - self.upto;
-                out.write_all(&self.pool.buffers[self.buffer_upto][self.upto..self.upto + count])?;
-                size += count;
-                self.upto = self.limit;
-                break;
-            } else {
-                let count = self.limit - self.upto;
-                out.write_all(&self.pool.buffers[self.buffer_upto][self.upto..self.upto + count])?;
-                size += count;
-                self.next_slice();
-            }
-        }
-        Ok(size)
     }
 
     /// Follow the forwarding address to the next slice.
@@ -686,7 +527,6 @@ mod tests {
     // Ported from:
     //   org.apache.lucene.util.TestByteBlockPool
     //   org.apache.lucene.index.TestByteSliceReader
-    //   org.apache.lucene.util.TestRecyclingByteBlockAllocator
 
     #[test]
     fn test_append_and_read_roundtrip() {
@@ -771,15 +611,12 @@ mod tests {
 
     #[test]
     fn test_reset_reuse_first() {
-        let counter = Rc::new(Cell::new(0usize));
-        let mut pool = ByteBlockPool::new(DirectTrackingAllocator::new(counter.clone()));
+        let mut pool = ByteBlockPool::new(DirectAllocator);
         pool.next_buffer();
-        assert_eq!(counter.get(), BYTE_BLOCK_SIZE);
 
         pool.append(&[1, 2, 3]);
         pool.reset(true, true);
 
-        assert_eq!(counter.get(), BYTE_BLOCK_SIZE);
         assert_eq!(pool.position(), 0);
         // Buffer should be zeroed
         assert_eq!(pool.read_byte(0), 0);
@@ -787,27 +624,14 @@ mod tests {
 
     #[test]
     fn test_reset_no_reuse() {
-        let counter = Rc::new(Cell::new(0usize));
-        let mut pool = ByteBlockPool::new(DirectTrackingAllocator::new(counter.clone()));
+        let mut pool = ByteBlockPool::new(DirectAllocator);
         pool.next_buffer();
-        assert_eq!(counter.get(), BYTE_BLOCK_SIZE);
+        pool.append(&[1, 2, 3]);
 
         pool.reset(false, false);
-        assert_eq!(counter.get(), 0);
-    }
 
-    #[test]
-    fn test_tracking_allocator_multi_block() {
-        let counter = Rc::new(Cell::new(0usize));
-        let mut pool = ByteBlockPool::new(DirectTrackingAllocator::new(counter.clone()));
-        pool.next_buffer();
-        pool.next_buffer();
-        pool.next_buffer();
-        assert_eq!(counter.get(), 3 * BYTE_BLOCK_SIZE);
-
-        pool.reset(false, true);
-        // Reused first, recycled 2
-        assert_eq!(counter.get(), BYTE_BLOCK_SIZE);
+        // After reset without reuse, pool is back to initial state
+        assert_eq!(pool.byte_upto, BYTE_BLOCK_SIZE);
     }
 
     #[test]
@@ -909,175 +733,9 @@ mod tests {
     }
 
     #[test]
-    fn test_writer_single_bytes() {
-        let mut pool = ByteBlockPool::new(DirectAllocator);
-        pool.next_buffer();
-
-        let offset = ByteSlicePool::new_slice(&mut pool, FIRST_LEVEL_SIZE);
-        let mut writer = ByteSliceWriter::new(&pool, offset);
-
-        // First slice (level 0, size 5): 1 data byte usable
-        writer.write_byte(&mut pool, 0xAA);
-        // This write should trigger slice growth
-        writer.write_byte(&mut pool, 0xBB);
-
-        // Verify by reading the slice chain
-        let end = writer.address();
-        let mut reader = ByteSliceReader::new(&pool, offset + pool.byte_offset as usize, end);
-        assert_eq!(reader.read_byte(), 0xAA);
-        assert_eq!(reader.read_byte(), 0xBB);
-        assert!(reader.eof());
-    }
-
-    #[test]
-    fn test_writer_bulk_write() {
-        let mut pool = ByteBlockPool::new(DirectAllocator);
-        pool.next_buffer();
-
-        let offset = ByteSlicePool::new_slice(&mut pool, FIRST_LEVEL_SIZE);
-        let mut writer = ByteSliceWriter::new(&pool, offset);
-
-        let data: Vec<u8> = (0..100).collect();
-        writer.write_bytes(&mut pool, &data);
-
-        let end = writer.address();
-        let start = offset + pool.byte_offset as usize;
-
-        // Verify we didn't truncate: the start should be 0 since byte_offset
-        // was BYTE_BLOCK_SIZE after next_buffer for a fresh pool
-        // Actually, after next_buffer, byte_offset = 0
-        let mut reader = ByteSliceReader::new(&pool, start, end);
-        let mut result = vec![0u8; 100];
-        reader.read_bytes(&mut result);
-        assert_eq!(data, result);
-        assert!(reader.eof());
-    }
-
-    #[test]
-    fn test_writer_vint_roundtrip() {
-        let mut pool = ByteBlockPool::new(DirectAllocator);
-        pool.next_buffer();
-
-        let offset = ByteSlicePool::new_slice(&mut pool, FIRST_LEVEL_SIZE);
-        let mut writer = ByteSliceWriter::new(&pool, offset);
-
-        let values = [0, 1, 127, 128, 16383, 16384, 2097151, i32::MAX];
-        for &v in &values {
-            writer.write_vint(&mut pool, v);
-        }
-
-        let end = writer.address();
-        let start = offset + pool.byte_offset as usize;
-        let mut reader = ByteSliceReader::new(&pool, start, end);
-
-        for &expected in &values {
-            let actual = read_vint(&mut reader);
-            assert_eq!(expected, actual, "vint mismatch");
-        }
-        assert!(reader.eof());
-    }
-
-    #[test]
-    fn test_two_interleaved_writers() {
-        let mut pool = ByteBlockPool::new(DirectAllocator);
-        pool.next_buffer();
-
-        let offset1 = ByteSlicePool::new_slice(&mut pool, FIRST_LEVEL_SIZE);
-        let mut writer1 = ByteSliceWriter::new(&pool, offset1);
-        let start1 = offset1 + pool.byte_offset as usize;
-
-        let offset2 = ByteSlicePool::new_slice(&mut pool, FIRST_LEVEL_SIZE);
-        let mut writer2 = ByteSliceWriter::new(&pool, offset2);
-        let start2 = offset2 + pool.byte_offset as usize;
-
-        // Interleave writes
-        for i in 0u8..50 {
-            writer1.write_byte(&mut pool, i);
-            writer2.write_byte(&mut pool, 200 + i);
-        }
-
-        let end1 = writer1.address();
-        let end2 = writer2.address();
-
-        // Read back stream 1
-        let mut reader1 = ByteSliceReader::new(&pool, start1, end1);
-        for i in 0u8..50 {
-            assert_eq!(reader1.read_byte(), i);
-        }
-        assert!(reader1.eof());
-
-        // Read back stream 2
-        let mut reader2 = ByteSliceReader::new(&pool, start2, end2);
-        for i in 0u8..50 {
-            assert_eq!(reader2.read_byte(), 200 + i);
-        }
-        assert!(reader2.eof());
-    }
-
-    #[test]
-    fn test_reader_byte_by_byte() {
-        let data: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
-        let (pool, start, end) = write_slice_data(&data);
-
-        let mut reader = ByteSliceReader::new(&pool, start, end);
-        for &expected in &data {
-            assert!(!reader.eof());
-            assert_eq!(reader.read_byte(), expected);
-        }
-        assert!(reader.eof());
-    }
-
-    #[test]
-    fn test_reader_bulk_read() {
-        let data: Vec<u8> = (0..300).map(|i| (i % 256) as u8).collect();
-        let (pool, start, end) = write_slice_data(&data);
-
-        let mut reader = ByteSliceReader::new(&pool, start, end);
-        let mut result = vec![0u8; data.len()];
-        reader.read_bytes(&mut result);
-        assert_eq!(data, result);
-        assert!(reader.eof());
-    }
-
-    #[test]
-    fn test_reader_skip_bytes() {
-        let data: Vec<u8> = (0..100).collect();
-        let (pool, start, end) = write_slice_data(&data);
-
-        let mut reader = ByteSliceReader::new(&pool, start, end);
-        reader.skip_bytes(10);
-        assert_eq!(reader.read_byte(), 10);
-
-        reader.skip_bytes(20);
-        assert_eq!(reader.read_byte(), 31);
-    }
-
-    #[test]
-    fn test_reader_write_to() {
-        let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
-        let (pool, start, end) = write_slice_data(&data);
-
-        let mut reader = ByteSliceReader::new(&pool, start, end);
-        let mut output = Vec::new();
-        let bytes_written = reader.write_to(&mut output).unwrap();
-        assert_len_eq_x!(&data, bytes_written);
-        assert_eq!(data, output);
-    }
-
-    #[test]
-    fn test_reader_eof_empty_data() {
-        // Write zero data bytes — just allocate a slice
-        let data: Vec<u8> = Vec::new();
-        let (pool, start, end) = write_slice_data(&data);
-
-        let reader = ByteSliceReader::new(&pool, start, end);
-        assert!(reader.eof());
-    }
-
-    #[test]
-    fn test_reader_matches_java_write_pattern() {
-        // Mimics the Java test's pattern of writing bytes using the low-level
-        // buffer[upto] check approach (same as TermsHashPerField).
+    fn test_reader_via_io_read() {
+        // Write data using the low-level buffer[upto] pattern (same as TermsHashPerField)
+        // and read back via the io::Read trait impl.
         let data: Vec<u8> = (0..150).map(|i| (i * 7 + 3) as u8).collect();
 
         let mut pool = ByteBlockPool::new(DirectAllocator);
@@ -1098,157 +756,23 @@ mod tests {
 
         let end = upto + buf_idx * BYTE_BLOCK_SIZE;
 
-        // Read byte by byte
+        // Read all via io::Read
+        use std::io::Read;
         let mut reader = ByteSliceReader::new(&pool, upto_start, end);
-        for &expected in &data {
-            assert_eq!(reader.read_byte(), expected);
-        }
-        assert!(reader.eof());
+        let mut result = Vec::new();
+        reader.read_to_end(&mut result).unwrap();
+        assert_eq!(data, result);
     }
 
-    /// Write data into a slice chain using ByteSliceWriter and return the pool
-    /// along with start/end indices for reading.
-    fn write_slice_data(data: &[u8]) -> (ByteBlockPool<DirectAllocator>, usize, usize) {
+    #[test]
+    fn test_reader_eof_empty_data() {
         let mut pool = ByteBlockPool::new(DirectAllocator);
         pool.next_buffer();
 
-        let offset = ByteSlicePool::new_slice(&mut pool, FIRST_LEVEL_SIZE);
-        let start = offset + pool.byte_offset as usize;
-        let mut writer = ByteSliceWriter::new(&pool, offset);
+        let upto_start = ByteSlicePool::new_slice(&mut pool, FIRST_LEVEL_SIZE);
+        let end = upto_start;
 
-        for &b in data {
-            writer.write_byte(&mut pool, b);
-        }
-
-        let end = writer.address();
-        (pool, start, end)
-    }
-
-    /// Read a VInt from a ByteSliceReader (for test verification).
-    fn read_vint<A: Allocator>(reader: &mut ByteSliceReader<A>) -> i32 {
-        let mut b = reader.read_byte();
-        let mut result = (b & 0x7F) as i32;
-        let mut shift = 7;
-        while (b & 0x80) != 0 {
-            b = reader.read_byte();
-            result |= ((b & 0x7F) as i32) << shift;
-            shift += 7;
-        }
-        result
-    }
-
-    #[test]
-    fn test_recycling_alloc_reuses_blocks() {
-        let counter = Rc::new(Cell::new(0usize));
-        let mut pool = ByteBlockPool::new(RecyclingByteBlockAllocator::new(2, counter.clone()));
-        pool.next_buffer();
-        pool.next_buffer();
-        assert_eq!(counter.get(), 2 * BYTE_BLOCK_SIZE);
-
-        // Reset with reuse_first=false — both blocks recycled into free list
-        pool.reset(false, false);
-        assert_eq!(pool.allocator.num_buffered_blocks(), 2);
-        // Counter unchanged: blocks are recycled, not freed
-        assert_eq!(counter.get(), 2 * BYTE_BLOCK_SIZE);
-
-        // Allocate again — should reuse recycled blocks, no new allocation
-        pool.next_buffer();
-        pool.next_buffer();
-        assert_eq!(counter.get(), 2 * BYTE_BLOCK_SIZE);
-        assert_eq!(pool.allocator.num_buffered_blocks(), 0);
-    }
-
-    #[test]
-    fn test_recycling_exceeds_max_buffered() {
-        let counter = Rc::new(Cell::new(0usize));
-        let max_buffered = 2;
-        let mut pool = ByteBlockPool::new(RecyclingByteBlockAllocator::new(
-            max_buffered,
-            counter.clone(),
-        ));
-
-        // Allocate 4 blocks
-        pool.next_buffer();
-        pool.next_buffer();
-        pool.next_buffer();
-        pool.next_buffer();
-        assert_eq!(counter.get(), 4 * BYTE_BLOCK_SIZE);
-
-        // Reset — only 2 fit in the free list, 2 are dropped
-        pool.reset(false, false);
-        assert_eq!(pool.allocator.num_buffered_blocks(), max_buffered);
-        // 2 blocks dropped, counter decremented for those
-        assert_eq!(counter.get(), 2 * BYTE_BLOCK_SIZE);
-    }
-
-    #[test]
-    fn test_recycling_free_blocks() {
-        let counter = Rc::new(Cell::new(0usize));
-        let mut alloc = RecyclingByteBlockAllocator::new(10, counter.clone());
-
-        // Allocate and recycle 5 blocks
-        let mut blocks: Vec<Vec<u8>> = (0..5).map(|_| alloc.get_byte_block()).collect();
-        assert_eq!(counter.get(), 5 * BYTE_BLOCK_SIZE);
-
-        alloc.recycle_byte_blocks(&mut blocks);
-        assert_eq!(alloc.num_buffered_blocks(), 5);
-        assert_eq!(counter.get(), 5 * BYTE_BLOCK_SIZE);
-
-        // Free 3 of them
-        let freed = alloc.free_blocks(3);
-        assert_eq!(freed, 3);
-        assert_eq!(alloc.num_buffered_blocks(), 2);
-        assert_eq!(counter.get(), 2 * BYTE_BLOCK_SIZE);
-
-        // Free more than available
-        let freed = alloc.free_blocks(10);
-        assert_eq!(freed, 2);
-        assert_eq!(alloc.num_buffered_blocks(), 0);
-        assert_eq!(counter.get(), 0);
-    }
-
-    #[test]
-    fn test_recycling_zeroed_on_reuse() {
-        let counter = Rc::new(Cell::new(0usize));
-        let mut pool = ByteBlockPool::new(RecyclingByteBlockAllocator::new(4, counter.clone()));
-        pool.next_buffer();
-
-        // Write data, then reset with zero_fill
-        pool.append(&[0xFF; 100]);
-        pool.reset(true, false);
-
-        // Reuse recycled block — it should be zeroed
-        pool.next_buffer();
-        for i in 0..100 {
-            assert_eq!(pool.read_byte(i), 0, "byte at offset {i} should be zero");
-        }
-    }
-
-    #[test]
-    fn test_recycling_with_defaults() {
-        let counter = Rc::new(Cell::new(0usize));
-        let alloc = RecyclingByteBlockAllocator::with_defaults(counter);
-        assert_eq!(alloc.num_buffered_blocks(), 0);
-        assert_eq!(alloc.bytes_used(), 0);
-    }
-
-    #[test]
-    fn test_recycling_data_integrity_across_reuse() {
-        let counter = Rc::new(Cell::new(0usize));
-        let mut pool = ByteBlockPool::new(RecyclingByteBlockAllocator::new(4, counter.clone()));
-
-        for round in 0u8..3 {
-            pool.next_buffer();
-            let data: Vec<u8> = (0..500)
-                .map(|i| (i as u8).wrapping_add(round * 37))
-                .collect();
-            pool.append(&data);
-
-            let mut result = vec![0u8; 500];
-            pool.read_bytes(0, &mut result);
-            assert_eq!(data, result, "round {round} data mismatch");
-
-            pool.reset(true, false);
-        }
+        let reader = ByteSliceReader::new(&pool, upto_start, end);
+        assert!(reader.eof());
     }
 }

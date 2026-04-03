@@ -95,14 +95,9 @@ impl IntBlockPool {
         }
     }
 
-    /// Returns the current head buffer, or panics if no buffer has been allocated.
-    pub fn buffer(&self) -> &[i32] {
-        &self.buffers[self.buffer_upto as usize]
-    }
-
-    /// Returns the current head buffer mutably.
-    pub fn buffer_mut(&mut self) -> &mut [i32] {
-        &mut self.buffers[self.buffer_upto as usize]
+    /// Returns the index of the current head buffer.
+    pub fn current_buffer_index(&self) -> usize {
+        self.buffer_upto as usize
     }
 }
 
@@ -133,7 +128,7 @@ mod tests {
         assert_eq!(pool.buffer_upto, 0);
         assert_eq!(pool.int_upto, 0);
         assert_eq!(pool.int_offset, 0);
-        assert_len_eq_x!(pool.buffer(), INT_BLOCK_SIZE);
+        assert_len_eq_x!(&pool.buffers[0], INT_BLOCK_SIZE);
     }
 
     #[test]
@@ -161,7 +156,8 @@ mod tests {
                 pool.next_buffer();
             }
             let upto = pool.int_upto;
-            pool.buffer_mut()[upto] = i as i32;
+            let buf_idx = pool.current_buffer_index();
+            pool.buffers[buf_idx][upto] = i as i32;
             pool.int_upto += 1;
         }
 
@@ -179,7 +175,8 @@ mod tests {
     fn test_reset_reuse_first() {
         let mut pool = IntBlockPool::new();
         pool.next_buffer();
-        pool.buffer_mut()[0] = 42;
+        let buf_idx = pool.current_buffer_index();
+        pool.buffers[buf_idx][0] = 42;
         pool.int_upto = 1;
         pool.next_buffer();
 
@@ -189,7 +186,7 @@ mod tests {
         assert_eq!(pool.int_upto, 0);
         assert_eq!(pool.int_offset, 0);
         // First buffer should be zeroed
-        assert_eq!(pool.buffer()[0], 0);
+        assert_eq!(pool.buffers[0][0], 0);
     }
 
     #[test]

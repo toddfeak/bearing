@@ -18,7 +18,6 @@ use crate::newindex::codecs::stored_fields::{Lucene90StoredFieldsWriter, StoredF
 use crate::newindex::field::{Field, StoredValue};
 
 /// Converts a newindex [`StoredValue`] to the codec's [`CodecStoredValue`].
-// DEBT: remove after switchover when codec uses newindex types directly
 fn to_codec_stored_value(sv: &StoredValue) -> CodecStoredValue {
     match sv {
         StoredValue::String(s) => CodecStoredValue::String(s.clone()),
