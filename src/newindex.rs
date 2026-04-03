@@ -5,6 +5,5 @@ pub(crate) mod codecs;
 pub mod directory;
 pub mod document;
 pub mod field;
-pub mod segment_infos;
 pub mod standard_analyzer;
 pub(crate) mod terms_hash;

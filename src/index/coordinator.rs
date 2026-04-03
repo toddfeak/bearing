@@ -16,10 +16,10 @@ use crate::index::id_generator::IdGenerator;
 use crate::index::index_file_names::{self, radix36 as radix_fmt};
 use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_context::SegmentContext;
+use crate::index::segment_infos::SegmentInfos;
 use crate::index::segment_worker::SegmentWorker;
 use crate::newindex::codecs::segment_info;
 use crate::newindex::document::Document;
-use crate::newindex::segment_infos::SegmentInfos;
 use crate::store::{self, SharedDirectory};
 
 /// Creates [`SegmentWorker`] instances for worker threads.
