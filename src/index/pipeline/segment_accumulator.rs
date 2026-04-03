@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 /// Shared state accumulated across all documents in a segment.
 ///
-/// Owned by the [`SegmentWorker`](crate::index::segment_worker::SegmentWorker)
-/// and passed as `&mut` to each [`FieldConsumer`](crate::index::consumer::FieldConsumer)
+/// Owned by the [`SegmentWorker`](crate::index::pipeline::segment_worker::SegmentWorker)
+/// and passed as `&mut` to each [`FieldConsumer`](crate::index::pipeline::consumer::FieldConsumer)
 /// in sequence. Only one consumer borrows at a time — no concurrent
 /// access within a worker thread.
 ///
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 ///
 /// 2. **Cross-consumer metadata** — information that one consumer produces
 ///    and another consumes. For example, norms computed by
-///    [`NormsConsumer`](crate::index::norms_consumer::NormsConsumer) are stored
+///    [`NormsConsumer`](crate::index::pipeline::norms_consumer::NormsConsumer) are stored
 ///    here so that the postings consumer can build `NormsLookup` at flush
 ///    time for competitive impact encoding.
 #[derive(Debug, Default, mem_dbg::MemSize)]

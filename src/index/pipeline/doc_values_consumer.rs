@@ -9,10 +9,10 @@ use std::io;
 use crate::analysis::Token;
 use crate::codecs::lucene90::doc_values::{self, DocValuesAccumulator, DocValuesFieldData};
 use crate::document::DocValuesType;
-use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field::{DocValue, Field};
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
+use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
 use crate::util::BytesRef;
 
 /// Per-field state for accumulating doc values during indexing.

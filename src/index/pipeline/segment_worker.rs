@@ -11,12 +11,12 @@ use crate::analysis::Analyzer;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene99::segment_info_format::SegmentInfoFieldData;
 use crate::document::Document;
-use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field::InvertableValue;
-use crate::index::field_info_registry::FieldInfoRegistry;
+use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+use crate::index::pipeline::field_info_registry::FieldInfoRegistry;
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
 use crate::index::segment::{FlushedSegment, SegmentId};
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
 
 /// Per-thread worker that accumulates documents into a single segment.
 ///
@@ -261,8 +261,8 @@ mod tests {
     use crate::analysis::StandardAnalyzer;
     use crate::analysis::Token;
     use crate::document::DocumentBuilder;
-    use crate::index::consumer::FieldConsumer;
     use crate::index::field::{Field, text};
+    use crate::index::pipeline::consumer::FieldConsumer;
     use crate::index::segment::SegmentId;
     use crate::store::{MemoryDirectory, SharedDirectory};
 

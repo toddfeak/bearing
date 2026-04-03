@@ -8,10 +8,10 @@ use std::io;
 
 use crate::analysis::Token;
 use crate::codecs::lucene90::points::{self, PointsFieldData};
-use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field::{Field, PointsValue};
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
+use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
 
 /// Per-field state for accumulating point values during indexing.
 #[derive(mem_dbg::MemSize)]

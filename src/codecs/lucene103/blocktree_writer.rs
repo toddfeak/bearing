@@ -17,7 +17,7 @@ use crate::codecs::lucene103::postings_format::{
 use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4};
 use crate::index::index_file_names::segment_file_name;
-use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
+use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
 

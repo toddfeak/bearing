@@ -401,7 +401,7 @@ mod tests {
     use crate::codecs::competitive_impact::NormsLookup;
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
     use crate::document::{DocValuesType, IndexOptions};
-    use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
+    use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::SharedDirectory;
     use crate::store::byte_slice_input::ByteSliceIndexInput;

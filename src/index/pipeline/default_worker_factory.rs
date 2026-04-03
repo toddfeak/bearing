@@ -6,18 +6,18 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::analysis::StandardAnalyzer;
-use crate::index::consumer::FieldConsumer;
-use crate::index::coordinator::WorkerFactory;
-use crate::index::doc_values_consumer::DocValuesConsumer;
-use crate::index::field_infos_consumer::FieldInfosConsumer;
-use crate::index::norms_consumer::NormsConsumer;
-use crate::index::points_consumer::PointsConsumer;
-use crate::index::postings_consumer::PostingsConsumer;
+use crate::index::pipeline::consumer::FieldConsumer;
+use crate::index::pipeline::coordinator::WorkerFactory;
+use crate::index::pipeline::doc_values_consumer::DocValuesConsumer;
+use crate::index::pipeline::field_infos_consumer::FieldInfosConsumer;
+use crate::index::pipeline::norms_consumer::NormsConsumer;
+use crate::index::pipeline::points_consumer::PointsConsumer;
+use crate::index::pipeline::postings_consumer::PostingsConsumer;
+use crate::index::pipeline::segment_context::SegmentContext;
+use crate::index::pipeline::segment_worker::SegmentWorker;
+use crate::index::pipeline::stored_fields_consumer::StoredFieldsConsumer;
+use crate::index::pipeline::term_vectors_consumer::TermVectorsConsumer;
 use crate::index::segment::SegmentId;
-use crate::index::segment_context::SegmentContext;
-use crate::index::segment_worker::SegmentWorker;
-use crate::index::stored_fields_consumer::StoredFieldsConsumer;
-use crate::index::term_vectors_consumer::TermVectorsConsumer;
 use crate::store::SharedDirectory;
 
 /// Creates workers with the standard set of field consumers.

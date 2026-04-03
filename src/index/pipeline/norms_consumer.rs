@@ -6,10 +6,10 @@ use std::io;
 
 use crate::analysis::Token;
 use crate::codecs::lucene90::norms::{self, NormsFieldData};
-use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field::Field;
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
+use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
 use crate::util::small_float;
 
 /// Computes and writes per-field norms from token counts.

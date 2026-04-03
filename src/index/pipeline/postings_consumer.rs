@@ -12,11 +12,11 @@ use crate::analysis::Token;
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
 use crate::document::IndexOptions;
-use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field::{Field, InvertableValue};
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
-use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
+use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
+use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 
 /// Accumulates postings (terms, frequencies, positions) for indexed fields
 /// and writes them at flush time via the block tree + postings codecs.

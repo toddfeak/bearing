@@ -38,8 +38,6 @@ impl FieldShape {
 /// A field that has been registered in this segment.
 #[derive(Debug, Clone)]
 pub struct RegisteredField {
-    /// The field name.
-    pub name: String,
     /// The assigned field number (unique within the segment).
     pub number: u32,
     /// The structural shape of the field type at registration time.
@@ -92,19 +90,10 @@ impl FieldInfoRegistry {
         } else {
             let number = self.fields.len() as u32;
             let idx = self.fields.len();
-            self.fields.push(RegisteredField {
-                name: name.to_string(),
-                number,
-                shape,
-            });
+            self.fields.push(RegisteredField { number, shape });
             self.by_name.insert(name.to_string(), idx);
             Ok(number)
         }
-    }
-
-    /// Returns the registered fields in registration order.
-    pub fn registered_fields(&self) -> &[RegisteredField] {
-        &self.fields
     }
 }
 
@@ -158,18 +147,14 @@ mod tests {
     }
 
     #[test]
-    fn registered_fields_returns_in_order() {
+    fn fields_registered_in_order() {
         let mut reg = FieldInfoRegistry::new();
         let fa = stored("a").string("x");
         let fb = stored("b").string("y");
-        reg.get_or_register("a", fa.field_type()).unwrap();
-        reg.get_or_register("b", fb.field_type()).unwrap();
-        let fields = reg.registered_fields();
-        assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0].name, "a");
-        assert_eq!(fields[0].number, 0);
-        assert_eq!(fields[1].name, "b");
-        assert_eq!(fields[1].number, 1);
+        assert_eq!(reg.get_or_register("a", fa.field_type()).unwrap(), 0);
+        assert_eq!(reg.get_or_register("b", fb.field_type()).unwrap(), 1);
+        // Re-registering returns the same number.
+        assert_eq!(reg.get_or_register("a", fa.field_type()).unwrap(), 0);
     }
 
     #[test]

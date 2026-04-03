@@ -12,15 +12,15 @@ use crate::codecs::lucene90;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene99::segment_info_format::SegmentInfoFieldData;
 use crate::document::Document;
-use crate::index::channel::{self, Receiver, Sender};
 use crate::index::config::IndexWriterConfig;
-use crate::index::flush_control::FlushControl;
-use crate::index::id_generator::IdGenerator;
 use crate::index::index_file_names::{self, radix36 as radix_fmt};
+use crate::index::pipeline::channel::{self, Receiver, Sender};
+use crate::index::pipeline::flush_control::FlushControl;
+use crate::index::pipeline::id_generator::IdGenerator;
+use crate::index::pipeline::segment_context::SegmentContext;
+use crate::index::pipeline::segment_worker::SegmentWorker;
 use crate::index::segment::{FlushedSegment, SegmentId};
-use crate::index::segment_context::SegmentContext;
 use crate::index::segment_infos::SegmentInfos;
-use crate::index::segment_worker::SegmentWorker;
 use crate::store::{self, SharedDirectory};
 
 /// Creates [`SegmentWorker`] instances for worker threads.
@@ -357,11 +357,11 @@ mod tests {
 
     use crate::analysis::StandardAnalyzer;
     use crate::analysis::Token;
-    use crate::index::consumer::{FieldConsumer, TokenInterest};
     use crate::index::field::Field;
-    use crate::index::flush_control::FlushControl;
-    use crate::index::id_generator::RandomIdGenerator;
-    use crate::index::segment_accumulator::SegmentAccumulator;
+    use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+    use crate::index::pipeline::flush_control::FlushControl;
+    use crate::index::pipeline::id_generator::RandomIdGenerator;
+    use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
     use crate::store::MemoryDirectory;
 
     /// Creates a disabled FlushControl for tests that don't need flush triggering.
@@ -468,8 +468,8 @@ mod tests {
 
     impl WorkerFactory for StoredFieldsWorkerFactory {
         fn create_worker(&self, segment_id: SegmentId) -> (SegmentWorker, SegmentContext) {
-            use crate::index::field_infos_consumer::FieldInfosConsumer;
-            use crate::index::stored_fields_consumer::StoredFieldsConsumer;
+            use crate::index::pipeline::field_infos_consumer::FieldInfosConsumer;
+            use crate::index::pipeline::stored_fields_consumer::StoredFieldsConsumer;
 
             let context = SegmentContext {
                 directory: Arc::clone(&self.directory),

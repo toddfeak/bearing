@@ -13,10 +13,10 @@ use std::io;
 use crate::analysis::Token;
 use crate::codecs::lucene90::stored_fields::{Lucene90StoredFieldsWriter, StoredFieldsWriter};
 use crate::document::StoredValue;
-use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field::Field;
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
+use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
 
 /// Streams stored field values to codec files per-document.
 ///

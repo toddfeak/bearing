@@ -7,7 +7,7 @@ use crate::store::SharedDirectory;
 
 /// Segment identity and directory access for codec writers at flush time.
 ///
-/// Passed to [`FieldConsumer::flush`](crate::index::consumer::FieldConsumer::flush)
+/// Passed to [`FieldConsumer::flush`](crate::index::pipeline::consumer::FieldConsumer::flush)
 /// so consumers can write correctly named and headered files without
 /// storing this context themselves.
 pub struct SegmentContext {

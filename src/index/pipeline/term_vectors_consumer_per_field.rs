@@ -14,7 +14,7 @@ use std::io;
 use std::mem;
 
 use crate::codecs::lucene90::term_vectors::TermVectorChunkWriter;
-use crate::index::terms_hash::{
+use crate::index::pipeline::terms_hash::{
     BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
     oversize,
 };

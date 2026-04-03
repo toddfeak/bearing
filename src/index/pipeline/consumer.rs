@@ -6,8 +6,8 @@ use mem_dbg::MemSize;
 
 use crate::analysis::Token;
 use crate::index::field::Field;
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
 
 /// Indicates whether a consumer wants to receive tokens for a field.
 ///

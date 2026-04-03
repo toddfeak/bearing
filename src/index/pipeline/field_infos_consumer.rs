@@ -12,10 +12,10 @@ use std::io;
 use crate::analysis::Token;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene94::field_infos_format::FieldInfosFieldData;
-use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field::{Field, PointsValue};
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
+use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
 
 /// Tracks field metadata from `start_field` calls and writes the `.fnm`
 /// file at flush time.

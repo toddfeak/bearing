@@ -14,13 +14,13 @@ use std::mem;
 
 use crate::analysis::Token;
 use crate::codecs::lucene90::term_vectors::{self, TermVectorChunkWriter};
-use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field::Field;
 use crate::index::index_file_names;
-use crate::index::segment_accumulator::SegmentAccumulator;
-use crate::index::segment_context::SegmentContext;
-use crate::index::term_vectors_consumer_per_field::TermVectorsConsumerPerField;
-use crate::index::terms_hash::{TermsHash, TermsHashPerFieldTrait};
+use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
+use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+use crate::index::pipeline::segment_context::SegmentContext;
+use crate::index::pipeline::term_vectors_consumer_per_field::TermVectorsConsumerPerField;
+use crate::index::pipeline::terms_hash::{TermsHash, TermsHashPerFieldTrait};
 
 /// Accumulates per-document term vector data during indexing and writes
 /// `.tvd`/`.tvx`/`.tvm` files at flush time.
