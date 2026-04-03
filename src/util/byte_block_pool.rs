@@ -130,11 +130,6 @@ impl<A: Allocator> ByteBlockPool<A> {
         }
     }
 
-    /// Global byte offset of the start of the current head buffer.
-    pub fn byte_offset(&self) -> i32 {
-        self.byte_offset
-    }
-
     /// Returns the index of the current head buffer.
     pub fn current_buffer_index(&self) -> usize {
         self.buffer_upto as usize
@@ -303,95 +298,6 @@ impl ByteSlicePool {
 // ---------------------------------------------------------------------------
 // ByteSliceWriter
 // ---------------------------------------------------------------------------
-
-/// Write cursor for byte slices allocated by [`ByteSlicePool`].
-///
-/// Tracks the current write position and automatically grows the slice when the
-/// end-of-slice marker is hit. Provides `write_byte`, `write_bytes`, and
-/// `write_vint` methods.
-#[derive(Debug, MemSize)]
-#[mem_size_flat]
-pub struct ByteSliceWriter {
-    /// Index into `ByteBlockPool.buffers` for the current write position.
-    buffer_index: usize,
-    /// Offset within the current buffer.
-    upto: usize,
-}
-
-impl ByteSliceWriter {
-    /// Create a new writer starting at the given buffer-local offset (as returned
-    /// by [`ByteSlicePool::new_slice`]). Converts to global using the pool's
-    /// current byte offset.
-    pub fn new<A: Allocator>(pool: &ByteBlockPool<A>, start_offset: usize) -> Self {
-        let global = start_offset + pool.byte_offset() as usize;
-        Self {
-            buffer_index: global >> BYTE_BLOCK_SHIFT,
-            upto: global & BYTE_BLOCK_MASK,
-        }
-    }
-
-    /// Create a writer positioned at the given global address.
-    pub fn from_address(addr: usize) -> Self {
-        Self {
-            buffer_index: addr >> BYTE_BLOCK_SHIFT,
-            upto: addr & BYTE_BLOCK_MASK,
-        }
-    }
-
-    /// Write a single byte, growing the slice if needed.
-    pub fn write_byte<A: Allocator>(&mut self, pool: &mut ByteBlockPool<A>, b: u8) {
-        if pool.buffers[self.buffer_index][self.upto] != 0 {
-            // End of slice marker — grow
-            let new_offset = ByteSlicePool::alloc_slice(pool, self.buffer_index, self.upto);
-            let new_buf_idx = pool.buffer_upto as usize;
-            self.buffer_index = new_buf_idx;
-            self.upto = new_offset;
-        }
-        pool.buffers[self.buffer_index][self.upto] = b;
-        self.upto += 1;
-    }
-
-    /// Write multiple bytes, growing the slice as needed.
-    pub fn write_bytes<A: Allocator>(&mut self, pool: &mut ByteBlockPool<A>, data: &[u8]) {
-        let mut offset = 0;
-        let end = data.len();
-
-        // Write into current slice while there's room
-        while pool.buffers[self.buffer_index][self.upto] == 0 && offset < end {
-            pool.buffers[self.buffer_index][self.upto] = data[offset];
-            self.upto += 1;
-            offset += 1;
-        }
-
-        // If we still have data, grow slices as needed
-        while offset < end {
-            let (slice_offset, slice_length) =
-                ByteSlicePool::alloc_known_size_slice(pool, self.buffer_index, self.upto);
-            let new_buf_idx = pool.buffer_upto as usize;
-            self.buffer_index = new_buf_idx;
-            // Write as much as fits (reserve last byte for potential end marker check)
-            let write_length = (slice_length - 1).min(end - offset);
-            pool.buffers[self.buffer_index][slice_offset..slice_offset + write_length]
-                .copy_from_slice(&data[offset..offset + write_length]);
-            self.upto = slice_offset + write_length;
-            offset += write_length;
-        }
-    }
-
-    /// Write an integer in variable-length encoding (1-5 bytes, 7 bits per byte).
-    pub fn write_vint<A: Allocator>(&mut self, pool: &mut ByteBlockPool<A>, mut i: i32) {
-        while (i & !0x7F) != 0 {
-            self.write_byte(pool, ((i & 0x7F) | 0x80) as u8);
-            i = ((i as u32) >> 7) as i32;
-        }
-        self.write_byte(pool, i as u8);
-    }
-
-    /// Current global write address.
-    pub fn address(&self) -> usize {
-        self.upto + self.buffer_index * BYTE_BLOCK_SIZE
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ByteSliceReader

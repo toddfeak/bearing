@@ -25,7 +25,7 @@ const VERSION_CURRENT: i32 = VERSION_START;
 ///
 /// The `.cfs` data is streamed directly to `cfs_out`, avoiding in-memory buffering
 /// of the entire compound file.
-pub fn write_to(
+pub(crate) fn write_to(
     segment_name: &str,
     segment_id: &[u8; 16],
     files: &[SegmentFile],

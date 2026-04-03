@@ -9,361 +9,37 @@
 //! used by codec writers. [`DataInput`] defines the byte-level reading interface
 //! used by codec readers.
 
-pub mod byte_slice_input;
+pub(crate) mod byte_slice_input;
 pub mod checksum;
-pub mod checksum_input;
+pub(crate) mod checksum_input;
+pub mod data_input;
+pub mod data_output;
 pub mod fs;
+pub mod index_input;
+pub mod index_output;
 pub mod memory;
 pub mod mmap;
 
 pub use checksum::CRC32;
+pub use data_input::{DataInput, DataInputReader, encode_vint, read_vint};
+pub use data_output::{DataOutput, DataOutputWriter, VecOutput};
 pub use fs::FSDirectory;
-pub use memory::{MemoryDirectory, MemoryIndexOutput};
+pub use index_input::{IndexInput, RandomAccessInput};
+pub use index_output::IndexOutput;
+pub use memory::MemoryDirectory;
 pub use mmap::MmapDirectory;
 
 // Re-export CompoundDirectory — a read-only Directory for compound files (.cfs/.cfe)
 pub use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 
-use std::collections::HashMap;
 use std::io;
 use std::sync::Mutex;
 
-use crate::encoding::group_vint;
-use crate::encoding::string;
-use crate::encoding::varint;
-
 /// A named in-memory file produced by codec writers during indexing.
 #[derive(Clone, Debug)]
-pub struct SegmentFile {
-    pub name: String,
-    pub data: Vec<u8>,
-}
-
-/// Trait for writing primitive types to an output stream.
-pub trait DataOutput {
-    /// Writes a single byte.
-    fn write_byte(&mut self, b: u8) -> io::Result<()>;
-
-    /// Writes a slice of bytes.
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()>;
-
-    /// Writes a 32-bit integer in **little-endian** byte order.
-    fn write_le_int(&mut self, i: i32) -> io::Result<()> {
-        self.write_bytes(&i.to_le_bytes())
-    }
-
-    /// Writes a 16-bit short in **little-endian** byte order.
-    fn write_le_short(&mut self, i: i16) -> io::Result<()> {
-        self.write_bytes(&i.to_le_bytes())
-    }
-
-    /// Writes a 64-bit long in **little-endian** byte order.
-    fn write_le_long(&mut self, i: i64) -> io::Result<()> {
-        self.write_bytes(&i.to_le_bytes())
-    }
-
-    /// Writes a variable-length integer (1-5 bytes). High bit = continuation.
-    fn write_vint(&mut self, i: i32) -> io::Result<()> {
-        varint::write_vint(&mut DataOutputWriter(self), i)
-    }
-
-    /// Writes a variable-length long (1-9 bytes). High bit = continuation.
-    fn write_vlong(&mut self, i: i64) -> io::Result<()> {
-        varint::write_vlong(&mut DataOutputWriter(self), i)
-    }
-
-    /// Writes a zigzag-encoded variable-length int.
-    fn write_zint(&mut self, i: i32) -> io::Result<()> {
-        varint::write_zint(&mut DataOutputWriter(self), i)
-    }
-
-    /// Writes a zigzag-encoded variable-length long.
-    fn write_zlong(&mut self, i: i64) -> io::Result<()> {
-        varint::write_zlong(&mut DataOutputWriter(self), i)
-    }
-
-    /// Writes a variable-length long that may be negative (used by writeZLong).
-    fn write_signed_vlong(&mut self, i: i64) -> io::Result<()> {
-        varint::write_signed_vlong(&mut DataOutputWriter(self), i)
-    }
-
-    /// Writes a 32-bit integer in **big-endian** byte order.
-    /// Used by CodecUtil for headers/footers.
-    fn write_be_int(&mut self, i: i32) -> io::Result<()> {
-        self.write_bytes(&i.to_be_bytes())
-    }
-
-    /// Writes a 64-bit long in **big-endian** byte order.
-    /// Used by CodecUtil for headers/footers.
-    fn write_be_long(&mut self, i: i64) -> io::Result<()> {
-        self.write_bytes(&i.to_be_bytes())
-    }
-
-    /// Writes a string as VInt-encoded byte length followed by UTF-8 bytes.
-    fn write_string(&mut self, s: &str) -> io::Result<()> {
-        string::write_string(&mut DataOutputWriter(self), s)
-    }
-
-    /// Writes a set of strings: VInt count followed by each string.
-    fn write_set_of_strings(&mut self, set: &[String]) -> io::Result<()> {
-        string::write_set_of_strings(&mut DataOutputWriter(self), set)
-    }
-
-    /// Writes a map of strings: VInt count followed by key-value pairs.
-    fn write_map_of_strings(&mut self, map: &HashMap<String, String>) -> io::Result<()> {
-        string::write_map_of_strings(&mut DataOutputWriter(self), map)
-    }
-
-    /// Writes integers using group-varint encoding.
-    /// Groups of 4 are encoded with a flag byte (2 bits per int = byte width - 1)
-    /// followed by the ints in LE with variable byte widths.
-    /// Remaining values (< 4) are written as regular VInts.
-    fn write_group_vints(&mut self, values: &[i32], limit: usize) -> io::Result<()> {
-        group_vint::write_group_vints(&mut DataOutputWriter(self), values, limit)
-    }
-}
-
-/// Adapter that wraps a [`DataOutput`] reference as an [`io::Write`].
-///
-/// This allows encoding functions (which accept `&mut impl io::Write`) to work
-/// with any [`DataOutput`] or [`IndexOutput`].
-pub struct DataOutputWriter<'a, T: ?Sized>(pub &'a mut T);
-
-impl<T: DataOutput + ?Sized> io::Write for DataOutputWriter<'_, T> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write_bytes(buf)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// A [`DataOutput`] adapter for writing directly into a `Vec<u8>`.
-///
-/// Use this instead of defining ad-hoc wrapper structs in individual codec modules.
-/// The inner `Vec<u8>` is borrowed mutably, so you can inspect it after writing.
-pub struct VecOutput<'a>(pub &'a mut Vec<u8>);
-
-impl DataOutput for VecOutput<'_> {
-    fn write_byte(&mut self, b: u8) -> io::Result<()> {
-        self.0.push(b);
-        Ok(())
-    }
-
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.0.extend_from_slice(buf);
-        Ok(())
-    }
-}
-
-/// Trait for reading primitive types from an input stream.
-pub trait DataInput {
-    /// Reads a single byte.
-    fn read_byte(&mut self) -> io::Result<u8>;
-
-    /// Reads exactly `buf.len()` bytes into the buffer.
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()>;
-
-    /// Skips over `num_bytes` bytes. Implementations may override for efficiency.
-    fn skip_bytes(&mut self, num_bytes: u64) -> io::Result<()> {
-        let mut remaining = num_bytes;
-        let mut skip_buf = [0u8; 1024];
-        while remaining > 0 {
-            let to_read = remaining.min(skip_buf.len() as u64) as usize;
-            self.read_bytes(&mut skip_buf[..to_read])?;
-            remaining -= to_read as u64;
-        }
-        Ok(())
-    }
-
-    /// Reads a 16-bit short in **little-endian** byte order.
-    fn read_le_short(&mut self) -> io::Result<i16> {
-        let mut buf = [0u8; 2];
-        self.read_bytes(&mut buf)?;
-        Ok(i16::from_le_bytes(buf))
-    }
-
-    /// Reads a 32-bit integer in **little-endian** byte order.
-    fn read_le_int(&mut self) -> io::Result<i32> {
-        let mut buf = [0u8; 4];
-        self.read_bytes(&mut buf)?;
-        Ok(i32::from_le_bytes(buf))
-    }
-
-    /// Reads a 64-bit long in **little-endian** byte order.
-    fn read_le_long(&mut self) -> io::Result<i64> {
-        let mut buf = [0u8; 8];
-        self.read_bytes(&mut buf)?;
-        Ok(i64::from_le_bytes(buf))
-    }
-
-    /// Reads a variable-length integer (1-5 bytes). High bit = continuation.
-    fn read_vint(&mut self) -> io::Result<i32> {
-        varint::read_vint(&mut DataInputReader(self))
-    }
-
-    /// Reads a variable-length long (1-9 bytes). High bit = continuation.
-    fn read_vlong(&mut self) -> io::Result<i64> {
-        varint::read_vlong(&mut DataInputReader(self))
-    }
-
-    /// Reads a zigzag-encoded variable-length int.
-    fn read_zint(&mut self) -> io::Result<i32> {
-        varint::read_zint(&mut DataInputReader(self))
-    }
-
-    /// Reads a zigzag-encoded variable-length long.
-    fn read_zlong(&mut self) -> io::Result<i64> {
-        varint::read_zlong(&mut DataInputReader(self))
-    }
-
-    /// Reads a 32-bit integer in **big-endian** byte order.
-    /// Used by CodecUtil for headers/footers.
-    fn read_be_int(&mut self) -> io::Result<i32> {
-        let mut buf = [0u8; 4];
-        self.read_bytes(&mut buf)?;
-        Ok(i32::from_be_bytes(buf))
-    }
-
-    /// Reads a 64-bit long in **big-endian** byte order.
-    /// Used by CodecUtil for headers/footers.
-    fn read_be_long(&mut self) -> io::Result<i64> {
-        let mut buf = [0u8; 8];
-        self.read_bytes(&mut buf)?;
-        Ok(i64::from_be_bytes(buf))
-    }
-
-    /// Reads a string: VInt-encoded byte length followed by UTF-8 bytes.
-    fn read_string(&mut self) -> io::Result<String> {
-        string::read_string(&mut DataInputReader(self))
-    }
-
-    /// Reads a set of strings: VInt count followed by each string.
-    fn read_set_of_strings(&mut self) -> io::Result<Vec<String>> {
-        string::read_set_of_strings(&mut DataInputReader(self))
-    }
-
-    /// Reads a map of strings: VInt count followed by key-value pairs.
-    fn read_map_of_strings(&mut self) -> io::Result<HashMap<String, String>> {
-        string::read_map_of_strings(&mut DataInputReader(self))
-    }
-
-    /// Reads integers using group-varint encoding.
-    fn read_group_vints(&mut self, values: &mut [i32], limit: usize) -> io::Result<()> {
-        group_vint::read_group_vints(&mut DataInputReader(self), values, limit)
-    }
-}
-
-/// Adapter that wraps a [`DataInput`] reference as an [`io::Read`].
-///
-/// This allows encoding functions (which accept `&mut impl io::Read`) to work
-/// with any [`DataInput`].
-pub struct DataInputReader<'a, T: ?Sized>(pub &'a mut T);
-
-impl<T: DataInput + ?Sized> io::Read for DataInputReader<'_, T> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        // Read one byte at a time — encoding functions use read_exact which
-        // loops until the buffer is full, so this is correct.
-        buf[0] = self.0.read_byte()?;
-        Ok(1)
-    }
-
-    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        self.0.read_bytes(buf)
-    }
-}
-
-/// Reads a variable-length integer (1-5 bytes) from any `io::Read` source.
-///
-/// High bit = continuation.
-pub fn read_vint(reader: &mut impl io::Read) -> io::Result<i32> {
-    varint::read_vint(reader)
-}
-
-/// Writes a variable-length integer (1-5 bytes) to any `io::Write` sink.
-///
-/// High bit = continuation.
-pub fn encode_vint(writer: &mut impl io::Write, val: i32) -> io::Result<()> {
-    varint::write_vint(writer, val)
-}
-
-/// Trait for index file input with position tracking and random access.
-pub trait IndexInput: DataInput + Send {
-    /// Returns the name of this input (the file name).
-    fn name(&self) -> &str;
-
-    /// Returns the current read position (byte offset).
-    fn file_pointer(&self) -> u64;
-
-    /// Sets the read position to the given byte offset.
-    fn seek(&mut self, pos: u64) -> io::Result<()>;
-
-    /// Returns the total length of the file in bytes.
-    fn length(&self) -> u64;
-
-    /// Creates a new IndexInput representing a slice of this input.
-    fn slice(&self, description: &str, offset: u64, length: u64)
-    -> io::Result<Box<dyn IndexInput>>;
-
-    /// Returns a [`RandomAccessInput`] for absolute-position reads over the
-    /// full extent of this input. Used by data structures like tries that
-    /// navigate by absolute file pointer.
-    fn random_access(&self) -> io::Result<Box<dyn RandomAccessInput>>;
-}
-
-/// Absolute-position reads without mutating seek state.
-///
-/// Mirrors Java's `RandomAccessInput`. Designed for data structures like tries
-/// that navigate by absolute file pointer rather than sequential reads.
-/// All multi-byte reads use **little-endian** byte order, matching Java's
-/// `RandomAccessInput` convention.
-pub trait RandomAccessInput: Send {
-    /// Reads a single byte at the given absolute position.
-    fn read_byte_at(&self, pos: u64) -> io::Result<u8>;
-
-    /// Reads a 2-byte little-endian short at the given absolute position.
-    fn read_le_short_at(&self, pos: u64) -> io::Result<i16>;
-
-    /// Reads a 4-byte little-endian int at the given absolute position.
-    fn read_le_int_at(&self, pos: u64) -> io::Result<i32>;
-
-    /// Reads an 8-byte little-endian long at the given absolute position.
-    fn read_le_long_at(&self, pos: u64) -> io::Result<i64>;
-}
-
-/// Trait for index file output with checksum and position tracking.
-pub trait IndexOutput: DataOutput + Send {
-    /// Returns the name of this output (the file name).
-    fn name(&self) -> &str;
-
-    /// Returns the current write position (byte offset).
-    fn file_pointer(&self) -> u64;
-
-    /// Returns the current CRC32 checksum of all bytes written so far.
-    fn checksum(&self) -> u64;
-
-    /// Aligns the file pointer to the given power-of-2 boundary by writing zero bytes.
-    fn align_file_pointer(&mut self, alignment: usize) -> io::Result<u64> {
-        let pos = self.file_pointer();
-        let aligned = align_offset(pos, alignment);
-        let padding = (aligned - pos) as usize;
-        if padding > 0 {
-            const ZEROS: [u8; 16] = [0u8; 16];
-            self.write_bytes(&ZEROS[..padding])?;
-        }
-        Ok(aligned)
-    }
-}
-
-/// Calculates the aligned offset for the given position and alignment.
-pub(crate) fn align_offset(offset: u64, alignment: usize) -> u64 {
-    let a = alignment as u64;
-    (offset + a - 1) & !(a - 1)
+pub(crate) struct SegmentFile {
+    pub(crate) name: String,
+    pub(crate) data: Vec<u8>,
 }
 
 /// A [`Directory`] behind a [`Mutex`] for shared concurrent access.
@@ -414,7 +90,10 @@ pub trait Directory: Send {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+    use crate::store::index_output::align_offset;
 
     /// A simple DataInput over a byte slice, for testing.
     struct ByteSliceInput<'a> {

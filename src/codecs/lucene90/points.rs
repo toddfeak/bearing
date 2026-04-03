@@ -901,7 +901,8 @@ fn recurse_pack_index(
 mod tests {
     use super::*;
     use crate::codecs::codec_util::{FOOTER_LENGTH, header_length, index_header_length};
-    use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
+    use crate::store::memory::MemoryIndexOutput;
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn make_test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))

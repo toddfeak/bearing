@@ -176,7 +176,7 @@ pub fn check_index_header(
 
 /// Validates a codec footer: checks magic, algorithm ID, and CRC32.
 ///
-/// The input must be a [`ChecksumIndexInput`] positioned just before the footer.
+/// The input must be a `ChecksumIndexInput` positioned just before the footer.
 /// The footer is 16 bytes: magic (BE int) + algorithm ID (BE int) + CRC32 (BE long).
 pub fn check_footer(input: &mut ChecksumIndexInput) -> io::Result<()> {
     let remaining = input.length() - input.file_pointer();
@@ -217,7 +217,7 @@ pub fn check_footer(input: &mut ChecksumIndexInput) -> io::Result<()> {
 /// algorithm, and reads the stored CRC value.
 ///
 /// This does NOT verify the CRC against the file data — use
-/// [`check_footer`] with a [`ChecksumIndexInput`] for full validation.
+/// [`check_footer`] with a `ChecksumIndexInput` for full validation.
 pub fn retrieve_checksum(input: &mut dyn IndexInput) -> io::Result<i64> {
     let len = input.length();
     if len < FOOTER_LENGTH as u64 {

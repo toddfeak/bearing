@@ -777,7 +777,8 @@ mod tests {
     use assertables::*;
 
     use super::*;
-    use crate::store::{MemoryDirectory, MemoryIndexOutput, SharedDirectory};
+    use crate::store::memory::MemoryIndexOutput;
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))

@@ -212,7 +212,7 @@ impl MemoryIndexOutput {
     }
 
     /// Consumes this output and returns a [`SegmentFile`] with its name and bytes.
-    pub fn into_inner(self) -> SegmentFile {
+    pub(crate) fn into_inner(self) -> SegmentFile {
         SegmentFile {
             name: self.name,
             data: self.buf,
