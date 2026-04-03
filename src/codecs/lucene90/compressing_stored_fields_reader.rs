@@ -3,7 +3,7 @@
 //! Stored fields reader for the Lucene90 compressing stored fields format.
 //!
 //! Reads `.fdt` (field data), `.fdx` (index), and `.fdm` (metadata) files
-//! written by [`super::stored_fields::write`].
+//! produced by the Lucene90 compressing stored fields writer.
 
 use std::io;
 
