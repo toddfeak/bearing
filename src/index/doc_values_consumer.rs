@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::analysis::Token;
 use crate::codecs::lucene90::doc_values::{self, DocValuesAccumulator, DocValuesFieldData};
 use crate::document::DocValuesType;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::analyzer::Token;
 use crate::newindex::field::{DocValue, Field};
 use crate::util::BytesRef;
 

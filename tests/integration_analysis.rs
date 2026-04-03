@@ -1,12 +1,34 @@
 //! Integration tests for the bearing analysis public API.
 //!
-//! Tests the StandardAnalyzer, tokenization, and the zero-allocation
-//! analyze_to callback API.
+//! Tests the StandardAnalyzer pull-based tokenization interface.
 
 #[macro_use]
 extern crate assertables;
 
-use bearing::analysis::{Analyzer, StandardAnalyzer, Token, TokenRef};
+use bearing::analysis::{Analyzer, StandardAnalyzer};
+
+/// Collects all tokens from an analyzer into (text, start, end, pos_inc) tuples.
+fn collect_tokens(text: &str) -> Vec<(String, i32, i32, i32)> {
+    let mut analyzer = StandardAnalyzer::new();
+    let mut reader: &[u8] = text.as_bytes();
+    let mut buf = String::new();
+    let mut result = Vec::new();
+
+    while let Some(token) = analyzer.next_token(&mut reader, &mut buf).unwrap() {
+        result.push((
+            token.text.to_string(),
+            token.start_offset,
+            token.end_offset,
+            token.position_increment,
+        ));
+    }
+    result
+}
+
+/// Collects just the token texts.
+fn collect_texts(text: &str) -> Vec<String> {
+    collect_tokens(text).into_iter().map(|t| t.0).collect()
+}
 
 // ---------------------------------------------------------------------------
 // StandardAnalyzer tokenization
@@ -14,120 +36,70 @@ use bearing::analysis::{Analyzer, StandardAnalyzer, Token, TokenRef};
 
 #[test]
 fn standard_analyzer_basic_tokenization() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("the quick brown fox");
-
-    assert_len_eq_x!(&tokens, 4);
-    assert_eq!(tokens[0].text, "the");
-    assert_eq!(tokens[1].text, "quick");
-    assert_eq!(tokens[2].text, "brown");
-    assert_eq!(tokens[3].text, "fox");
+    let texts = collect_texts("the quick brown fox");
+    assert_eq!(texts, vec!["the", "quick", "brown", "fox"]);
 }
 
 #[test]
 fn standard_analyzer_lowercases() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("Hello WORLD FoO");
-
-    assert_len_eq_x!(&tokens, 3);
-    assert_eq!(tokens[0].text, "hello");
-    assert_eq!(tokens[1].text, "world");
-    assert_eq!(tokens[2].text, "foo");
+    let texts = collect_texts("Hello WORLD FoO");
+    assert_eq!(texts, vec!["hello", "world", "foo"]);
 }
 
 #[test]
 fn standard_analyzer_empty_input() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("");
+    let tokens = collect_tokens("");
     assert_is_empty!(tokens);
 }
 
 #[test]
 fn standard_analyzer_whitespace_only() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("   \t\n  ");
+    let tokens = collect_tokens("   \t\n  ");
     assert_is_empty!(tokens);
 }
 
 #[test]
 fn standard_analyzer_punctuation_splitting() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("hello, world! how are you?");
-
-    let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+    let texts = collect_texts("hello, world! how are you?");
     assert_eq!(texts, vec!["hello", "world", "how", "are", "you"]);
 }
 
 #[test]
 fn standard_analyzer_offsets() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("hello world");
-
-    assert_eq!(tokens[0].start_offset, 0);
-    assert_eq!(tokens[0].end_offset, 5);
-    assert_eq!(tokens[1].start_offset, 6);
-    assert_eq!(tokens[1].end_offset, 11);
+    let tokens = collect_tokens("hello world");
+    assert_eq!(tokens[0].1, 0); // start
+    assert_eq!(tokens[0].2, 5); // end
+    assert_eq!(tokens[1].1, 6);
+    assert_eq!(tokens[1].2, 11);
 }
 
 #[test]
 fn standard_analyzer_position_increments() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("one two three");
-
-    // All tokens should have position_increment = 1
+    let tokens = collect_tokens("one two three");
     for token in &tokens {
-        assert_eq!(token.position_increment, 1);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// analyze_to callback API
-// ---------------------------------------------------------------------------
-
-#[test]
-fn analyze_to_produces_same_results() {
-    let analyzer = StandardAnalyzer::new();
-    let text = "The Quick Brown Fox Jumps";
-
-    let owned_tokens = analyzer.analyze(text);
-
-    let mut callback_tokens = Vec::new();
-    let mut buf = String::new();
-    analyzer.analyze_to(text, &mut buf, &mut |token_ref: TokenRef<'_>| {
-        callback_tokens.push(Token {
-            text: token_ref.text.to_string(),
-            start_offset: token_ref.start_offset,
-            end_offset: token_ref.end_offset,
-            position_increment: token_ref.position_increment,
-        });
-    });
-
-    assert_eq!(owned_tokens.len(), callback_tokens.len());
-    for (owned, callback) in owned_tokens.iter().zip(callback_tokens.iter()) {
-        assert_eq!(owned.text, callback.text);
-        assert_eq!(owned.start_offset, callback.start_offset);
-        assert_eq!(owned.end_offset, callback.end_offset);
-        assert_eq!(owned.position_increment, callback.position_increment);
+        assert_eq!(token.3, 1);
     }
 }
 
 #[test]
-fn analyze_to_reuses_buffer() {
-    let analyzer = StandardAnalyzer::new();
+fn standard_analyzer_reset_allows_reuse() {
+    let mut analyzer = StandardAnalyzer::new();
     let mut buf = String::new();
-    let mut count = 0;
 
-    analyzer.analyze_to("hello world", &mut buf, &mut |_| {
-        count += 1;
-    });
-    assert_eq!(count, 2);
+    // First field
+    let mut reader: &[u8] = b"hello";
+    let token = analyzer.next_token(&mut reader, &mut buf).unwrap();
+    assert_some!(&token);
+    assert_eq!(buf, "hello");
+    let none = analyzer.next_token(&mut reader, &mut buf).unwrap();
+    assert_none!(&none);
 
-    // Reuse the same buffer for a second call
-    count = 0;
-    analyzer.analyze_to("another test here", &mut buf, &mut |_| {
-        count += 1;
-    });
-    assert_eq!(count, 3);
+    // Reset and process second field
+    analyzer.reset();
+    let mut reader: &[u8] = b"world";
+    let token = analyzer.next_token(&mut reader, &mut buf).unwrap();
+    assert_some!(&token);
+    assert_eq!(buf, "world");
 }
 
 // ---------------------------------------------------------------------------
@@ -136,53 +108,36 @@ fn analyze_to_reuses_buffer() {
 
 #[test]
 fn unicode_basic_latin_extended() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("café résumé naïve");
-
-    // StandardAnalyzer should handle accented characters as part of words
-    assert_len_eq_x!(&tokens, 3);
-    // Lowercasing is ASCII-only per the known limitations
-    assert_eq!(tokens[0].text, "café");
-    assert_eq!(tokens[1].text, "résumé");
-    assert_eq!(tokens[2].text, "naïve");
+    let texts = collect_texts("café résumé naïve");
+    assert_len_eq_x!(&texts, 3);
+    assert_eq!(texts[0], "café");
+    assert_eq!(texts[1], "résumé");
+    assert_eq!(texts[2], "naïve");
 }
 
 #[test]
 fn unicode_cjk_characters() {
-    let analyzer = StandardAnalyzer::new();
-    // CJK characters — StandardTokenizer behavior may vary,
-    // but should not panic
-    let tokens = analyzer.analyze("hello 世界");
-    assert_not_empty!(tokens);
-    assert_eq!(tokens[0].text, "hello");
+    let texts = collect_texts("hello 世界");
+    assert_not_empty!(texts);
+    assert_eq!(texts[0], "hello");
 }
 
 #[test]
 fn unicode_emoji() {
-    let analyzer = StandardAnalyzer::new();
     // Should not panic on emoji input
-    let _tokens = analyzer.analyze("hello 🌍 world");
+    let _tokens = collect_tokens("hello 🌍 world");
 }
 
 #[test]
 fn single_character_tokens() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("a b c");
-
-    assert_len_eq_x!(&tokens, 3);
-    assert_eq!(tokens[0].text, "a");
-    assert_eq!(tokens[1].text, "b");
-    assert_eq!(tokens[2].text, "c");
+    let texts = collect_texts("a b c");
+    assert_eq!(texts, vec!["a", "b", "c"]);
 }
 
 #[test]
 fn numeric_text_tokenization() {
-    let analyzer = StandardAnalyzer::new();
-    let tokens = analyzer.analyze("version 3.14 release 42");
-
-    let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
-    // Numbers should be tokenized as words
-    assert_contains!(texts, &"version");
-    assert_contains!(texts, &"release");
-    assert_contains!(texts, &"42");
+    let texts = collect_texts("version 3 release 42");
+    assert_contains!(texts, &"version".to_string());
+    assert_contains!(texts, &"release".to_string());
+    assert_contains!(texts, &"42".to_string());
 }

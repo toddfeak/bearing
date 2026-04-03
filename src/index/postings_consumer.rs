@@ -8,6 +8,7 @@ use std::fmt;
 use std::io;
 use std::mem;
 
+use crate::analysis::Token;
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
 use crate::document::IndexOptions;
@@ -15,7 +16,6 @@ use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
-use crate::newindex::analyzer::Token;
 use crate::newindex::field::{Field, InvertableValue};
 
 /// Accumulates postings (terms, frequencies, positions) for indexed fields

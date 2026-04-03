@@ -357,13 +357,13 @@ mod tests {
     use assertables::*;
     use std::collections::HashSet;
 
+    use crate::analysis::StandardAnalyzer;
+    use crate::analysis::Token;
     use crate::index::consumer::{FieldConsumer, TokenInterest};
     use crate::index::flush_control::FlushControl;
     use crate::index::id_generator::RandomIdGenerator;
     use crate::index::segment_accumulator::SegmentAccumulator;
-    use crate::newindex::analyzer::Token;
     use crate::newindex::field::Field;
-    use crate::newindex::standard_analyzer::StandardAnalyzer;
     use crate::store::MemoryDirectory;
 
     /// Creates a disabled FlushControl for tests that don't need flush triggering.

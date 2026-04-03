@@ -7,6 +7,7 @@ use std::mem;
 
 use mem_dbg::{MemSize, SizeFlags};
 
+use crate::analysis::Analyzer;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene99::segment_info_format::SegmentInfoFieldData;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
@@ -14,7 +15,6 @@ use crate::index::field_info_registry::FieldInfoRegistry;
 use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::analyzer::Analyzer;
 use crate::newindex::document::Document;
 use crate::newindex::field::InvertableValue;
 
@@ -259,11 +259,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::analysis::StandardAnalyzer;
+    use crate::analysis::Token;
     use crate::index::consumer::FieldConsumer;
     use crate::index::segment::SegmentId;
-    use crate::newindex::analyzer::Token;
     use crate::newindex::field::Field;
-    use crate::newindex::standard_analyzer::StandardAnalyzer;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     /// No-op consumer that returns an empty file list.

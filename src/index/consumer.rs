@@ -4,9 +4,9 @@ use std::io;
 
 use mem_dbg::MemSize;
 
+use crate::analysis::Token;
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::analyzer::Token;
 use crate::newindex::field::Field;
 
 /// Indicates whether a consumer wants to receive tokens for a field.
