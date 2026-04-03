@@ -377,11 +377,6 @@ impl Field {
         &self.value
     }
 
-    /// Returns a mutable reference to the field value.
-    pub(crate) fn value_mut(&mut self) -> &mut FieldValue {
-        &mut self.value
-    }
-
     /// Returns the string value, if this field holds text.
     pub fn string_value(&self) -> Option<&str> {
         match &self.value {

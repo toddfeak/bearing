@@ -32,7 +32,6 @@ pub mod writer;
 
 pub use segment_infos::{SegmentEntry, SegmentInfosRead};
 pub mod directory_reader;
-pub mod indexing_chain;
 pub mod numeric_doc_values;
 pub mod segment_infos;
 pub mod segment_reader;
