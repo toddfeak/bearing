@@ -683,7 +683,7 @@ impl FreqProxTermsWriterPerField {
     /// Finish adding all instances of this field to the current document.
     #[expect(dead_code)]
     pub(crate) fn finish(&self) {
-        // No-op in newindex — TV chaining is handled at the consumer level.
+        // No-op — TV chaining is handled at the consumer level.
     }
 
     /// Returns the number of unique terms.

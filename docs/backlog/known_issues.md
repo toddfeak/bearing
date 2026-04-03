@@ -1,6 +1,6 @@
-# Newindex Known Issues
+# Known Issues
 
-Outstanding problems and optimization gaps in the newindex pipeline.
+Outstanding problems and optimization gaps in the indexing pipeline.
 
 ---
 
@@ -76,13 +76,15 @@ Rust: (split into "12" and "1")
 
 ---
 
-## 4. Streaming StandardAnalyzer (FIXED)
+## 4. StandardAnalyzer Buffers All Tokens
 
-**Status:** Fixed in current branch. Documented here for context.
+**Severity:** High for large-document corpora
 
-The newindex `StandardAnalyzer` adapter previously buffered ALL tokens for a document in a `VecDeque` before returning any. For a 33MB document, this consumed ~880MB peak across 12 threads.
+`StandardAnalyzer` reads all input with `read_to_string`, tokenizes it, and buffers every token in a `VecDeque` before returning any via `next_token`. For a 33MB document, this consumes ~880MB peak across 12 threads.
 
-**Fix applied:** Rewrote `StandardAnalyzer` to read input in 8KB chunks, tokenize each chunk, and buffer only that chunk's tokens. Peak heap dropped from 1.24GB to 243MB (5x reduction) on the gutenberg-large-50 corpus.
+A previous chunked streaming implementation existed (8KB chunks, tokenize-and-emit per chunk) but was lost during the analyzer unification. The current pull-based `Analyzer` trait (`next_token`/`reset`) needs a streaming implementation that reads input incrementally rather than all at once.
+
+**Fix:** Reimplement chunked reading inside `StandardAnalyzer::next_token` — read 8KB at a time, tokenize each chunk, buffer only that chunk's tokens. This is the same approach that previously achieved a 5x reduction (1.24GB → 243MB peak) on the gutenberg-large-50 corpus.
 
 ---
 
@@ -169,3 +171,29 @@ No reader variable in the worker. No `take_invertable`. No buf parameter. Fields
 - One 64KB window allocation per analyzer (reused across all documents and fields via reset)
 - Infrequent `memmove` when sliding the window (amortized over many tokens)
 - Consumers that need owned copies (e.g., BytesRefHash) copy from the slice — but they already do this today
+
+---
+
+## 6. Dual Document/Field Models for Write vs Read
+
+**Severity:** Architecture — two parallel representations for the same concept
+
+The write path uses `document::Document` / `index::field::Field` (the builder DSL with `text()`, `keyword()`, `stored()`, etc.). The read path uses `StoredField { field_number, StoredValue }` from `CompressingStoredFieldsReader` and `FieldInfo`/`FieldInfos` for metadata.
+
+In Lucene's Java model, `Document` and `Field` serve both read and write — a `Document` is what you index AND what you get back from `IndexReader.document()`. In Rust, these are completely separate types.
+
+**Current state:** Both models work, no bugs. But having two separate document representations means code that reads an index and re-indexes (e.g., merging) would need to convert between them.
+
+**Fix:** Consider whether `Document`/`Field` should be unified across read and write, or whether the separation is actually a feature (write-side fields are richer with builders and streaming readers, read-side fields are simpler). This is a design decision, not a bug.
+
+---
+
+## 7. Dual Directory Traits
+
+**Severity:** Architecture — `store::Directory` uses `&mut self` for writes, preventing concurrent access without a `Mutex` wrapper (`SharedDirectory`)
+
+The write path wraps `store::Directory` in `SharedDirectory` (a `Mutex`) for all file I/O. The original newindex design introduced a separate `Directory` trait with `&self` methods and `Send + Sync` bounds, but this was never adopted by the codec writers — they all use `SharedDirectory` directly.
+
+**Current state:** The newindex `Directory` trait and its `DirectoryAdapter` have been deleted. Everything uses `store::Directory` through `SharedDirectory`. This works but means all file I/O is serialized through a single mutex.
+
+**Fix:** Consider whether `store::Directory` should adopt `&self` semantics (with interior mutability in implementations) to enable concurrent file creation. This would eliminate the `SharedDirectory` wrapper. Lower priority — the mutex is not a bottleneck since file I/O is infrequent relative to in-memory indexing work.

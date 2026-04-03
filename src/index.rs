@@ -11,7 +11,6 @@ pub mod config;
 pub mod consumer;
 pub mod coordinator;
 pub mod default_worker_factory;
-pub mod directory_adapter;
 pub mod doc_values_consumer;
 pub mod field;
 pub mod field_info_registry;

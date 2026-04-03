@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for the newindex indexing pipeline.
+//! Integration tests for the indexing pipeline.
 //!
 //! Verifies the full lifecycle: IndexWriter → add documents → commit →
 //! correct segments returned with expected file lists.

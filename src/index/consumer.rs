@@ -61,7 +61,6 @@ pub enum TokenInterest {
 /// matters — some consumers may read files written by earlier consumers
 /// during their own flush. The consumer is then dropped along with
 /// the worker.
-// LOCKED
 pub trait FieldConsumer: MemSize {
     /// A new document is beginning.
     fn start_document(&mut self, doc_id: i32) -> io::Result<()>;

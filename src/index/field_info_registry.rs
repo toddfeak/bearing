@@ -52,7 +52,6 @@ pub struct RegisteredField {
 /// occurrence of a field name and returns the existing entry on
 /// subsequent calls. Validates that the same field name always has
 /// consistent options within the segment.
-// LOCKED
 #[derive(Default)]
 pub struct FieldInfoRegistry {
     fields: Vec<RegisteredField>,

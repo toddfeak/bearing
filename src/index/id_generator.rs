@@ -8,7 +8,6 @@ use crate::util::string_helper;
 ///
 /// Production implementations use OS randomness. Test implementations
 /// return deterministic values for reproducible output.
-// LOCKED
 pub trait IdGenerator: Send {
     /// Returns the next 16-byte identifier.
     fn next_id(&mut self) -> [u8; 16];

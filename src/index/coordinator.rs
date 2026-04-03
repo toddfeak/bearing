@@ -33,7 +33,6 @@ use crate::store::{self, SharedDirectory};
 /// flushed in order, and some consumers depend on files written by
 /// earlier consumers during flush. Implementations must ensure the
 /// consumer list is correctly ordered to satisfy these dependencies.
-// LOCKED
 pub trait WorkerFactory: Send + Sync {
     /// Creates a new `SegmentWorker` and its flush-time `SegmentContext`
     /// for the given segment identity.
@@ -254,7 +253,6 @@ fn package_compound_segment(
 /// threads and returns the first error encountered. The caller
 /// receives it from `commit()`. No poison flags or error channels —
 /// just `Result` propagation through the thread join.
-// LOCKED
 pub struct IndexCoordinator {
     sender: Sender,
     workers: Vec<thread::JoinHandle<io::Result<Vec<FlushedSegment>>>>,

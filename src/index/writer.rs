@@ -13,7 +13,6 @@ use crate::store::SharedDirectory;
 
 /// Manages the indexing pipeline: accepts documents, coordinates worker
 /// threads, and flushes segments to the directory.
-// LOCKED
 pub struct IndexWriter {
     coordinator: IndexCoordinator,
     directory: Arc<SharedDirectory>,

@@ -103,7 +103,6 @@ use crate::index::segment_context::SegmentContext;
 /// The worker borrows:
 /// - Directory (from coordinator, for creating output files)
 /// - Config (thresholds for flush decisions)
-// LOCKED
 pub struct SegmentWorker {
     segment_id: SegmentId,
     registry: FieldInfoRegistry,

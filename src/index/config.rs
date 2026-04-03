@@ -3,7 +3,6 @@
 /// Configuration for an [`IndexWriter`](crate::index::writer::IndexWriter).
 ///
 /// All fields have sensible defaults. Use the builder methods to override.
-// LOCKED
 #[derive(Debug, Clone)]
 pub struct IndexWriterConfig {
     /// Number of threads in the internal indexing pool.

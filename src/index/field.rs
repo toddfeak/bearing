@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Field types and builders for the newindex pipeline.
+//! Field types and builders for the indexing pipeline.
 //!
 //! Fields are the unit of data added to a document. Each field has a name and
 //! a [`FieldType`] that describes what axes of the index it participates in:
@@ -153,7 +153,6 @@ impl TermVectorOptions {
 /// Determines the [`IndexOptions`] level (docs, freqs, positions) and whether
 /// the field is run through an analyzer. Tokenized variants carry an optional
 /// [`TermVectorOptions`] for per-document term vector storage.
-// LOCKED
 pub enum InvertableValue {
     /// Content run through an analyzer via a [`ReadProvider`]. Produces a
     /// token stream with docs, freqs, and positions. Has norms. The provider
@@ -183,7 +182,6 @@ impl fmt::Debug for InvertableValue {
 /// Columnar per-document value for sorting, faceting, and aggregation.
 ///
 /// Doc values are written to separate files (.dvd, .dvm) and accessed
-// LOCKED
 /// during queries without touching the inverted index.
 #[derive(Clone, PartialEq)]
 pub enum DocValue {
@@ -216,7 +214,6 @@ impl fmt::Debug for DocValue {
 
 /// Dimensional point data for range queries.
 ///
-// LOCKED
 /// Points are indexed in a BKD tree structure for efficient multi-dimensional
 /// range queries.
 #[derive(Clone, PartialEq)]
@@ -272,7 +269,6 @@ impl fmt::Debug for PointsValue {
 ///
 /// `FieldType` fields are private — instances can only be created through
 /// the builder DSL ([`text`], etc.).
-// LOCKED
 pub struct FieldType {
     stored: Option<StoredValue>,
     invertable: Option<InvertableValue>,
@@ -364,7 +360,6 @@ impl fmt::Debug for FieldType {
 /// Created via builder functions ([`text`], etc.). Holds a name and a
 /// [`FieldType`] that describes what axes of the index the field participates
 /// in.
-// LOCKED
 #[derive(Debug)]
 pub struct Field {
     name: String,
