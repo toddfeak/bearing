@@ -13,6 +13,7 @@ pub mod coordinator;
 pub mod default_worker_factory;
 pub mod directory_adapter;
 pub mod doc_values_consumer;
+pub mod field;
 pub mod field_info_registry;
 pub mod field_infos_consumer;
 pub mod flush_control;

@@ -9,9 +9,9 @@ use crate::analysis::Token;
 use crate::codecs::lucene90::doc_values::{self, DocValuesAccumulator, DocValuesFieldData};
 use crate::document::DocValuesType;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
+use crate::index::field::{DocValue, Field};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::field::{DocValue, Field};
 use crate::util::BytesRef;
 
 /// Per-field state for accumulating doc values during indexing.
@@ -192,7 +192,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::newindex::field::{
+    use crate::index::field::{
         binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored,
     };
     use crate::store::{MemoryDirectory, SharedDirectory};

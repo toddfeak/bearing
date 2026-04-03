@@ -11,6 +11,7 @@ use log::debug;
 use crate::codecs::lucene90;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene99::segment_info_format::SegmentInfoFieldData;
+use crate::document::Document;
 use crate::index::channel::{self, Receiver, Sender};
 use crate::index::config::IndexWriterConfig;
 use crate::index::flush_control::FlushControl;
@@ -20,7 +21,6 @@ use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_context::SegmentContext;
 use crate::index::segment_infos::SegmentInfos;
 use crate::index::segment_worker::SegmentWorker;
-use crate::newindex::document::Document;
 use crate::store::{self, SharedDirectory};
 
 /// Creates [`SegmentWorker`] instances for worker threads.
@@ -360,10 +360,10 @@ mod tests {
     use crate::analysis::StandardAnalyzer;
     use crate::analysis::Token;
     use crate::index::consumer::{FieldConsumer, TokenInterest};
+    use crate::index::field::Field;
     use crate::index::flush_control::FlushControl;
     use crate::index::id_generator::RandomIdGenerator;
     use crate::index::segment_accumulator::SegmentAccumulator;
-    use crate::newindex::field::Field;
     use crate::store::MemoryDirectory;
 
     /// Creates a disabled FlushControl for tests that don't need flush triggering.
@@ -524,8 +524,8 @@ mod tests {
     // --- worker_thread_loop tests ---
 
     fn make_doc() -> Document {
-        use crate::newindex::document::DocumentBuilder;
-        use crate::newindex::field::stored;
+        use crate::document::DocumentBuilder;
+        use crate::index::field::stored;
         DocumentBuilder::new()
             .add_field(stored("f").string("v"))
             .build()

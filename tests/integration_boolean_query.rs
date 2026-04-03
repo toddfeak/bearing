@@ -13,11 +13,11 @@
 use std::sync::Arc;
 
 use assertables::*;
+use bearing::document::DocumentBuilder;
 use bearing::index::config::IndexWriterConfig;
 use bearing::index::directory_reader::DirectoryReader;
+use bearing::index::field::text;
 use bearing::index::writer::IndexWriter;
-use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::text;
 use bearing::search::*;
 use bearing::store::{MemoryDirectory, SharedDirectory};
 

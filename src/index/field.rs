@@ -31,7 +31,7 @@ use std::fs::File;
 use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
 
-use crate::document::{DocValuesType, IndexOptions};
+use crate::document::{DocValuesType, IndexOptions, StoredValue};
 
 // ============================================================
 // ReadProvider — reusable reader factory for field content
@@ -97,40 +97,6 @@ impl From<&str> for Box<dyn ReadProvider> {
 impl From<PathBuf> for Box<dyn ReadProvider> {
     fn from(p: PathBuf) -> Self {
         Box::new(PathProvider(p))
-    }
-}
-
-/// Value stored in the stored fields segment for later retrieval.
-///
-/// Each variant carries a single typed value. The type is fixed at field
-/// creation time and determines how the value is serialized.
-// LOCKED
-#[derive(Clone, PartialEq)]
-pub enum StoredValue {
-    /// UTF-8 string value.
-    String(String),
-    /// Raw byte array.
-    Bytes(Vec<u8>),
-    /// 32-bit signed integer.
-    Int(i32),
-    /// 64-bit signed integer.
-    Long(i64),
-    /// 32-bit floating point.
-    Float(f32),
-    /// 64-bit floating point.
-    Double(f64),
-}
-
-impl fmt::Debug for StoredValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StoredValue::String(s) => f.debug_tuple("String").field(s).finish(),
-            StoredValue::Bytes(b) => f.debug_tuple("Bytes.len()").field(&b.len()).finish(),
-            StoredValue::Int(v) => f.debug_tuple("Int").field(v).finish(),
-            StoredValue::Long(v) => f.debug_tuple("Long").field(v).finish(),
-            StoredValue::Float(v) => f.debug_tuple("Float").field(v).finish(),
-            StoredValue::Double(v) => f.debug_tuple("Double").field(v).finish(),
-        }
     }
 }
 

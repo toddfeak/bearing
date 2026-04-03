@@ -11,8 +11,8 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use bearing::index::config::IndexWriterConfig;
-//! use bearing::newindex::document::DocumentBuilder;
-//! use bearing::newindex::field::{text, keyword};
+//! use bearing::document::DocumentBuilder;
+//! use bearing::index::field::{text, keyword};
 //! use bearing::index::writer::IndexWriter;
 //! use bearing::store::{FSDirectory, SharedDirectory};
 //!

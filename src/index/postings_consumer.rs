@@ -13,10 +13,10 @@ use crate::codecs::competitive_impact::NormsLookup;
 use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
 use crate::document::IndexOptions;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
+use crate::index::field::{Field, InvertableValue};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::index::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
-use crate::newindex::field::{Field, InvertableValue};
 
 /// Accumulates postings (terms, frequencies, positions) for indexed fields
 /// and writes them at flush time via the block tree + postings codecs.
@@ -276,7 +276,7 @@ impl FieldConsumer for PostingsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{feature, stored, string, text};
+    use crate::index::field::{feature, stored, string, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;

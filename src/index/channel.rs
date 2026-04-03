@@ -2,7 +2,7 @@
 
 use std::io;
 
-use crate::newindex::document::Document;
+use crate::document::Document;
 
 /// Sending half of a bounded channel.
 #[derive(Clone)]

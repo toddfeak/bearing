@@ -140,10 +140,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::document::DocumentBuilder;
     use crate::index::config::IndexWriterConfig;
+    use crate::index::field::{string, text};
     use crate::index::writer::IndexWriter;
-    use crate::newindex::document::DocumentBuilder;
-    use crate::newindex::field::{string, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 

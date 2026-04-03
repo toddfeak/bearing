@@ -13,9 +13,9 @@ use crate::analysis::Token;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene94::field_infos_format::FieldInfosFieldData;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
+use crate::index::field::{Field, PointsValue};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::field::{Field, PointsValue};
 
 /// Tracks field metadata from `start_field` calls and writes the `.fnm`
 /// file at flush time.
@@ -135,7 +135,7 @@ impl FieldConsumer for FieldInfosConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::stored;
+    use crate::index::field::stored;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use std::sync::Arc;
 

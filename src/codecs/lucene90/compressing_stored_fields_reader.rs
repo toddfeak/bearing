@@ -683,11 +683,11 @@ mod tests {
 
     use super::*;
     use crate::document::StoredValue;
+    use crate::document::{Document, DocumentBuilder};
     use crate::index::config::IndexWriterConfig;
+    use crate::index::field::stored;
     use crate::index::segment_infos;
     use crate::index::writer::IndexWriter;
-    use crate::newindex::document::{Document, DocumentBuilder};
-    use crate::newindex::field::stored;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 

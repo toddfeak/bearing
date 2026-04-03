@@ -528,11 +528,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::document::DocumentBuilder;
     use crate::index::config::IndexWriterConfig;
     use crate::index::directory_reader::DirectoryReader;
+    use crate::index::field::text;
     use crate::index::writer::IndexWriter;
-    use crate::newindex::document::DocumentBuilder;
-    use crate::newindex::field::text;
     use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
     use crate::store::{MemoryDirectory, SharedDirectory};
 

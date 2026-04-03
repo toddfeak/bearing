@@ -262,11 +262,11 @@ mod tests {
 
     use std::sync::Arc;
 
+    use crate::document::DocumentBuilder;
     use crate::index::config::IndexWriterConfig;
     use crate::index::directory_reader::DirectoryReader;
+    use crate::index::field::text;
     use crate::index::writer::IndexWriter;
-    use crate::newindex::document::DocumentBuilder;
-    use crate::newindex::field::text;
     use crate::search::index_searcher::IndexSearcher;
     use crate::search::term_query::TermQuery;
     use crate::store::{MemoryDirectory, SharedDirectory};

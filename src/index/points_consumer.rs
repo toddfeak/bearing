@@ -9,9 +9,9 @@ use std::io;
 use crate::analysis::Token;
 use crate::codecs::lucene90::points::{self, PointsFieldData};
 use crate::index::consumer::{FieldConsumer, TokenInterest};
+use crate::index::field::{Field, PointsValue};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::field::{Field, PointsValue};
 
 /// Per-field state for accumulating point values during indexing.
 #[derive(mem_dbg::MemSize)]
@@ -183,7 +183,7 @@ impl FieldConsumer for PointsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::newindex::field::{int_field, lat_lon, long_field};
+    use crate::index::field::{int_field, lat_lon, long_field};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
     use std::sync::Arc;

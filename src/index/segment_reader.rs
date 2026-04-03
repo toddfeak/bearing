@@ -293,10 +293,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::document::DocumentBuilder;
     use crate::index::config::IndexWriterConfig;
+    use crate::index::field::{string, text};
     use crate::index::writer::IndexWriter;
-    use crate::newindex::document::DocumentBuilder;
-    use crate::newindex::field::{string, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn write_test_index(compound: bool) -> (Arc<SharedDirectory>, String, [u8; 16]) {
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn test_segment_without_norms_has_no_norms_reader() {
         // KeywordField has omit_norms=true, no TextField => no norms
-        use crate::newindex::field::keyword;
+        use crate::index::field::keyword;
 
         let config = IndexWriterConfig {
             use_compound_file: false,

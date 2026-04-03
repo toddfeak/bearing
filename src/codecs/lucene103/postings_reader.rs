@@ -1069,12 +1069,12 @@ mod tests {
 
     use crate::codecs::competitive_impact::NormsLookup;
     use crate::codecs::lucene103::postings_writer::PostingsWriter;
+    use crate::document::DocumentBuilder;
     use crate::document::IndexOptions;
     use crate::index::config::IndexWriterConfig;
+    use crate::index::field::text;
     use crate::index::writer::IndexWriter;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
-    use crate::newindex::document::DocumentBuilder;
-    use crate::newindex::field::text;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 

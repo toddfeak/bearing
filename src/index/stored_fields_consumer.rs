@@ -11,23 +11,11 @@ use std::io;
 
 use crate::analysis::Token;
 use crate::codecs::lucene90::stored_fields::{Lucene90StoredFieldsWriter, StoredFieldsWriter};
-use crate::document::StoredValue as CodecStoredValue;
+use crate::document::StoredValue;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
+use crate::index::field::Field;
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::field::{Field, StoredValue};
-
-/// Converts a newindex [`StoredValue`] to the codec's [`CodecStoredValue`].
-fn to_codec_stored_value(sv: &StoredValue) -> CodecStoredValue {
-    match sv {
-        StoredValue::String(s) => CodecStoredValue::String(s.clone()),
-        StoredValue::Bytes(b) => CodecStoredValue::Bytes(b.clone()),
-        StoredValue::Int(v) => CodecStoredValue::Int(*v),
-        StoredValue::Long(v) => CodecStoredValue::Long(*v),
-        StoredValue::Float(v) => CodecStoredValue::Float(*v),
-        StoredValue::Double(v) => CodecStoredValue::Double(*v),
-    }
-}
 
 /// Streams stored field values to codec files per-document.
 ///
@@ -36,7 +24,7 @@ fn to_codec_stored_value(sv: &StoredValue) -> CodecStoredValue {
 /// are filled at flush time to maintain document ID alignment.
 pub struct StoredFieldsConsumer {
     writer: Option<Lucene90StoredFieldsWriter>,
-    current_doc_fields: Vec<(u32, CodecStoredValue)>,
+    current_doc_fields: Vec<(u32, StoredValue)>,
     last_doc: i32,
 }
 
@@ -114,8 +102,7 @@ impl FieldConsumer for StoredFieldsConsumer {
         _accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
         if let Some(sv) = field.field_type().stored() {
-            self.current_doc_fields
-                .push((field_id, to_codec_stored_value(sv)));
+            self.current_doc_fields.push((field_id, sv.clone()));
         }
         Ok(TokenInterest::NoTokens)
     }
@@ -197,7 +184,7 @@ mod tests {
     use assertables::*;
 
     use super::*;
-    use crate::newindex::field::{stored, text};
+    use crate::index::field::{stored, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_context() -> SegmentContext {

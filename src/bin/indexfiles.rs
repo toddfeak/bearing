@@ -12,14 +12,14 @@ use std::time::Instant;
 
 use log::error;
 
+use bearing::document::DocumentBuilder;
 use bearing::index::config::IndexWriterConfig;
-use bearing::index::writer::IndexWriter;
-use bearing::newindex::document::DocumentBuilder;
-use bearing::newindex::field::{
+use bearing::index::field::{
     TermVectorOptions, binary_dv, double_field, double_range, feature, float_field, float_range,
     int_field, int_range, keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv,
     sorted_numeric_dv, sorted_set_dv, stored, string, text,
 };
+use bearing::index::writer::IndexWriter;
 use bearing::store::{FSDirectory, SharedDirectory};
 
 struct CliArgs {
@@ -220,7 +220,7 @@ fn main() {
 }
 
 /// Creates a Document from a file path with all supported field types.
-fn make_document(path: &Path) -> bearing::newindex::document::Document {
+fn make_document(path: &Path) -> bearing::document::Document {
     let path_str = path.to_string_lossy().to_string();
     let file_name = path
         .file_name()

@@ -10,13 +10,13 @@ use mem_dbg::{MemSize, SizeFlags};
 use crate::analysis::Analyzer;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene99::segment_info_format::SegmentInfoFieldData;
+use crate::document::Document;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
+use crate::index::field::InvertableValue;
 use crate::index::field_info_registry::FieldInfoRegistry;
 use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
-use crate::newindex::document::Document;
-use crate::newindex::field::InvertableValue;
 
 /// Per-thread worker that accumulates documents into a single segment.
 ///
@@ -262,8 +262,8 @@ mod tests {
     use crate::analysis::StandardAnalyzer;
     use crate::analysis::Token;
     use crate::index::consumer::FieldConsumer;
+    use crate::index::field::Field;
     use crate::index::segment::SegmentId;
-    use crate::newindex::field::Field;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     /// No-op consumer that returns an empty file list.

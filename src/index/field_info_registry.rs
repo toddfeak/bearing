@@ -5,7 +5,7 @@ use std::fmt;
 use std::io;
 
 use crate::document::{DocValuesType, IndexOptions};
-use crate::newindex::field::{FieldType, TermVectorOptions};
+use crate::index::field::{FieldType, TermVectorOptions};
 
 /// Captures the structural identity of a field type for conflict detection.
 ///
@@ -113,7 +113,7 @@ impl FieldInfoRegistry {
 mod tests {
 
     use super::*;
-    use crate::newindex::field::{stored, text};
+    use crate::index::field::{stored, text};
 
     #[test]
     fn register_new_field_assigns_zero() {
