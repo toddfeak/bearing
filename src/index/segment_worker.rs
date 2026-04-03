@@ -7,13 +7,14 @@ use std::mem;
 
 use mem_dbg::{MemSize, SizeFlags};
 
+use crate::codecs::lucene99::segment_info_format;
+use crate::codecs::lucene99::segment_info_format::SegmentInfoFieldData;
 use crate::index::consumer::{FieldConsumer, TokenInterest};
 use crate::index::field_info_registry::FieldInfoRegistry;
 use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_accumulator::SegmentAccumulator;
 use crate::index::segment_context::SegmentContext;
 use crate::newindex::analyzer::Analyzer;
-use crate::newindex::codecs::segment_info;
 use crate::newindex::document::Document;
 use crate::newindex::field::InvertableValue;
 
@@ -233,7 +234,7 @@ impl SegmentWorker {
             "BEST_SPEED".to_string(),
         );
 
-        let si = segment_info::SegmentInfo {
+        let si = SegmentInfoFieldData {
             name: context.segment_name.clone(),
             max_doc: self.doc_count,
             is_compound_file: false,
@@ -242,7 +243,7 @@ impl SegmentWorker {
             attributes,
             has_blocks: false,
         };
-        let si_name = segment_info::write(&context.directory, &si, &file_names)?;
+        let si_name = segment_info_format::write(&context.directory, &si, &file_names)?;
         file_names.push(si_name);
 
         Ok(FlushedSegment {

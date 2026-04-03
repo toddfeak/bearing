@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Segment info format writer for segment-level metadata (name, doc count, diagnostics).
+//! Segment info format (.si) writer and reader for segment-level metadata.
 
+use std::collections::HashMap;
 use std::io;
 
 use log::debug;
@@ -8,30 +9,44 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
-use crate::store::SharedDirectory;
-
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory};
+use crate::store::{DataInput, Directory, SharedDirectory};
 use std::collections::HashSet;
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
 const VERSION_CURRENT: i32 = 0;
 const EXTENSION: &str = "si";
 
-/// Lucene version constants (10.3.2)
 const LUCENE_MAJOR: i32 = 10;
 const LUCENE_MINOR: i32 = 3;
 const LUCENE_BUGFIX: i32 = 2;
 
-/// SegmentInfo.YES = 1, SegmentInfo.NO = -1
 const SI_YES: u8 = 1;
 const SI_NO: u8 = 0xFF; // -1 as byte
 
-/// Writes the .si (segment info) file to `directory`.
-/// Returns the file name written.
-pub fn write(
+/// Segment-level metadata for writing the .si file.
+#[derive(Debug)]
+pub(crate) struct SegmentInfoFieldData {
+    /// Segment name (e.g. "_0").
+    pub name: String,
+    /// Number of documents in the segment.
+    pub max_doc: i32,
+    /// Whether this segment is stored as a compound file (.cfs/.cfe).
+    pub is_compound_file: bool,
+    /// 16-byte unique segment ID.
+    pub id: [u8; 16],
+    /// Diagnostic metadata (e.g. source=flush).
+    pub diagnostics: HashMap<String, String>,
+    /// Segment attributes (e.g. stored fields compression mode).
+    pub attributes: HashMap<String, String>,
+    /// Whether this segment has blocks.
+    pub has_blocks: bool,
+}
+
+/// Writes the .si file for a segment. Returns the file name written.
+pub(crate) fn write(
     directory: &SharedDirectory,
-    segment_info: &SegmentInfo,
+    segment_info: &SegmentInfoFieldData,
     files: &[String],
 ) -> io::Result<String> {
     let file_name = index_file_names::segment_file_name(&segment_info.name, "", EXTENSION);
@@ -53,13 +68,13 @@ pub fn write(
         "",
     )?;
 
-    // Write Lucene version
+    // Lucene version (LE ints)
     output.write_le_int(LUCENE_MAJOR)?;
     output.write_le_int(LUCENE_MINOR)?;
     output.write_le_int(LUCENE_BUGFIX)?;
 
-    // minVersion: write 1 (present) + version, same as main version
-    output.write_byte(1)?; // hasMinVersion = true
+    // minVersion: present + same as main version
+    output.write_byte(1)?;
     output.write_le_int(LUCENE_MAJOR)?;
     output.write_le_int(LUCENE_MINOR)?;
     output.write_le_int(LUCENE_BUGFIX)?;
@@ -67,30 +82,30 @@ pub fn write(
     // maxDoc
     output.write_le_int(segment_info.max_doc)?;
 
-    // isCompoundFile (byte: YES=1, NO=-1)
+    // isCompoundFile
     output.write_byte(if segment_info.is_compound_file {
         SI_YES
     } else {
         SI_NO
     })?;
 
-    // hasBlocks (byte: YES=1, NO=-1)
+    // hasBlocks
     output.write_byte(if segment_info.has_blocks {
         SI_YES
     } else {
         SI_NO
     })?;
 
-    // diagnostics (map of strings)
+    // diagnostics
     output.write_map_of_strings(&segment_info.diagnostics)?;
 
-    // files (set of strings) — the files that belong to this segment
+    // files
     output.write_set_of_strings(files)?;
 
-    // attributes (map of strings)
+    // attributes
     output.write_map_of_strings(&segment_info.attributes)?;
 
-    // numSortFields = 0 (no index sorting)
+    // numSortFields = 0
     output.write_vint(0)?;
 
     codec_util::write_footer(&mut *output)?;
@@ -195,43 +210,45 @@ pub fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    fn make_test_segment() -> SegmentInfo {
+    const SEGMENT_NAME: &str = "_0";
+    const SEGMENT_ID: [u8; 16] = [0u8; 16];
+
+    fn make_segment_info() -> SegmentInfoFieldData {
         let mut diagnostics = HashMap::new();
         diagnostics.insert("source".to_string(), "flush".to_string());
-
-        SegmentInfo::new(
-            "_0".to_string(),
-            3,
-            true,
-            [0u8; 16],
+        SegmentInfoFieldData {
+            name: SEGMENT_NAME.to_string(),
+            max_doc: 3,
+            is_compound_file: false,
+            id: SEGMENT_ID,
             diagnostics,
-            HashMap::new(),
-        )
+            attributes: HashMap::new(),
+            has_blocks: false,
+        }
     }
 
-    #[test]
-    fn test_write_segment_info() {
-        let si = make_test_segment();
-        let files = vec!["_0.cfs".to_string(), "_0.cfe".to_string()];
+    // --- Write-side tests ---
 
+    #[test]
+    fn write_produces_si_file() {
         let dir = test_directory();
+        let si = make_segment_info();
+        let files = vec!["_0.fdt".to_string(), "_0.fdx".to_string()];
         let name = write(&dir, &si, &files).unwrap();
         assert_eq!(name, "_0.si");
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
-        assert_not_empty!(data);
 
-        // Verify header magic
+        let data = dir.lock().unwrap().read_file(&name).unwrap();
+
+        // Header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
 
-        // Verify footer magic
+        // Footer magic
         let footer_start = data.len() - 16;
         assert_eq!(
             &data[footer_start..footer_start + 4],
@@ -240,47 +257,69 @@ mod tests {
     }
 
     #[test]
-    fn test_lucene_version_encoding() {
-        let si = make_test_segment();
+    fn write_encodes_version_and_maxdoc() {
         let dir = test_directory();
-        let name = write(&dir, &si, &[]).unwrap();
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        let si = make_segment_info();
+        write(&dir, &si, &[]).unwrap();
 
-        // After the index header, the first data is the Lucene version
-        // Header: 4(magic) + 1+19(codec name) + 4(version) + 16(id) + 1(suffix len) = 45 bytes
-        let version_offset = 45;
+        let data = dir.lock().unwrap().read_file("_0.si").unwrap();
 
-        // major=10
-        assert_eq!(data[version_offset], 10);
-        assert_eq!(data[version_offset + 1], 0);
-        assert_eq!(data[version_offset + 2], 0);
-        assert_eq!(data[version_offset + 3], 0);
+        // After index header: codec="Lucene90SegmentInfo"(19 chars), version=0
+        // Header = 4(magic) + 1+19(codec) + 4(version) + 16(id) + 1(suffix len) = 45
+        let offset = 45;
 
-        // minor=3
-        assert_eq!(data[version_offset + 4], 3);
-        assert_eq!(data[version_offset + 5], 0);
-        assert_eq!(data[version_offset + 6], 0);
-        assert_eq!(data[version_offset + 7], 0);
+        // Lucene version: major=10 (LE int)
+        assert_eq!(data[offset], 10);
+        assert_eq!(data[offset + 1], 0);
+        assert_eq!(data[offset + 2], 0);
+        assert_eq!(data[offset + 3], 0);
 
-        // bugfix=2
-        assert_eq!(data[version_offset + 8], 2);
-        assert_eq!(data[version_offset + 9], 0);
-        assert_eq!(data[version_offset + 10], 0);
-        assert_eq!(data[version_offset + 11], 0);
+        // After version(12) + hasMinVersion(1) + minVersion(12) = 25 more bytes
+        let maxdoc_offset = offset + 25;
+
+        // maxDoc=3 (LE int)
+        assert_eq!(data[maxdoc_offset], 3);
+        assert_eq!(data[maxdoc_offset + 1], 0);
+        assert_eq!(data[maxdoc_offset + 2], 0);
+        assert_eq!(data[maxdoc_offset + 3], 0);
+
+        // isCompoundFile = NO = 0xFF
+        assert_eq!(data[maxdoc_offset + 4], 0xFF);
+
+        // hasBlocks = NO = 0xFF
+        assert_eq!(data[maxdoc_offset + 5], 0xFF);
+    }
+
+    #[test]
+    fn write_compound_file_flag() {
+        let dir = test_directory();
+        let mut si = make_segment_info();
+        si.is_compound_file = true;
+        write(&dir, &si, &[]).unwrap();
+
+        let data = dir.lock().unwrap().read_file("_0.si").unwrap();
+
+        // After header (45) + version (12) + hasMinVersion(1) + minVersion(12) + maxDoc(4) = 74
+        let flag_offset = 74;
+
+        // isCompoundFile = YES = 1
+        assert_eq!(data[flag_offset], 1);
+
+        // hasBlocks = NO = 0xFF
+        assert_eq!(data[flag_offset + 1], 0xFF);
     }
 
     // --- Read round-trip tests ---
 
     #[test]
     fn test_read_roundtrip() {
-        let si = make_test_segment();
-        let files = vec!["_0.cfs".to_string(), "_0.cfe".to_string()];
         let dir = test_directory();
-
+        let si = make_segment_info();
+        let files = vec!["_0.cfs".to_string(), "_0.cfe".to_string()];
         write(&dir, &si, &files).unwrap();
 
         let dir_guard = dir.lock().unwrap();
-        let read_si = read(&**dir_guard, &si.name, &si.id).unwrap();
+        let read_si = read(&**dir_guard, SEGMENT_NAME, &SEGMENT_ID).unwrap();
 
         assert_eq!(read_si.name, si.name);
         assert_eq!(read_si.max_doc, si.max_doc);
@@ -295,69 +334,56 @@ mod tests {
     }
 
     #[test]
-    fn test_read_non_compound() {
-        let mut si = make_test_segment();
-        si.is_compound_file = false;
-        let files = vec!["_0.fnm".to_string(), "_0.fdt".to_string()];
+    fn test_read_roundtrip_compound() {
         let dir = test_directory();
-
+        let mut si = make_segment_info();
+        si.is_compound_file = true;
+        let files = vec!["_0.cfs".to_string(), "_0.cfe".to_string()];
         write(&dir, &si, &files).unwrap();
 
         let dir_guard = dir.lock().unwrap();
-        let read_si = read(&**dir_guard, &si.name, &si.id).unwrap();
+        let read_si = read(&**dir_guard, SEGMENT_NAME, &SEGMENT_ID).unwrap();
+
+        assert!(read_si.is_compound_file);
+        assert_eq!(read_si.max_doc, 3);
+    }
+
+    #[test]
+    fn test_read_roundtrip_non_compound() {
+        let dir = test_directory();
+        let si = make_segment_info();
+        let files = vec!["_0.fnm".to_string(), "_0.fdt".to_string()];
+        write(&dir, &si, &files).unwrap();
+
+        let dir_guard = dir.lock().unwrap();
+        let read_si = read(&**dir_guard, SEGMENT_NAME, &SEGMENT_ID).unwrap();
 
         assert!(!read_si.is_compound_file);
         assert_eq!(read_si.max_doc, 3);
     }
 
     #[test]
-    fn test_read_with_attributes() {
-        let mut si = make_test_segment();
+    fn test_read_roundtrip_with_attributes() {
+        let dir = test_directory();
+        let mut si = make_segment_info();
         si.attributes
             .insert("custom_key".to_string(), "custom_val".to_string());
-        let dir = test_directory();
-
         write(&dir, &si, &[]).unwrap();
 
         let dir_guard = dir.lock().unwrap();
-        let read_si = read(&**dir_guard, &si.name, &si.id).unwrap();
+        let read_si = read(&**dir_guard, SEGMENT_NAME, &SEGMENT_ID).unwrap();
 
         assert_eq!(read_si.attributes.get("custom_key").unwrap(), "custom_val");
     }
 
     #[test]
     fn test_read_wrong_segment_id() {
-        let si = make_test_segment();
         let dir = test_directory();
+        let si = make_segment_info();
         write(&dir, &si, &[]).unwrap();
 
         let wrong_id = [0xFFu8; 16];
         let dir_guard = dir.lock().unwrap();
-        assert_err!(read(&**dir_guard, &si.name, &wrong_id));
-    }
-
-    // --- Write-side tests ---
-
-    #[test]
-    fn test_max_doc_and_flags() {
-        let si = make_test_segment();
-        let dir = test_directory();
-        let name = write(&dir, &si, &[]).unwrap();
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
-
-        // After header (45) + version (12) + hasMinVersion(1) + minVersion(12) = 70
-        let maxdoc_offset = 70;
-
-        // maxDoc=3
-        assert_eq!(data[maxdoc_offset], 3);
-        assert_eq!(data[maxdoc_offset + 1], 0);
-        assert_eq!(data[maxdoc_offset + 2], 0);
-        assert_eq!(data[maxdoc_offset + 3], 0);
-
-        // isCompoundFile = YES = 1
-        assert_eq!(data[maxdoc_offset + 4], 1);
-
-        // hasBlocks = NO = 0xFF
-        assert_eq!(data[maxdoc_offset + 5], 0xFF);
+        assert_err!(read(&**dir_guard, SEGMENT_NAME, &wrong_id));
     }
 }

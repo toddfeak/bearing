@@ -9,6 +9,8 @@ use std::thread;
 use log::debug;
 
 use crate::codecs::lucene90;
+use crate::codecs::lucene99::segment_info_format;
+use crate::codecs::lucene99::segment_info_format::SegmentInfoFieldData;
 use crate::index::channel::{self, Receiver, Sender};
 use crate::index::config::IndexWriterConfig;
 use crate::index::flush_control::FlushControl;
@@ -18,7 +20,6 @@ use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_context::SegmentContext;
 use crate::index::segment_infos::SegmentInfos;
 use crate::index::segment_worker::SegmentWorker;
-use crate::newindex::codecs::segment_info;
 use crate::newindex::document::Document;
 use crate::store::{self, SharedDirectory};
 
@@ -188,7 +189,7 @@ fn package_compound_segment(
         "BEST_SPEED".to_string(),
     );
 
-    let si = segment_info::SegmentInfo {
+    let si = SegmentInfoFieldData {
         name: seg_name.clone(),
         max_doc: segment.doc_count,
         is_compound_file: true,
@@ -200,7 +201,7 @@ fn package_compound_segment(
 
     // Delete old .si before rewriting
     directory.lock().unwrap().delete_file(&si_name)?;
-    segment_info::write(directory, &si, &compound_files)?;
+    segment_info_format::write(directory, &si, &compound_files)?;
 
     debug!(
         "compound: packaged {} ({} sub-files → .cfs/.cfe)",
