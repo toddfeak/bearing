@@ -33,26 +33,30 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bearing = "0.1.0-alpha.2"
+bearing = "0.1.0-alpha.4"
 ```
 
 ```rust
-use bearing::index::{IndexWriter, IndexWriterConfig};
-use bearing::document::{self, Document};
-use bearing::search::*;
+use std::sync::Arc;
+use bearing::prelude::{
+    DocumentBuilder, FSDirectory, IndexWriter, IndexWriterConfig,
+    SharedDirectory, keyword, text,
+};
 
-// Index a document
-let writer = IndexWriter::new();
-let mut doc = Document::new();
-doc.add(document::text_field("title", "hello world"));
+let fs_dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
+let directory = Arc::new(SharedDirectory::new(Box::new(fs_dir)));
+let writer = IndexWriter::new(IndexWriterConfig::default(), directory);
+
+let doc = DocumentBuilder::new()
+    .add_field(text("body").value("the quick brown fox"))
+    .add_field(keyword("category").value("animals"))
+    .build();
 writer.add_document(doc).unwrap();
-let result = writer.commit().unwrap();
 
-// Search (after opening the index)
-// let searcher = IndexSearcher::new(&reader);
-// let query = TermQuery::new("title", b"hello");
-// let results = searcher.search(&query, 10).unwrap();
+writer.commit().unwrap();
 ```
+
+See the [`prelude`](https://docs.rs/bearing/latest/bearing/prelude/) module for all available field types.
 
 ## Why "Bearing"?
 

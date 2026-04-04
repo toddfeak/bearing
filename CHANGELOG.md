@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4]
+
+### Fixed
+
+- README quick start showed nonexistent API (`Document::new()`, `doc.add()`) — updated to use prelude imports with the actual API
+
 ## [0.1.0-alpha.3]
 
 ### Changed
