@@ -57,11 +57,12 @@ struct TvPerFieldState {
 impl mem_dbg::MemSize for TermVectorsConsumer {
     fn mem_size_rec(
         &self,
-        _flags: mem_dbg::SizeFlags,
+        flags: mem_dbg::SizeFlags,
         _refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
-        // TV pools are reset per-document, so baseline is small
-        mem::size_of::<Self>()
+        let writer_size = self.writer.as_ref().map(|w| w.mem_size(flags)).unwrap_or(0);
+        let tv_hash_size = self.tv_terms_hash.mem_size(flags);
+        mem::size_of::<Self>() + writer_size + tv_hash_size
     }
 }
 

@@ -119,7 +119,7 @@ cargo run --bin indexfiles -- -docs <DOCS_PATH> [OPTIONS]
 | `-docs PATH` | *(required)* | Source directory with files to index |
 | `-index PATH` | `index` | Output directory for the index |
 | `--max-buffered-docs N` | disabled | Flush after N documents per segment |
-| `--ram-buffer-size MB` | `16.0` | RAM buffer size in MB |
+| `--ram-buffer-size MB` | `64.0` | RAM buffer size in MB |
 | `--threads N` | `1` | Number of indexing threads |
 | `--compound` | off | Package segment files into .cfs/.cfe |
 

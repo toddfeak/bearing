@@ -59,11 +59,10 @@ struct PerFieldState {
 impl mem_dbg::MemSize for PerFieldState {
     fn mem_size_rec(
         &self,
-        _flags: mem_dbg::SizeFlags,
-        _refs: &mut mem_dbg::HashMap<usize, usize>,
+        flags: mem_dbg::SizeFlags,
+        refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
-        // Rough estimate — the real cost is in the shared pools
-        mem::size_of::<Self>() + self.field_name.capacity()
+        mem::size_of::<Self>() + self.field_name.capacity() + self.writer.mem_size_rec(flags, refs)
     }
 }
 

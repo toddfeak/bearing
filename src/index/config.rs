@@ -12,7 +12,7 @@ use crate::analysis::{AnalyzerFactory, StandardAnalyzerFactory};
 /// | Field | Default |
 /// |---|---|
 /// | `num_threads` | `1` |
-/// | `ram_buffer_size_mb` | `16.0` |
+/// | `ram_buffer_size_mb` | `64.0` |
 /// | `max_buffered_docs` | `-1` (disabled) |
 /// | `use_compound_file` | `false` |
 /// | `analyzer_factory` | [`StandardAnalyzerFactory`] |
@@ -121,7 +121,7 @@ impl Default for IndexWriterConfig {
     fn default() -> Self {
         Self {
             num_threads: 1,
-            ram_buffer_size_mb: 16.0,
+            ram_buffer_size_mb: 64.0,
             max_buffered_docs: -1,
             use_compound_file: false,
             analyzer_factory: Arc::new(StandardAnalyzerFactory),
@@ -139,7 +139,7 @@ mod tests {
     fn test_default_values() {
         let config = IndexWriterConfig::default();
         assert_eq!(config.get_num_threads(), 1);
-        assert_in_delta!(config.get_ram_buffer_size_mb(), 16.0, f64::EPSILON);
+        assert_in_delta!(config.get_ram_buffer_size_mb(), 64.0, f64::EPSILON);
         assert_eq!(config.get_max_buffered_docs(), -1);
         assert!(!config.get_use_compound_file());
     }

@@ -378,7 +378,7 @@ fn print_usage() {
          Indexes documents with all supported field types.\n\n\
          Options:\n\
          \t--max-buffered-docs N  Flush after N docs per segment (-1 = disabled)\n\
-         \t--ram-buffer-size MB   RAM buffer size in MB (default: 16.0)\n\
+         \t--ram-buffer-size MB   RAM buffer size in MB (default: 64.0)\n\
          \t--threads N            Number of indexing threads (default: 1)\n\
          \t--compound             Package segment files into .cfs/.cfe (default: non-compound)"
     );

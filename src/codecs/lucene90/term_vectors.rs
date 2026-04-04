@@ -151,6 +151,23 @@ pub(crate) struct TermVectorChunkWriter {
     last_term: Vec<u8>,
 }
 
+impl mem_dbg::MemSize for TermVectorChunkWriter {
+    fn mem_size_rec(
+        &self,
+        flags: mem_dbg::SizeFlags,
+        refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        mem::size_of::<Self>()
+            + self.pending_docs.mem_size_rec(flags, refs)
+            + self.cur_fields.mem_size_rec(flags, refs)
+            + self.cur_field_terms.mem_size_rec(flags, refs)
+            + self.cur_term_positions.capacity() * mem::size_of::<i32>()
+            + self.cur_term_start_offsets.capacity() * mem::size_of::<i32>()
+            + self.cur_term_end_offsets.capacity() * mem::size_of::<i32>()
+            + self.cur_term_text.capacity()
+    }
+}
+
 impl TermVectorChunkWriter {
     /// Creates a new chunk writer. Writes the `.tvd` header immediately.
     pub(crate) fn new(
