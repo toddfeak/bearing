@@ -10,11 +10,10 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use bearing::index::config::IndexWriterConfig;
-//! use bearing::document::DocumentBuilder;
-//! use bearing::index::field::{text, keyword};
-//! use bearing::index::writer::IndexWriter;
-//! use bearing::store::{FSDirectory, SharedDirectory};
+//! use bearing::prelude::{
+//!     DocumentBuilder, FSDirectory, IndexWriter, IndexWriterConfig,
+//!     SharedDirectory, keyword, text,
+//! };
 //!
 //! let fs_dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
 //! let directory = Arc::new(SharedDirectory::new(Box::new(fs_dir)));
@@ -31,6 +30,7 @@
 //!
 //! # Modules
 //!
+//! - [`prelude`] — Convenience re-exports for common types.
 //! - [`analysis`] — Text analysis pipeline (tokenizers, filters, analyzers).
 //! - [`document`] — Document model and field factory functions.
 //! - [`encoding`] — Data encoding/decoding algorithms (varint, zigzag, packed ints, compression).
@@ -46,7 +46,9 @@ pub mod analysis;
 pub mod codecs;
 pub mod document;
 pub mod encoding;
+pub use index::field;
 pub mod index;
+pub mod prelude;
 pub mod search;
 pub mod store;
 #[cfg(test)]

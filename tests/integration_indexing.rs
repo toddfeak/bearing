@@ -12,14 +12,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use assertables::*;
-use bearing::document::DocumentBuilder;
-use bearing::index::config::IndexWriterConfig;
-use bearing::index::field::{
+use bearing::prelude::{
+    DocumentBuilder, IndexWriter, IndexWriterConfig, MemoryDirectory, SharedDirectory,
     TermVectorOptions, binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored,
     string, text,
 };
-use bearing::index::writer::IndexWriter;
-use bearing::store::{MemoryDirectory, SharedDirectory};
 
 fn shared_memory_dir() -> Arc<SharedDirectory> {
     Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())))

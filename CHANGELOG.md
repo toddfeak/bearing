@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3]
+
+### Changed
+
+- Reworked the indexing pipeline with improved lifecycle and ownership — replaced the old /index pacakge with a unified write path using idiomatic Rust ownership, builder patterns, and clear module layering
+- Restructured `index` module: public API types at the top level, 19 internal pipeline modules moved into `index/pipeline/` as `pub(crate)`
+- Extracted I/O traits from `store.rs` into `data_output.rs`, `data_input.rs`, `index_output.rs`, `index_input.rs`
+- Reduced public API surface: internal modules in `util` and `store` are now `pub(crate)`
+- Added `prelude` module with convenience re-exports for common types
+- Added rustdoc examples for `IndexWriter`, `DocumentBuilder`, and `SharedDirectory`
+- Updated `lib.rs` quick start and `indexfiles` CLI to use prelude imports
+
+
 ## [0.1.0-alpha.2]
 
 ### Added

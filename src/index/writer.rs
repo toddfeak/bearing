@@ -13,6 +13,31 @@ use crate::store::SharedDirectory;
 
 /// Manages the indexing pipeline: accepts documents, coordinates worker
 /// threads, and flushes segments to the directory.
+///
+/// # Lifecycle
+///
+/// 1. Create with [`IndexWriter::new`], passing a config and directory.
+/// 2. Add documents with [`IndexWriter::add_document`].
+/// 3. Call [`IndexWriter::commit`] to flush all pending segments and write
+///    the `segments_N` commit point.
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use bearing::prelude::{
+///     DocumentBuilder, IndexWriter, IndexWriterConfig,
+///     MemoryDirectory, SharedDirectory, text,
+/// };
+///
+/// let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+/// let writer = IndexWriter::new(IndexWriterConfig::default(), dir);
+///
+/// let doc = DocumentBuilder::new()
+///     .add_field(text("body").value("hello world"))
+///     .build();
+/// writer.add_document(doc).unwrap();
+///
+/// let segments = writer.commit().unwrap();
+/// ```
 pub struct IndexWriter {
     coordinator: IndexCoordinator,
     directory: Arc<SharedDirectory>,

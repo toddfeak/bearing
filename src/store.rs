@@ -43,6 +43,16 @@ pub(crate) struct SegmentFile {
 }
 
 /// A [`Directory`] behind a [`Mutex`] for shared concurrent access.
+///
+/// Wrap in `Arc<SharedDirectory>` for multi-threaded use with [`IndexWriter`](crate::index::writer::IndexWriter):
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use bearing::store::{FSDirectory, SharedDirectory};
+///
+/// let fs_dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
+/// let directory = Arc::new(SharedDirectory::new(Box::new(fs_dir)));
+/// ```
 pub type SharedDirectory = Mutex<Box<dyn Directory>>;
 
 /// Trait for a directory that can create and manage index files.

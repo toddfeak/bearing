@@ -12,15 +12,12 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use log::error;
 
-use bearing::document::{Document, DocumentBuilder};
-use bearing::index::config::IndexWriterConfig;
-use bearing::index::field::{
+use bearing::prelude::{
+    Document, DocumentBuilder, FSDirectory, IndexWriter, IndexWriterConfig, SharedDirectory,
     TermVectorOptions, binary_dv, double_field, double_range, feature, float_field, float_range,
     int_field, int_range, keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv,
     sorted_numeric_dv, sorted_set_dv, stored, string, text,
 };
-use bearing::index::writer::IndexWriter;
-use bearing::store::{FSDirectory, SharedDirectory};
 
 struct CliArgs {
     index_path: String,

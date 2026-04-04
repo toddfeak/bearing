@@ -108,6 +108,17 @@ impl Document {
 }
 
 /// Builds a [`Document`] by accumulating fields.
+///
+/// ```
+/// use bearing::prelude::{DocumentBuilder, keyword, numeric_dv, stored, text};
+///
+/// let doc = DocumentBuilder::new()
+///     .add_field(text("body").value("the quick brown fox"))
+///     .add_field(keyword("category").value("animals"))
+///     .add_field(numeric_dv("timestamp").value(1_700_000_000i64))
+///     .add_field(stored("raw").string("payload data"))
+///     .build();
+/// ```
 #[derive(Debug, Default)]
 pub struct DocumentBuilder {
     fields: Vec<Field>,
