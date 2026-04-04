@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use mem_dbg::{MemSize, SizeFlags};
 use std::collections::HashMap;
 use std::env;
 use std::io;
-use std::mem;
-
-use mem_dbg::{MemSize, SizeFlags};
 
 use crate::analysis::Analyzer;
 use crate::codecs::lucene99::segment_info_format;
@@ -109,8 +107,6 @@ pub struct SegmentWorker {
     field_consumers: Vec<Box<dyn FieldConsumer>>,
     analyzer: Box<dyn Analyzer>,
     doc_count: i32,
-    /// Reusable buffer for token text, avoids per-token allocation.
-    token_buf: String,
     /// Shared state passed to consumers sequentially.
     accumulator: SegmentAccumulator,
 }
@@ -128,7 +124,6 @@ impl SegmentWorker {
             field_consumers,
             analyzer,
             doc_count: 0,
-            token_buf: String::new(),
             accumulator: SegmentAccumulator::new(),
         }
     }
@@ -165,11 +160,8 @@ impl SegmentWorker {
                     Some(InvertableValue::Tokenized(provider, _)) => provider,
                     _ => continue,
                 };
-                let mut reader = provider.open()?;
-                let mut token_buf = mem::take(&mut self.token_buf);
-
-                self.analyzer.reset();
-                while let Some(token) = self.analyzer.next_token(&mut *reader, &mut token_buf)? {
+                self.analyzer.set_reader(provider.open()?);
+                while let Some(token) = self.analyzer.next_token()? {
                     for &i in &interested {
                         self.field_consumers[i].add_token(
                             field_id,
@@ -179,8 +171,6 @@ impl SegmentWorker {
                         )?;
                     }
                 }
-
-                self.token_buf = token_buf;
             }
 
             // 2c. Finish field — every consumer finalizes per-field state

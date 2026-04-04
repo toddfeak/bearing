@@ -5,16 +5,17 @@
 #[macro_use]
 extern crate assertables;
 
+use std::io::Cursor;
+
 use bearing::analysis::{Analyzer, StandardAnalyzer};
 
 /// Collects all tokens from an analyzer into (text, start, end, pos_inc) tuples.
 fn collect_tokens(text: &str) -> Vec<(String, i32, i32, i32)> {
     let mut analyzer = StandardAnalyzer::new();
-    let mut reader: &[u8] = text.as_bytes();
-    let mut buf = String::new();
+    analyzer.set_reader(Box::new(Cursor::new(text.as_bytes().to_vec())));
     let mut result = Vec::new();
 
-    while let Some(token) = analyzer.next_token(&mut reader, &mut buf).unwrap() {
+    while let Some(token) = analyzer.next_token().unwrap() {
         result.push((
             token.text.to_string(),
             token.start_offset,
@@ -82,24 +83,21 @@ fn standard_analyzer_position_increments() {
 }
 
 #[test]
-fn standard_analyzer_reset_allows_reuse() {
+fn standard_analyzer_set_reader_allows_reuse() {
     let mut analyzer = StandardAnalyzer::new();
-    let mut buf = String::new();
 
     // First field
-    let mut reader: &[u8] = b"hello";
-    let token = analyzer.next_token(&mut reader, &mut buf).unwrap();
+    analyzer.set_reader(Box::new(Cursor::new(b"hello".to_vec())));
+    let token = analyzer.next_token().unwrap();
     assert_some!(&token);
-    assert_eq!(buf, "hello");
-    let none = analyzer.next_token(&mut reader, &mut buf).unwrap();
+    let none = analyzer.next_token().unwrap();
     assert_none!(&none);
 
-    // Reset and process second field
-    analyzer.reset();
-    let mut reader: &[u8] = b"world";
-    let token = analyzer.next_token(&mut reader, &mut buf).unwrap();
+    // Set new reader and process second field
+    analyzer.set_reader(Box::new(Cursor::new(b"world".to_vec())));
+    let token = analyzer.next_token().unwrap();
     assert_some!(&token);
-    assert_eq!(buf, "world");
+    assert_eq!(token.unwrap().text, "world");
 }
 
 // ---------------------------------------------------------------------------

@@ -97,22 +97,26 @@ impl StandardTokenizer {
     }
 }
 
-/// Buffered token from a single tokenization pass.
+/// Buffered token byte range into the analyzer's `lowered` buffer.
 struct BufferedToken {
-    text: String,
+    start: usize,
+    end: usize,
     start_offset: i32,
     end_offset: i32,
-    position_increment: i32,
 }
 
 /// Standard text analyzer: Unicode-aware tokenization with lowercase normalization.
 ///
 /// Matches Java's `StandardAnalyzer` with no stop words. Implements the
-/// pull-based [`Analyzer`] trait: on the first `next_token` call for a field,
-/// reads all input, tokenizes and lowercases, then serves tokens from a buffer.
+/// pull-based [`Analyzer`] trait. Call [`set_reader`](Analyzer::set_reader)
+/// to provide input for a new field, then pull tokens with
+/// [`next_token`](Analyzer::next_token).
 #[derive(Default)]
 pub struct StandardAnalyzer {
+    reader: Option<Box<dyn Read + Send>>,
     tokens: VecDeque<BufferedToken>,
+    /// Lowercased text. Tokens borrow from this.
+    lowered: String,
     consumed: bool,
 }
 
@@ -122,57 +126,55 @@ impl StandardAnalyzer {
         Self::default()
     }
 
-    /// Lowercases `text` (ASCII-only), then tokenizes it,
-    /// pushing results into `self.tokens`.
-    fn analyze_into_buffer(&mut self, text: &str) {
-        let mut lowered = String::with_capacity(text.len());
-        for ch in text.chars() {
-            lowered.push(ch.to_ascii_lowercase());
+    /// Reads all input, lowercases (ASCII-only), and tokenizes into the buffer.
+    fn consume_reader(&mut self) -> io::Result<()> {
+        let mut input = String::new();
+        if let Some(reader) = &mut self.reader {
+            reader.read_to_string(&mut input)?;
         }
 
-        // Tokenize the pre-lowercased buffer
-        StandardTokenizer::tokenize_inner(&lowered, |start, end| {
+        self.lowered.clear();
+        self.lowered.reserve(input.len());
+        for ch in input.chars() {
+            self.lowered.push(ch.to_ascii_lowercase());
+        }
+
+        StandardTokenizer::tokenize_inner(&self.lowered, |start, end| {
             self.tokens.push_back(BufferedToken {
-                text: lowered[start..end].to_string(),
+                start,
+                end,
                 start_offset: start as i32,
                 end_offset: end as i32,
-                position_increment: 1,
             });
         });
+
+        self.consumed = true;
+        Ok(())
     }
 }
 
 impl Analyzer for StandardAnalyzer {
-    fn next_token<'b>(
-        &mut self,
-        reader: &mut dyn Read,
-        buf: &'b mut String,
-    ) -> io::Result<Option<Token<'b>>> {
+    fn set_reader(&mut self, reader: Box<dyn Read + Send>) {
+        self.reader = Some(reader);
+        self.tokens.clear();
+        self.lowered.clear();
+        self.consumed = false;
+    }
+
+    fn next_token(&mut self) -> io::Result<Option<Token<'_>>> {
         if !self.consumed {
-            let mut input = String::new();
-            reader.read_to_string(&mut input)?;
-            self.consumed = true;
-            self.analyze_into_buffer(&input);
+            self.consume_reader()?;
         }
 
         match self.tokens.pop_front() {
-            Some(bt) => {
-                buf.clear();
-                buf.push_str(&bt.text);
-                Ok(Some(Token {
-                    text: buf,
-                    start_offset: bt.start_offset,
-                    end_offset: bt.end_offset,
-                    position_increment: bt.position_increment,
-                }))
-            }
+            Some(bt) => Ok(Some(Token {
+                text: &self.lowered[bt.start..bt.end],
+                start_offset: bt.start_offset,
+                end_offset: bt.end_offset,
+                position_increment: 1,
+            })),
             None => Ok(None),
         }
-    }
-
-    fn reset(&mut self) {
-        self.tokens.clear();
-        self.consumed = false;
     }
 }
 
@@ -273,11 +275,10 @@ mod tests {
 
     fn collect_tokens(text: &str) -> Vec<(String, i32, i32, i32)> {
         let mut analyzer = StandardAnalyzer::default();
-        let mut reader: &[u8] = text.as_bytes();
-        let mut buf = String::new();
+        analyzer.set_reader(Box::new(io::Cursor::new(text.as_bytes().to_vec())));
         let mut result = Vec::new();
 
-        while let Some(token) = analyzer.next_token(&mut reader, &mut buf).unwrap() {
+        while let Some(token) = analyzer.next_token().unwrap() {
             result.push((
                 token.text.to_string(),
                 token.start_offset,
@@ -344,22 +345,20 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_allows_reuse() {
+    fn test_set_reader_allows_reuse() {
         let mut analyzer = StandardAnalyzer::default();
-        let mut buf = String::new();
 
         // First field
-        let mut reader: &[u8] = b"hello";
-        let token = analyzer.next_token(&mut reader, &mut buf).unwrap();
+        analyzer.set_reader(Box::new(io::Cursor::new(b"hello".to_vec())));
+        let token = analyzer.next_token().unwrap();
         assert_some!(&token);
-        let none = analyzer.next_token(&mut reader, &mut buf).unwrap();
+        let none = analyzer.next_token().unwrap();
         assert_none!(&none);
 
-        // Reset and process second field
-        analyzer.reset();
-        let mut reader: &[u8] = b"world";
-        let token = analyzer.next_token(&mut reader, &mut buf).unwrap();
+        // Set new reader and process second field
+        analyzer.set_reader(Box::new(io::Cursor::new(b"world".to_vec())));
+        let token = analyzer.next_token().unwrap();
         assert_some!(&token);
-        assert_eq!(buf, "world");
+        assert_eq!(token.unwrap().text, "world");
     }
 }

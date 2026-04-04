@@ -27,25 +27,25 @@ pub struct Token<'a> {
 
 /// Breaks text into a stream of tokens for indexing.
 ///
-/// The caller drives the loop by calling `next_token` repeatedly.
-/// The analyzer reads from the provided `Reader` incrementally and
-/// writes each token's text into a caller-owned buffer. The returned
-/// `Token` borrows from that buffer, avoiding per-token allocation.
+/// The analyzer owns its input reader. Call [`set_reader`](Analyzer::set_reader)
+/// to provide input for a new field, then call [`next_token`](Analyzer::next_token)
+/// repeatedly until it returns `None`. Each `set_reader` call replaces the
+/// previous reader and resets internal state.
 ///
-/// Each implementation holds its own internal parsing state (offsets,
-/// leftover bytes, etc.) which is reset when a new field begins.
+/// The returned [`Token`] borrows from the analyzer's internal buffer.
+/// The caller must let the token drop before calling `next_token` again
+/// (which the natural loop does).
 pub trait Analyzer: Send {
-    /// Reads the next token from `reader`, writing token text into `buf`.
+    /// Sets the input reader for a new field.
     ///
-    /// Returns `None` when the input is exhausted. The returned `Token`
-    /// borrows its text from `buf`. The caller must let the token drop
-    /// before calling `next_token` again (which the natural loop does).
-    fn next_token<'b>(
-        &mut self,
-        reader: &mut dyn Read,
-        buf: &'b mut String,
-    ) -> io::Result<Option<Token<'b>>>;
+    /// Replaces any previous reader and resets internal state (buffered
+    /// tokens, offsets, etc.). The old reader is dropped.
+    fn set_reader(&mut self, reader: Box<dyn Read + Send>);
 
-    /// Resets internal state for processing a new field.
-    fn reset(&mut self);
+    /// Returns the next token, or `None` when input is exhausted.
+    ///
+    /// The returned `Token` borrows its text from the analyzer's internal
+    /// buffer. The caller must drop the token before calling `next_token`
+    /// again.
+    fn next_token(&mut self) -> io::Result<Option<Token<'_>>>;
 }

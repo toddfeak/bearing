@@ -78,48 +78,11 @@ A previous chunked streaming implementation existed (8KB chunks, tokenize-and-em
 
 ---
 
-## 4. ReadProvider for Tokenized+Stored Fields
-
-**Severity:** API design — current approach forces unnecessary memory usage or awkward splits
-
-The text field builder currently offers two paths for providing content:
-- `.value(String)` — loads the entire string into memory, works for both tokenizing and storing
-- `.reader(Read)` — streams for tokenization, but the reader is consumed once and can't be re-read for storing
-
-This forces large documents to either be loaded entirely into memory (via String) or split into separate stored and tokenized fields. Neither is ideal.
-
-**Proposed fix:** Introduce a `ReadProvider` trait:
-
-```rust
-trait ReadProvider: Send {
-    fn open(&self) -> io::Result<Box<dyn Read + Send>>;
-}
-```
-
-The provider is lightweight and owned by the field. Each consumer calls `open()` independently — the tokenizer streams through one reader, the stored fields writer streams through another. Neither holds the full content in memory (for file-backed providers).
-
-Built-in conversions via `From`/`Into`:
-- `String` → provider returning `Cursor::new(bytes)` each time
-- `PathBuf` / `&Path` → provider returning `File::open()` each time
-- `Vec<u8>` → provider returning `Cursor::new(bytes)` each time
-
-The builder API becomes:
-```rust
-text("body").value("hello world")                // String → ReadProvider
-text("body").stored().value("hello world")       // tokenized + stored
-text("body").stored().value(path_buf)            // tokenized + stored, streamed from disk
-stored("body").value("hello world")              // stored only
-```
-
-The `.stored()` chain remains orthogonal. The `ReadProvider` replaces both the current String and Reader paths with a single unified mechanism. Large file-backed fields never load into memory for either tokenization or storage.
-
----
-
-## 5. Zero-Copy Tokenization with Sliding Window
+## 4. Zero-Copy Tokenization with Sliding Window
 
 **Severity:** Performance/allocation optimization
 
-Items 3 and 4 above address specific problems independently. This item combines them with a sliding window buffer to eliminate per-token allocation entirely and simplify the ownership model across the tokenization path.
+Item 3 above addresses buffering independently. ReadProvider (item 4, now complete) introduced the `ReadProvider` trait. This item combines them with a sliding window buffer to eliminate per-token allocation entirely and simplify the ownership model across the tokenization path.
 
 **Current problems (three intertwined):**
 - The segment worker extracts the reader from the field via `take_invertable()` (mutates the field, consumes the value)
@@ -128,7 +91,7 @@ Items 3 and 4 above address specific problems independently. This item combines 
 
 **Proposed design — three changes that reinforce each other:**
 
-1. **ReadProvider** (item 4): Fields hold a lightweight provider. Consumers call `provider.open()` to get independent readers. Fields stay immutable.
+1. **ReadProvider** (complete): Fields hold a lightweight provider. Consumers call `provider.open()` to get independent readers. Fields stay immutable.
 
 2. **Analyzer owns its reader**: Instead of the worker passing `&mut reader` to every `next_token` call, the worker calls `analyzer.set_reader(provider.open()?)` once per field. The analyzer owns the reader internally. `next_token()` becomes `fn next_token(&mut self) -> io::Result<Option<Token<'_>>>` — no reader or buf parameter.
 
@@ -164,7 +127,7 @@ No reader variable in the worker. No `take_invertable`. No buf parameter. Fields
 
 ---
 
-## 6. Dual Document/Field Models for Write vs Read
+## 5. Dual Document/Field Models for Write vs Read
 
 **Severity:** Architecture — two parallel representations for the same concept
 
@@ -178,7 +141,7 @@ In Lucene's Java model, `Document` and `Field` serve both read and write — a `
 
 ---
 
-## 7. Dual Directory Traits
+## 6. Dual Directory Traits
 
 **Severity:** Architecture — `store::Directory` uses `&mut self` for writes, preventing concurrent access without a `Mutex` wrapper (`SharedDirectory`)
 
@@ -190,7 +153,7 @@ The write path wraps `store::Directory` in `SharedDirectory` (a `Mutex`) for all
 
 ---
 
-## 8. Level1 Skip Data for Write Path
+## 7. Level1 Skip Data for Write Path
 
 **Severity:** Correctness — posting lists with >4096 docs cannot be written
 
