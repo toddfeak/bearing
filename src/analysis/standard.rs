@@ -32,16 +32,14 @@ impl StandardTokenizer {
     }
 }
 
-/// Standard text analyzer: Unicode-aware tokenization with lowercase normalization.
+/// Fast text analyzer with ASCII tokenization and lowercase normalization.
 ///
-/// Matches Java's `StandardAnalyzer` with no stop words. Implements the
-/// pull-based [`Analyzer`] trait. Call [`set_reader`](Analyzer::set_reader)
-/// to provide input for a new field, then pull tokens with
-/// [`next_token`](Analyzer::next_token).
+/// Splits on non-alphanumeric characters, keeps internal apostrophes
+/// (e.g., "don't"), and lowercases ASCII. This is the default analyzer
+/// and the fastest option for English text.
 ///
-/// Streams input in ~8 KB UTF-8 chunks via [`Utf8ChunkReader`], avoiding
-/// unbounded memory usage. Tokens are zero-copy borrows from the current
-/// chunk buffer; tokens spanning chunk boundaries use a small internal buffer.
+/// For correct handling of CJK, numeric grouping (`1,200`), and URLs,
+/// use [`UnicodeAnalyzer`](super::unicode::UnicodeAnalyzer) instead.
 #[derive(Default)]
 pub struct StandardAnalyzer {
     chunk_reader: Option<Utf8ChunkReader>,

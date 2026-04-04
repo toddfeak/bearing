@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Pluggable analyzers via `AnalyzerFactory` trait on `IndexWriterConfig`
+- `UnicodeAnalyzer` with UAX#29 word boundaries, closer to Java Lucene's `StandardAnalyzer`
+
+### Changed
+
+- Improved `StandardAnalyzer` memory and throughput with streaming tokenization
+
 ## [0.1.0-alpha.4]
 
 ### Fixed

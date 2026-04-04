@@ -4,6 +4,8 @@
 //!
 //! # Write path
 //!
+//! - **Analysis**: [`AnalyzerFactory`], [`StandardAnalyzerFactory`],
+//!   [`UnicodeAnalyzerFactory`]
 //! - **Documents**: [`Document`], [`DocumentBuilder`]
 //! - **Index writer**: [`IndexWriter`], [`IndexWriterConfig`]
 //! - **Field builders**: [`text`], [`keyword`], [`string`], [`stored`],
@@ -14,6 +16,7 @@
 //! - **Storage**: [`Directory`], [`FSDirectory`], [`MemoryDirectory`],
 //!   [`SharedDirectory`]
 
+pub use crate::analysis::{AnalyzerFactory, StandardAnalyzerFactory, UnicodeAnalyzerFactory};
 pub use crate::document::{Document, DocumentBuilder};
 pub use crate::index::config::IndexWriterConfig;
 pub use crate::index::field::{

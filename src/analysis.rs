@@ -11,8 +11,10 @@ use std::io::{self, Read};
 
 pub(crate) mod chunk_reader;
 pub mod standard;
+pub mod unicode;
 
 pub use standard::{StandardAnalyzer, StandardAnalyzerFactory};
+pub use unicode::{UnicodeAnalyzer, UnicodeAnalyzerFactory};
 
 /// A single token produced by the analyzer during tokenization.
 #[derive(Debug)]
