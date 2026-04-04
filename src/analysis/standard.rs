@@ -2,23 +2,20 @@
 
 //! Standard analysis: [`StandardTokenizer`] and [`StandardAnalyzer`].
 
-use std::collections::VecDeque;
 use std::io::{self, Read};
 
+use crate::analysis::chunk_reader::Utf8ChunkReader;
 use crate::analysis::{Analyzer, Token};
 
 /// Maximum token length. Tokens longer than this are split.
 /// Matches Java: StandardAnalyzer.DEFAULT_MAX_TOKEN_LENGTH = 255
 const MAX_TOKEN_LENGTH: usize = 255;
 
-/// A simplified StandardTokenizer implementing UAX#29 word break rules
-/// for ASCII/Latin text. Produces the same tokens as Java's StandardTokenizer
-/// for English text.
+/// Token classification helpers for UAX#29-like word break rules.
 ///
 /// Token rules:
 /// - Alphanumeric sequences are tokens
 /// - Internal apostrophes (e.g., "don't") are kept as part of the token
-/// - Internal periods in abbreviations (e.g., "U.S.A.") are kept
 /// - Everything else is a token separator
 pub struct StandardTokenizer;
 
@@ -33,76 +30,6 @@ impl StandardTokenizer {
     fn is_internal_separator(c: char) -> bool {
         c == '\'' || c == '\u{2019}' // apostrophe and right single quotation mark
     }
-
-    /// Shared state machine for tokenization. Calls `emit` for each token found.
-    fn tokenize_inner<F>(text: &str, mut emit: F)
-    where
-        F: FnMut(usize, usize),
-    {
-        let mut iter = text.char_indices().peekable();
-
-        while let Some(&(byte_pos, ch)) = iter.peek() {
-            if !Self::is_word_char(ch) {
-                iter.next();
-                continue;
-            }
-
-            let token_start_byte = byte_pos;
-            let mut token_end_byte = byte_pos + ch.len_utf8();
-            let mut char_count: usize = 1;
-            iter.next();
-
-            while char_count < MAX_TOKEN_LENGTH {
-                if let Some(&(bp, c)) = iter.peek() {
-                    if Self::is_word_char(c) {
-                        token_end_byte = bp + c.len_utf8();
-                        char_count += 1;
-                        iter.next();
-                    } else if Self::is_internal_separator(c) {
-                        let sep_byte = bp;
-                        iter.next();
-                        if let Some(&(bp2, c2)) = iter.peek() {
-                            if c2.is_alphanumeric() {
-                                token_end_byte = bp2 + c2.len_utf8();
-                                char_count += 2;
-                                iter.next();
-                            } else {
-                                token_end_byte = sep_byte;
-                                break;
-                            }
-                        } else {
-                            token_end_byte = sep_byte;
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            if char_count >= MAX_TOKEN_LENGTH {
-                while let Some(&(_, c)) = iter.peek() {
-                    if Self::is_word_char(c) || Self::is_internal_separator(c) {
-                        iter.next();
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            emit(token_start_byte, token_end_byte);
-        }
-    }
-}
-
-/// Buffered token byte range into the analyzer's `lowered` buffer.
-struct BufferedToken {
-    start: usize,
-    end: usize,
-    start_offset: i32,
-    end_offset: i32,
 }
 
 /// Standard text analyzer: Unicode-aware tokenization with lowercase normalization.
@@ -111,13 +38,25 @@ struct BufferedToken {
 /// pull-based [`Analyzer`] trait. Call [`set_reader`](Analyzer::set_reader)
 /// to provide input for a new field, then pull tokens with
 /// [`next_token`](Analyzer::next_token).
+///
+/// Streams input in ~8 KB UTF-8 chunks via [`Utf8ChunkReader`], avoiding
+/// unbounded memory usage. Tokens are zero-copy borrows from the current
+/// chunk buffer; tokens spanning chunk boundaries use a small internal buffer.
 #[derive(Default)]
 pub struct StandardAnalyzer {
-    reader: Option<Box<dyn Read + Send>>,
-    tokens: VecDeque<BufferedToken>,
-    /// Lowercased text. Tokens borrow from this.
-    lowered: String,
-    consumed: bool,
+    chunk_reader: Option<Utf8ChunkReader>,
+    /// Current chunk, ASCII-lowercased. Tokens borrow from this.
+    current: String,
+    /// Byte scan position in `current`.
+    pos: usize,
+    /// Buffer for tokens that span a chunk boundary.
+    /// Also used for tokens truncated at MAX_TOKEN_LENGTH when the skip
+    /// crosses a chunk boundary.
+    boundary_buf: String,
+    /// Total bytes consumed before the current chunk (for offset calculation).
+    bytes_consumed: usize,
+    /// Whether the chunk reader has been exhausted.
+    eof: bool,
 }
 
 impl StandardAnalyzer {
@@ -126,54 +65,249 @@ impl StandardAnalyzer {
         Self::default()
     }
 
-    /// Reads all input, lowercases (ASCII-only), and tokenizes into the buffer.
-    fn consume_reader(&mut self) -> io::Result<()> {
-        let mut input = String::new();
-        if let Some(reader) = &mut self.reader {
-            reader.read_to_string(&mut input)?;
+    /// Loads the next chunk from the reader, ASCII-lowercases it, and resets
+    /// the scan position.
+    fn load_next_chunk(&mut self) -> io::Result<()> {
+        self.bytes_consumed += self.current.len();
+        if let Some(reader) = &mut self.chunk_reader {
+            match reader.next_chunk()? {
+                Some(mut chunk) => {
+                    chunk.make_ascii_lowercase();
+                    self.current = chunk;
+                    self.pos = 0;
+                }
+                None => {
+                    self.current.clear();
+                    self.pos = 0;
+                    self.eof = true;
+                }
+            }
+        } else {
+            self.eof = true;
         }
-
-        self.lowered.clear();
-        self.lowered.reserve(input.len());
-        for ch in input.chars() {
-            self.lowered.push(ch.to_ascii_lowercase());
-        }
-
-        StandardTokenizer::tokenize_inner(&self.lowered, |start, end| {
-            self.tokens.push_back(BufferedToken {
-                start,
-                end,
-                start_offset: start as i32,
-                end_offset: end as i32,
-            });
-        });
-
-        self.consumed = true;
         Ok(())
+    }
+
+    /// Creates an analyzer with a custom chunk capacity (for testing).
+    #[cfg(test)]
+    fn with_capacity(capacity: usize, reader: Box<dyn Read + Send>) -> Self {
+        Self {
+            chunk_reader: Some(Utf8ChunkReader::with_capacity(capacity, reader)),
+            ..Self::default()
+        }
     }
 }
 
 impl Analyzer for StandardAnalyzer {
     fn set_reader(&mut self, reader: Box<dyn Read + Send>) {
-        self.reader = Some(reader);
-        self.tokens.clear();
-        self.lowered.clear();
-        self.consumed = false;
+        self.chunk_reader = Some(Utf8ChunkReader::new(reader));
+        self.current.clear();
+        self.pos = 0;
+        self.boundary_buf.clear();
+        self.bytes_consumed = 0;
+        self.eof = false;
     }
 
     fn next_token(&mut self) -> io::Result<Option<Token<'_>>> {
-        if !self.consumed {
-            self.consume_reader()?;
+        // --- Phase 1: Skip non-word characters ---
+        'skip: loop {
+            let bytes = self.current.as_bytes();
+            while self.pos < bytes.len() {
+                let b = bytes[self.pos];
+                if b < 0x80 {
+                    if StandardTokenizer::is_word_char(b as char) {
+                        break 'skip;
+                    }
+                    self.pos += 1;
+                } else {
+                    let ch = self.current[self.pos..].chars().next().unwrap();
+                    if StandardTokenizer::is_word_char(ch) {
+                        break 'skip;
+                    }
+                    self.pos += ch.len_utf8();
+                }
+            }
+            // Exhausted chunk.
+            if self.eof {
+                return Ok(None);
+            }
+            self.load_next_chunk()?;
         }
 
-        match self.tokens.pop_front() {
-            Some(bt) => Ok(Some(Token {
-                text: &self.lowered[bt.start..bt.end],
-                start_offset: bt.start_offset,
-                end_offset: bt.end_offset,
+        let token_start_byte = self.bytes_consumed + self.pos;
+        let scan_start = self.pos;
+        let mut char_count: usize = 0;
+        let mut spanning = false;
+
+        // --- Phase 2: Scan word chars + internal separators ---
+        // Pending separator: when we hit a separator that might cross a chunk
+        // boundary, we break out of the inner loop, handle the boundary, then
+        // continue. This avoids holding a `bytes` borrow across load_next_chunk.
+        let mut pending_sep: Option<char> = None;
+
+        'token: loop {
+            // Handle a separator that was deferred from the previous iteration.
+            if let Some(sep) = pending_sep.take() {
+                let sep_len = sep.len_utf8();
+                // We already advanced pos past the separator and possibly loaded
+                // a new chunk. Now check what follows.
+                if self.pos >= self.current.len() {
+                    // EOF after separator — exclude it.
+                    if !spanning {
+                        // pos is past sep in now-empty chunk; we can't back up.
+                        // But we saved to boundary_buf before breaking, so just
+                        // emit from boundary_buf.
+                        _ = sep_len;
+                    }
+                    break 'token;
+                }
+                let next_ch = self.current[self.pos..].chars().next().unwrap();
+                if next_ch.is_alphanumeric() {
+                    if spanning {
+                        self.boundary_buf.push(sep);
+                        self.boundary_buf.push(next_ch);
+                    }
+                    self.pos += next_ch.len_utf8();
+                    char_count += 2;
+                } else {
+                    // Trailing separator — exclude it. If spanning, boundary_buf
+                    // doesn't have the sep. If not spanning, pos is already past
+                    // the sep but that's fine — we just won't include it.
+                    if !spanning {
+                        self.pos -= sep_len;
+                    }
+                    break 'token;
+                }
+            }
+
+            // Tight inner loop: scan within current chunk.
+            let bytes = self.current.as_bytes();
+            while self.pos < bytes.len() && char_count < MAX_TOKEN_LENGTH {
+                let b = bytes[self.pos];
+                let ch = if b < 0x80 {
+                    b as char
+                } else {
+                    self.current[self.pos..].chars().next().unwrap()
+                };
+
+                if StandardTokenizer::is_word_char(ch) {
+                    if spanning {
+                        self.boundary_buf.push(ch);
+                    }
+                    self.pos += ch.len_utf8();
+                    char_count += 1;
+                } else if StandardTokenizer::is_internal_separator(ch) {
+                    let sep_len = ch.len_utf8();
+
+                    // Will advancing past the separator leave the chunk?
+                    if self.pos + sep_len >= bytes.len() && !self.eof {
+                        // Save token text before crossing.
+                        if !spanning {
+                            self.boundary_buf.clear();
+                            self.boundary_buf
+                                .push_str(&self.current[scan_start..self.pos]);
+                            spanning = true;
+                        }
+                        self.pos += sep_len;
+                        // Need to load next chunk — break out of inner loop to
+                        // avoid holding `bytes` borrow.
+                        pending_sep = Some(ch);
+                        break;
+                    }
+
+                    // Separator and next char both in this chunk.
+                    if self.pos + sep_len < bytes.len() {
+                        let next_ch = self.current[self.pos + sep_len..].chars().next().unwrap();
+                        if next_ch.is_alphanumeric() {
+                            if spanning {
+                                self.boundary_buf.push(ch);
+                                self.boundary_buf.push(next_ch);
+                            }
+                            self.pos += sep_len + next_ch.len_utf8();
+                            char_count += 2;
+                        } else {
+                            break 'token;
+                        }
+                    } else {
+                        // Separator is last byte(s) of chunk and eof is true.
+                        break 'token;
+                    }
+                } else {
+                    break 'token;
+                }
+            }
+
+            // Exited inner loop: end of chunk, MAX_TOKEN_LENGTH, or pending_sep.
+            if char_count >= MAX_TOKEN_LENGTH {
+                break 'token;
+            }
+            if pending_sep.is_some() {
+                // Load next chunk for the pending separator.
+                self.load_next_chunk()?;
+                continue 'token;
+            }
+            if self.eof {
+                break 'token;
+            }
+            // End of chunk mid-token — save and continue in next chunk.
+            if !spanning {
+                self.boundary_buf.clear();
+                self.boundary_buf
+                    .push_str(&self.current[scan_start..self.pos]);
+                spanning = true;
+            }
+            self.load_next_chunk()?;
+        }
+
+        // --- Phase 3: Handle MAX_TOKEN_LENGTH overflow ---
+        if char_count >= MAX_TOKEN_LENGTH {
+            if !spanning {
+                self.boundary_buf.clear();
+                self.boundary_buf
+                    .push_str(&self.current[scan_start..self.pos]);
+                spanning = true;
+            }
+            // Skip remaining word chars / separators.
+            'skip_overflow: loop {
+                let bytes = self.current.as_bytes();
+                while self.pos < bytes.len() {
+                    let ch = if bytes[self.pos] < 0x80 {
+                        bytes[self.pos] as char
+                    } else {
+                        self.current[self.pos..].chars().next().unwrap()
+                    };
+                    if StandardTokenizer::is_word_char(ch)
+                        || StandardTokenizer::is_internal_separator(ch)
+                    {
+                        self.pos += ch.len_utf8();
+                    } else {
+                        break 'skip_overflow;
+                    }
+                }
+                if self.eof {
+                    break;
+                }
+                self.load_next_chunk()?;
+            }
+        }
+
+        // --- Phase 4: Emit token ---
+        if spanning {
+            let token_end_byte = token_start_byte + self.boundary_buf.len();
+            Ok(Some(Token {
+                text: &self.boundary_buf,
+                start_offset: token_start_byte as i32,
+                end_offset: token_end_byte as i32,
                 position_increment: 1,
-            })),
-            None => Ok(None),
+            }))
+        } else {
+            let token_end_byte = self.bytes_consumed + self.pos;
+            Ok(Some(Token {
+                text: &self.current[scan_start..self.pos],
+                start_offset: token_start_byte as i32,
+                end_offset: token_end_byte as i32,
+                position_increment: 1,
+            }))
         }
     }
 }
@@ -183,15 +317,14 @@ mod tests {
     use super::*;
     use assertables::*;
 
-    // --- StandardTokenizer unit tests ---
+    // --- Tokenizer tests (exercise the real StandardAnalyzer) ---
 
-    /// Helper: tokenize and collect (text, start, end) tuples.
+    /// Helper: tokenize via the real StandardAnalyzer, return (text, start, end).
     fn tokenize(text: &str) -> Vec<(String, usize, usize)> {
-        let mut tokens = Vec::new();
-        StandardTokenizer::tokenize_inner(text, |start, end| {
-            tokens.push((text[start..end].to_string(), start, end));
-        });
-        tokens
+        collect_tokens(text)
+            .into_iter()
+            .map(|(t, s, e, _)| (t, s as usize, e as usize))
+            .collect()
     }
 
     #[test]
@@ -360,5 +493,151 @@ mod tests {
         let token = analyzer.next_token().unwrap();
         assert_some!(&token);
         assert_eq!(token.unwrap().text, "world");
+    }
+
+    // --- Chunk boundary tests (small capacity to force boundaries) ---
+
+    fn collect_tokens_chunked(text: &str, capacity: usize) -> Vec<(String, i32, i32, i32)> {
+        let reader: Box<dyn Read + Send> = Box::new(io::Cursor::new(text.as_bytes().to_vec()));
+        let mut analyzer = StandardAnalyzer::with_capacity(capacity, reader);
+        let mut result = Vec::new();
+        while let Some(token) = analyzer.next_token().unwrap() {
+            result.push((
+                token.text.to_string(),
+                token.start_offset,
+                token.end_offset,
+                token.position_increment,
+            ));
+        }
+        result
+    }
+
+    #[test]
+    fn test_token_spanning_chunk_boundary() {
+        let tokens = collect_tokens_chunked("hello world", 4);
+        assert_len_eq_x!(&tokens, 2);
+        assert_eq!(tokens[0].0, "hello");
+        assert_eq!(tokens[1].0, "world");
+    }
+
+    #[test]
+    fn test_contraction_spanning_boundary() {
+        let tokens = collect_tokens_chunked("don't stop", 4);
+        assert_len_eq_x!(&tokens, 2);
+        assert_eq!(tokens[0].0, "don't");
+        assert_eq!(tokens[1].0, "stop");
+    }
+
+    #[test]
+    fn test_separator_at_exact_boundary() {
+        // "ab'" is 3 bytes. With capacity 3, the apostrophe is last byte of chunk.
+        // Next chunk starts with "cd" — should produce "ab'cd".
+        let tokens = collect_tokens_chunked("ab'cd", 3);
+        assert_len_eq_x!(&tokens, 1);
+        assert_eq!(tokens[0].0, "ab'cd");
+    }
+
+    #[test]
+    fn test_separator_at_boundary_followed_by_non_alpha() {
+        let tokens = collect_tokens_chunked("ab' x", 3);
+        assert_len_eq_x!(&tokens, 2);
+        assert_eq!(tokens[0].0, "ab");
+        assert_eq!(tokens[1].0, "x");
+    }
+
+    #[test]
+    fn test_comprehensive_tiny_chunks_match_default() {
+        let input = "The quick brown fox don't jump over the lazy dog's bed";
+        let default_tokens = collect_tokens(input);
+        let default_texts: Vec<&str> = default_tokens.iter().map(|t| t.0.as_str()).collect();
+        let chunked_tokens = collect_tokens_chunked(input, 4);
+        let chunked_texts: Vec<&str> = chunked_tokens.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(chunked_texts, default_texts);
+    }
+
+    #[test]
+    fn test_token_at_eof_no_trailing_whitespace() {
+        let tokens = collect_tokens_chunked("hello", 3);
+        assert_len_eq_x!(&tokens, 1);
+        assert_eq!(tokens[0].0, "hello");
+    }
+
+    #[test]
+    fn test_empty_input_chunked() {
+        let tokens = collect_tokens_chunked("", 4);
+        assert_is_empty!(&tokens);
+    }
+
+    #[test]
+    fn test_set_reader_reuse_with_streaming() {
+        let reader1: Box<dyn Read + Send> = Box::new(io::Cursor::new(b"hello".to_vec()));
+        let mut analyzer = StandardAnalyzer::with_capacity(3, reader1);
+        let token = analyzer.next_token().unwrap();
+        assert_eq!(token.unwrap().text, "hello");
+        let none = analyzer.next_token().unwrap();
+        assert_none!(&none);
+        analyzer.set_reader(Box::new(io::Cursor::new(b"world".to_vec())));
+        let token = analyzer.next_token().unwrap();
+        assert_eq!(token.unwrap().text, "world");
+    }
+
+    #[test]
+    fn test_offsets_correct_across_chunks() {
+        let tokens = collect_tokens_chunked("hello world", 4);
+        assert_eq!(tokens[0].1, 0);
+        assert_eq!(tokens[0].2, 5);
+        assert_eq!(tokens[1].1, 6);
+        assert_eq!(tokens[1].2, 11);
+    }
+
+    #[test]
+    fn test_many_tokens_tiny_chunks() {
+        let input = "a b c d e f g h i j";
+        let tokens = collect_tokens_chunked(input, 3);
+        let texts: Vec<&str> = tokens.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+        );
+    }
+
+    // --- MAX_TOKEN_LENGTH edge cases ---
+
+    #[test]
+    fn test_max_token_length_exact() {
+        let input: String = "a".repeat(255);
+        let tokens = collect_tokens(&input);
+        assert_len_eq_x!(&tokens, 1);
+        assert_len_eq_x!(&tokens[0].0, 255);
+    }
+
+    #[test]
+    fn test_max_token_length_exceeded() {
+        let input: String = "b".repeat(300);
+        let tokens = collect_tokens(&input);
+        assert_len_eq_x!(&tokens, 1);
+        assert_len_eq_x!(&tokens[0].0, 255);
+    }
+
+    #[test]
+    fn test_max_token_length_with_following_token() {
+        let input = format!("{} short", "c".repeat(300));
+        let tokens = collect_tokens(&input);
+        assert_len_eq_x!(&tokens, 2);
+        assert_len_eq_x!(&tokens[0].0, 255);
+        assert_eq!(tokens[1].0, "short");
+    }
+
+    // --- Smart quote (U+2019) edge cases ---
+
+    #[test]
+    fn test_smart_quote_contraction_at_boundary() {
+        // U+2019 is 3 bytes. With capacity 4, chunk boundary falls inside
+        // the multi-byte sequence — utf8-zero handles this by not splitting
+        // the codepoint, but the token must still be preserved.
+        let input = "don\u{2019}t";
+        let tokens = collect_tokens_chunked(input, 4);
+        assert_len_eq_x!(&tokens, 1);
+        assert_eq!(tokens[0].0, "don\u{2019}t");
     }
 }

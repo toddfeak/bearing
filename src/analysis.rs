@@ -8,6 +8,7 @@
 
 use std::io::{self, Read};
 
+pub(crate) mod chunk_reader;
 pub mod standard;
 
 pub use standard::StandardAnalyzer;
