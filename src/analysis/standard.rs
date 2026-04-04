@@ -5,7 +5,7 @@
 use std::io::{self, Read};
 
 use crate::analysis::chunk_reader::Utf8ChunkReader;
-use crate::analysis::{Analyzer, Token};
+use crate::analysis::{Analyzer, AnalyzerFactory, Token};
 
 /// Maximum token length. Tokens longer than this are split.
 /// Matches Java: StandardAnalyzer.DEFAULT_MAX_TOKEN_LENGTH = 255
@@ -309,6 +309,19 @@ impl Analyzer for StandardAnalyzer {
                 position_increment: 1,
             }))
         }
+    }
+}
+
+/// Factory that creates [`StandardAnalyzer`] instances.
+///
+/// This is the default analyzer factory used by
+/// [`IndexWriterConfig`](crate::index::config::IndexWriterConfig).
+#[derive(Debug, Clone, Copy)]
+pub struct StandardAnalyzerFactory;
+
+impl AnalyzerFactory for StandardAnalyzerFactory {
+    fn create(&self) -> Box<dyn Analyzer> {
+        Box::new(StandardAnalyzer::new())
     }
 }
 

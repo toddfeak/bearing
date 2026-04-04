@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
+use std::sync::Arc;
+
+use crate::analysis::{AnalyzerFactory, StandardAnalyzerFactory};
+
 /// Configuration for an [`IndexWriter`](crate::index::writer::IndexWriter).
 ///
 /// # Defaults
@@ -10,6 +15,7 @@
 /// | `ram_buffer_size_mb` | `16.0` |
 /// | `max_buffered_docs` | `-1` (disabled) |
 /// | `use_compound_file` | `false` |
+/// | `analyzer_factory` | [`StandardAnalyzerFactory`] |
 ///
 /// # Example
 ///
@@ -21,12 +27,36 @@
 ///     .ram_buffer_size_mb(64.0)
 ///     .use_compound_file(true);
 /// ```
-#[derive(Debug, Clone)]
 pub struct IndexWriterConfig {
     num_threads: usize,
     ram_buffer_size_mb: f64,
     max_buffered_docs: i32,
     use_compound_file: bool,
+    analyzer_factory: Arc<dyn AnalyzerFactory>,
+}
+
+impl Clone for IndexWriterConfig {
+    fn clone(&self) -> Self {
+        Self {
+            num_threads: self.num_threads,
+            ram_buffer_size_mb: self.ram_buffer_size_mb,
+            max_buffered_docs: self.max_buffered_docs,
+            use_compound_file: self.use_compound_file,
+            analyzer_factory: Arc::clone(&self.analyzer_factory),
+        }
+    }
+}
+
+impl fmt::Debug for IndexWriterConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexWriterConfig")
+            .field("num_threads", &self.num_threads)
+            .field("ram_buffer_size_mb", &self.ram_buffer_size_mb)
+            .field("max_buffered_docs", &self.max_buffered_docs)
+            .field("use_compound_file", &self.use_compound_file)
+            .field("analyzer_factory", &self.analyzer_factory)
+            .finish()
+    }
 }
 
 impl IndexWriterConfig {
@@ -55,6 +85,12 @@ impl IndexWriterConfig {
         self
     }
 
+    /// Sets the analyzer factory used to create per-worker analyzers.
+    pub fn analyzer_factory(mut self, factory: Arc<dyn AnalyzerFactory>) -> Self {
+        self.analyzer_factory = factory;
+        self
+    }
+
     /// Returns the number of threads in the internal indexing pool.
     pub fn get_num_threads(&self) -> usize {
         self.num_threads
@@ -74,6 +110,11 @@ impl IndexWriterConfig {
     pub fn get_use_compound_file(&self) -> bool {
         self.use_compound_file
     }
+
+    /// Returns the analyzer factory.
+    pub fn get_analyzer_factory(&self) -> &Arc<dyn AnalyzerFactory> {
+        &self.analyzer_factory
+    }
 }
 
 impl Default for IndexWriterConfig {
@@ -83,6 +124,7 @@ impl Default for IndexWriterConfig {
             ram_buffer_size_mb: 16.0,
             max_buffered_docs: -1,
             use_compound_file: false,
+            analyzer_factory: Arc::new(StandardAnalyzerFactory),
         }
     }
 }

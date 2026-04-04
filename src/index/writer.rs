@@ -49,7 +49,10 @@ impl IndexWriter {
     /// The caller retains shared access to the directory via `Arc`, matching
     /// Lucene's model where the `Directory` is shared between writer and reader.
     pub fn new(config: IndexWriterConfig, directory: Arc<SharedDirectory>) -> Self {
-        let factory = Arc::new(DefaultWorkerFactory::new(Arc::clone(&directory)));
+        let factory = Arc::new(DefaultWorkerFactory::new(
+            Arc::clone(&directory),
+            Arc::clone(config.get_analyzer_factory()),
+        ));
         let coordinator = IndexCoordinator::new(
             &config,
             Box::new(RandomIdGenerator),

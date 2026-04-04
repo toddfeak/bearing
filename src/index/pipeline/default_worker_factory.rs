@@ -5,7 +5,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::analysis::StandardAnalyzer;
+use crate::analysis::AnalyzerFactory;
 use crate::index::pipeline::consumer::FieldConsumer;
 use crate::index::pipeline::coordinator::WorkerFactory;
 use crate::index::pipeline::doc_values_consumer::DocValuesConsumer;
@@ -23,6 +23,7 @@ use crate::store::SharedDirectory;
 /// Creates workers with the standard set of field consumers.
 pub struct DefaultWorkerFactory {
     directory: Arc<SharedDirectory>,
+    analyzer_factory: Arc<dyn AnalyzerFactory>,
 }
 
 impl fmt::Debug for DefaultWorkerFactory {
@@ -33,9 +34,15 @@ impl fmt::Debug for DefaultWorkerFactory {
 }
 
 impl DefaultWorkerFactory {
-    /// Creates a new factory backed by the given directory.
-    pub fn new(directory: Arc<SharedDirectory>) -> Self {
-        Self { directory }
+    /// Creates a new factory backed by the given directory and analyzer factory.
+    pub fn new(
+        directory: Arc<SharedDirectory>,
+        analyzer_factory: Arc<dyn AnalyzerFactory>,
+    ) -> Self {
+        Self {
+            directory,
+            analyzer_factory,
+        }
     }
 }
 
@@ -58,8 +65,7 @@ impl WorkerFactory for DefaultWorkerFactory {
             Box::new(FieldInfosConsumer::new()),
         ];
 
-        let worker =
-            SegmentWorker::new(segment_id, consumers, Box::new(StandardAnalyzer::default()));
+        let worker = SegmentWorker::new(segment_id, consumers, self.analyzer_factory.create());
 
         (worker, context)
     }

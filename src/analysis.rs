@@ -6,12 +6,13 @@
 //! token iterator. [`StandardAnalyzer`] provides Unicode-aware tokenization
 //! with lowercase normalization, matching Lucene's `StandardAnalyzer`.
 
+use std::fmt::Debug;
 use std::io::{self, Read};
 
 pub(crate) mod chunk_reader;
 pub mod standard;
 
-pub use standard::StandardAnalyzer;
+pub use standard::{StandardAnalyzer, StandardAnalyzerFactory};
 
 /// A single token produced by the analyzer during tokenization.
 #[derive(Debug)]
@@ -49,4 +50,22 @@ pub trait Analyzer: Send {
     /// buffer. The caller must drop the token before calling `next_token`
     /// again.
     fn next_token(&mut self) -> io::Result<Option<Token<'_>>>;
+}
+
+/// Creates [`Analyzer`] instances for indexing workers.
+///
+/// Each worker thread receives its own `Analyzer` via [`create`](AnalyzerFactory::create).
+/// The factory is shared across threads via `Arc` in [`IndexWriterConfig`](crate::index::config::IndexWriterConfig).
+///
+/// # Example
+///
+/// ```
+/// use bearing::analysis::{Analyzer, AnalyzerFactory, StandardAnalyzerFactory};
+///
+/// let factory = StandardAnalyzerFactory;
+/// let mut analyzer = factory.create();
+/// ```
+pub trait AnalyzerFactory: Send + Sync + Debug {
+    /// Creates a new analyzer instance.
+    fn create(&self) -> Box<dyn Analyzer>;
 }
