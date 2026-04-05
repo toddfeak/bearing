@@ -31,18 +31,11 @@ pub struct SegmentAccumulator {
     term_byte_pool: ByteBlockPool<DirectAllocator>,
     /// Per-token hint from postings to term vectors: the byte pool offset
     /// and term bytes of the most recently interned term.
-    text_start_hint: Option<TextStartHint>,
+    text_start_hint: Option<i32>,
     /// field_id → per-field norms data
     norms: HashMap<u32, PerFieldNormsData>,
     /// Total documents processed in this segment.
     doc_count: i32,
-}
-
-/// Byte pool offset and term bytes for cross-consumer hint verification.
-#[derive(Debug)]
-struct TextStartHint {
-    text_start: i32,
-    term_bytes: Vec<u8>,
 }
 
 /// Per-field norms accumulated during document processing.
@@ -95,33 +88,21 @@ impl SegmentAccumulator {
     /// Overwrites any previous unconsumed hint. This is expected when
     /// term vectors are not enabled for the current field — postings
     /// sets the hint for every token but TV only consumes it when active.
-    pub fn set_text_start_hint(&mut self, text_start: i32, term_bytes: &[u8]) {
-        self.text_start_hint = Some(TextStartHint {
-            text_start,
-            term_bytes: term_bytes.to_vec(),
-        });
+    pub fn set_text_start_hint(&mut self, text_start: i32) {
+        self.text_start_hint = Some(text_start);
     }
 
-    /// Returns and clears the text_start hint, verifying the term matches.
+    /// Returns and clears the text_start hint.
     ///
     /// Called by the term vectors consumer to get the byte pool offset
     /// for a term already interned by the postings consumer.
     ///
     /// # Panics
-    /// Panics if no hint was set or if the term bytes don't match.
-    pub fn take_text_start_hint(&mut self, expected_term: &[u8]) -> i32 {
-        let hint = self
-            .text_start_hint
+    /// Panics if no hint was set.
+    pub fn take_text_start_hint(&mut self) -> i32 {
+        self.text_start_hint
             .take()
-            .expect("no text_start hint set — postings must process token before term vectors");
-        assert_eq!(
-            hint.term_bytes.as_slice(),
-            expected_term,
-            "text_start hint term mismatch: expected {:?}, got {:?}",
-            String::from_utf8_lossy(expected_term),
-            String::from_utf8_lossy(&hint.term_bytes),
-        );
-        hint.text_start
+            .expect("no text_start hint set — postings must process token before term vectors")
     }
 
     /// Clears the text_start hint without panicking.
@@ -219,39 +200,39 @@ mod tests {
     #[test]
     fn hint_set_and_take() {
         let mut acc = SegmentAccumulator::new();
-        acc.set_text_start_hint(42, b"hello");
-        let result = acc.take_text_start_hint(b"hello");
+        acc.set_text_start_hint(42);
+        let result = acc.take_text_start_hint();
         assert_eq!(result, 42);
     }
 
     #[test]
     fn hint_cleared_after_take() {
         let mut acc = SegmentAccumulator::new();
-        acc.set_text_start_hint(42, b"hello");
-        acc.take_text_start_hint(b"hello");
+        acc.set_text_start_hint(42);
+        acc.take_text_start_hint();
         // Setting again should work (previous was consumed)
-        acc.set_text_start_hint(99, b"world");
-        let result = acc.take_text_start_hint(b"world");
+        acc.set_text_start_hint(99);
+        let result = acc.take_text_start_hint();
         assert_eq!(result, 99);
     }
 
     #[test]
     fn clear_hint_allows_reset() {
         let mut acc = SegmentAccumulator::new();
-        acc.set_text_start_hint(42, b"hello");
+        acc.set_text_start_hint(42);
         acc.clear_text_start_hint();
         // Setting again should work after clear
-        acc.set_text_start_hint(99, b"world");
-        let result = acc.take_text_start_hint(b"world");
+        acc.set_text_start_hint(99);
+        let result = acc.take_text_start_hint();
         assert_eq!(result, 99);
     }
 
     #[test]
     fn hint_overwrites_unconsumed() {
         let mut acc = SegmentAccumulator::new();
-        acc.set_text_start_hint(42, b"hello");
-        acc.set_text_start_hint(99, b"world"); // overwrites, no panic
-        let result = acc.take_text_start_hint(b"world");
+        acc.set_text_start_hint(42);
+        acc.set_text_start_hint(99); // overwrites, no panic
+        let result = acc.take_text_start_hint();
         assert_eq!(result, 99);
     }
 
@@ -259,15 +240,7 @@ mod tests {
     #[should_panic(expected = "no text_start hint set")]
     fn hint_panics_on_missing() {
         let mut acc = SegmentAccumulator::new();
-        acc.take_text_start_hint(b"hello"); // should panic
-    }
-
-    #[test]
-    #[should_panic(expected = "hint term mismatch")]
-    fn hint_panics_on_term_mismatch() {
-        let mut acc = SegmentAccumulator::new();
-        acc.set_text_start_hint(42, b"hello");
-        acc.take_text_start_hint(b"world"); // should panic
+        acc.take_text_start_hint(); // should panic
     }
 
     #[test]

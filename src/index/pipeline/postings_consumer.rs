@@ -187,7 +187,7 @@ impl FieldConsumer for PostingsConsumer {
 
         // Set hint for term vectors consumer
         let text_start = state.writer.postings_array.base.text_starts[term_id];
-        accumulator.set_text_start_hint(text_start, token.text.as_bytes());
+        accumulator.set_text_start_hint(text_start);
 
         Ok(())
     }

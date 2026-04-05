@@ -160,7 +160,7 @@ impl FieldConsumer for TermVectorsConsumer {
         state.tv_pf.current_offset_length = token.offset_length;
 
         // Read the text_start hint set by PostingsConsumer for this token
-        let text_start = accumulator.take_text_start_hint(token.text.as_bytes());
+        let text_start = accumulator.take_text_start_hint();
 
         // Intern by pool offset — no byte copying, references shared term byte pool
         TermsHashPerFieldTrait::add_by_text_start(
@@ -304,7 +304,7 @@ mod tests {
             ((-term_id) - 1) as usize
         };
         let text_start = hash.byte_start(id);
-        accum.set_text_start_hint(text_start, text);
+        accum.set_text_start_hint(text_start);
     }
 
     #[test]
