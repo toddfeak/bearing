@@ -23,8 +23,8 @@ pub struct Token<'a> {
     pub text: &'a str,
     /// Start character offset in the original input.
     pub start_offset: i32,
-    /// End character offset in the original input.
-    pub end_offset: i32,
+    /// Length of this token in characters (end_offset - start_offset).
+    pub offset_length: u16,
     /// Position increment (distance from previous token). Usually 1.
     pub position_increment: i32,
 }

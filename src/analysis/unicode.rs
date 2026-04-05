@@ -115,11 +115,11 @@ impl Analyzer for UnicodeAnalyzer {
                 let (start, end) = self.segments[self.seg_idx];
                 self.seg_idx += 1;
                 let token_start_byte = self.bytes_consumed + start;
-                let token_end_byte = self.bytes_consumed + end;
+                let token_len = (self.bytes_consumed + end) - token_start_byte;
                 return Ok(Some(Token {
                     text: &self.buf[start..end],
                     start_offset: token_start_byte as i32,
-                    end_offset: token_end_byte as i32,
+                    offset_length: token_len as u16,
                     position_increment: 1,
                 }));
             }
@@ -175,7 +175,7 @@ mod tests {
             result.push((
                 token.text.to_string(),
                 token.start_offset,
-                token.end_offset,
+                token.start_offset + token.offset_length as i32,
                 token.position_increment,
             ));
         }
@@ -190,7 +190,7 @@ mod tests {
             result.push((
                 token.text.to_string(),
                 token.start_offset,
-                token.end_offset,
+                token.start_offset + token.offset_length as i32,
                 token.position_increment,
             ));
         }

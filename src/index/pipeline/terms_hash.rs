@@ -605,7 +605,7 @@ pub(crate) struct FreqProxTermsWriterPerField {
     // Current token state — set before calling trait add(), read by new_term/add_term.
     pub(crate) current_position: i32,
     pub(crate) current_start_offset: i32,
-    pub(crate) current_end_offset: i32,
+    pub(crate) current_offset_length: u16,
 }
 
 impl FreqProxTermsWriterPerField {
@@ -632,7 +632,7 @@ impl FreqProxTermsWriterPerField {
             unique_term_count: 0,
             current_position: 0,
             current_start_offset: 0,
-            current_end_offset: 0,
+            current_offset_length: 0,
         }
     }
 
@@ -642,7 +642,7 @@ impl FreqProxTermsWriterPerField {
     /// `terms_hash` holds the per-consumer stream pools.
     ///
     /// The caller must set `current_position`, `current_start_offset`, and
-    /// `current_end_offset` before calling this method.
+    /// `current_offset_length` before calling this method.
     pub(crate) fn add(
         &mut self,
         term_byte_pool: &mut ByteBlockPool<DirectAllocator>,
@@ -665,11 +665,11 @@ impl FreqProxTermsWriterPerField {
         doc_id: i32,
         position: i32,
         start_offset: i32,
-        end_offset: i32,
+        offset_length: u16,
     ) -> io::Result<usize> {
         self.current_position = position;
         self.current_start_offset = start_offset;
-        self.current_end_offset = end_offset;
+        self.current_offset_length = offset_length;
         self.add(term_byte_pool, terms_hash, term_bytes, doc_id)
     }
 
@@ -881,7 +881,7 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
     fn new_term(&mut self, terms_hash: &mut TermsHash, term_id: usize, doc_id: i32) {
         let position = self.current_position;
         let start_offset = self.current_start_offset;
-        let end_offset = self.current_end_offset;
+        let offset_length = self.current_offset_length;
 
         let postings = &mut self.postings_array;
 
@@ -898,8 +898,7 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
                 if self.has_offsets {
                     postings.last_offsets.as_mut().unwrap()[term_id] = 0;
                     self.base.write_v_int(terms_hash, 1, start_offset);
-                    self.base
-                        .write_v_int(terms_hash, 1, end_offset - start_offset);
+                    self.base.write_v_int(terms_hash, 1, offset_length as i32);
                     postings.last_offsets.as_mut().unwrap()[term_id] = start_offset;
                 }
             }
@@ -913,7 +912,7 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
     fn add_term(&mut self, terms_hash: &mut TermsHash, term_id: usize, doc_id: i32) {
         let position = self.current_position;
         let start_offset = self.current_start_offset;
-        let end_offset = self.current_end_offset;
+        let offset_length = self.current_offset_length;
 
         let postings = &mut self.postings_array;
 
@@ -951,8 +950,7 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
                 if self.has_offsets {
                     postings.last_offsets.as_mut().unwrap()[term_id] = 0;
                     self.base.write_v_int(terms_hash, 1, start_offset);
-                    self.base
-                        .write_v_int(terms_hash, 1, end_offset - start_offset);
+                    self.base.write_v_int(terms_hash, 1, offset_length as i32);
                     postings.last_offsets.as_mut().unwrap()[term_id] = start_offset;
                 }
             }
@@ -973,8 +971,7 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
                     let last_offset = postings.last_offsets.as_ref().unwrap()[term_id];
                     self.base
                         .write_v_int(terms_hash, 1, start_offset - last_offset);
-                    self.base
-                        .write_v_int(terms_hash, 1, end_offset - start_offset);
+                    self.base.write_v_int(terms_hash, 1, offset_length as i32);
                     postings.last_offsets.as_mut().unwrap()[term_id] = start_offset;
                 }
             }
@@ -1008,7 +1005,7 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
 
         assert_eq!(field.num_terms(), 1);
@@ -1025,10 +1022,10 @@ mod tests {
         );
 
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 1, 6, 11)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 1, 6, 5)
             .unwrap();
 
         assert_eq!(field.num_terms(), 1);
@@ -1044,13 +1041,13 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"world", 0, 1, 6, 11)
+            .add_at(&mut term_pool, &mut th, b"world", 0, 1, 6, 5)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 2, 12, 17)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 2, 12, 5)
             .unwrap();
 
         assert_eq!(field.num_terms(), 2);
@@ -1074,10 +1071,10 @@ mod tests {
 
         // Doc 0: "hello world"
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"world", 0, 1, 6, 11)
+            .add_at(&mut term_pool, &mut th, b"world", 0, 1, 6, 5)
             .unwrap();
 
         // Doc 1: "hello"
@@ -1108,13 +1105,13 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"cherry", 0, 0, 0, 6)
+            .add_at(&mut term_pool, &mut th, b"cherry", 0, 0, 0, 6u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"apple", 0, 1, 7, 12)
+            .add_at(&mut term_pool, &mut th, b"apple", 0, 1, 7, 5)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"banana", 0, 2, 13, 19)
+            .add_at(&mut term_pool, &mut th, b"banana", 0, 2, 13, 6)
             .unwrap();
 
         field.sort_terms(&term_pool);
@@ -1133,13 +1130,13 @@ mod tests {
         let mut field = FreqProxTermsWriterPerField::new("tags".to_string(), IndexOptions::Docs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"tag1", 0, 0, 0, 4)
+            .add_at(&mut term_pool, &mut th, b"tag1", 0, 0, 0, 4u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"tag1", 1, 0, 0, 4)
+            .add_at(&mut term_pool, &mut th, b"tag1", 1, 0, 0, 4u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"tag1", 2, 0, 0, 4)
+            .add_at(&mut term_pool, &mut th, b"tag1", 2, 0, 0, 4u16)
             .unwrap();
 
         assert_eq!(field.num_terms(), 1);
@@ -1169,16 +1166,16 @@ mod tests {
 
         // "hello" appears at positions 0 and 3 in doc 0
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"other", 0, 1, 6, 11)
+            .add_at(&mut term_pool, &mut th, b"other", 0, 1, 6, 5)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"stuff", 0, 2, 12, 17)
+            .add_at(&mut term_pool, &mut th, b"stuff", 0, 2, 12, 5)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 3, 18, 23)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 3, 18, 5)
             .unwrap();
 
         let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
@@ -1205,13 +1202,13 @@ mod tests {
 
         // Doc 0: "hello" x3
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 1, 6, 11)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 1, 6, 5)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 2, 12, 17)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 2, 12, 5)
             .unwrap();
 
         // Doc 1: "hello" x1
@@ -1224,7 +1221,7 @@ mod tests {
             .add_at(&mut term_pool, &mut th, b"hello", 2, 0, 0, 5)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 2, 1, 6, 11)
+            .add_at(&mut term_pool, &mut th, b"hello", 2, 1, 6, 5)
             .unwrap();
 
         let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
@@ -1253,16 +1250,16 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 0, 0, 1)
+            .add_at(&mut term_pool, &mut th, b"a", 0, 0, 0, 1u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"b", 0, 1, 2, 3)
+            .add_at(&mut term_pool, &mut th, b"b", 0, 1, 2, 1)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 2, 4, 5)
+            .add_at(&mut term_pool, &mut th, b"a", 0, 2, 4, 1)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 3, 6, 7)
+            .add_at(&mut term_pool, &mut th, b"a", 0, 3, 6, 1)
             .unwrap();
 
         assert_eq!(field.max_term_frequency, 3); // "a" appeared 3 times
@@ -1276,13 +1273,13 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 0, 0, 1)
+            .add_at(&mut term_pool, &mut th, b"a", 0, 0, 0, 1u16)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"b", 0, 1, 2, 3)
+            .add_at(&mut term_pool, &mut th, b"b", 0, 1, 2, 1)
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 2, 4, 5)
+            .add_at(&mut term_pool, &mut th, b"a", 0, 2, 4, 1)
             .unwrap();
 
         assert_eq!(field.unique_term_count, 2);
@@ -1303,7 +1300,7 @@ mod tests {
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
 
         th.reset();
@@ -1368,11 +1365,11 @@ mod tests {
 
         // "hello" at position 0 with offsets [0, 5)
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
         // "hello" at position 3 with offsets [18, 23)
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 3, 18, 23)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 3, 18, 5)
             .unwrap();
 
         assert_eq!(field.num_terms(), 1);
@@ -1414,7 +1411,7 @@ mod tests {
 
         // Doc 0: "hello" at pos 0, offsets [0, 5)
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
             .unwrap();
         // Doc 1: "hello" at pos 0, offsets [0, 5) — offsets reset per new doc
         field

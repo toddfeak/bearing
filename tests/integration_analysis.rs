@@ -19,7 +19,7 @@ fn collect_tokens(text: &str) -> Vec<(String, i32, i32, i32)> {
         result.push((
             token.text.to_string(),
             token.start_offset,
-            token.end_offset,
+            token.start_offset + token.offset_length as i32,
             token.position_increment,
         ));
     }

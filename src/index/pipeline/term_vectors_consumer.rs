@@ -157,7 +157,7 @@ impl FieldConsumer for TermVectorsConsumer {
 
         state.tv_pf.current_position = state.current_position;
         state.tv_pf.current_start_offset = token.start_offset;
-        state.tv_pf.current_end_offset = token.end_offset;
+        state.tv_pf.current_offset_length = token.offset_length;
 
         // Read the text_start hint set by PostingsConsumer for this token
         let text_start = accumulator.take_text_start_hint(token.text.as_bytes());
@@ -379,7 +379,7 @@ mod tests {
             text: "hello",
             position_increment: 1,
             start_offset: 0,
-            end_offset: 5,
+            offset_length: 5,
         };
         set_hint_for_token(&mut accum, &mut hash, b"hello");
         consumer.add_token(0, &field, &token1, &mut accum).unwrap();
@@ -388,7 +388,7 @@ mod tests {
             text: "world",
             position_increment: 1,
             start_offset: 6,
-            end_offset: 11,
+            offset_length: 5,
         };
         set_hint_for_token(&mut accum, &mut hash, b"world");
         consumer.add_token(0, &field, &token2, &mut accum).unwrap();
@@ -438,7 +438,7 @@ mod tests {
             text: "hello",
             position_increment: 1,
             start_offset: 0,
-            end_offset: 5,
+            offset_length: 5,
         };
         set_hint_for_token(&mut accum, &mut hash, b"hello");
         consumer.add_token(0, &field, &token, &mut accum).unwrap();
@@ -481,7 +481,7 @@ mod tests {
             text: "alpha",
             position_increment: 1,
             start_offset: 0,
-            end_offset: 5,
+            offset_length: 5,
         };
         set_hint_for_token(&mut accum, &mut hash, b"alpha");
         consumer.add_token(5, &field_a, &t1, &mut accum).unwrap();
@@ -492,7 +492,7 @@ mod tests {
             text: "beta",
             position_increment: 1,
             start_offset: 0,
-            end_offset: 4,
+            offset_length: 4,
         };
         set_hint_for_token(&mut accum, &mut hash, b"beta");
         consumer.add_token(2, &field_b, &t2, &mut accum).unwrap();

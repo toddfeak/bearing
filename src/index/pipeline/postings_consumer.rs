@@ -125,7 +125,7 @@ impl FieldConsumer for PostingsConsumer {
         if let Some(InvertableValue::ExactMatch(value)) = field.field_type().invertable() {
             state.writer.current_position = 0;
             state.writer.current_start_offset = 0;
-            state.writer.current_end_offset = 0;
+            state.writer.current_offset_length = 0;
             state.writer.add(
                 accumulator.term_byte_pool_mut(),
                 &mut self.terms_hash,
@@ -143,7 +143,7 @@ impl FieldConsumer for PostingsConsumer {
             // doc has freq=1. We need to override it.
             state.writer.current_position = 0;
             state.writer.current_start_offset = 0;
-            state.writer.current_end_offset = 0;
+            state.writer.current_offset_length = 0;
             let tid = state.writer.add(
                 accumulator.term_byte_pool_mut(),
                 &mut self.terms_hash,
@@ -177,7 +177,7 @@ impl FieldConsumer for PostingsConsumer {
 
         state.writer.current_position = position;
         state.writer.current_start_offset = token.start_offset;
-        state.writer.current_end_offset = token.end_offset;
+        state.writer.current_offset_length = token.offset_length;
         let term_id = state.writer.add(
             accumulator.term_byte_pool_mut(),
             &mut self.terms_hash,
@@ -309,7 +309,7 @@ mod tests {
         Token {
             text,
             start_offset: 0,
-            end_offset: text.len() as i32,
+            offset_length: text.len() as u16,
             position_increment: 1,
         }
     }

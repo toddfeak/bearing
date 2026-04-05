@@ -291,19 +291,18 @@ impl Analyzer for StandardAnalyzer {
 
         // --- Phase 4: Emit token ---
         if spanning {
-            let token_end_byte = token_start_byte + self.boundary_buf.len();
             Ok(Some(Token {
                 text: &self.boundary_buf,
                 start_offset: token_start_byte as i32,
-                end_offset: token_end_byte as i32,
+                offset_length: self.boundary_buf.len() as u16,
                 position_increment: 1,
             }))
         } else {
-            let token_end_byte = self.bytes_consumed + self.pos;
+            let token_len = (self.bytes_consumed + self.pos) - token_start_byte;
             Ok(Some(Token {
                 text: &self.current[scan_start..self.pos],
                 start_offset: token_start_byte as i32,
-                end_offset: token_end_byte as i32,
+                offset_length: token_len as u16,
                 position_increment: 1,
             }))
         }
@@ -426,7 +425,7 @@ mod tests {
             result.push((
                 token.text.to_string(),
                 token.start_offset,
-                token.end_offset,
+                token.start_offset + token.offset_length as i32,
                 token.position_increment,
             ));
         }
@@ -475,7 +474,7 @@ mod tests {
     fn test_offsets_are_correct() {
         let tokens = collect_tokens("hello world");
         assert_eq!(tokens[0].1, 0); // start_offset
-        assert_eq!(tokens[0].2, 5); // end_offset
+        assert_eq!(tokens[0].2, 5); // offset_length
         assert_eq!(tokens[1].1, 6);
         assert_eq!(tokens[1].2, 11);
     }
@@ -516,7 +515,7 @@ mod tests {
             result.push((
                 token.text.to_string(),
                 token.start_offset,
-                token.end_offset,
+                token.start_offset + token.offset_length as i32,
                 token.position_increment,
             ));
         }

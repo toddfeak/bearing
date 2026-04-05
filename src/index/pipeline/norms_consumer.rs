@@ -167,7 +167,7 @@ mod tests {
             let token = Token {
                 text: &buf,
                 start_offset: 0,
-                end_offset: 5,
+                offset_length: 5,
                 position_increment: 1,
             };
             consumer.add_token(field_id, field, &token, acc).unwrap();

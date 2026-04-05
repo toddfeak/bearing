@@ -548,7 +548,7 @@ mod tests {
         fn add(&mut self, term: &str, doc_id: i32, position: i32) {
             self.writer.current_position = position;
             self.writer.current_start_offset = 0;
-            self.writer.current_end_offset = 0;
+            self.writer.current_offset_length = 0;
             self.writer
                 .add(
                     &mut self.term_pool,
