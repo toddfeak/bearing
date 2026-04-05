@@ -54,14 +54,15 @@ impl WorkerFactory for DefaultWorkerFactory {
             segment_id: segment_id.id,
         };
 
-        // Order matters: norms before postings, FieldInfosConsumer last.
+        // Order matters: norms before postings, postings before term vectors
+        // (TV reads term byte pool offsets set by postings), FieldInfosConsumer last.
         let consumers: Vec<Box<dyn FieldConsumer>> = vec![
             Box::new(NormsConsumer::new()),
             Box::new(DocValuesConsumer::new()),
             Box::new(PointsConsumer::new()),
             Box::new(StoredFieldsConsumer::new()),
-            Box::new(TermVectorsConsumer::new()),
             Box::new(PostingsConsumer::new()),
+            Box::new(TermVectorsConsumer::new()),
             Box::new(FieldInfosConsumer::new()),
         ];
 

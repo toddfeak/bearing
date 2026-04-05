@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fmt;
+use std::mem;
+
+use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
 
 /// Shared state accumulated across all documents in a segment.
 ///
@@ -11,21 +15,34 @@ use std::collections::HashMap;
 ///
 /// This struct serves two purposes:
 ///
-/// 1. **Shared data pools** — memory pools (byte blocks, int blocks, etc.)
-///    that multiple consumers read from and write to. For example, postings
-///    and term vectors may share a byte pool for term storage.
+/// 1. **Shared data pools** — the `term_byte_pool` stores deduplicated term
+///    text bytes shared between postings and term vectors consumers, matching
+///    Java Lucene's `termBytePool` in `TermsHash`.
 ///
 /// 2. **Cross-consumer metadata** — information that one consumer produces
 ///    and another consumes. For example, norms computed by
 ///    [`NormsConsumer`](crate::index::pipeline::norms_consumer::NormsConsumer) are stored
 ///    here so that the postings consumer can build `NormsLookup` at flush
-///    time for competitive impact encoding.
-#[derive(Debug, Default, mem_dbg::MemSize)]
+///    time for competitive impact encoding. The `text_start` hint passes
+///    term byte pool offsets from postings to term vectors per token.
 pub struct SegmentAccumulator {
+    /// Shared term text byte pool. Postings interns term bytes here;
+    /// term vectors references them by offset. Matches Java's `termBytePool`.
+    term_byte_pool: ByteBlockPool<DirectAllocator>,
+    /// Per-token hint from postings to term vectors: the byte pool offset
+    /// and term bytes of the most recently interned term.
+    text_start_hint: Option<TextStartHint>,
     /// field_id → per-field norms data
     norms: HashMap<u32, PerFieldNormsData>,
     /// Total documents processed in this segment.
     doc_count: i32,
+}
+
+/// Byte pool offset and term bytes for cross-consumer hint verification.
+#[derive(Debug)]
+struct TextStartHint {
+    text_start: i32,
+    term_bytes: Vec<u8>,
 }
 
 /// Per-field norms accumulated during document processing.
@@ -44,9 +61,75 @@ pub struct PerFieldNormsData {
 }
 
 impl SegmentAccumulator {
-    /// Creates an empty accumulator.
+    /// Creates an empty accumulator with an initialized term byte pool.
     pub fn new() -> Self {
-        Self::default()
+        let mut term_byte_pool = ByteBlockPool::new(DirectAllocator);
+        term_byte_pool.next_buffer();
+        Self {
+            term_byte_pool,
+            text_start_hint: None,
+            norms: HashMap::new(),
+            doc_count: 0,
+        }
+    }
+
+    /// Returns a reference to the shared term byte pool.
+    ///
+    /// Used at flush time to read term text for sorted output.
+    pub fn term_byte_pool(&self) -> &ByteBlockPool<DirectAllocator> {
+        &self.term_byte_pool
+    }
+
+    /// Returns a mutable reference to the shared term byte pool.
+    ///
+    /// Used by the postings consumer to intern term bytes during `add_token`.
+    pub fn term_byte_pool_mut(&mut self) -> &mut ByteBlockPool<DirectAllocator> {
+        &mut self.term_byte_pool
+    }
+
+    /// Records the byte pool offset of the most recently interned term.
+    ///
+    /// Called by the postings consumer after interning a term. The term
+    /// vectors consumer reads this via [`take_text_start_hint`](Self::take_text_start_hint).
+    ///
+    /// Overwrites any previous unconsumed hint. This is expected when
+    /// term vectors are not enabled for the current field — postings
+    /// sets the hint for every token but TV only consumes it when active.
+    pub fn set_text_start_hint(&mut self, text_start: i32, term_bytes: &[u8]) {
+        self.text_start_hint = Some(TextStartHint {
+            text_start,
+            term_bytes: term_bytes.to_vec(),
+        });
+    }
+
+    /// Returns and clears the text_start hint, verifying the term matches.
+    ///
+    /// Called by the term vectors consumer to get the byte pool offset
+    /// for a term already interned by the postings consumer.
+    ///
+    /// # Panics
+    /// Panics if no hint was set or if the term bytes don't match.
+    pub fn take_text_start_hint(&mut self, expected_term: &[u8]) -> i32 {
+        let hint = self
+            .text_start_hint
+            .take()
+            .expect("no text_start hint set — postings must process token before term vectors");
+        assert_eq!(
+            hint.term_bytes.as_slice(),
+            expected_term,
+            "text_start hint term mismatch: expected {:?}, got {:?}",
+            String::from_utf8_lossy(expected_term),
+            String::from_utf8_lossy(&hint.term_bytes),
+        );
+        hint.text_start
+    }
+
+    /// Clears the text_start hint without panicking.
+    ///
+    /// Called at `finish_field` to clean up any unconsumed hint from
+    /// fields where postings ran but term vectors was not interested.
+    pub fn clear_text_start_hint(&mut self) {
+        self.text_start_hint = None;
     }
 
     /// Records a norm value for a field in a document.
@@ -82,6 +165,35 @@ impl SegmentAccumulator {
     }
 }
 
+impl Default for SegmentAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for SegmentAccumulator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SegmentAccumulator")
+            .field("term_byte_pool_buffers", &self.term_byte_pool.buffers.len())
+            .field("text_start_hint", &self.text_start_hint)
+            .field("norms_fields", &self.norms.len())
+            .field("doc_count", &self.doc_count)
+            .finish()
+    }
+}
+
+impl mem_dbg::MemSize for SegmentAccumulator {
+    fn mem_size_rec(
+        &self,
+        flags: mem_dbg::SizeFlags,
+        refs: &mut mem_dbg::HashMap<usize, usize>,
+    ) -> usize {
+        let pool_size = self.term_byte_pool.mem_size_rec(flags, refs);
+        let norms_size = self.norms.mem_size_rec(flags, refs);
+        mem::size_of::<Self>() + pool_size + norms_size
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,9 +201,10 @@ mod tests {
     use mem_dbg::{MemSize, SizeFlags};
 
     #[test]
-    fn mem_size_empty_is_small() {
+    fn mem_size_empty_includes_pool() {
         let acc = SegmentAccumulator::new();
-        assert_lt!(acc.mem_size(SizeFlags::CAPACITY), 200);
+        // Pool has one 32KB buffer allocated
+        assert_gt!(acc.mem_size(SizeFlags::CAPACITY), 30_000);
     }
 
     #[test]
@@ -101,5 +214,66 @@ mod tests {
             acc.record_norm(0, "body", doc_id, 42);
         }
         assert_gt!(acc.mem_size(SizeFlags::CAPACITY), 0);
+    }
+
+    #[test]
+    fn hint_set_and_take() {
+        let mut acc = SegmentAccumulator::new();
+        acc.set_text_start_hint(42, b"hello");
+        let result = acc.take_text_start_hint(b"hello");
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn hint_cleared_after_take() {
+        let mut acc = SegmentAccumulator::new();
+        acc.set_text_start_hint(42, b"hello");
+        acc.take_text_start_hint(b"hello");
+        // Setting again should work (previous was consumed)
+        acc.set_text_start_hint(99, b"world");
+        let result = acc.take_text_start_hint(b"world");
+        assert_eq!(result, 99);
+    }
+
+    #[test]
+    fn clear_hint_allows_reset() {
+        let mut acc = SegmentAccumulator::new();
+        acc.set_text_start_hint(42, b"hello");
+        acc.clear_text_start_hint();
+        // Setting again should work after clear
+        acc.set_text_start_hint(99, b"world");
+        let result = acc.take_text_start_hint(b"world");
+        assert_eq!(result, 99);
+    }
+
+    #[test]
+    fn hint_overwrites_unconsumed() {
+        let mut acc = SegmentAccumulator::new();
+        acc.set_text_start_hint(42, b"hello");
+        acc.set_text_start_hint(99, b"world"); // overwrites, no panic
+        let result = acc.take_text_start_hint(b"world");
+        assert_eq!(result, 99);
+    }
+
+    #[test]
+    #[should_panic(expected = "no text_start hint set")]
+    fn hint_panics_on_missing() {
+        let mut acc = SegmentAccumulator::new();
+        acc.take_text_start_hint(b"hello"); // should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "hint term mismatch")]
+    fn hint_panics_on_term_mismatch() {
+        let mut acc = SegmentAccumulator::new();
+        acc.set_text_start_hint(42, b"hello");
+        acc.take_text_start_hint(b"world"); // should panic
+    }
+
+    #[test]
+    fn term_byte_pool_accessible() {
+        let acc = SegmentAccumulator::new();
+        let pool = acc.term_byte_pool();
+        assert_eq!(pool.buffers.len(), 1);
     }
 }

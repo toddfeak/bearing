@@ -482,6 +482,7 @@ mod tests {
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::memory::MemoryDirectory;
     use crate::store::{Directory, SharedDirectory};
+    use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
     use assertables::*;
 
     fn make_field_info(name: &str, number: u32, index_options: IndexOptions) -> FieldInfo {
@@ -498,13 +499,17 @@ mod tests {
 
     struct TestTerms {
         writer: FreqProxTermsWriterPerField,
+        term_pool: ByteBlockPool<DirectAllocator>,
         terms_hash: TermsHash,
     }
 
     impl TestTerms {
         fn new(field_name: &str, index_options: IndexOptions) -> Self {
+            let mut term_pool = ByteBlockPool::new(DirectAllocator);
+            term_pool.next_buffer();
             Self {
                 writer: FreqProxTermsWriterPerField::new(field_name.to_string(), index_options),
+                term_pool,
                 terms_hash: TermsHash::new(),
             }
         }
@@ -514,13 +519,18 @@ mod tests {
             self.writer.current_start_offset = 0;
             self.writer.current_end_offset = 0;
             self.writer
-                .add(&mut self.terms_hash, term.as_bytes(), doc_id)
+                .add(
+                    &mut self.term_pool,
+                    &mut self.terms_hash,
+                    term.as_bytes(),
+                    doc_id,
+                )
                 .unwrap();
         }
 
         fn finalize(&mut self) {
             self.writer.flush_pending_docs(&mut self.terms_hash);
-            self.writer.sort_terms(&self.terms_hash.byte_pool);
+            self.writer.sort_terms(&self.term_pool);
         }
     }
 
@@ -574,7 +584,7 @@ mod tests {
                 write_positions: index_options.has_positions(),
             };
             let norms = NormsLookup::no_norms();
-            writer.write_field(&ctx, &tt.writer, &tt.terms_hash, &norms)?;
+            writer.write_field(&ctx, &tt.writer, &tt.term_pool, &tt.terms_hash, &norms)?;
 
             writer.finish()?;
         }

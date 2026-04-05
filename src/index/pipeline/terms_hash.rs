@@ -471,18 +471,24 @@ pub(crate) trait TermsHashPerFieldTrait {
     /// Primary entry point: intern term bytes, allocate/position streams,
     /// dispatch to `new_term`/`add_term`.
     ///
+    /// `term_byte_pool` is the shared pool for term text (from the accumulator).
+    /// `terms_hash` holds the per-consumer stream pools for postings data.
+    ///
     /// Returns the (positive) term ID.
-    fn add(&mut self, terms_hash: &mut TermsHash, term_bytes: &[u8], doc_id: i32) -> usize {
+    fn add(
+        &mut self,
+        term_byte_pool: &mut ByteBlockPool<DirectAllocator>,
+        terms_hash: &mut TermsHash,
+        term_bytes: &[u8],
+        doc_id: i32,
+    ) -> usize {
         {
             let base = self.base_mut();
             debug_assert!(doc_id >= base.last_doc_id);
             base.last_doc_id = doc_id;
         }
 
-        let term_id = self
-            .base_mut()
-            .bytes_hash
-            .add(&mut terms_hash.byte_pool, term_bytes);
+        let term_id = self.base_mut().bytes_hash.add(term_byte_pool, term_bytes);
 
         if term_id >= 0 {
             let tid = term_id as usize;
@@ -496,7 +502,6 @@ pub(crate) trait TermsHashPerFieldTrait {
     }
 
     /// Secondary entry point for pre-interned terms (term vectors).
-    #[cfg(test)]
     fn add_by_text_start(&mut self, terms_hash: &mut TermsHash, text_start: i32, doc_id: i32) {
         let term_id = self.base_mut().bytes_hash.add_by_pool_offset(text_start);
 
@@ -633,15 +638,19 @@ impl FreqProxTermsWriterPerField {
 
     /// Add a term occurrence for the given document.
     ///
+    /// `term_byte_pool` is the shared pool for term text (from the accumulator).
+    /// `terms_hash` holds the per-consumer stream pools.
+    ///
     /// The caller must set `current_position`, `current_start_offset`, and
     /// `current_end_offset` before calling this method.
     pub(crate) fn add(
         &mut self,
+        term_byte_pool: &mut ByteBlockPool<DirectAllocator>,
         terms_hash: &mut TermsHash,
         term_bytes: &[u8],
         doc_id: i32,
     ) -> io::Result<usize> {
-        let tid = TermsHashPerFieldTrait::add(self, terms_hash, term_bytes, doc_id);
+        let tid = TermsHashPerFieldTrait::add(self, term_byte_pool, terms_hash, term_bytes, doc_id);
         Ok(tid)
     }
 
@@ -650,6 +659,7 @@ impl FreqProxTermsWriterPerField {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_at(
         &mut self,
+        term_byte_pool: &mut ByteBlockPool<DirectAllocator>,
         terms_hash: &mut TermsHash,
         term_bytes: &[u8],
         doc_id: i32,
@@ -660,7 +670,7 @@ impl FreqProxTermsWriterPerField {
         self.current_position = position;
         self.current_start_offset = start_offset;
         self.current_end_offset = end_offset;
-        self.add(terms_hash, term_bytes, doc_id)
+        self.add(term_byte_pool, terms_hash, term_bytes, doc_id)
     }
 
     /// Resets this per-field state.
@@ -984,28 +994,42 @@ mod tests {
         store::read_vint(reader).unwrap()
     }
 
+    fn new_term_pool() -> ByteBlockPool<DirectAllocator> {
+        let mut pool = ByteBlockPool::new(DirectAllocator);
+        pool.next_buffer();
+        pool
+    }
+
     #[test]
     fn test_single_term_single_doc() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
 
         assert_eq!(field.num_terms(), 1);
-        assert_eq!(field.term_bytes(&th.byte_pool, 0), b"hello");
+        assert_eq!(field.term_bytes(&term_pool, 0), b"hello");
     }
 
     #[test]
     fn test_duplicate_term_same_doc() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field = FreqProxTermsWriterPerField::new(
             "body".to_string(),
             IndexOptions::DocsAndFreqsAndPositions,
         );
 
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
-        field.add_at(&mut th, b"hello", 0, 1, 6, 11).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 1, 6, 11)
+            .unwrap();
 
         assert_eq!(field.num_terms(), 1);
         // Freq should be 2
@@ -1014,17 +1038,24 @@ mod tests {
 
     #[test]
     fn test_multiple_terms() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
-        field.add_at(&mut th, b"world", 0, 1, 6, 11).unwrap();
-        field.add_at(&mut th, b"hello", 0, 2, 12, 17).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"world", 0, 1, 6, 11)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 2, 12, 17)
+            .unwrap();
 
         assert_eq!(field.num_terms(), 2);
         // "hello" freq should be 2
-        let hello_id = field.base.bytes_hash.find(&th.byte_pool, b"hello");
+        let hello_id = field.base.bytes_hash.find(&term_pool, b"hello");
         assert_ge!(hello_id, 0);
         assert_eq!(
             field.postings_array.term_freqs.as_ref().unwrap()[hello_id as usize],
@@ -1034,6 +1065,7 @@ mod tests {
 
     #[test]
     fn test_term_across_documents() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field = FreqProxTermsWriterPerField::new(
             "body".to_string(),
@@ -1041,16 +1073,22 @@ mod tests {
         );
 
         // Doc 0: "hello world"
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
-        field.add_at(&mut th, b"world", 0, 1, 6, 11).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"world", 0, 1, 6, 11)
+            .unwrap();
 
         // Doc 1: "hello"
-        field.add_at(&mut th, b"hello", 1, 0, 0, 5).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 1, 0, 0, 5)
+            .unwrap();
 
         assert_eq!(field.num_terms(), 2);
 
         // Read back the doc/freq stream for "hello" (stream 0)
-        let hello_id = field.base.bytes_hash.find(&th.byte_pool, b"hello") as usize;
+        let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
         let (start, end) = field.get_stream_range(&th.int_pool, hello_id, 0);
         let mut reader = ByteSliceReader::new(&th.byte_pool, start, end);
 
@@ -1064,46 +1102,51 @@ mod tests {
 
     #[test]
     fn test_sort_terms_lexicographic() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
-        field.add_at(&mut th, b"cherry", 0, 0, 0, 6).unwrap();
-        field.add_at(&mut th, b"apple", 0, 1, 7, 12).unwrap();
-        field.add_at(&mut th, b"banana", 0, 2, 13, 19).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"cherry", 0, 0, 0, 6)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"apple", 0, 1, 7, 12)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"banana", 0, 2, 13, 19)
+            .unwrap();
 
-        field.sort_terms(&th.byte_pool);
+        field.sort_terms(&term_pool);
         let sorted = field.sorted_term_ids();
         assert_len_eq_x!(sorted, 3);
 
-        assert_eq!(
-            field.term_bytes(&th.byte_pool, sorted[0] as usize),
-            b"apple"
-        );
-        assert_eq!(
-            field.term_bytes(&th.byte_pool, sorted[1] as usize),
-            b"banana"
-        );
-        assert_eq!(
-            field.term_bytes(&th.byte_pool, sorted[2] as usize),
-            b"cherry"
-        );
+        assert_eq!(field.term_bytes(&term_pool, sorted[0] as usize), b"apple");
+        assert_eq!(field.term_bytes(&term_pool, sorted[1] as usize), b"banana");
+        assert_eq!(field.term_bytes(&term_pool, sorted[2] as usize), b"cherry");
     }
 
     #[test]
     fn test_docs_only_no_freq() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field = FreqProxTermsWriterPerField::new("tags".to_string(), IndexOptions::Docs);
 
-        field.add_at(&mut th, b"tag1", 0, 0, 0, 4).unwrap();
-        field.add_at(&mut th, b"tag1", 1, 0, 0, 4).unwrap();
-        field.add_at(&mut th, b"tag1", 2, 0, 0, 4).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"tag1", 0, 0, 0, 4)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"tag1", 1, 0, 0, 4)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"tag1", 2, 0, 0, 4)
+            .unwrap();
 
         assert_eq!(field.num_terms(), 1);
         assert!(!field.has_freq);
 
         // Read stream 0 — should have doc codes
-        let tid = field.base.bytes_hash.find(&th.byte_pool, b"tag1") as usize;
+        let tid = field.base.bytes_hash.find(&term_pool, b"tag1") as usize;
         let (start, end) = field.get_stream_range(&th.int_pool, tid, 0);
         let mut reader = ByteSliceReader::new(&th.byte_pool, start, end);
 
@@ -1117,6 +1160,7 @@ mod tests {
 
     #[test]
     fn test_positions_stream() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field = FreqProxTermsWriterPerField::new(
             "body".to_string(),
@@ -1124,12 +1168,20 @@ mod tests {
         );
 
         // "hello" appears at positions 0 and 3 in doc 0
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
-        field.add_at(&mut th, b"other", 0, 1, 6, 11).unwrap();
-        field.add_at(&mut th, b"stuff", 0, 2, 12, 17).unwrap();
-        field.add_at(&mut th, b"hello", 0, 3, 18, 23).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"other", 0, 1, 6, 11)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"stuff", 0, 2, 12, 17)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 3, 18, 23)
+            .unwrap();
 
-        let hello_id = field.base.bytes_hash.find(&th.byte_pool, b"hello") as usize;
+        let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
 
         // Read position stream (stream 1)
         let (start, end) = field.get_stream_range(&th.int_pool, hello_id, 1);
@@ -1146,23 +1198,36 @@ mod tests {
 
     #[test]
     fn test_multi_doc_freq_encoding() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         // Doc 0: "hello" x3
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
-        field.add_at(&mut th, b"hello", 0, 1, 6, 11).unwrap();
-        field.add_at(&mut th, b"hello", 0, 2, 12, 17).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 1, 6, 11)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 2, 12, 17)
+            .unwrap();
 
         // Doc 1: "hello" x1
-        field.add_at(&mut th, b"hello", 1, 0, 0, 5).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 1, 0, 0, 5)
+            .unwrap();
 
         // Doc 2: "hello" x2
-        field.add_at(&mut th, b"hello", 2, 0, 0, 5).unwrap();
-        field.add_at(&mut th, b"hello", 2, 1, 6, 11).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 2, 0, 0, 5)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 2, 1, 6, 11)
+            .unwrap();
 
-        let hello_id = field.base.bytes_hash.find(&th.byte_pool, b"hello") as usize;
+        let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
         let (start, end) = field.get_stream_range(&th.int_pool, hello_id, 0);
         let mut reader = ByteSliceReader::new(&th.byte_pool, start, end);
 
@@ -1182,27 +1247,43 @@ mod tests {
 
     #[test]
     fn test_max_term_frequency_tracking() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
-        field.add_at(&mut th, b"a", 0, 0, 0, 1).unwrap();
-        field.add_at(&mut th, b"b", 0, 1, 2, 3).unwrap();
-        field.add_at(&mut th, b"a", 0, 2, 4, 5).unwrap();
-        field.add_at(&mut th, b"a", 0, 3, 6, 7).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"a", 0, 0, 0, 1)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"b", 0, 1, 2, 3)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"a", 0, 2, 4, 5)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"a", 0, 3, 6, 7)
+            .unwrap();
 
         assert_eq!(field.max_term_frequency, 3); // "a" appeared 3 times
     }
 
     #[test]
     fn test_unique_term_count_tracking() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
-        field.add_at(&mut th, b"a", 0, 0, 0, 1).unwrap();
-        field.add_at(&mut th, b"b", 0, 1, 2, 3).unwrap();
-        field.add_at(&mut th, b"a", 0, 2, 4, 5).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"a", 0, 0, 0, 1)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"b", 0, 1, 2, 3)
+            .unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"a", 0, 2, 4, 5)
+            .unwrap();
 
         assert_eq!(field.unique_term_count, 2);
     }
@@ -1217,16 +1298,21 @@ mod tests {
 
     #[test]
     fn test_terms_hash_reset() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
 
         th.reset();
         // After reset, pools are cleared — new terms can be added
         let mut field2 =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
-        field2.add_at(&mut th, b"world", 0, 0, 0, 5).unwrap();
+        field2
+            .add_at(&mut term_pool, &mut th, b"world", 0, 0, 0, 5)
+            .unwrap();
         assert_eq!(field2.num_terms(), 1);
     }
 
@@ -1273,6 +1359,7 @@ mod tests {
 
     #[test]
     fn test_positions_and_offsets() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field = FreqProxTermsWriterPerField::new(
             "body".to_string(),
@@ -1280,14 +1367,18 @@ mod tests {
         );
 
         // "hello" at position 0 with offsets [0, 5)
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
         // "hello" at position 3 with offsets [18, 23)
-        field.add_at(&mut th, b"hello", 0, 3, 18, 23).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 3, 18, 23)
+            .unwrap();
 
         assert_eq!(field.num_terms(), 1);
         assert!(field.has_offsets);
 
-        let hello_id = field.base.bytes_hash.find(&th.byte_pool, b"hello") as usize;
+        let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
 
         // Read prox stream (stream 1) — positions and offsets interleaved
         let (start, end) = field.get_stream_range(&th.int_pool, hello_id, 1);
@@ -1314,6 +1405,7 @@ mod tests {
 
     #[test]
     fn test_offsets_across_documents() {
+        let mut term_pool = new_term_pool();
         let mut th = TermsHash::new();
         let mut field = FreqProxTermsWriterPerField::new(
             "body".to_string(),
@@ -1321,11 +1413,15 @@ mod tests {
         );
 
         // Doc 0: "hello" at pos 0, offsets [0, 5)
-        field.add_at(&mut th, b"hello", 0, 0, 0, 5).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5)
+            .unwrap();
         // Doc 1: "hello" at pos 0, offsets [0, 5) — offsets reset per new doc
-        field.add_at(&mut th, b"hello", 1, 0, 0, 5).unwrap();
+        field
+            .add_at(&mut term_pool, &mut th, b"hello", 1, 0, 0, 5)
+            .unwrap();
 
-        let hello_id = field.base.bytes_hash.find(&th.byte_pool, b"hello") as usize;
+        let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
 
         // Read prox stream — doc 0 prox data should be there
         let (start, end) = field.get_stream_range(&th.int_pool, hello_id, 1);

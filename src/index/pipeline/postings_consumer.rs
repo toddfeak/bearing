@@ -102,7 +102,7 @@ impl FieldConsumer for PostingsConsumer {
         &mut self,
         field_id: u32,
         field: &Field,
-        _accumulator: &mut SegmentAccumulator,
+        accumulator: &mut SegmentAccumulator,
     ) -> io::Result<TokenInterest> {
         let opts = field.field_type().index_options();
         if opts == IndexOptions::None {
@@ -126,9 +126,12 @@ impl FieldConsumer for PostingsConsumer {
             state.writer.current_position = 0;
             state.writer.current_start_offset = 0;
             state.writer.current_end_offset = 0;
-            state
-                .writer
-                .add(&mut self.terms_hash, value.as_bytes(), self.current_doc_id)?;
+            state.writer.add(
+                accumulator.term_byte_pool_mut(),
+                &mut self.terms_hash,
+                value.as_bytes(),
+                self.current_doc_id,
+            )?;
             return Ok(TokenInterest::NoTokens);
         }
 
@@ -142,6 +145,7 @@ impl FieldConsumer for PostingsConsumer {
             state.writer.current_start_offset = 0;
             state.writer.current_end_offset = 0;
             let tid = state.writer.add(
+                accumulator.term_byte_pool_mut(),
                 &mut self.terms_hash,
                 term_name.as_bytes(),
                 self.current_doc_id,
@@ -161,7 +165,7 @@ impl FieldConsumer for PostingsConsumer {
         field_id: u32,
         _field: &Field,
         token: &Token<'_>,
-        _accumulator: &mut SegmentAccumulator,
+        accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()> {
         self.current_position += token.position_increment;
         let position = self.current_position - 1;
@@ -174,11 +178,16 @@ impl FieldConsumer for PostingsConsumer {
         state.writer.current_position = position;
         state.writer.current_start_offset = token.start_offset;
         state.writer.current_end_offset = token.end_offset;
-        state.writer.add(
+        let term_id = state.writer.add(
+            accumulator.term_byte_pool_mut(),
             &mut self.terms_hash,
             token.text.as_bytes(),
             self.current_doc_id,
         )?;
+
+        // Set hint for term vectors consumer
+        let text_start = state.writer.postings_array.base.text_starts[term_id];
+        accumulator.set_text_start_hint(text_start, token.text.as_bytes());
 
         Ok(())
     }
@@ -187,8 +196,9 @@ impl FieldConsumer for PostingsConsumer {
         &mut self,
         _field_id: u32,
         _field: &Field,
-        _accumulator: &mut SegmentAccumulator,
+        accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()> {
+        accumulator.clear_text_start_hint();
         Ok(())
     }
 
@@ -219,10 +229,11 @@ impl FieldConsumer for PostingsConsumer {
         let mut field_ids: Vec<u32> = self.per_field.keys().copied().collect();
         field_ids.sort();
 
-        // Sort terms for each field
+        // Sort terms for each field (term bytes are in the accumulator's pool)
+        let term_byte_pool = accumulator.term_byte_pool();
         for state in self.per_field.values_mut() {
             if state.writer.num_terms() > 0 {
-                state.writer.sort_terms(&self.terms_hash.byte_pool);
+                state.writer.sort_terms(term_byte_pool);
             }
         }
 
@@ -265,7 +276,13 @@ impl FieldConsumer for PostingsConsumer {
                 write_positions: state.index_options.has_positions(),
             };
 
-            writer.write_field(&field_ctx, &state.writer, &self.terms_hash, &norms)?;
+            writer.write_field(
+                &field_ctx,
+                &state.writer,
+                term_byte_pool,
+                &self.terms_hash,
+                &norms,
+            )?;
         }
 
         writer.finish()

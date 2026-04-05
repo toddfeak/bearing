@@ -20,6 +20,7 @@ use crate::index::index_file_names::segment_file_name;
 use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
+use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
 
 use super::postings_writer::PostingsWriter;
 
@@ -145,6 +146,7 @@ impl BlockTreeTermsWriter {
         &mut self,
         field_ctx: &FieldWriteContext,
         per_field: &FreqProxTermsWriterPerField,
+        term_byte_pool: &ByteBlockPool<DirectAllocator>,
         terms_hash: &TermsHash,
         norms: &NormsLookup,
     ) -> io::Result<()> {
@@ -166,7 +168,7 @@ impl BlockTreeTermsWriter {
 
         for &sorted_id in &sorted_ids[..num_terms] {
             let term_id = sorted_id as usize;
-            let term_bytes = per_field.term_bytes(&terms_hash.byte_pool, term_id);
+            let term_bytes = per_field.term_bytes(term_byte_pool, term_id);
             let term_str = str::from_utf8(term_bytes).expect("term bytes must be valid UTF-8");
 
             let decoded = per_field.decode_term(terms_hash, term_id)?;
@@ -1283,6 +1285,7 @@ mod tests {
     use crate::document::IndexOptions;
     use crate::store::memory::MemoryIndexOutput;
     use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
@@ -1295,6 +1298,7 @@ mod tests {
     /// FreqProxTermsWriterPerField uses a shared last_doc_id assertion.
     struct TestTerms {
         writer: FreqProxTermsWriterPerField,
+        term_pool: ByteBlockPool<DirectAllocator>,
         terms_hash: TermsHash,
     }
 
@@ -1305,8 +1309,11 @@ mod tests {
             } else {
                 IndexOptions::DocsAndFreqs
             };
+            let mut term_pool = ByteBlockPool::new(DirectAllocator);
+            term_pool.next_buffer();
             Self {
                 writer: FreqProxTermsWriterPerField::new("test".to_string(), opts),
+                term_pool,
                 terms_hash: TermsHash::new(),
             }
         }
@@ -1317,13 +1324,18 @@ mod tests {
             self.writer.current_start_offset = 0;
             self.writer.current_end_offset = 0;
             self.writer
-                .add(&mut self.terms_hash, term.as_bytes(), doc_id)
+                .add(
+                    &mut self.term_pool,
+                    &mut self.terms_hash,
+                    term.as_bytes(),
+                    doc_id,
+                )
                 .unwrap();
         }
 
         fn finalize(&mut self) {
             self.writer.flush_pending_docs(&mut self.terms_hash);
-            self.writer.sort_terms(&self.terms_hash.byte_pool);
+            self.writer.sort_terms(&self.term_pool);
         }
     }
 
@@ -1548,6 +1560,7 @@ mod tests {
         btw.write_field(
             &freq_field_ctx("test"),
             &tt.writer,
+            &tt.term_pool,
             &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
@@ -1591,6 +1604,7 @@ mod tests {
         btw.write_field(
             &positions_field_ctx("contents"),
             &tt.writer,
+            &tt.term_pool,
             &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
@@ -1624,6 +1638,7 @@ mod tests {
         btw.write_field(
             &positions_field_ctx("contents"),
             &tt.writer,
+            &tt.term_pool,
             &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
@@ -1654,6 +1669,7 @@ mod tests {
         btw.write_field(
             &freq_field_ctx("test"),
             &tt.writer,
+            &tt.term_pool,
             &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
@@ -1708,6 +1724,7 @@ mod tests {
         btw.write_field(
             &freq_field_ctx("test"),
             &tt.writer,
+            &tt.term_pool,
             &tt.terms_hash,
             &NormsLookup::no_norms(),
         )
@@ -1803,6 +1820,7 @@ mod tests {
         btw.write_field(
             &positions_field_ctx("contents"),
             &tt.writer,
+            &tt.term_pool,
             &tt.terms_hash,
             &NormsLookup::no_norms(),
         )

@@ -91,17 +91,15 @@ impl TermVectorsConsumerPerField {
     }
 
     /// Writes this field's term vector data to the codec writer, reading
-    /// term text from the primary byte pool and position/offset data from
+    /// term text from the shared term byte pool and position/offset data from
     /// the TV pools via `ByteSliceReader`.
     ///
-    /// `primary_hash` / `primary_byte_pool` provide term text lookup.
+    /// `term_byte_pool` is the shared pool from the accumulator.
     /// `tv_terms_hash` provides the TV int/byte pools for position/offset streams.
-    #[expect(dead_code)]
     pub(crate) fn finish_document(
         &mut self,
         field_number: u32,
-        primary_hash: &BytesRefHash,
-        primary_byte_pool: &ByteBlockPool<DirectAllocator>,
+        term_byte_pool: &ByteBlockPool<DirectAllocator>,
         tv_terms_hash: &TermsHash,
         writer: &mut TermVectorChunkWriter,
     ) -> io::Result<()> {
@@ -112,7 +110,7 @@ impl TermVectorsConsumerPerField {
 
         let num_terms = self.num_terms();
 
-        self.base.sort_terms(primary_byte_pool);
+        self.base.sort_terms(term_byte_pool);
         let sorted_ids = self.base.sorted_term_ids();
 
         writer.start_field(
@@ -128,7 +126,7 @@ impl TermVectorsConsumerPerField {
             let freq = self.postings_array.freqs[term_id];
 
             let text_start = self.postings_array.base.text_starts[term_id] as usize;
-            let term_bytes = primary_hash.get_by_offset(primary_byte_pool, text_start);
+            let term_bytes = BytesRefHash::read_bytes_at_pool(term_byte_pool, text_start);
 
             writer.start_term(term_bytes, freq);
 
@@ -161,6 +159,7 @@ impl TermVectorsConsumerPerField {
     ///
     /// `tv_terms_hash` provides both the byte pool (for term text AND
     /// position/offset streams) and the int pool (for stream addresses).
+    #[cfg(test)]
     pub(crate) fn finish_document_self_owned(
         &mut self,
         field_number: u32,
@@ -384,8 +383,14 @@ mod tests {
     use crate::codecs::lucene90::term_vectors::TermVectorChunkWriter;
     use crate::store;
     use crate::store::{MemoryDirectory, SharedDirectory};
-    use crate::util::byte_block_pool::Allocator;
+    use crate::util::byte_block_pool::{Allocator, ByteBlockPool, DirectAllocator};
     use assertables::*;
+
+    fn new_term_pool() -> ByteBlockPool<DirectAllocator> {
+        let mut pool = ByteBlockPool::new(DirectAllocator);
+        pool.next_buffer();
+        pool
+    }
 
     /// Helper to read a VInt from a byte slice reader.
     fn read_vint<A: Allocator>(reader: &mut ByteSliceReader<'_, A>) -> i32 {
@@ -584,6 +589,7 @@ mod tests {
         let segment_id = [0u8; 16];
         let mut writer = TermVectorChunkWriter::new(tvd, &segment_id, "").unwrap();
 
+        let mut term_pool = new_term_pool();
         let mut tv_th = TermsHash::new();
         let mut tv = TermVectorsConsumerPerField::new("body".to_string());
         tv.do_vectors = true;
@@ -594,12 +600,12 @@ mod tests {
         tv.current_position = 0;
         tv.current_start_offset = 0;
         tv.current_end_offset = 5;
-        TermsHashPerFieldTrait::add(&mut tv, &mut tv_th, b"hello", 0);
+        TermsHashPerFieldTrait::add(&mut tv, &mut term_pool, &mut tv_th, b"hello", 0);
 
         tv.current_position = 1;
         tv.current_start_offset = 6;
         tv.current_end_offset = 11;
-        TermsHashPerFieldTrait::add(&mut tv, &mut tv_th, b"world", 0);
+        TermsHashPerFieldTrait::add(&mut tv, &mut term_pool, &mut tv_th, b"world", 0);
 
         // Flush via finish_document_self_owned
         writer.start_document(1);

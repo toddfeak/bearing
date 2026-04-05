@@ -145,7 +145,7 @@ impl FieldConsumer for TermVectorsConsumer {
         field_id: u32,
         _field: &Field,
         token: &Token<'_>,
-        _accumulator: &mut SegmentAccumulator,
+        accumulator: &mut SegmentAccumulator,
     ) -> io::Result<()> {
         let state = self
             .per_field
@@ -159,11 +159,14 @@ impl FieldConsumer for TermVectorsConsumer {
         state.tv_pf.current_start_offset = token.start_offset;
         state.tv_pf.current_end_offset = token.end_offset;
 
-        // Intern term bytes directly in the TV byte pool via add()
-        TermsHashPerFieldTrait::add(
+        // Read the text_start hint set by PostingsConsumer for this token
+        let text_start = accumulator.take_text_start_hint(token.text.as_bytes());
+
+        // Intern by pool offset — no byte copying, references shared term byte pool
+        TermsHashPerFieldTrait::add_by_text_start(
             &mut state.tv_pf,
             &mut self.tv_terms_hash,
-            token.text.as_bytes(),
+            text_start,
             self.current_doc_id,
         );
 
@@ -183,7 +186,7 @@ impl FieldConsumer for TermVectorsConsumer {
     fn finish_document(
         &mut self,
         doc_id: i32,
-        _accumulator: &mut SegmentAccumulator,
+        accumulator: &mut SegmentAccumulator,
         context: &SegmentContext,
     ) -> io::Result<()> {
         self.num_docs += 1;
@@ -222,11 +225,13 @@ impl FieldConsumer for TermVectorsConsumer {
         // Sort active fields by field number for deterministic output
         self.active_field_ids.sort();
 
+        let term_byte_pool = accumulator.term_byte_pool();
         for &field_id in &self.active_field_ids.clone() {
             let state = self.per_field.get_mut(&field_id).unwrap();
             if state.tv_pf.has_data() {
-                state.tv_pf.finish_document_self_owned(
+                state.tv_pf.finish_document(
                     state.field_number,
+                    term_byte_pool,
                     &self.tv_terms_hash,
                     writer,
                 )?;
@@ -276,12 +281,26 @@ mod tests {
     use crate::index::field::{TermVectorOptions, text};
     use crate::store::{MemoryDirectory, SharedDirectory};
 
+    use crate::util::bytes_ref_hash::BytesRefHash;
+
     fn test_context() -> SegmentContext {
         SegmentContext {
             directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }
+    }
+
+    /// Simulates what PostingsConsumer does: intern term bytes and set the hint.
+    fn set_hint_for_token(accum: &mut SegmentAccumulator, hash: &mut BytesRefHash, text: &[u8]) {
+        let term_id = hash.add(accum.term_byte_pool_mut(), text);
+        let id = if term_id >= 0 {
+            term_id as usize
+        } else {
+            ((-term_id) - 1) as usize
+        };
+        let text_start = hash.byte_start(id);
+        accum.set_text_start_hint(text_start, text);
     }
 
     #[test]
@@ -346,6 +365,7 @@ mod tests {
         let context = test_context();
         let mut consumer = TermVectorsConsumer::new();
         let mut accum = SegmentAccumulator::new();
+        let mut hash = BytesRefHash::new(4);
 
         let field = text("contents")
             .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
@@ -361,6 +381,7 @@ mod tests {
             start_offset: 0,
             end_offset: 5,
         };
+        set_hint_for_token(&mut accum, &mut hash, b"hello");
         consumer.add_token(0, &field, &token1, &mut accum).unwrap();
 
         let token2 = Token {
@@ -369,6 +390,7 @@ mod tests {
             start_offset: 6,
             end_offset: 11,
         };
+        set_hint_for_token(&mut accum, &mut hash, b"world");
         consumer.add_token(0, &field, &token2, &mut accum).unwrap();
 
         consumer.finish_field(0, &field, &mut accum).unwrap();
@@ -395,6 +417,7 @@ mod tests {
         let context = test_context();
         let mut consumer = TermVectorsConsumer::new();
         let mut accum = SegmentAccumulator::new();
+        let mut hash = BytesRefHash::new(4);
 
         let field = text("contents")
             .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
@@ -417,6 +440,7 @@ mod tests {
             start_offset: 0,
             end_offset: 5,
         };
+        set_hint_for_token(&mut accum, &mut hash, b"hello");
         consumer.add_token(0, &field, &token, &mut accum).unwrap();
         consumer.finish_field(0, &field, &mut accum).unwrap();
         consumer.finish_document(1, &mut accum, &context).unwrap();
@@ -440,6 +464,7 @@ mod tests {
         let context = test_context();
         let mut consumer = TermVectorsConsumer::new();
         let mut accum = SegmentAccumulator::new();
+        let mut hash = BytesRefHash::new(4);
 
         let field_a = text("zzz")
             .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
@@ -458,6 +483,7 @@ mod tests {
             start_offset: 0,
             end_offset: 5,
         };
+        set_hint_for_token(&mut accum, &mut hash, b"alpha");
         consumer.add_token(5, &field_a, &t1, &mut accum).unwrap();
         consumer.finish_field(5, &field_a, &mut accum).unwrap();
 
@@ -468,6 +494,7 @@ mod tests {
             start_offset: 0,
             end_offset: 4,
         };
+        set_hint_for_token(&mut accum, &mut hash, b"beta");
         consumer.add_token(2, &field_b, &t2, &mut accum).unwrap();
         consumer.finish_field(2, &field_b, &mut accum).unwrap();
 

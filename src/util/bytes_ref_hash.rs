@@ -153,17 +153,6 @@ impl BytesRefHash {
         self.ids.fill(-1);
     }
 
-    /// Reads the length-prefixed bytes at the given pool offset.
-    ///
-    /// Used when reading term bytes by pool offset rather than by term ID.
-    pub fn get_by_offset<'a>(
-        &self,
-        pool: &'a ByteBlockPool<DirectAllocator>,
-        offset: usize,
-    ) -> &'a [u8] {
-        Self::read_bytes_at_pool(pool, offset)
-    }
-
     // --- Internal methods ---
 
     fn find_hash(
@@ -294,7 +283,7 @@ impl BytesRefHash {
     }
 
     /// Reads the length-prefixed bytes at the given pool offset.
-    fn read_bytes_at_pool(pool: &ByteBlockPool<DirectAllocator>, start: usize) -> &[u8] {
+    pub fn read_bytes_at_pool(pool: &ByteBlockPool<DirectAllocator>, start: usize) -> &[u8] {
         let buffer_index = start >> BYTE_BLOCK_SHIFT;
         let pos = start & BYTE_BLOCK_MASK;
         let buffer = &pool.buffers[buffer_index];
@@ -314,15 +303,7 @@ impl BytesRefHash {
     }
 }
 
-#[cfg(test)]
 impl BytesRefHash {
-    /// Looks up a byte sequence. Returns the ID if found, or -1 if not present.
-    pub fn find(&self, pool: &ByteBlockPool<DirectAllocator>, bytes: &[u8]) -> i32 {
-        let hashcode = do_hash(bytes);
-        let id = self.ids[self.find_hash(pool, bytes, hashcode)];
-        if id == -1 { -1 } else { id & self.hash_mask }
-    }
-
     /// Adds an arbitrary int offset instead of a byte sequence.
     ///
     /// Used by term vectors, which don't redundantly store term bytes — they
@@ -358,6 +339,16 @@ impl BytesRefHash {
             return e;
         }
         -(e + 1)
+    }
+}
+
+#[cfg(test)]
+impl BytesRefHash {
+    /// Looks up a byte sequence. Returns the ID if found, or -1 if not present.
+    pub fn find(&self, pool: &ByteBlockPool<DirectAllocator>, bytes: &[u8]) -> i32 {
+        let hashcode = do_hash(bytes);
+        let id = self.ids[self.find_hash(pool, bytes, hashcode)];
+        if id == -1 { -1 } else { id & self.hash_mask }
     }
 }
 
