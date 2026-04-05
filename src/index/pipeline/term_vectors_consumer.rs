@@ -13,7 +13,7 @@ use std::io;
 use std::mem;
 
 use crate::analysis::Token;
-use crate::codecs::lucene90::term_vectors::{self, TermVectorChunkWriter};
+use crate::codecs::lucene90::term_vectors::{self, CompressingTermVectorsWriter};
 use crate::index::field::Field;
 use crate::index::index_file_names;
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
@@ -29,7 +29,7 @@ use crate::index::pipeline::terms_hash::{TermsHash, TermsHashPerFieldTrait};
 /// document is written to the codec writer.
 pub struct TermVectorsConsumer {
     /// Lazy-initialized codec writer.
-    writer: Option<TermVectorChunkWriter>,
+    writer: Option<CompressingTermVectorsWriter>,
     /// Shared TV pools, reset per-document.
     tv_terms_hash: TermsHash,
     /// Per-field TV consumers, keyed by field_id.
@@ -206,7 +206,11 @@ impl FieldConsumer for TermVectorsConsumer {
                 let mut dir = context.directory.lock().unwrap();
                 dir.create_output(&tvd_name)?
             };
-            self.writer = Some(TermVectorChunkWriter::new(tvd, &context.segment_id, "")?);
+            self.writer = Some(CompressingTermVectorsWriter::new(
+                tvd,
+                &context.segment_id,
+                "",
+            )?);
         }
 
         let writer = self.writer.as_mut().unwrap();

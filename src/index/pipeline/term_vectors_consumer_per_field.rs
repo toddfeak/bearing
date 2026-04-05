@@ -13,7 +13,7 @@ use std::fmt;
 use std::io;
 use std::mem;
 
-use crate::codecs::lucene90::term_vectors::TermVectorChunkWriter;
+use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
 use crate::index::pipeline::terms_hash::{
     BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
     oversize,
@@ -101,7 +101,7 @@ impl TermVectorsConsumerPerField {
         field_number: u32,
         term_byte_pool: &ByteBlockPool<DirectAllocator>,
         tv_terms_hash: &TermsHash,
-        writer: &mut TermVectorChunkWriter,
+        writer: &mut CompressingTermVectorsWriter,
     ) -> io::Result<()> {
         if !self.do_vectors {
             return Ok(());
@@ -164,7 +164,7 @@ impl TermVectorsConsumerPerField {
         &mut self,
         field_number: u32,
         tv_terms_hash: &TermsHash,
-        writer: &mut TermVectorChunkWriter,
+        writer: &mut CompressingTermVectorsWriter,
     ) -> io::Result<()> {
         if !self.do_vectors {
             return Ok(());
@@ -379,7 +379,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::codecs::lucene90::term_vectors::TermVectorChunkWriter;
+    use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
     use crate::store;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::util::byte_block_pool::{Allocator, ByteBlockPool, DirectAllocator};
@@ -586,7 +586,7 @@ mod tests {
             guard.create_output("_0.tvd").unwrap()
         };
         let segment_id = [0u8; 16];
-        let mut writer = TermVectorChunkWriter::new(tvd, &segment_id, "").unwrap();
+        let mut writer = CompressingTermVectorsWriter::new(tvd, &segment_id, "").unwrap();
 
         let mut term_pool = new_term_pool();
         let mut tv_th = TermsHash::new();

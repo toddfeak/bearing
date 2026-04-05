@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Term vectors writer producing `.tvd`, `.tvx`, `.tvm` files.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::io;
 use std::mem;
 
@@ -14,40 +14,8 @@ use crate::codecs::packed_writers::{BlockPackedWriter, DirectMonotonicWriter, Di
 use crate::encoding::lz4;
 use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_bits_required};
 use crate::index::index_file_names;
-use crate::store::{self, DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{self, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::byte_block_pool::{ByteSliceReader, DirectAllocator};
-
-/// Offset data for a single term occurrence in a term vector.
-#[derive(Debug, Clone, MemSize)]
-pub(crate) struct OffsetBuffers {
-    pub start_offsets: Vec<i32>,
-    pub end_offsets: Vec<i32>,
-}
-
-/// A single term in a term vector field.
-#[derive(Debug, Clone, MemSize)]
-pub(crate) struct TermVectorTerm {
-    pub term: String,
-    pub freq: i32,
-    pub positions: Vec<i32>,
-    pub offsets: Option<Box<OffsetBuffers>>,
-}
-
-/// A single field's term vector data for one document.
-#[derive(Debug, Clone, MemSize)]
-pub(crate) struct TermVectorField {
-    pub field_number: u32,
-    pub has_positions: bool,
-    pub has_offsets: bool,
-    pub has_payloads: bool,
-    pub terms: Vec<TermVectorTerm>,
-}
-
-/// All term vector data for one document.
-#[derive(Debug, Clone, MemSize)]
-pub(crate) struct TermVectorDoc {
-    pub fields: Vec<TermVectorField>,
-}
 
 // File extensions
 pub(crate) const VECTORS_EXTENSION: &str = "tvd";
@@ -71,60 +39,147 @@ const POSITIONS: u8 = 0b001;
 const OFFSETS: u8 = 0b010;
 const PAYLOADS: u8 = 0b100;
 
-/// FLAGS_BITS = unsigned_bits_required(POSITIONS | OFFSETS | PAYLOADS) = unsigned_bits_required(7) = 4
+/// FLAGS_BITS = unsigned_bits_required(POSITIONS | OFFSETS | PAYLOADS) = 4
 const FLAGS_BITS: u32 = 4;
 
-/// Writes term vector files (`.tvd`, `.tvx`, `.tvm`) for a segment.
-///
-/// Returns the names of the files written.
-#[cfg(test)]
-pub(crate) fn write(
-    directory: &SharedDirectory,
-    segment_name: &str,
-    segment_suffix: &str,
-    segment_id: &[u8; 16],
-    term_vector_docs: &[TermVectorDoc],
-    num_docs: i32,
-) -> io::Result<Vec<String>> {
-    let tvd_name =
-        index_file_names::segment_file_name(segment_name, segment_suffix, VECTORS_EXTENSION);
+/// Initial capacity for shared position/offset/payload buffers.
+const INITIAL_BUF_SIZE: usize = 1024;
 
-    debug!("term_vectors: writing tvd/tvx/tvm for segment={segment_name:?}, num_docs={num_docs}");
-
-    let tvd = {
-        let mut dir = directory.lock().unwrap();
-        dir.create_output(&tvd_name)?
-    };
-
-    let mut writer = TermVectorChunkWriter::new(tvd, segment_id, segment_suffix)?;
-    for doc in term_vector_docs {
-        writer.add_doc(doc)?;
-    }
-    writer.finish(
-        directory,
-        segment_name,
-        segment_suffix,
-        segment_id,
-        num_docs,
-    )
-}
-
-/// Incrementally accumulates term vector documents and writes them as chunks
-/// to a `.tvd` file. Finalization writes the `.tvx` and `.tvm` index/meta files.
 /// Maximum docs per chunk before flushing.
 const MAX_DOCS_PER_CHUNK: usize = 128;
 
-pub(crate) struct TermVectorChunkWriter {
+// ---------------------------------------------------------------------------
+// DocData / FieldData
+// ---------------------------------------------------------------------------
+
+/// Per-field metadata within a pending chunk. Position and offset data lives
+/// in shared buffers on the writer, indexed by `pos_start`/`off_start`.
+#[derive(Debug, MemSize)]
+pub(crate) struct FieldData {
+    field_num: u32,
+    flags: i32,
+    num_terms: usize,
+    has_positions: bool,
+    has_offsets: bool,
+    has_payloads: bool,
+    freqs: Vec<i32>,
+    prefix_lengths: Vec<i32>,
+    suffix_lengths: Vec<i32>,
+    pub(crate) pos_start: usize,
+    pub(crate) off_start: usize,
+    pay_start: usize,
+    pub(crate) total_positions: usize,
+    ord: usize,
+}
+
+impl FieldData {
+    /// Records a term's frequency and prefix/suffix lengths.
+    fn add_term(&mut self, freq: i32, prefix_length: i32, suffix_length: i32) {
+        self.freqs[self.ord] = freq;
+        self.prefix_lengths[self.ord] = prefix_length;
+        self.suffix_lengths[self.ord] = suffix_length;
+        self.ord += 1;
+    }
+}
+
+/// Per-document metadata within a pending chunk.
+#[derive(Debug, MemSize)]
+struct DocData {
+    num_fields: i32,
+    fields: Vec<FieldData>,
+    pos_start: usize,
+    off_start: usize,
+    pay_start: usize,
+}
+
+impl DocData {
+    /// Adds a new field, computing its buffer offsets from the previous field.
+    fn add_field(
+        &mut self,
+        field_num: u32,
+        num_terms: usize,
+        positions: bool,
+        offsets: bool,
+        payloads: bool,
+    ) -> &mut FieldData {
+        let (pos_start, off_start, pay_start) = if let Some(last) = self.fields.last() {
+            let ps = last.pos_start
+                + if last.has_positions {
+                    last.total_positions
+                } else {
+                    0
+                };
+            let os = last.off_start
+                + if last.has_offsets {
+                    last.total_positions
+                } else {
+                    0
+                };
+            let pas = last.pay_start
+                + if last.has_payloads {
+                    last.total_positions
+                } else {
+                    0
+                };
+            (ps, os, pas)
+        } else {
+            (self.pos_start, self.off_start, self.pay_start)
+        };
+
+        let flags = (if positions { POSITIONS as i32 } else { 0 })
+            | (if offsets { OFFSETS as i32 } else { 0 })
+            | (if payloads { PAYLOADS as i32 } else { 0 });
+
+        self.fields.push(FieldData {
+            field_num,
+            flags,
+            num_terms,
+            has_positions: positions,
+            has_offsets: offsets,
+            has_payloads: payloads,
+            freqs: vec![0; num_terms],
+            prefix_lengths: vec![0; num_terms],
+            suffix_lengths: vec![0; num_terms],
+            pos_start,
+            off_start,
+            pay_start,
+            total_positions: 0,
+            ord: 0,
+        });
+        self.fields.last_mut().unwrap()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CompressingTermVectorsWriter
+// ---------------------------------------------------------------------------
+
+/// Writes term vector `.tvd`, `.tvx`, `.tvm` files for a segment.
+pub(crate) struct CompressingTermVectorsWriter {
     /// Open `.tvd` handle (header already written).
-    tvd: Box<dyn IndexOutput>,
+    vectors_stream: Box<dyn IndexOutput>,
     /// Documents in the current (unflushed) chunk.
-    pending_docs: Vec<TermVectorDoc>,
-    /// Accumulated term suffix bytes in the current chunk (matches Java's termSuffixes.size()).
-    chunk_suffix_bytes: usize,
-    /// Last term per field number in the current chunk, for prefix compression tracking.
-    last_terms: HashMap<u32, Vec<u8>>,
-    /// First doc id in the current chunk.
-    doc_base: i32,
+    pending_docs: Vec<DocData>,
+    /// Current document being built.
+    cur_doc: Option<DocData>,
+    /// Current field being built (owned; moved into `cur_doc.fields` on `finish_field`).
+    pub(crate) cur_field: Option<FieldData>,
+    /// Last term bytes for prefix compression (reset per field).
+    last_term: Vec<u8>,
+    /// Shared position buffer across all docs/fields/terms in the chunk.
+    pub(crate) positions_buf: Vec<i32>,
+    /// Shared start-offset buffer.
+    pub(crate) start_offsets_buf: Vec<i32>,
+    /// Shared offset-length buffer (stores `end_offset - start_offset`).
+    pub(crate) lengths_buf: Vec<i32>,
+    /// Shared payload-length buffer.
+    payload_lengths_buf: Vec<i32>,
+    /// Accumulated term suffix bytes for LZ4 compression.
+    term_suffixes: Vec<u8>,
+    /// Accumulated payload bytes (appended to term_suffixes on finish_document).
+    payload_bytes: Vec<u8>,
+    /// Total number of docs seen.
+    num_docs: i32,
     /// Chunk doc bases accumulated across all flushed chunks (for `.tvx`).
     doc_bases: Vec<i64>,
     /// Chunk start pointers accumulated across all flushed chunks (for `.tvx`).
@@ -135,279 +190,324 @@ pub(crate) struct TermVectorChunkWriter {
     num_dirty_chunks: i64,
     /// Number of documents in dirty chunks.
     num_dirty_docs: i64,
-    // -- Streaming state for per-document building --
-    num_docs: i32,
-    cur_fields: Vec<TermVectorField>,
-    cur_field_number: u32,
-    cur_field_has_positions: bool,
-    cur_field_has_offsets: bool,
-    cur_field_has_payloads: bool,
-    cur_field_terms: Vec<TermVectorTerm>,
-    cur_term_text: Vec<u8>,
-    cur_term_freq: i32,
-    cur_term_positions: Vec<i32>,
-    cur_term_start_offsets: Vec<i32>,
-    cur_term_end_offsets: Vec<i32>,
-    last_term: Vec<u8>,
+    /// High-water mark of positions_buf usage in current chunk (for MemSize).
+    pub(crate) pos_buf_used: usize,
+    /// High-water mark of offset buffer usage in current chunk (for MemSize).
+    pub(crate) off_buf_used: usize,
 }
 
-impl mem_dbg::MemSize for TermVectorChunkWriter {
+impl mem_dbg::MemSize for CompressingTermVectorsWriter {
     fn mem_size_rec(
         &self,
         flags: mem_dbg::SizeFlags,
         refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
+        // Report used buffer size, not capacity. The shared buffers retain
+        // capacity across chunk flushes (that's the optimization), but the
+        // stall control should only see data actively accumulated.
         mem::size_of::<Self>()
             + self.pending_docs.mem_size_rec(flags, refs)
-            + self.cur_fields.mem_size_rec(flags, refs)
-            + self.cur_field_terms.mem_size_rec(flags, refs)
-            + self.cur_term_positions.capacity() * mem::size_of::<i32>()
-            + self.cur_term_start_offsets.capacity() * mem::size_of::<i32>()
-            + self.cur_term_end_offsets.capacity() * mem::size_of::<i32>()
-            + self.cur_term_text.capacity()
+            + self.pos_buf_used * mem::size_of::<i32>()
+            + self.off_buf_used * 2 * mem::size_of::<i32>()
+            + self.term_suffixes.len()
+            + self.payload_bytes.len()
+            + self.last_term.capacity()
     }
 }
 
-impl TermVectorChunkWriter {
-    /// Creates a new chunk writer. Writes the `.tvd` header immediately.
+impl CompressingTermVectorsWriter {
+    /// Creates a new writer. Writes the `.tvd` header immediately.
     pub(crate) fn new(
-        mut tvd: Box<dyn IndexOutput>,
+        mut vectors_stream: Box<dyn IndexOutput>,
         segment_id: &[u8; 16],
         segment_suffix: &str,
     ) -> io::Result<Self> {
-        codec_util::write_index_header(&mut *tvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
+        codec_util::write_index_header(
+            &mut *vectors_stream,
+            DATA_CODEC,
+            VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
         Ok(Self {
-            tvd,
+            vectors_stream,
             pending_docs: Vec::new(),
-            chunk_suffix_bytes: 0,
-            last_terms: HashMap::new(),
-            doc_base: 0,
+            cur_doc: None,
+            cur_field: None,
+            last_term: Vec::new(),
+            positions_buf: vec![0; INITIAL_BUF_SIZE],
+            start_offsets_buf: vec![0; INITIAL_BUF_SIZE],
+            lengths_buf: vec![0; INITIAL_BUF_SIZE],
+            payload_lengths_buf: vec![0; INITIAL_BUF_SIZE],
+            term_suffixes: Vec::new(),
+            payload_bytes: Vec::new(),
+            num_docs: 0,
             doc_bases: Vec::new(),
             start_pointers: Vec::new(),
             num_chunks: 0,
             num_dirty_chunks: 0,
             num_dirty_docs: 0,
-            num_docs: 0,
-            cur_fields: Vec::new(),
-            cur_field_number: 0,
-            cur_field_has_positions: false,
-            cur_field_has_offsets: false,
-            cur_field_has_payloads: false,
-            cur_field_terms: Vec::new(),
-            cur_term_text: Vec::new(),
-            cur_term_freq: 0,
-            cur_term_positions: Vec::new(),
-            cur_term_start_offsets: Vec::new(),
-            cur_term_end_offsets: Vec::new(),
-            last_term: Vec::new(),
+            pos_buf_used: 0,
+            off_buf_used: 0,
         })
     }
 
-    /// Adds a document's term vector data to the current chunk.
-    /// Flushes the chunk first if the threshold is reached.
-    #[cfg(test)]
-    pub(crate) fn add_doc(&mut self, doc: &TermVectorDoc) -> io::Result<()> {
-        // Compute actual suffix bytes by tracking prefix compression per field
-        for field in &doc.fields {
-            let last_term = self.last_terms.entry(field.field_number).or_default();
-            for term_data in &field.terms {
-                let term_bytes = term_data.term.as_bytes();
-                let prefix_len = shared_prefix_length(last_term, term_bytes);
-                self.chunk_suffix_bytes += term_bytes.len() - prefix_len;
-                last_term.clear();
-                last_term.extend_from_slice(term_bytes);
-            }
-        }
-        self.pending_docs.push(doc.clone());
-        self.maybe_flush()
+    // -- Streaming API -------------------------------------------------------
+
+    /// Begins a new document.
+    pub(crate) fn start_document(&mut self, num_vector_fields: i32) {
+        self.cur_doc = Some(self.add_doc_data(num_vector_fields));
     }
 
-    // -- Streaming interface --
-
-    /// Begins a new document with the given number of vector fields.
-    pub(crate) fn start_document(&mut self, _num_vector_fields: i32) {
-        self.cur_fields.clear();
-    }
-
-    /// Finishes the current document, triggering a chunk flush if thresholds are met.
+    /// Finishes the current document.
     pub(crate) fn finish_document(&mut self) -> io::Result<()> {
-        let doc = TermVectorDoc {
-            fields: mem::take(&mut self.cur_fields),
-        };
-        // Track suffix bytes for chunk threshold
-        for field in &doc.fields {
-            let last_term = self.last_terms.entry(field.field_number).or_default();
-            for term_data in &field.terms {
-                let term_bytes = term_data.term.as_bytes();
-                let prefix_len = shared_prefix_length(last_term, term_bytes);
-                self.chunk_suffix_bytes += term_bytes.len() - prefix_len;
-                last_term.clear();
-                last_term.extend_from_slice(term_bytes);
-            }
-        }
+        // Move cur_doc into pending_docs. Stored separately during building
+        // because Rust can't hold a reference into a Vec while mutating it.
+        let doc = self.cur_doc.take().unwrap();
         self.pending_docs.push(doc);
+        // Append payload bytes after the term suffixes
+        self.term_suffixes.append(&mut self.payload_bytes);
         self.num_docs += 1;
-        self.maybe_flush()
+        if self.trigger_flush() {
+            self.flush(false)?;
+        }
+        Ok(())
     }
 
     /// Begins a new field within the current document.
     pub(crate) fn start_field(
         &mut self,
         field_number: u32,
-        _num_terms: i32,
+        num_terms: i32,
         positions: bool,
         offsets: bool,
         payloads: bool,
     ) {
-        self.cur_field_number = field_number;
-        self.cur_field_has_positions = positions;
-        self.cur_field_has_offsets = offsets;
-        self.cur_field_has_payloads = payloads;
-        self.cur_field_terms.clear();
+        let doc = self.cur_doc.as_mut().unwrap();
+        doc.add_field(
+            field_number,
+            num_terms as usize,
+            positions,
+            offsets,
+            payloads,
+        );
+        // Move the field out of cur_doc into cur_field for the borrow checker
+        self.cur_field = self.cur_doc.as_mut().unwrap().fields.pop();
         self.last_term.clear();
     }
 
     /// Finishes the current field.
     pub(crate) fn finish_field(&mut self) {
-        self.cur_fields.push(TermVectorField {
-            field_number: self.cur_field_number,
-            has_positions: self.cur_field_has_positions,
-            has_offsets: self.cur_field_has_offsets,
-            has_payloads: self.cur_field_has_payloads,
-            terms: mem::take(&mut self.cur_field_terms),
-        });
+        let field = self.cur_field.take().unwrap();
+        self.cur_doc.as_mut().unwrap().fields.push(field);
     }
 
-    /// Begins a new term with the given frequency.
+    /// Begins a new term.
     pub(crate) fn start_term(&mut self, term: &[u8], freq: i32) {
-        self.cur_term_text.clear();
-        self.cur_term_text.extend_from_slice(term);
-        self.cur_term_freq = freq;
-        self.cur_term_positions.clear();
-        self.cur_term_start_offsets.clear();
-        self.cur_term_end_offsets.clear();
-    }
-
-    /// Finishes the current term, collecting positions and offsets.
-    pub(crate) fn finish_term(&mut self) {
-        let offsets = if self.cur_field_has_offsets {
-            Some(Box::new(OffsetBuffers {
-                start_offsets: mem::take(&mut self.cur_term_start_offsets),
-                end_offsets: mem::take(&mut self.cur_term_end_offsets),
-            }))
+        assert!(freq >= 1);
+        let prefix = if self.last_term.is_empty() {
+            0
         } else {
-            None
+            shared_prefix_length(&self.last_term, term)
         };
-        let term_text = String::from_utf8(mem::take(&mut self.cur_term_text)).unwrap_or_default();
-        self.cur_field_terms.push(TermVectorTerm {
-            term: term_text,
-            freq: self.cur_term_freq,
-            positions: mem::take(&mut self.cur_term_positions),
-            offsets,
-        });
+
+        self.cur_field.as_mut().unwrap().add_term(
+            freq,
+            prefix as i32,
+            (term.len() - prefix) as i32,
+        );
+        self.term_suffixes.extend_from_slice(&term[prefix..]);
+
+        // Copy last term
+        self.last_term.clear();
+        self.last_term.extend_from_slice(term);
     }
 
-    /// Reads position/offset data from byte slice readers and decodes them
-    /// into absolute positions and offsets for the current term.
+    /// No-op kept for caller compatibility — there is no corresponding finish step.
+    pub(crate) fn finish_term(&mut self) {}
+
+    /// Bulk-reads position/offset data from byte slice readers.
     pub(crate) fn add_prox(
         &mut self,
         num_prox: i32,
         positions: Option<&mut ByteSliceReader<'_, DirectAllocator>>,
         offsets: Option<&mut ByteSliceReader<'_, DirectAllocator>>,
     ) {
+        let (pos_start, off_start, pay_start, total_pos, has_payloads) = {
+            let f = self.cur_field.as_ref().unwrap();
+            (
+                f.pos_start,
+                f.off_start,
+                f.pay_start,
+                f.total_positions,
+                f.has_payloads,
+            )
+        };
+
         if let Some(pos_reader) = positions {
-            if self.cur_field_has_payloads {
-                for _ in 0..num_prox {
+            let write_start = pos_start + total_pos;
+            let needed = write_start + num_prox as usize;
+            if needed > self.positions_buf.len() {
+                self.positions_buf.resize(oversize(needed), 0);
+            }
+
+            let mut position = 0i32;
+            if has_payloads {
+                let pay_write = pay_start + total_pos;
+                if pay_write + num_prox as usize > self.payload_lengths_buf.len() {
+                    self.payload_lengths_buf
+                        .resize(oversize(pay_write + num_prox as usize), 0);
+                }
+                for i in 0..num_prox as usize {
                     let code = store::read_vint(pos_reader).unwrap();
                     if (code & 1) != 0 {
                         let payload_length = store::read_vint(pos_reader).unwrap();
+                        self.payload_lengths_buf[pay_write + i] = payload_length;
                         for _ in 0..payload_length {
                             let mut buf = [0u8; 1];
                             io::Read::read_exact(pos_reader, &mut buf).unwrap();
+                            self.payload_bytes.push(buf[0]);
                         }
+                    } else {
+                        self.payload_lengths_buf[pay_write + i] = 0;
                     }
-                    let pos_delta = code >> 1;
-                    let last_pos = self.cur_term_positions.last().copied().unwrap_or(0);
-                    self.cur_term_positions.push(last_pos + pos_delta);
+                    position += code >> 1;
+                    self.positions_buf[write_start + i] = position;
                 }
             } else {
-                for _ in 0..num_prox {
+                for i in 0..num_prox as usize {
                     let code = store::read_vint(pos_reader).unwrap();
-                    let pos_delta = code >> 1;
-                    let last_pos = self.cur_term_positions.last().copied().unwrap_or(0);
-                    self.cur_term_positions.push(last_pos + pos_delta);
+                    position += code >> 1;
+                    self.positions_buf[write_start + i] = position;
                 }
             }
         }
 
         if let Some(off_reader) = offsets {
+            let write_start = off_start + total_pos;
+            let needed = write_start + num_prox as usize;
+            if needed > self.start_offsets_buf.len() {
+                let new_len = oversize(needed);
+                self.start_offsets_buf.resize(new_len, 0);
+                self.lengths_buf.resize(new_len, 0);
+            }
+
             let mut last_end_offset = 0i32;
-            for _ in 0..num_prox {
+            for i in 0..num_prox as usize {
                 let start_offset = last_end_offset + store::read_vint(off_reader).unwrap();
                 let end_offset = start_offset + store::read_vint(off_reader).unwrap();
                 last_end_offset = end_offset;
-                self.cur_term_start_offsets.push(start_offset);
-                self.cur_term_end_offsets.push(end_offset);
+                self.start_offsets_buf[write_start + i] = start_offset;
+                self.lengths_buf[write_start + i] = end_offset - start_offset;
             }
         }
+
+        let field = self.cur_field.as_mut().unwrap();
+        field.total_positions += num_prox as usize;
+        self.pos_buf_used = self
+            .pos_buf_used
+            .max(pos_start + total_pos + num_prox as usize);
+        self.off_buf_used = self
+            .off_buf_used
+            .max(off_start + total_pos + num_prox as usize);
     }
 
-    /// Flushes the current chunk if it exceeds the size or doc count threshold.
-    fn maybe_flush(&mut self) -> io::Result<()> {
-        if self.chunk_suffix_bytes >= CHUNK_SIZE as usize
+    // -- Chunk flush logic --------------------------------------------------
+
+    /// Returns true if the current chunk should be flushed.
+    fn trigger_flush(&self) -> bool {
+        self.term_suffixes.len() >= CHUNK_SIZE as usize
             || self.pending_docs.len() >= MAX_DOCS_PER_CHUNK
-        {
-            self.flush_chunk(false)?;
+    }
+
+    /// Creates a `DocData` for a new document, computing buffer offsets from
+    /// the last pending doc.
+    fn add_doc_data(&mut self, num_vector_fields: i32) -> DocData {
+        let (pos_start, off_start, pay_start) = if let Some(last_doc) = self.pending_docs.last() {
+            if let Some(last) = last_doc.fields.last() {
+                let ps = last.pos_start
+                    + if last.has_positions {
+                        last.total_positions
+                    } else {
+                        0
+                    };
+                let os = last.off_start
+                    + if last.has_offsets {
+                        last.total_positions
+                    } else {
+                        0
+                    };
+                let pas = last.pay_start
+                    + if last.has_payloads {
+                        last.total_positions
+                    } else {
+                        0
+                    };
+                (ps, os, pas)
+            } else {
+                (last_doc.pos_start, last_doc.off_start, last_doc.pay_start)
+            }
+        } else {
+            (0, 0, 0)
+        };
+
+        DocData {
+            num_fields: num_vector_fields,
+            fields: Vec::with_capacity(num_vector_fields as usize),
+            pos_start,
+            off_start,
+            pay_start,
         }
-        Ok(())
     }
 
     /// Writes one chunk of pending documents to `.tvd`.
-    fn flush_chunk(&mut self, dirty: bool) -> io::Result<()> {
-        let docs = &self.pending_docs;
-        let chunk_docs = docs.len() as i32;
-        if chunk_docs == 0 {
-            return Ok(());
-        }
-
-        // Record chunk position for index
-        self.doc_bases.push(self.doc_base as i64);
-        self.start_pointers.push(self.tvd.file_pointer() as i64);
-
-        // Chunk header: docBase, (chunkDocs << 1) | dirty_bit
-        self.tvd.write_vint(self.doc_base)?;
-        let dirty_bit = if dirty { 1 } else { 0 };
-        self.tvd.write_vint((chunk_docs << 1) | dirty_bit)?;
-
-        let total_fields = flush_num_fields(docs, &mut *self.tvd)?;
-
-        if total_fields > 0 {
-            let field_nums = flush_field_nums(docs, &mut *self.tvd)?;
-            flush_fields(docs, &field_nums, &mut *self.tvd)?;
-            flush_flags(docs, &field_nums, &mut *self.tvd)?;
-            flush_num_terms(docs, &mut *self.tvd)?;
-
-            let term_suffixes = flush_term_lengths(docs, &mut *self.tvd)?;
-            flush_term_freqs(docs, &mut *self.tvd)?;
-            flush_positions(docs, &mut *self.tvd)?;
-            flush_offsets(docs, &field_nums, &mut *self.tvd)?;
-            flush_payload_lengths(docs, &mut *self.tvd)?;
-
-            // Compress term suffixes with plain LZ4 (CompressionMode.FAST)
-            let compressed = lz4::compress(&term_suffixes);
-            self.tvd.write_bytes(&compressed)?;
-        }
+    fn flush(&mut self, force: bool) -> io::Result<()> {
+        let chunk_docs = self.pending_docs.len() as i32;
+        assert!(chunk_docs > 0);
 
         self.num_chunks += 1;
-        if dirty {
+        if force {
             self.num_dirty_chunks += 1;
             self.num_dirty_docs += chunk_docs as i64;
         }
 
-        self.doc_base += chunk_docs;
+        // Record chunk position for index
+        let doc_base = self.num_docs - chunk_docs;
+        self.doc_bases.push(doc_base as i64);
+        self.start_pointers
+            .push(self.vectors_stream.file_pointer() as i64);
+
+        // Chunk header: docBase, (chunkDocs << 1) | dirty_bit
+        self.vectors_stream.write_vint(doc_base)?;
+        let dirty_bit = if force { 1 } else { 0 };
+        self.vectors_stream
+            .write_vint((chunk_docs << 1) | dirty_bit)?;
+
+        let total_fields = self.flush_num_fields(chunk_docs)?;
+
+        if total_fields > 0 {
+            let field_nums = self.flush_field_nums()?;
+            self.flush_fields(total_fields, &field_nums)?;
+            self.flush_flags(total_fields, &field_nums)?;
+            self.flush_num_terms(total_fields)?;
+            self.flush_term_lengths()?;
+            self.flush_term_freqs()?;
+            self.flush_positions()?;
+            self.flush_offsets(&field_nums)?;
+            self.flush_payload_lengths()?;
+
+            // Compress term suffixes with plain LZ4 (CompressionMode.FAST)
+            let compressed = lz4::compress(&self.term_suffixes);
+            self.vectors_stream.write_bytes(&compressed)?;
+        }
+
+        // Reset
         self.pending_docs.clear();
-        self.chunk_suffix_bytes = 0;
-        self.last_terms.clear();
+        self.cur_doc = None;
+        self.cur_field = None;
+        self.term_suffixes.clear();
+        self.pos_buf_used = 0;
+        self.off_buf_used = 0;
         Ok(())
     }
 
@@ -424,7 +524,9 @@ impl TermVectorChunkWriter {
         num_docs: i32,
     ) -> io::Result<Vec<String>> {
         // Flush remaining docs as a dirty chunk
-        self.flush_chunk(true)?;
+        if !self.pending_docs.is_empty() {
+            self.flush(true)?;
+        }
 
         let tvd_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, VECTORS_EXTENSION);
@@ -458,7 +560,7 @@ impl TermVectorChunkWriter {
         tvm.write_vint(PACKED_INTS_VERSION)?;
         tvm.write_vint(CHUNK_SIZE)?;
 
-        let max_pointer = self.tvd.file_pointer() as i64;
+        let max_pointer = self.vectors_stream.file_pointer() as i64;
         let total_chunks = self.num_chunks as u32;
 
         // Write FieldsIndex to .tvx and .tvm (mirrors FieldsIndexWriter.finish())
@@ -466,11 +568,8 @@ impl TermVectorChunkWriter {
         tvm.write_le_int(BLOCK_SHIFT as i32)?;
         tvm.write_le_int((total_chunks + 1) as i32)?;
 
-        // docsStartPointer
         tvm.write_le_long(tvx.file_pointer() as i64)?;
 
-        // Docs monotonic index (meta → tvm, data → tvx)
-        // totalChunks + 1 values: doc_base of each chunk, then num_docs sentinel
         let mut docs_writer = DirectMonotonicWriter::new(BLOCK_SHIFT);
         for &db in &self.doc_bases {
             docs_writer.add(db);
@@ -480,10 +579,8 @@ impl TermVectorChunkWriter {
         }
         docs_writer.finish(&mut *tvm, &mut *tvx)?;
 
-        // startPointersStartPointer
         tvm.write_le_long(tvx.file_pointer() as i64)?;
 
-        // File pointers monotonic index (meta → tvm, data → tvx)
         let mut fp_writer = DirectMonotonicWriter::new(BLOCK_SHIFT);
         for &sp in &self.start_pointers {
             fp_writer.add(sp);
@@ -491,16 +588,11 @@ impl TermVectorChunkWriter {
         fp_writer.add(max_pointer);
         fp_writer.finish(&mut *tvm, &mut *tvx)?;
 
-        // startPointersEndPointer
         tvm.write_le_long(tvx.file_pointer() as i64)?;
-
-        // .tvx footer
         codec_util::write_footer(&mut *tvx)?;
 
-        // maxPointer (into .tvd)
         tvm.write_le_long(max_pointer)?;
 
-        // Trailing metadata to .tvm
         debug!(
             "term_vectors: num_chunks={}, num_dirty_chunks={}, num_dirty_docs={}",
             self.num_chunks, self.num_dirty_chunks, self.num_dirty_docs
@@ -509,383 +601,348 @@ impl TermVectorChunkWriter {
         tvm.write_vlong(self.num_dirty_chunks)?;
         tvm.write_vlong(self.num_dirty_docs)?;
 
-        // Footers for .tvm and .tvd
         codec_util::write_footer(&mut *tvm)?;
-        codec_util::write_footer(&mut *self.tvd)?;
+        codec_util::write_footer(&mut *self.vectors_stream)?;
 
         Ok(vec![tvd_name, tvx_name, tvm_name])
     }
-}
 
-/// Writes number of fields per doc. Returns the total field count across all docs.
-fn flush_num_fields(docs: &[TermVectorDoc], output: &mut dyn DataOutput) -> io::Result<i32> {
-    if docs.len() == 1 {
-        let num_fields = docs[0].fields.len() as i32;
-        output.write_vint(num_fields)?;
-        return Ok(num_fields);
-    }
+    // -- Flush helpers -------------------------------------------------------
 
-    let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
-    let mut total_fields = 0i32;
-    for doc in docs {
-        let n = doc.fields.len() as i64;
-        writer.add(output, n)?;
-        total_fields += n as i32;
-    }
-    writer.finish(output)?;
-    Ok(total_fields)
-}
-
-/// Writes unique sorted field numbers. Returns the sorted field number list.
-fn flush_field_nums(docs: &[TermVectorDoc], output: &mut dyn DataOutput) -> io::Result<Vec<u32>> {
-    let mut field_nums_set = BTreeSet::new();
-    for doc in docs {
-        for field in &doc.fields {
-            field_nums_set.insert(field.field_number);
+    fn flush_num_fields(&mut self, chunk_docs: i32) -> io::Result<i32> {
+        if chunk_docs == 1 {
+            let num_fields = self.pending_docs[0].num_fields;
+            self.vectors_stream.write_vint(num_fields)?;
+            return Ok(num_fields);
         }
-    }
 
-    let field_nums: Vec<u32> = field_nums_set.into_iter().collect();
-    let num_distinct = field_nums.len();
-    assert!(num_distinct > 0);
-
-    let max_field_num = field_nums[num_distinct - 1] as i64;
-    let bits_required = packed_bits_required(max_field_num);
-    let token = ((num_distinct - 1).min(0x07) << 5) as u8 | bits_required as u8;
-    output.write_byte(token)?;
-    if num_distinct > 0x07 {
-        output.write_vint((num_distinct - 1 - 0x07) as i32)?;
-    }
-
-    let values: Vec<i64> = field_nums.iter().map(|&n| n as i64).collect();
-    packed_ints_write(&mut DataOutputWriter(output), &values, bits_required)?;
-
-    Ok(field_nums)
-}
-
-/// Writes field number indices via DirectWriter to scratch buffer.
-fn flush_fields(
-    docs: &[TermVectorDoc],
-    field_nums: &[u32],
-    output: &mut dyn DataOutput,
-) -> io::Result<()> {
-    let bpv = unsigned_bits_required((field_nums.len() - 1) as i64);
-    let mut writer = DirectWriter::new(bpv);
-    for doc in docs {
-        for field in &doc.fields {
-            let idx = field_nums
-                .binary_search(&field.field_number)
-                .expect("field number must be in field_nums");
-            writer.add(idx as i64);
+        let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
+        let mut total_fields = 0i32;
+        for doc in &self.pending_docs {
+            writer.add(&mut *self.vectors_stream, doc.num_fields as i64)?;
+            total_fields += doc.num_fields;
         }
+        writer.finish(&mut *self.vectors_stream)?;
+        Ok(total_fields)
     }
-    let mut scratch = Vec::new();
-    writer.finish(&mut VecOutput(&mut scratch))?;
-    output.write_vlong(scratch.len() as i64)?;
-    output.write_bytes(&scratch)
-}
 
-/// Writes per-field flags (positions/offsets/payloads) via DirectWriter.
-fn flush_flags(
-    docs: &[TermVectorDoc],
-    field_nums: &[u32],
-    output: &mut dyn DataOutput,
-) -> io::Result<()> {
-    // Check if flags are consistent per field number
-    let mut field_flags: Vec<i32> = vec![-1; field_nums.len()];
-    let mut non_changing = true;
-
-    'outer: for doc in docs {
-        for field in &doc.fields {
-            let idx = field_nums
-                .binary_search(&field.field_number)
-                .expect("field number must be in field_nums");
-            let flags = field_flags_value(field);
-            if field_flags[idx] == -1 {
-                field_flags[idx] = flags;
-            } else if field_flags[idx] != flags {
-                non_changing = false;
-                break 'outer;
+    fn flush_field_nums(&mut self) -> io::Result<Vec<u32>> {
+        let mut field_nums_set = BTreeSet::new();
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                field_nums_set.insert(fd.field_num);
             }
         }
+
+        let field_nums: Vec<u32> = field_nums_set.into_iter().collect();
+        let num_distinct = field_nums.len();
+        assert!(num_distinct > 0);
+
+        let max_field_num = field_nums[num_distinct - 1] as i64;
+        let bits_required = packed_bits_required(max_field_num);
+        let token = ((num_distinct - 1).min(0x07) << 5) as u8 | bits_required as u8;
+        self.vectors_stream.write_byte(token)?;
+        if num_distinct > 0x07 {
+            self.vectors_stream
+                .write_vint((num_distinct - 1 - 0x07) as i32)?;
+        }
+
+        let values: Vec<i64> = field_nums.iter().map(|&n| n as i64).collect();
+        packed_ints_write(
+            &mut DataOutputWriter(&mut *self.vectors_stream),
+            &values,
+            bits_required,
+        )?;
+
+        Ok(field_nums)
     }
 
-    if non_changing {
-        // One flag per unique field number
-        output.write_vint(0)?;
+    fn flush_fields(&mut self, _total_fields: i32, field_nums: &[u32]) -> io::Result<()> {
+        let bpv = unsigned_bits_required((field_nums.len() - 1) as i64);
+        let mut writer = DirectWriter::new(bpv);
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                let idx = field_nums
+                    .binary_search(&fd.field_num)
+                    .expect("field number must be in field_nums");
+                writer.add(idx as i64);
+            }
+        }
         let mut scratch = Vec::new();
-        let mut writer = DirectWriter::new(FLAGS_BITS);
-        for &flags in &field_flags {
-            assert!(flags >= 0);
-            writer.add(flags as i64);
-        }
         writer.finish(&mut VecOutput(&mut scratch))?;
-        output.write_vint(scratch.len() as i32)?;
-        output.write_bytes(&scratch)
-    } else {
-        // One flag per field instance
-        output.write_vint(1)?;
-        let mut scratch = Vec::new();
-        let mut writer = DirectWriter::new(FLAGS_BITS);
-        for doc in docs {
-            for field in &doc.fields {
-                writer.add(field_flags_value(field) as i64);
-            }
-        }
-        writer.finish(&mut VecOutput(&mut scratch))?;
-        output.write_vint(scratch.len() as i32)?;
-        output.write_bytes(&scratch)
-    }
-}
-
-/// Writes number of terms per field via DirectWriter to scratch buffer.
-fn flush_num_terms(docs: &[TermVectorDoc], output: &mut dyn DataOutput) -> io::Result<()> {
-    let mut max_num_terms: i32 = 0;
-    for doc in docs {
-        for field in &doc.fields {
-            max_num_terms |= field.terms.len() as i32;
-        }
+        self.vectors_stream.write_vlong(scratch.len() as i64)?;
+        self.vectors_stream.write_bytes(&scratch)
     }
 
-    let bpv = unsigned_bits_required(max_num_terms as i64);
-    output.write_vint(bpv as i32)?;
-    let mut scratch = Vec::new();
-    let mut writer = DirectWriter::new(bpv);
-    for doc in docs {
-        for field in &doc.fields {
-            writer.add(field.terms.len() as i64);
-        }
-    }
-    writer.finish(&mut VecOutput(&mut scratch))?;
-    output.write_vint(scratch.len() as i32)?;
-    output.write_bytes(&scratch)
-}
+    fn flush_flags(&mut self, _total_fields: i32, field_nums: &[u32]) -> io::Result<()> {
+        let mut field_flags: Vec<i32> = vec![-1; field_nums.len()];
+        let mut non_changing = true;
 
-/// Writes prefix and suffix lengths via BlockPackedWriter. Returns the accumulated
-/// term suffix bytes for LZ4 compression.
-fn flush_term_lengths(docs: &[TermVectorDoc], output: &mut dyn DataOutput) -> io::Result<Vec<u8>> {
-    let mut term_suffixes = Vec::new();
-
-    // Compute prefix/suffix lengths and accumulate suffix bytes
-    struct TermLengths {
-        prefix_len: i32,
-        suffix_len: i32,
-    }
-    let mut all_lengths: Vec<TermLengths> = Vec::new();
-
-    for doc in docs {
-        for field in &doc.fields {
-            let mut prev_term: &[u8] = &[];
-            for term_data in &field.terms {
-                let term_bytes = term_data.term.as_bytes();
-                let prefix_len = shared_prefix_length(prev_term, term_bytes);
-                let suffix_len = term_bytes.len() - prefix_len;
-                all_lengths.push(TermLengths {
-                    prefix_len: prefix_len as i32,
-                    suffix_len: suffix_len as i32,
-                });
-                term_suffixes.extend_from_slice(&term_bytes[prefix_len..]);
-                prev_term = term_bytes;
-            }
-        }
-    }
-
-    // Write prefix lengths
-    let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
-    for tl in &all_lengths {
-        writer.add(output, tl.prefix_len as i64)?;
-    }
-    writer.finish(output)?;
-
-    // Write suffix lengths
-    writer.reset();
-    for tl in &all_lengths {
-        writer.add(output, tl.suffix_len as i64)?;
-    }
-    writer.finish(output)?;
-
-    Ok(term_suffixes)
-}
-
-/// Writes (freq - 1) for each term via BlockPackedWriter.
-fn flush_term_freqs(docs: &[TermVectorDoc], output: &mut dyn DataOutput) -> io::Result<()> {
-    let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
-    for doc in docs {
-        for field in &doc.fields {
-            for term in &field.terms {
-                writer.add(output, (term.freq - 1) as i64)?;
-            }
-        }
-    }
-    writer.finish(output)
-}
-
-/// Writes position deltas via BlockPackedWriter.
-fn flush_positions(docs: &[TermVectorDoc], output: &mut dyn DataOutput) -> io::Result<()> {
-    let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
-    for doc in docs {
-        for field in &doc.fields {
-            if field.has_positions {
-                for term in &field.terms {
-                    let mut previous_position = 0;
-                    for &position in &term.positions {
-                        writer.add(output, (position - previous_position) as i64)?;
-                        previous_position = position;
-                    }
+        'outer: for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                let idx = field_nums
+                    .binary_search(&fd.field_num)
+                    .expect("field number must be in field_nums");
+                if field_flags[idx] == -1 {
+                    field_flags[idx] = fd.flags;
+                } else if field_flags[idx] != fd.flags {
+                    non_changing = false;
+                    break 'outer;
                 }
             }
         }
+
+        if non_changing {
+            self.vectors_stream.write_vint(0)?;
+            let mut scratch = Vec::new();
+            let mut writer = DirectWriter::new(FLAGS_BITS);
+            for &flags in &field_flags {
+                assert!(flags >= 0);
+                writer.add(flags as i64);
+            }
+            writer.finish(&mut VecOutput(&mut scratch))?;
+            self.vectors_stream.write_vint(scratch.len() as i32)?;
+            self.vectors_stream.write_bytes(&scratch)
+        } else {
+            self.vectors_stream.write_vint(1)?;
+            let mut scratch = Vec::new();
+            let mut writer = DirectWriter::new(FLAGS_BITS);
+            for doc in &self.pending_docs {
+                for fd in &doc.fields {
+                    writer.add(fd.flags as i64);
+                }
+            }
+            writer.finish(&mut VecOutput(&mut scratch))?;
+            self.vectors_stream.write_vint(scratch.len() as i32)?;
+            self.vectors_stream.write_bytes(&scratch)
+        }
     }
-    writer.finish(output)
-}
 
-/// Writes offset data: charsPerTerm floats (BE), start offset deltas, and offset lengths.
-fn flush_offsets(
-    docs: &[TermVectorDoc],
-    field_nums: &[u32],
-    output: &mut dyn DataOutput,
-) -> io::Result<()> {
-    let has_offsets = docs
-        .iter()
-        .any(|doc| doc.fields.iter().any(|f| f.has_offsets));
-    if !has_offsets {
-        return Ok(());
+    fn flush_num_terms(&mut self, _total_fields: i32) -> io::Result<()> {
+        let mut max_num_terms: i32 = 0;
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                max_num_terms |= fd.num_terms as i32;
+            }
+        }
+
+        let bpv = unsigned_bits_required(max_num_terms as i64);
+        self.vectors_stream.write_vint(bpv as i32)?;
+        let mut scratch = Vec::new();
+        let mut writer = DirectWriter::new(bpv);
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                writer.add(fd.num_terms as i64);
+            }
+        }
+        writer.finish(&mut VecOutput(&mut scratch))?;
+        self.vectors_stream.write_vint(scratch.len() as i32)?;
+        self.vectors_stream.write_bytes(&scratch)
     }
 
-    // Compute charsPerTerm per unique field number
-    let mut sum_pos = vec![0i64; field_nums.len()];
-    let mut sum_offsets = vec![0i64; field_nums.len()];
+    fn flush_term_lengths(&mut self) -> io::Result<()> {
+        let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                for i in 0..fd.num_terms {
+                    writer.add(&mut *self.vectors_stream, fd.prefix_lengths[i] as i64)?;
+                }
+            }
+        }
+        writer.finish(&mut *self.vectors_stream)?;
 
-    for doc in docs {
-        for field in &doc.fields {
-            if field.has_offsets && field.has_positions {
-                let idx = field_nums
-                    .binary_search(&field.field_number)
-                    .expect("field number must be in field_nums");
-                for term in &field.terms {
-                    let freq = term.freq as usize;
-                    if freq > 0 {
-                        // Last position for this term
-                        sum_pos[idx] += term.positions[freq - 1] as i64;
-                        // Last start offset for this term
-                        if let Some(ref offsets) = term.offsets {
-                            sum_offsets[idx] += offsets.start_offsets[freq - 1] as i64;
+        writer.reset();
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                for i in 0..fd.num_terms {
+                    writer.add(&mut *self.vectors_stream, fd.suffix_lengths[i] as i64)?;
+                }
+            }
+        }
+        writer.finish(&mut *self.vectors_stream)
+    }
+
+    fn flush_term_freqs(&mut self) -> io::Result<()> {
+        let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                for i in 0..fd.num_terms {
+                    writer.add(&mut *self.vectors_stream, (fd.freqs[i] - 1) as i64)?;
+                }
+            }
+        }
+        writer.finish(&mut *self.vectors_stream)
+    }
+
+    fn flush_positions(&mut self) -> io::Result<()> {
+        let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                if fd.has_positions {
+                    let mut pos = 0usize;
+                    for i in 0..fd.num_terms {
+                        let mut previous_position = 0;
+                        for _ in 0..fd.freqs[i] as usize {
+                            let position = self.positions_buf[fd.pos_start + pos];
+                            writer.add(
+                                &mut *self.vectors_stream,
+                                (position - previous_position) as i64,
+                            )?;
+                            previous_position = position;
+                            pos += 1;
                         }
                     }
+                    assert_eq!(pos, fd.total_positions);
                 }
             }
         }
+        writer.finish(&mut *self.vectors_stream)
     }
 
-    let mut chars_per_term = vec![0.0f32; field_nums.len()];
-    for i in 0..field_nums.len() {
-        chars_per_term[i] = if sum_pos[i] <= 0 || sum_offsets[i] <= 0 {
-            0.0
-        } else {
-            (sum_offsets[i] as f64 / sum_pos[i] as f64) as f32
-        };
-    }
+    fn flush_offsets(&mut self, field_nums: &[u32]) -> io::Result<()> {
+        let has_offsets = self
+            .pending_docs
+            .iter()
+            .any(|doc| doc.fields.iter().any(|f| f.has_offsets));
+        if !has_offsets {
+            return Ok(());
+        }
 
-    // Write charsPerTerm as LE ints
-    for &cpt in &chars_per_term {
-        output.write_le_int(f32::to_bits(cpt) as i32)?;
-    }
+        // Compute charsPerTerm per unique field number
+        let mut sum_pos = vec![0i64; field_nums.len()];
+        let mut sum_offsets = vec![0i64; field_nums.len()];
 
-    // Start offset deltas
-    let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
-    for doc in docs {
-        for field in &doc.fields {
-            if field.has_offsets {
-                let idx = field_nums
-                    .binary_search(&field.field_number)
-                    .expect("field number must be in field_nums");
-                let cpt = chars_per_term[idx];
-                for term in &field.terms {
-                    let mut previous_pos = 0i32;
-                    let mut previous_off = 0i32;
-                    if let Some(ref offsets) = term.offsets {
-                        for j in 0..term.freq as usize {
-                            let position = if field.has_positions {
-                                term.positions[j]
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                if fd.has_offsets && fd.has_positions {
+                    let idx = field_nums
+                        .binary_search(&fd.field_num)
+                        .expect("field number must be in field_nums");
+                    let mut pos = 0usize;
+                    for i in 0..fd.num_terms {
+                        let freq = fd.freqs[i] as usize;
+                        if freq > 0 {
+                            sum_pos[idx] += self.positions_buf
+                                [fd.pos_start + fd.freqs[i] as usize - 1 + pos]
+                                as i64;
+                            sum_offsets[idx] += self.start_offsets_buf
+                                [fd.off_start + fd.freqs[i] as usize - 1 + pos]
+                                as i64;
+                        }
+                        pos += freq;
+                    }
+                    assert_eq!(pos, fd.total_positions);
+                }
+            }
+        }
+
+        let mut chars_per_term = vec![0.0f32; field_nums.len()];
+        for i in 0..field_nums.len() {
+            chars_per_term[i] = if sum_pos[i] <= 0 || sum_offsets[i] <= 0 {
+                0.0
+            } else {
+                (sum_offsets[i] as f64 / sum_pos[i] as f64) as f32
+            };
+        }
+
+        // Write charsPerTerm as LE ints
+        for &cpt in &chars_per_term {
+            self.vectors_stream.write_le_int(f32::to_bits(cpt) as i32)?;
+        }
+
+        // Start offset deltas
+        let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                if (fd.flags & OFFSETS as i32) != 0 {
+                    let idx = field_nums
+                        .binary_search(&fd.field_num)
+                        .expect("field number must be in field_nums");
+                    let cpt = chars_per_term[idx];
+                    let mut pos = 0usize;
+                    for i in 0..fd.num_terms {
+                        let mut previous_pos = 0i32;
+                        let mut previous_off = 0i32;
+                        for _ in 0..fd.freqs[i] as usize {
+                            let position = if fd.has_positions {
+                                self.positions_buf[fd.pos_start + pos]
                             } else {
                                 0
                             };
-                            let start_offset = offsets.start_offsets[j];
+                            let start_offset = self.start_offsets_buf[fd.off_start + pos];
                             let delta = start_offset
                                 - previous_off
                                 - (cpt * (position - previous_pos) as f32) as i32;
-                            writer.add(output, delta as i64)?;
+                            writer.add(&mut *self.vectors_stream, delta as i64)?;
                             previous_pos = position;
                             previous_off = start_offset;
+                            pos += 1;
                         }
                     }
                 }
             }
         }
-    }
-    writer.finish(output)?;
+        writer.finish(&mut *self.vectors_stream)?;
 
-    // Offset lengths: (endOffset - startOffset) - prefixLength - suffixLength
-    writer.reset();
-    for doc in docs {
-        for field in &doc.fields {
-            if field.has_offsets {
-                let mut prev_term: &[u8] = &[];
-                for term in &field.terms {
-                    let term_bytes = term.term.as_bytes();
-                    let prefix_len = shared_prefix_length(prev_term, term_bytes) as i32;
-                    let suffix_len = term_bytes.len() as i32 - prefix_len;
-
-                    if let Some(ref offsets) = term.offsets {
-                        for j in 0..term.freq as usize {
-                            let length = offsets.end_offsets[j] - offsets.start_offsets[j];
-                            writer.add(output, (length - prefix_len - suffix_len) as i64)?;
+        // Offset lengths: length - prefixLength - suffixLength
+        writer.reset();
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                if (fd.flags & OFFSETS as i32) != 0 {
+                    let mut pos = 0usize;
+                    for i in 0..fd.num_terms {
+                        for _ in 0..fd.freqs[i] as usize {
+                            let length = self.lengths_buf[fd.off_start + pos];
+                            writer.add(
+                                &mut *self.vectors_stream,
+                                (length - fd.prefix_lengths[i] - fd.suffix_lengths[i]) as i64,
+                            )?;
+                            pos += 1;
                         }
                     }
-                    prev_term = term_bytes;
+                    assert_eq!(pos, fd.total_positions);
                 }
             }
         }
+        writer.finish(&mut *self.vectors_stream)
     }
-    writer.finish(output)
-}
 
-/// Writes payload lengths via BlockPackedWriter (all zeros for now).
-fn flush_payload_lengths(docs: &[TermVectorDoc], output: &mut dyn DataOutput) -> io::Result<()> {
-    let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
-    for doc in docs {
-        for field in &doc.fields {
-            if field.has_payloads {
-                for term in &field.terms {
-                    for _ in 0..term.freq {
-                        writer.add(output, 0)?;
+    fn flush_payload_lengths(&mut self) -> io::Result<()> {
+        let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
+        for doc in &self.pending_docs {
+            for fd in &doc.fields {
+                if fd.has_payloads {
+                    for i in 0..fd.total_positions {
+                        writer.add(
+                            &mut *self.vectors_stream,
+                            self.payload_lengths_buf[fd.pay_start + i] as i64,
+                        )?;
                     }
                 }
             }
         }
+        writer.finish(&mut *self.vectors_stream)
     }
-    writer.finish(output)
 }
 
-/// Computes the flags byte for a term vector field.
-fn field_flags_value(field: &TermVectorField) -> i32 {
-    let mut flags = 0i32;
-    if field.has_positions {
-        flags |= POSITIONS as i32;
-    }
-    if field.has_offsets {
-        flags |= OFFSETS as i32;
-    }
-    if field.has_payloads {
-        flags |= PAYLOADS as i32;
-    }
-    flags
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/// Grows a buffer size by at least 1/8 plus a small constant.
+pub(crate) fn oversize(min_size: usize) -> usize {
+    let extra = (min_size >> 3).max(3);
+    min_size + extra
 }
 
 /// Returns the length of the shared prefix between two byte slices.
 fn shared_prefix_length(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -904,11 +961,26 @@ mod tests {
         [0u8; 16]
     }
 
+    /// Creates a writer, calls `build_fn` to populate it, then finishes.
+    fn write_with<F>(dir: &SharedDirectory, num_docs: i32, build_fn: F) -> Vec<String>
+    where
+        F: FnOnce(&mut CompressingTermVectorsWriter),
+    {
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        build_fn(&mut w);
+        w.finish(dir, "_0", "", &make_segment_id(), num_docs)
+            .unwrap()
+    }
+
     #[test]
     fn test_empty_docs() {
         let dir = make_directory();
-        let docs: Vec<TermVectorDoc> = vec![];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 0).unwrap();
+        let files = write_with(&dir, 0, |_| {});
         assert_len_eq_x!(&files, 3);
         assert!(files[0].ends_with(".tvd"));
         assert!(files[1].ends_with(".tvx"));
@@ -918,210 +990,83 @@ mod tests {
     #[test]
     fn test_single_doc_no_fields() {
         let dir = make_directory();
-        let docs = vec![TermVectorDoc { fields: vec![] }];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
+        let files = write_with(&dir, 1, |w| {
+            w.start_document(0);
+            w.finish_document().unwrap();
+        });
         assert_len_eq_x!(&files, 3);
     }
 
     #[test]
     fn test_single_doc_single_field_single_term() {
         let dir = make_directory();
-        let docs = vec![TermVectorDoc {
-            fields: vec![TermVectorField {
-                field_number: 0,
-                has_positions: false,
-                has_offsets: false,
-                has_payloads: false,
-                terms: vec![TermVectorTerm {
-                    term: "hello".to_string(),
-                    freq: 1,
-                    positions: vec![],
-                    offsets: None,
-                }],
-            }],
-        }];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
+        let files = write_with(&dir, 1, |w| {
+            w.start_document(1);
+            w.start_field(0, 1, false, false, false);
+            w.start_term(b"hello", 1);
+            w.finish_term();
+            w.finish_field();
+            w.finish_document().unwrap();
+        });
         assert_len_eq_x!(&files, 3);
 
-        // Verify the .tvd file has valid content (header + chunk + footer)
         let dir_guard = dir.lock().unwrap();
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
-        // Should have at least a header + some chunk data + footer
         assert_gt!(tvd_len, 40);
     }
 
     #[test]
-    fn test_single_doc_with_positions() {
+    fn test_single_doc_multiple_terms() {
         let dir = make_directory();
-        let docs = vec![TermVectorDoc {
-            fields: vec![TermVectorField {
-                field_number: 0,
-                has_positions: true,
-                has_offsets: false,
-                has_payloads: false,
-                terms: vec![
-                    TermVectorTerm {
-                        term: "bar".to_string(),
-                        freq: 1,
-                        positions: vec![0],
-                        offsets: None,
-                    },
-                    TermVectorTerm {
-                        term: "foo".to_string(),
-                        freq: 2,
-                        positions: vec![1, 3],
-                        offsets: None,
-                    },
-                ],
-            }],
-        }];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
+        let files = write_with(&dir, 1, |w| {
+            w.start_document(1);
+            w.start_field(0, 2, false, false, false);
+            w.start_term(b"bar", 1);
+            w.finish_term();
+            w.start_term(b"foo", 2);
+            w.finish_term();
+            w.finish_field();
+            w.finish_document().unwrap();
+        });
         assert_len_eq_x!(&files, 3);
-    }
-
-    #[test]
-    fn test_single_doc_with_offsets() {
-        let dir = make_directory();
-        let docs = vec![TermVectorDoc {
-            fields: vec![TermVectorField {
-                field_number: 0,
-                has_positions: true,
-                has_offsets: true,
-                has_payloads: false,
-                terms: vec![TermVectorTerm {
-                    term: "hello".to_string(),
-                    freq: 2,
-                    positions: vec![0, 5],
-                    offsets: Some(Box::new(OffsetBuffers {
-                        start_offsets: vec![0, 30],
-                        end_offsets: vec![5, 35],
-                    })),
-                }],
-            }],
-        }];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_len_eq_x!(&files, 3);
-    }
-
-    /// Verifies charsPerTerm is written as LE int (matching Lucene's
-    /// DataOutput.writeInt) rather than BE. The reader patches offsets using
-    /// Float.intBitsToFloat(readInt()) which expects LE byte order.
-    #[test]
-    fn test_chars_per_term_le_byte_order() {
-        let dir = make_directory();
-        // charsPerTerm = sumOffsets / sumPos. With one term at position 2
-        // and start_offset 10: charsPerTerm = 10/2 = 5.0f.
-        // IEEE 754 for 5.0f = 0x40A00000.
-        // LE bytes: [00, 00, A0, 40].
-        let docs = vec![TermVectorDoc {
-            fields: vec![TermVectorField {
-                field_number: 0,
-                has_positions: true,
-                has_offsets: true,
-                has_payloads: false,
-                terms: vec![TermVectorTerm {
-                    term: "hello".to_string(),
-                    freq: 1,
-                    positions: vec![2],
-                    offsets: Some(Box::new(OffsetBuffers {
-                        start_offsets: vec![10],
-                        end_offsets: vec![15],
-                    })),
-                }],
-            }],
-        }];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_len_eq_x!(&files, 3);
-
-        // Read the .tvd bytes and verify charsPerTerm byte order
-        let dir_guard = dir.lock().unwrap();
-        let tvd_bytes = dir_guard.read_file(&files[0]).unwrap();
-        assert_gt!(tvd_bytes.len(), 40);
-
-        // LE representation of 5.0f (0x40A00000): bytes [00, 00, A0, 40]
-        let le_5_0 = [0x00u8, 0x00, 0xA0, 0x40];
-        // BE representation would be [40, A0, 00, 00]
-        let be_5_0 = [0x40u8, 0xA0, 0x00, 0x00];
-
-        let has_le = tvd_bytes.windows(4).any(|w| w == le_5_0);
-        let has_be = tvd_bytes.windows(4).any(|w| w == be_5_0);
-        assert!(has_le, "charsPerTerm 5.0f should appear in LE byte order");
-        assert!(
-            !has_be,
-            "charsPerTerm 5.0f should NOT appear in BE byte order"
-        );
     }
 
     #[test]
     fn test_multiple_docs_different_fields() {
         let dir = make_directory();
-        let docs = vec![
-            TermVectorDoc {
-                fields: vec![TermVectorField {
-                    field_number: 0,
-                    has_positions: false,
-                    has_offsets: false,
-                    has_payloads: false,
-                    terms: vec![TermVectorTerm {
-                        term: "alpha".to_string(),
-                        freq: 1,
-                        positions: vec![],
-                        offsets: None,
-                    }],
-                }],
-            },
-            TermVectorDoc {
-                fields: vec![TermVectorField {
-                    field_number: 2,
-                    has_positions: false,
-                    has_offsets: false,
-                    has_payloads: false,
-                    terms: vec![TermVectorTerm {
-                        term: "beta".to_string(),
-                        freq: 1,
-                        positions: vec![],
-                        offsets: None,
-                    }],
-                }],
-            },
-        ];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 2).unwrap();
+        let files = write_with(&dir, 2, |w| {
+            w.start_document(1);
+            w.start_field(0, 1, false, false, false);
+            w.start_term(b"alpha", 1);
+            w.finish_term();
+            w.finish_field();
+            w.finish_document().unwrap();
+
+            w.start_document(1);
+            w.start_field(2, 1, false, false, false);
+            w.start_term(b"beta", 1);
+            w.finish_term();
+            w.finish_field();
+            w.finish_document().unwrap();
+        });
         assert_len_eq_x!(&files, 3);
     }
 
     #[test]
     fn test_term_prefix_compression() {
-        // Terms sharing prefixes should produce correct prefix/suffix lengths
         let dir = make_directory();
-        let docs = vec![TermVectorDoc {
-            fields: vec![TermVectorField {
-                field_number: 0,
-                has_positions: false,
-                has_offsets: false,
-                has_payloads: false,
-                terms: vec![
-                    TermVectorTerm {
-                        term: "abc".to_string(),
-                        freq: 1,
-                        positions: vec![],
-                        offsets: None,
-                    },
-                    TermVectorTerm {
-                        term: "abd".to_string(),
-                        freq: 1,
-                        positions: vec![],
-                        offsets: None,
-                    },
-                    TermVectorTerm {
-                        term: "xyz".to_string(),
-                        freq: 1,
-                        positions: vec![],
-                        offsets: None,
-                    },
-                ],
-            }],
-        }];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
+        let files = write_with(&dir, 1, |w| {
+            w.start_document(1);
+            w.start_field(0, 3, false, false, false);
+            w.start_term(b"abc", 1);
+            w.finish_term();
+            w.start_term(b"abd", 1);
+            w.finish_term();
+            w.start_term(b"xyz", 1);
+            w.finish_term();
+            w.finish_field();
+            w.finish_document().unwrap();
+        });
         assert_len_eq_x!(&files, 3);
     }
 
@@ -1135,95 +1080,19 @@ mod tests {
     }
 
     #[test]
-    fn test_field_flags_value() {
-        let field = TermVectorField {
-            field_number: 0,
-            has_positions: true,
-            has_offsets: true,
-            has_payloads: false,
-            terms: vec![],
-        };
-        assert_eq!(field_flags_value(&field), 0x03); // POSITIONS | OFFSETS
-
-        let field2 = TermVectorField {
-            field_number: 0,
-            has_positions: false,
-            has_offsets: false,
-            has_payloads: false,
-            terms: vec![],
-        };
-        assert_eq!(field_flags_value(&field2), 0x00);
-
-        let field3 = TermVectorField {
-            field_number: 0,
-            has_positions: true,
-            has_offsets: true,
-            has_payloads: true,
-            terms: vec![],
-        };
-        assert_eq!(field_flags_value(&field3), 0x07);
-    }
-
-    #[test]
-    fn test_position_delta_encoding() {
+    fn test_many_terms_no_positions() {
         let dir = make_directory();
-        let docs = vec![TermVectorDoc {
-            fields: vec![TermVectorField {
-                field_number: 0,
-                has_positions: true,
-                has_offsets: false,
-                has_payloads: false,
-                terms: vec![
-                    TermVectorTerm {
-                        term: "a".to_string(),
-                        freq: 3,
-                        positions: vec![0, 5, 10],
-                        offsets: None,
-                    },
-                    TermVectorTerm {
-                        term: "b".to_string(),
-                        freq: 2,
-                        // Position delta resets per term
-                        positions: vec![2, 7],
-                        offsets: None,
-                    },
-                ],
-            }],
-        }];
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
-        assert_len_eq_x!(&files, 3);
-    }
-
-    /// Writes term vectors with positions and offsets matching the
-    /// text_field_with_term_vectors configuration. Exercises the LZ4
-    /// compression path with enough terms to produce meaningful compressed
-    /// output. Uses plain LZ4 (CompressionMode.FAST), not the preset-dict
-    /// format used by stored fields.
-    #[test]
-    fn test_positions_and_offsets_with_many_terms() {
-        let dir = make_directory();
-        let terms: Vec<TermVectorTerm> = (0..20)
-            .map(|i| TermVectorTerm {
-                term: format!("term_{i:04}"),
-                freq: 1,
-                positions: vec![i],
-                offsets: Some(Box::new(OffsetBuffers {
-                    start_offsets: vec![i * 10],
-                    end_offsets: vec![i * 10 + 9],
-                })),
-            })
-            .collect();
-        let docs = vec![TermVectorDoc {
-            fields: vec![TermVectorField {
-                field_number: 0,
-                has_positions: true,
-                has_offsets: true,
-                has_payloads: false,
-                terms,
-            }],
-        }];
-
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, 1).unwrap();
+        let files = write_with(&dir, 1, |w| {
+            w.start_document(1);
+            w.start_field(0, 20, false, false, false);
+            for i in 0..20i32 {
+                let term = format!("term_{i:04}");
+                w.start_term(term.as_bytes(), 1);
+                w.finish_term();
+            }
+            w.finish_field();
+            w.finish_document().unwrap();
+        });
         assert_len_eq_x!(&files, 3);
 
         let dir_guard = dir.lock().unwrap();
@@ -1231,80 +1100,51 @@ mod tests {
         assert_gt!(tvd_len, 40, "tvd should have substantial content");
     }
 
-    /// Verifies multi-chunk output when exceeding MAX_DOCS_PER_CHUNK (128 docs).
-    /// Uses the TermVectorChunkWriter directly to inspect chunk metadata.
     #[test]
     fn test_multi_chunk_by_doc_count() {
         let dir = make_directory();
-        let num_docs = 200;
-        let docs: Vec<TermVectorDoc> = (0..num_docs)
-            .map(|i| TermVectorDoc {
-                fields: vec![TermVectorField {
-                    field_number: 0,
-                    has_positions: false,
-                    has_offsets: false,
-                    has_payloads: false,
-                    terms: vec![TermVectorTerm {
-                        term: format!("t{i}"),
-                        freq: 1,
-                        positions: vec![],
-                        offsets: None,
-                    }],
-                }],
-            })
-            .collect();
-
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, num_docs).unwrap();
+        let num_docs = 200i32;
+        let files = write_with(&dir, num_docs, |w| {
+            for i in 0..num_docs {
+                w.start_document(1);
+                w.start_field(0, 1, false, false, false);
+                let term = format!("t{i}");
+                w.start_term(term.as_bytes(), 1);
+                w.finish_term();
+                w.finish_field();
+                w.finish_document().unwrap();
+            }
+        });
         assert_len_eq_x!(&files, 3);
 
-        // Read .tvm to verify num_chunks > 1
         let dir_guard = dir.lock().unwrap();
         let tvm_bytes = dir_guard.read_file(&files[2]).unwrap();
-        // num_chunks is a vlong near the end of .tvm, before the 16-byte footer.
-        // With 200 docs and max 128 per chunk, expect 2 chunks.
-        // Verify by checking .tvd size is larger than a single-chunk write would produce.
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
         assert_gt!(
             tvd_len,
             60,
             "multi-chunk tvd should have substantial content"
         );
-
-        // Also verify the tvm file is well-formed (has footer)
         assert_gt!(tvm_bytes.len(), 16);
     }
 
-    /// Verifies multi-chunk output when exceeding CHUNK_SIZE (4096 bytes of term data).
     #[test]
     fn test_multi_chunk_by_term_bytes() {
         let dir = make_directory();
-        // 10 docs, each with a ~500-byte term → 5000 bytes total, exceeds 4096
-        let num_docs = 10;
-        let docs: Vec<TermVectorDoc> = (0..num_docs)
-            .map(|i| {
+        let num_docs = 10i32;
+        let files = write_with(&dir, num_docs, |w| {
+            for i in 0..num_docs {
+                w.start_document(1);
+                w.start_field(0, 1, false, false, false);
                 let long_term = format!("term_{i:0>500}");
-                TermVectorDoc {
-                    fields: vec![TermVectorField {
-                        field_number: 0,
-                        has_positions: false,
-                        has_offsets: false,
-                        has_payloads: false,
-                        terms: vec![TermVectorTerm {
-                            term: long_term,
-                            freq: 1,
-                            positions: vec![],
-                            offsets: None,
-                        }],
-                    }],
-                }
-            })
-            .collect();
-
-        let files = write(&dir, "_0", "", &make_segment_id(), &docs, num_docs).unwrap();
+                w.start_term(long_term.as_bytes(), 1);
+                w.finish_term();
+                w.finish_field();
+                w.finish_document().unwrap();
+            }
+        });
         assert_len_eq_x!(&files, 3);
 
-        // With ~500 bytes per doc, chunk flushes after ~8 docs (>= 4096 bytes).
-        // Should produce at least 2 chunks.
         let dir_guard = dir.lock().unwrap();
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
         assert_gt!(
@@ -1312,5 +1152,384 @@ mod tests {
             60,
             "multi-chunk tvd should have substantial content"
         );
+    }
+
+    // -- FieldData.add_term -------------------------------------------------
+
+    #[test]
+    fn test_field_data_add_term_records_freq_and_lengths() {
+        let mut doc = DocData {
+            num_fields: 0,
+            fields: Vec::new(),
+            pos_start: 0,
+            off_start: 0,
+            pay_start: 0,
+        };
+        doc.add_field(0, 3, true, false, false);
+        let fd = doc.fields.last_mut().unwrap();
+
+        fd.add_term(5, 0, 4);
+        fd.add_term(2, 2, 3);
+        fd.add_term(1, 4, 1);
+
+        assert_eq!(fd.freqs, vec![5, 2, 1]);
+        assert_eq!(fd.prefix_lengths, vec![0, 2, 4]);
+        assert_eq!(fd.suffix_lengths, vec![4, 3, 1]);
+        assert_eq!(fd.ord, 3);
+    }
+
+    // -- DocData.add_field offset calculations ------------------------------
+
+    #[test]
+    fn test_doc_data_add_field_first_field_inherits_doc_offsets() {
+        let mut doc = DocData {
+            num_fields: 0,
+            fields: Vec::new(),
+            pos_start: 10,
+            off_start: 20,
+            pay_start: 30,
+        };
+        doc.add_field(0, 1, true, true, true);
+        let fd = &doc.fields[0];
+
+        assert_eq!(fd.pos_start, 10);
+        assert_eq!(fd.off_start, 20);
+        assert_eq!(fd.pay_start, 30);
+    }
+
+    #[test]
+    fn test_doc_data_add_field_second_field_offsets_from_first() {
+        let mut doc = DocData {
+            num_fields: 0,
+            fields: Vec::new(),
+            pos_start: 0,
+            off_start: 0,
+            pay_start: 0,
+        };
+        doc.add_field(0, 2, true, true, false);
+        // Simulate 5 positions written to first field
+        doc.fields[0].total_positions = 5;
+
+        doc.add_field(1, 3, true, true, false);
+        let fd2 = &doc.fields[1];
+
+        assert_eq!(fd2.pos_start, 5);
+        assert_eq!(fd2.off_start, 5);
+        assert_eq!(fd2.pay_start, 0); // first field had no payloads
+    }
+
+    #[test]
+    fn test_doc_data_add_field_skips_disabled_features() {
+        let mut doc = DocData {
+            num_fields: 0,
+            fields: Vec::new(),
+            pos_start: 0,
+            off_start: 0,
+            pay_start: 0,
+        };
+        // First field: positions only, 10 total_positions
+        doc.add_field(0, 1, true, false, false);
+        doc.fields[0].total_positions = 10;
+
+        // Second field starts at pos_start=10, off_start=0 (offsets disabled on field 0)
+        doc.add_field(1, 1, true, true, false);
+        let fd2 = &doc.fields[1];
+
+        assert_eq!(fd2.pos_start, 10);
+        assert_eq!(fd2.off_start, 0);
+    }
+
+    #[test]
+    fn test_doc_data_add_field_flags() {
+        let mut doc = DocData {
+            num_fields: 0,
+            fields: Vec::new(),
+            pos_start: 0,
+            off_start: 0,
+            pay_start: 0,
+        };
+        doc.add_field(0, 1, true, true, true);
+        assert_eq!(doc.fields[0].flags, 0b111);
+
+        doc.add_field(1, 1, true, false, false);
+        assert_eq!(doc.fields[1].flags, 0b001);
+
+        doc.add_field(2, 1, false, true, false);
+        assert_eq!(doc.fields[2].flags, 0b010);
+
+        doc.add_field(3, 1, false, false, false);
+        assert_eq!(doc.fields[3].flags, 0b000);
+    }
+
+    // -- Buffer growth via oversize -----------------------------------------
+
+    #[test]
+    fn test_oversize_grows_by_at_least_one_eighth() {
+        assert_ge!(oversize(100), 100 + 100 / 8);
+        assert_ge!(oversize(1000), 1000 + 1000 / 8);
+    }
+
+    #[test]
+    fn test_oversize_small_inputs_grow_by_at_least_3() {
+        assert_ge!(oversize(1), 4);
+        assert_ge!(oversize(0), 3);
+    }
+
+    #[test]
+    fn test_multi_field_different_field_numbers() {
+        let dir = make_directory();
+        let files = write_with(&dir, 1, |w| {
+            w.start_document(3);
+            w.start_field(0, 1, false, false, false);
+            w.start_term(b"alpha", 1);
+            w.finish_term();
+            w.finish_field();
+            w.start_field(5, 1, false, false, false);
+            w.start_term(b"beta", 1);
+            w.finish_term();
+            w.finish_field();
+            w.start_field(10, 1, false, false, false);
+            w.start_term(b"gamma", 1);
+            w.finish_term();
+            w.finish_field();
+            w.finish_document().unwrap();
+        });
+        assert_len_eq_x!(&files, 3);
+
+        let dir_guard = dir.lock().unwrap();
+        let tvd_len = dir_guard.file_length(&files[0]).unwrap();
+        assert_gt!(tvd_len, 40);
+    }
+
+    // -- trigger_flush ------------------------------------------------------
+
+    #[test]
+    fn test_trigger_flush_by_suffix_size() {
+        let dir = make_directory();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+
+        assert!(!w.trigger_flush());
+
+        // Fill term_suffixes beyond CHUNK_SIZE (4096)
+        w.term_suffixes.resize(CHUNK_SIZE as usize, b'x');
+        assert!(w.trigger_flush());
+    }
+
+    #[test]
+    fn test_trigger_flush_by_doc_count() {
+        let dir = make_directory();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+
+        assert!(!w.trigger_flush());
+
+        // Add MAX_DOCS_PER_CHUNK empty docs to pending
+        for _ in 0..MAX_DOCS_PER_CHUNK {
+            w.pending_docs.push(DocData {
+                num_fields: 0,
+                fields: Vec::new(),
+                pos_start: 0,
+                off_start: 0,
+                pay_start: 0,
+            });
+        }
+        assert!(w.trigger_flush());
+    }
+
+    // -- finish_document pushes cur_doc into pending_docs --------------------
+
+    #[test]
+    fn test_finish_document_moves_cur_doc_to_pending() {
+        let dir = make_directory();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+
+        assert!(w.pending_docs.is_empty());
+        assert!(w.cur_doc.is_none());
+
+        w.start_document(1);
+        assert!(w.cur_doc.is_some());
+        assert!(w.pending_docs.is_empty());
+
+        w.start_field(0, 1, false, false, false);
+        w.start_term(b"x", 1);
+        w.finish_term();
+        w.finish_field();
+        w.finish_document().unwrap();
+
+        assert!(w.cur_doc.is_none());
+        assert_eq!(w.pending_docs.len(), 1);
+        assert_eq!(w.pending_docs[0].num_fields, 1);
+        assert_eq!(w.pending_docs[0].fields.len(), 1);
+    }
+
+    #[test]
+    fn test_finish_document_increments_num_docs() {
+        let dir = make_directory();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+
+        assert_eq!(w.num_docs, 0);
+
+        w.start_document(0);
+        w.finish_document().unwrap();
+        assert_eq!(w.num_docs, 1);
+
+        w.start_document(0);
+        w.finish_document().unwrap();
+        assert_eq!(w.num_docs, 2);
+    }
+
+    // -- MemSize reports used, not capacity ---------------------------------
+
+    #[test]
+    fn test_mem_size_reports_used_not_capacity() {
+        use mem_dbg::MemSize;
+
+        let dir = make_directory();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+
+        let mut refs = mem_dbg::HashMap::default();
+        let empty_size = w.mem_size_rec(mem_dbg::SizeFlags::default(), &mut refs);
+
+        // Write docs with enough terms to accumulate meaningful suffix data
+        for i in 0..10 {
+            w.start_document(1);
+            w.start_field(0, 3, false, false, false);
+            for j in 0..3 {
+                let term = format!("term_{i}_{j}_padding");
+                w.start_term(term.as_bytes(), 1);
+                w.finish_term();
+            }
+            w.finish_field();
+            w.finish_document().unwrap();
+        }
+
+        refs.clear();
+        let with_data = w.mem_size_rec(mem_dbg::SizeFlags::default(), &mut refs);
+        assert_gt!(with_data, empty_size);
+
+        // After flush, used size should drop even though buffers retain capacity
+        w.flush(true).unwrap();
+        refs.clear();
+        let after_flush = w.mem_size_rec(mem_dbg::SizeFlags::default(), &mut refs);
+        assert_lt!(after_flush, with_data);
+
+        // Buffer capacity is still there but not reported
+        assert_gt!(w.positions_buf.capacity(), 0);
+        assert_eq!(w.pos_buf_used, 0);
+        assert_eq!(w.off_buf_used, 0);
+    }
+
+    // -- start_term prefix compression and suffix accumulation ---------------
+
+    #[test]
+    fn test_start_term_accumulates_suffixes() {
+        let dir = make_directory();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+
+        w.start_document(1);
+        w.start_field(0, 3, false, false, false);
+
+        w.start_term(b"abc", 1); // prefix=0, suffix="abc"
+        w.start_term(b"abd", 1); // prefix=2 ("ab"), suffix="d"
+        w.start_term(b"xyz", 1); // prefix=0, suffix="xyz"
+
+        assert_eq!(&w.term_suffixes, b"abcdxyz");
+
+        let fd = w.cur_field.as_ref().unwrap();
+        assert_eq!(fd.prefix_lengths[0], 0);
+        assert_eq!(fd.suffix_lengths[0], 3);
+        assert_eq!(fd.prefix_lengths[1], 2);
+        assert_eq!(fd.suffix_lengths[1], 1);
+        assert_eq!(fd.prefix_lengths[2], 0);
+        assert_eq!(fd.suffix_lengths[2], 3);
+    }
+
+    #[test]
+    fn test_start_term_resets_prefix_per_field() {
+        let dir = make_directory();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+
+        w.start_document(2);
+        // Field 0: term "abc"
+        w.start_field(0, 1, false, false, false);
+        w.start_term(b"abc", 1);
+        w.finish_term();
+        w.finish_field();
+
+        // Field 1: term "abd" — should NOT share prefix with field 0's "abc"
+        w.start_field(1, 1, false, false, false);
+        w.start_term(b"abd", 1);
+
+        let fd = w.cur_field.as_ref().unwrap();
+        assert_eq!(fd.prefix_lengths[0], 0); // no prefix sharing across fields
+        assert_eq!(fd.suffix_lengths[0], 3);
+    }
+
+    // -- add_doc_data offset calculations across documents -------------------
+
+    // -- flush resets state but retains buffer capacity ----------------------
+
+    #[test]
+    fn test_flush_resets_pending_and_suffixes() {
+        let dir = make_directory();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+
+        w.start_document(1);
+        w.start_field(0, 1, false, false, false);
+        w.start_term(b"test", 1);
+        w.finish_term();
+        w.finish_field();
+        w.finish_document().unwrap();
+
+        assert!(!w.pending_docs.is_empty());
+        assert!(!w.term_suffixes.is_empty());
+
+        w.flush(true).unwrap();
+
+        assert!(w.pending_docs.is_empty());
+        assert!(w.term_suffixes.is_empty());
+        assert_eq!(w.pos_buf_used, 0);
+        assert_eq!(w.off_buf_used, 0);
+        // Buffer capacity retained
+        assert_ge!(w.positions_buf.len(), INITIAL_BUF_SIZE);
     }
 }

@@ -159,9 +159,8 @@ impl CompressingTermVectorsReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::term_vectors::{
-        self, OffsetBuffers, TermVectorDoc, TermVectorField, TermVectorTerm,
-    };
+    use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, VECTORS_EXTENSION};
+    use crate::index::index_file_names;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
@@ -169,86 +168,74 @@ mod tests {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    fn make_tv_doc(field_number: u32, terms: Vec<&str>) -> TermVectorDoc {
-        let tv_terms: Vec<TermVectorTerm> = terms
-            .into_iter()
-            .map(|t| TermVectorTerm {
-                term: t.to_string(),
-                freq: 1,
-                positions: vec![0],
-                offsets: Some(Box::new(OffsetBuffers {
-                    start_offsets: vec![0],
-                    end_offsets: vec![t.len() as i32],
-                })),
-            })
-            .collect();
-
-        TermVectorDoc {
-            fields: vec![TermVectorField {
-                field_number,
-                has_positions: true,
-                has_offsets: true,
-                has_payloads: false,
-                terms: tv_terms,
-            }],
-        }
+    fn segment_id() -> [u8; 16] {
+        [0u8; 16]
     }
 
-    fn write_and_read(tv_docs: &[TermVectorDoc], num_docs: i32) -> CompressingTermVectorsReader {
-        let segment_id = [0u8; 16];
+    /// Writes docs via the streaming API, finishes, then opens a reader.
+    fn write_and_read<F>(num_docs: i32, build_fn: F) -> CompressingTermVectorsReader
+    where
+        F: FnOnce(&mut CompressingTermVectorsWriter),
+    {
         let dir = test_directory();
-        term_vectors::write(&dir, "_0", "", &segment_id, tv_docs, num_docs).unwrap();
+        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
+        let tvd = {
+            let mut d = dir.lock().unwrap();
+            d.create_output(&tvd_name).unwrap()
+        };
+        let mut w = CompressingTermVectorsWriter::new(tvd, &segment_id(), "").unwrap();
+        build_fn(&mut w);
+        w.finish(&dir, "_0", "", &segment_id(), num_docs).unwrap();
         let guard = dir.lock().unwrap();
-        CompressingTermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id).unwrap()
+        CompressingTermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id()).unwrap()
     }
 
     #[test]
     fn test_single_doc() {
-        let docs = vec![make_tv_doc(2, vec!["hello", "world"])];
-        let reader = write_and_read(&docs, 1);
+        let reader = write_and_read(1, |w| {
+            w.start_document(1);
+            w.start_field(2, 2, false, false, false);
+            w.start_term(b"hello", 1);
+            w.finish_term();
+            w.start_term(b"world", 1);
+            w.finish_term();
+            w.finish_field();
+            w.finish_document().unwrap();
+        });
         assert_eq!(reader.num_chunks(), 1);
     }
 
     #[test]
     fn test_multiple_docs_one_chunk() {
-        let docs: Vec<TermVectorDoc> = (0..10).map(|_| make_tv_doc(2, vec!["term"])).collect();
-        let reader = write_and_read(&docs, 10);
+        let reader = write_and_read(10, |w| {
+            for _ in 0..10 {
+                w.start_document(1);
+                w.start_field(2, 1, false, false, false);
+                w.start_term(b"term", 1);
+                w.finish_term();
+                w.finish_field();
+                w.finish_document().unwrap();
+            }
+        });
         assert_eq!(reader.num_chunks(), 1);
     }
 
     #[test]
     fn test_multiple_docs_multiple_fields() {
-        let docs: Vec<TermVectorDoc> = (0..5)
-            .map(|_| TermVectorDoc {
-                fields: vec![
-                    TermVectorField {
-                        field_number: 0,
-                        has_positions: true,
-                        has_offsets: false,
-                        has_payloads: false,
-                        terms: vec![TermVectorTerm {
-                            term: "alpha".to_string(),
-                            freq: 1,
-                            positions: vec![0],
-                            offsets: None,
-                        }],
-                    },
-                    TermVectorField {
-                        field_number: 1,
-                        has_positions: true,
-                        has_offsets: false,
-                        has_payloads: false,
-                        terms: vec![TermVectorTerm {
-                            term: "beta".to_string(),
-                            freq: 1,
-                            positions: vec![0],
-                            offsets: None,
-                        }],
-                    },
-                ],
-            })
-            .collect();
-        let reader = write_and_read(&docs, 5);
+        let reader = write_and_read(5, |w| {
+            for _ in 0..5 {
+                w.start_document(2);
+                w.start_field(0, 1, false, false, false);
+                w.start_term(b"alpha", 1);
+                w.finish_term();
+                w.finish_field();
+                w.start_field(1, 1, false, false, false);
+                w.start_term(b"beta", 1);
+                w.finish_term();
+                w.finish_field();
+                w.finish_document().unwrap();
+            }
+        });
         assert_ge!(reader.num_chunks(), 1);
     }
 }
