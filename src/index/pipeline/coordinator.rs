@@ -97,7 +97,9 @@ fn worker_thread_loop(
     let mut segments = Vec::new();
     let (mut worker, mut context) = worker_source.create_worker();
 
-    while let Some(doc) = doc_rx.recv() {
+    loop {
+        flush_control.wait_if_stalled();
+        let Some(doc) = doc_rx.recv() else { break };
         worker.add_document(doc, &context)?;
 
         flush_control.after_document(worker_id, worker.ram_bytes_used() as u64);
@@ -262,10 +264,6 @@ pub struct IndexCoordinator {
     directory: Arc<SharedDirectory>,
     /// Tracks committed segments and writes `segments_N`.
     segment_infos: SegmentInfos,
-    /// Shared flush coordination state for RAM-based flushing.
-    /// Held to keep the `Arc` alive; future stall control will read from it.
-    #[expect(dead_code)]
-    flush_control: Arc<FlushControl>,
 }
 
 impl IndexCoordinator {
@@ -302,7 +300,6 @@ impl IndexCoordinator {
             use_compound_file: config.get_use_compound_file(),
             directory,
             segment_infos: SegmentInfos::new(),
-            flush_control,
         }
     }
 

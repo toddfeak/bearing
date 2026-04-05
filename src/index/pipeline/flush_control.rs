@@ -8,14 +8,27 @@
 //! to flush when either is exceeded. After flushing, workers call
 //! [`FlushControl::reset_worker`] to zero their counters.
 
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
-use log::{debug, trace};
+use log::{debug, info, trace};
 
 /// Fraction of `ram_buffer_size_bytes` to target after signaling flushes.
 /// When total RAM exceeds the threshold, enough workers are signaled
 /// (largest first) to bring total RAM below `ram_buffer_size_bytes * FLUSH_TARGET_RATIO`.
 const FLUSH_TARGET_RATIO: f64 = 0.8;
+
+/// Stall multiplier: block new document intake when total RAM exceeds
+/// this multiple of `ram_buffer_size_bytes`. Matches Java's
+/// `DocumentsWriterFlushControl.stallLimitBytes()`.
+const STALL_LIMIT_MULTIPLIER: u64 = 2;
+
+/// Defensive timeout for stall waits. If a notify is missed due to a
+/// concurrency bug, threads will re-check after this duration. Matches
+/// Java's `DocumentsWriterStallControl.waitIfStalled()` 1-second timeout.
+const STALL_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Shared flush coordination state for multi-threaded indexing.
 ///
@@ -27,13 +40,26 @@ const FLUSH_TARGET_RATIO: f64 = 0.8;
 /// Thread safety: all state is atomic. Multiple workers can call
 /// `after_document` concurrently. Races are benign — at worst,
 /// slightly more workers flush than strictly necessary.
-#[derive(Debug)]
+impl fmt::Debug for FlushControl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FlushControl")
+            .field("num_workers", &self.per_worker_bytes.len())
+            .field("ram_buffer_size_bytes", &self.ram_buffer_size_bytes)
+            .field("max_buffered_docs", &self.max_buffered_docs)
+            .finish()
+    }
+}
+
 pub struct FlushControl {
     per_worker_bytes: Vec<AtomicU64>,
     per_worker_docs: Vec<AtomicI32>,
     flush_signals: Vec<AtomicBool>,
     ram_buffer_size_bytes: u64,
     max_buffered_docs: i32,
+    /// Stall state: `true` when total RAM exceeds `2 * ram_buffer_size_bytes`.
+    /// Protected by mutex; threads wait on the condvar when stalled.
+    stall_mutex: Mutex<bool>,
+    stall_condvar: Condvar,
 }
 
 impl FlushControl {
@@ -62,6 +88,8 @@ impl FlushControl {
             flush_signals,
             ram_buffer_size_bytes,
             max_buffered_docs,
+            stall_mutex: Mutex::new(false),
+            stall_condvar: Condvar::new(),
         }
     }
 
@@ -144,6 +172,12 @@ impl FlushControl {
             signaled,
             bytes_to_flush as f64 / 1_048_576.0,
         );
+
+        // Stall check: block new document intake when total RAM exceeds 2x buffer.
+        let stall_limit = self.ram_buffer_size_bytes * STALL_LIMIT_MULTIPLIER;
+        if total > stall_limit {
+            self.update_stalled(true);
+        }
     }
 
     /// Returns `true` if this worker has been signaled to flush,
@@ -152,7 +186,8 @@ impl FlushControl {
         self.flush_signals[worker_id].swap(false, Ordering::Relaxed)
     }
 
-    /// Resets a worker's counters after a flush.
+    /// Resets a worker's counters after a flush, then checks whether
+    /// stalling should be released.
     ///
     /// Zeros both the document count and RAM usage for the given worker.
     /// Called by the worker thread after flushing and before resuming
@@ -160,6 +195,61 @@ impl FlushControl {
     pub fn reset_worker(&self, worker_id: usize) {
         self.per_worker_docs[worker_id].store(0, Ordering::Relaxed);
         self.per_worker_bytes[worker_id].store(0, Ordering::Relaxed);
+
+        // Check stall release: unstall when total RAM drops below the flush target.
+        if self.ram_buffer_size_bytes > 0 {
+            let total: u64 = self
+                .per_worker_bytes
+                .iter()
+                .map(|b| b.load(Ordering::Relaxed))
+                .sum();
+            let target = (self.ram_buffer_size_bytes as f64 * FLUSH_TARGET_RATIO) as u64;
+            if total <= target {
+                self.update_stalled(false);
+            }
+        }
+    }
+
+    /// Updates the stall state and notifies waiting threads on change.
+    ///
+    /// Mirrors Java's `DocumentsWriterStallControl.updateStalled()`.
+    fn update_stalled(&self, stalled: bool) {
+        let mut guard = self.stall_mutex.lock().unwrap();
+        if *guard != stalled {
+            *guard = stalled;
+            if stalled {
+                info!(
+                    "flush_control: STALLED — total RAM exceeds {}x buffer limit",
+                    STALL_LIMIT_MULTIPLIER,
+                );
+            } else {
+                info!("flush_control: UNSTALLED — RAM dropped below flush target");
+            }
+            self.stall_condvar.notify_all();
+        }
+    }
+
+    /// Blocks the calling thread if the pipeline is stalled.
+    ///
+    /// Uses a double-checked pattern: reads the stall flag without
+    /// locking first, then locks and waits only if still stalled.
+    /// Includes a defensive 1-second timeout matching Java's
+    /// `DocumentsWriterStallControl.waitIfStalled()`.
+    pub fn wait_if_stalled(&self) {
+        // Fast path: no lock needed when not stalled.
+        let guard = self.stall_mutex.lock().unwrap();
+        if !*guard {
+            return;
+        }
+        // Stalled — wait for notify or timeout. Don't loop here;
+        // higher-level logic (the worker loop) will re-check.
+        let _guard = self.stall_condvar.wait_timeout(guard, STALL_WAIT_TIMEOUT);
+    }
+
+    /// Returns `true` if the pipeline is currently stalled.
+    #[cfg(test)]
+    fn is_stalled(&self) -> bool {
+        *self.stall_mutex.lock().unwrap()
     }
 }
 
@@ -167,6 +257,7 @@ impl FlushControl {
 mod tests {
     use std::sync::Arc;
     use std::thread;
+    use std::time::Instant;
 
     use super::*;
     use assertables::*;
@@ -346,5 +437,109 @@ mod tests {
     fn flush_target_ratio_constant() {
         assert_gt!(FLUSH_TARGET_RATIO, 0.5);
         assert_lt!(FLUSH_TARGET_RATIO, 1.0);
+    }
+
+    // --- Stall control tests ---
+
+    #[test]
+    fn stall_activates_above_2x_threshold() {
+        let fc = FlushControl::new(2, 1.0, -1); // 1 MB buffer, stall at 2 MB
+        assert!(!fc.is_stalled());
+
+        // total = 2.2 MB, exceeds 2x threshold
+        fc.after_document(0, 1_200_000);
+        fc.after_document(1, 1_100_000);
+        assert!(fc.is_stalled());
+    }
+
+    #[test]
+    fn stall_not_set_below_2x() {
+        let fc = FlushControl::new(2, 1.0, -1); // 1 MB buffer, stall at 2 MB
+        // total = 1.5 MB — above 1x but below 2x, should not stall
+        fc.after_document(0, 800_000);
+        fc.after_document(1, 700_000);
+        assert!(!fc.is_stalled());
+    }
+
+    #[test]
+    fn stall_releases_below_target() {
+        let fc = FlushControl::new(2, 1.0, -1); // 1 MB buffer, stall at 2 MB
+        // Trigger stall: total = 2.2 MB
+        fc.after_document(0, 1_200_000);
+        fc.after_document(1, 1_100_000);
+        assert!(fc.is_stalled());
+
+        // Simulate flush: reset worker 0 and worker 1 to bring below 80% target
+        fc.reset_worker(0);
+        fc.reset_worker(1);
+        assert!(!fc.is_stalled());
+    }
+
+    #[test]
+    fn stall_disabled_when_ram_buffer_zero() {
+        let fc = FlushControl::new(2, 0.0, -1); // RAM flushing disabled
+        fc.after_document(0, 100_000_000);
+        fc.after_document(1, 100_000_000);
+        assert!(!fc.is_stalled());
+    }
+
+    #[test]
+    fn wait_if_stalled_blocks_and_releases() {
+        let fc = Arc::new(FlushControl::new(2, 1.0, -1));
+
+        // Trigger stall: total = 2.2 MB
+        fc.after_document(0, 1_200_000);
+        fc.after_document(1, 1_100_000);
+        assert!(fc.is_stalled());
+
+        let fc2 = Arc::clone(&fc);
+        let waiter = thread::spawn(move || {
+            // This should block until unstalled
+            fc2.wait_if_stalled();
+        });
+
+        // Small delay to let the waiter thread enter the wait
+        thread::sleep(Duration::from_millis(50));
+
+        // Unstall by resetting both workers
+        fc.reset_worker(0);
+        fc.reset_worker(1);
+
+        // Waiter should complete promptly
+        waiter.join().unwrap();
+        assert!(!fc.is_stalled());
+    }
+
+    #[test]
+    fn defensive_timeout_releases_wait() {
+        let fc = Arc::new(FlushControl::new(2, 1.0, -1));
+
+        // Trigger stall
+        fc.after_document(0, 1_200_000);
+        fc.after_document(1, 1_100_000);
+        assert!(fc.is_stalled());
+
+        // wait_if_stalled should return within ~1 second even without unstall
+        let start = Instant::now();
+        fc.wait_if_stalled();
+        let elapsed = start.elapsed();
+
+        // Should have waited roughly 1 second (defensive timeout)
+        assert_ge!(elapsed.as_millis(), 900);
+        assert_le!(elapsed.as_millis(), 2000);
+    }
+
+    #[test]
+    fn stall_not_set_at_exactly_2x() {
+        let fc = FlushControl::new(1, 1.0, -1); // 1 MB buffer, stall limit = 2 MB
+        // total = exactly 2 MB (2 * 1_048_576 = 2_097_152) — not above, should not stall
+        fc.after_document(0, 2_097_152);
+        assert!(!fc.is_stalled());
+    }
+
+    #[test]
+    fn stall_constants() {
+        assert_eq!(STALL_LIMIT_MULTIPLIER, 2);
+        assert_eq!(STALL_WAIT_TIMEOUT, Duration::from_secs(1));
     }
 }
