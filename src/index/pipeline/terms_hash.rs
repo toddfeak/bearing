@@ -254,7 +254,7 @@ impl mem_dbg::MemSize for TermsHash {
         flags: mem_dbg::SizeFlags,
         refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
-        self.int_pool.capacity() * mem::size_of::<i32>() + self.byte_pool.mem_size_rec(flags, refs)
+        self.int_pool.len() * mem::size_of::<i32>() + self.byte_pool.mem_size_rec(flags, refs)
     }
 }
 

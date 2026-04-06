@@ -195,9 +195,9 @@ impl SegmentWorker {
         let consumers: usize = self
             .field_consumers
             .iter()
-            .map(|c| c.mem_size(SizeFlags::CAPACITY))
+            .map(|c| c.mem_size(SizeFlags::default()))
             .sum();
-        let accumulator = self.accumulator.mem_size(SizeFlags::CAPACITY);
+        let accumulator = self.accumulator.mem_size(SizeFlags::default());
         consumers + accumulator
     }
 

@@ -62,7 +62,7 @@ impl mem_dbg::MemSize for PerFieldState {
         flags: mem_dbg::SizeFlags,
         refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
-        mem::size_of::<Self>() + self.field_name.capacity() + self.writer.mem_size_rec(flags, refs)
+        mem::size_of::<Self>() + self.field_name.len() + self.writer.mem_size_rec(flags, refs)
     }
 }
 

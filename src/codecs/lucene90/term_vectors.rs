@@ -211,7 +211,7 @@ impl mem_dbg::MemSize for CompressingTermVectorsWriter {
             + self.off_buf_used * 2 * mem::size_of::<i32>()
             + self.term_suffixes.len()
             + self.payload_bytes.len()
-            + self.last_term.capacity()
+            + self.last_term.len()
     }
 }
 

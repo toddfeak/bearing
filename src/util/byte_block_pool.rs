@@ -31,10 +31,8 @@ impl MemSize for ByteBlockPool {
         _flags: mem_dbg::SizeFlags,
         _refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
-        // Report capacity — the flush policy needs to know actual memory
-        // consumed to decide when to flush. With chunk-based growth (32KB
-        // increments), capacity stays close to usage.
-        self.data.capacity()
+        // Report used bytes, not capacity.
+        self.data.len()
     }
 }
 
