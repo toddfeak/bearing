@@ -19,10 +19,7 @@ use std::io;
 use std::mem;
 
 use crate::document::IndexOptions;
-use crate::util::byte_block_pool::{
-    BYTE_BLOCK_MASK, BYTE_BLOCK_SHIFT, BYTE_BLOCK_SIZE, ByteBlockPool, ByteSlicePool,
-    DirectAllocator, FIRST_LEVEL_SIZE,
-};
+use crate::util::byte_block_pool::{ByteBlockPool, ByteSlicePool, FIRST_LEVEL_SIZE};
 use crate::util::bytes_ref_hash::BytesRefHash;
 
 // ---------------------------------------------------------------------------
@@ -217,7 +214,7 @@ const HASH_INIT_SIZE: usize = 4;
 pub(crate) struct TermsHash {
     /// Flat table of byte-pool write offsets, indexed by stream address.
     pub(crate) int_pool: Vec<i32>,
-    pub(crate) byte_pool: ByteBlockPool<DirectAllocator>,
+    pub(crate) byte_pool: ByteBlockPool,
 }
 
 impl TermsHash {
@@ -225,14 +222,14 @@ impl TermsHash {
     pub(crate) fn new() -> Self {
         Self {
             int_pool: Vec::with_capacity(8192),
-            byte_pool: ByteBlockPool::new(DirectAllocator),
+            byte_pool: ByteBlockPool::new(32 * 1024),
         }
     }
 
     /// Resets both pools for reuse.
     pub(crate) fn reset(&mut self) {
         self.int_pool.clear();
-        self.byte_pool.reset(false, false);
+        self.byte_pool.reset();
     }
 }
 
@@ -246,7 +243,7 @@ impl fmt::Debug for TermsHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TermsHash")
             .field("int_pool_len", &self.int_pool.len())
-            .field("byte_pool_buffers", &self.byte_pool.buffers.len())
+            .field("byte_pool_len", &self.byte_pool.data.len())
             .finish()
     }
 }
@@ -312,7 +309,7 @@ impl TermsHashPerField {
     /// Collapses the hash table and sorts term IDs lexicographically.
     ///
     /// Must not be called twice without a [`reset`](Self::reset) in between.
-    pub(crate) fn sort_terms(&mut self, byte_pool: &ByteBlockPool<DirectAllocator>) {
+    pub(crate) fn sort_terms(&mut self, byte_pool: &ByteBlockPool) {
         assert!(self.sorted_term_ids.is_none());
         self.sorted_term_ids = Some(self.bytes_hash.sort(byte_pool));
     }
@@ -336,11 +333,7 @@ impl TermsHashPerField {
     }
 
     /// Returns the bytes for a given term ID (from the shared byte pool).
-    pub(crate) fn term_bytes<'a>(
-        &self,
-        byte_pool: &'a ByteBlockPool<DirectAllocator>,
-        term_id: usize,
-    ) -> &'a [u8] {
+    pub(crate) fn term_bytes<'a>(&self, byte_pool: &'a ByteBlockPool, term_id: usize) -> &'a [u8] {
         self.bytes_hash.get(byte_pool, term_id)
     }
 
@@ -348,19 +341,14 @@ impl TermsHashPerField {
     pub(crate) fn write_byte(&mut self, terms_hash: &mut TermsHash, stream: usize, b: u8) {
         let stream_address = self.stream_address_offset + stream;
         let upto = terms_hash.int_pool[stream_address] as usize;
-        let buffer_index = upto >> BYTE_BLOCK_SHIFT;
-        let offset = upto & BYTE_BLOCK_MASK;
-        if terms_hash.byte_pool.buffers[buffer_index][offset] != 0 {
+        if terms_hash.byte_pool.data[upto] != 0 {
             // End of slice; allocate a new one
-            let new_offset =
-                ByteSlicePool::alloc_slice(&mut terms_hash.byte_pool, buffer_index, offset);
-            let new_buf_idx = terms_hash.byte_pool.current_buffer_index();
-            terms_hash.int_pool[stream_address] =
-                (new_offset as i32) + terms_hash.byte_pool.byte_offset;
-            terms_hash.byte_pool.buffers[new_buf_idx][new_offset] = b;
+            let new_offset = ByteSlicePool::alloc_slice(&mut terms_hash.byte_pool, upto);
+            terms_hash.int_pool[stream_address] = new_offset as i32;
+            terms_hash.byte_pool.data[new_offset] = b;
             terms_hash.int_pool[stream_address] += 1;
         } else {
-            terms_hash.byte_pool.buffers[buffer_index][offset] = b;
+            terms_hash.byte_pool.data[upto] = b;
             terms_hash.int_pool[stream_address] += 1;
         }
     }
@@ -370,35 +358,27 @@ impl TermsHashPerField {
     pub(crate) fn write_bytes(&mut self, terms_hash: &mut TermsHash, stream: usize, data: &[u8]) {
         let end = data.len();
         let stream_address = self.stream_address_offset + stream;
-        let upto = terms_hash.int_pool[stream_address] as usize;
-        let mut buffer_index = upto >> BYTE_BLOCK_SHIFT;
-        let mut slice_offset = upto & BYTE_BLOCK_MASK;
+        let mut upto = terms_hash.int_pool[stream_address] as usize;
         let mut offset = 0;
 
         // Write into current slice while there's room
-        while terms_hash.byte_pool.buffers[buffer_index][slice_offset] == 0 && offset < end {
-            terms_hash.byte_pool.buffers[buffer_index][slice_offset] = data[offset];
-            slice_offset += 1;
+        while terms_hash.byte_pool.data[upto] == 0 && offset < end {
+            terms_hash.byte_pool.data[upto] = data[offset];
+            upto += 1;
             offset += 1;
             terms_hash.int_pool[stream_address] += 1;
         }
 
         // If we still have data, grow slices as needed
         while offset < end {
-            let (new_slice_offset, slice_length) = ByteSlicePool::alloc_known_size_slice(
-                &mut terms_hash.byte_pool,
-                buffer_index,
-                slice_offset,
-            );
-            buffer_index = terms_hash.byte_pool.current_buffer_index();
+            let (new_slice_offset, slice_length) =
+                ByteSlicePool::alloc_known_size_slice(&mut terms_hash.byte_pool, upto);
             let write_length = (slice_length - 1).min(end - offset);
-            terms_hash.byte_pool.buffers[buffer_index]
-                [new_slice_offset..new_slice_offset + write_length]
+            terms_hash.byte_pool.data[new_slice_offset..new_slice_offset + write_length]
                 .copy_from_slice(&data[offset..offset + write_length]);
-            slice_offset = new_slice_offset + write_length;
+            upto = new_slice_offset + write_length;
             offset += write_length;
-            terms_hash.int_pool[stream_address] =
-                (slice_offset as i32) + terms_hash.byte_pool.byte_offset;
+            terms_hash.int_pool[stream_address] = upto as i32;
         }
     }
 
@@ -464,7 +444,7 @@ pub(crate) trait TermsHashPerFieldTrait {
     /// Returns the (positive) term ID.
     fn add(
         &mut self,
-        term_byte_pool: &mut ByteBlockPool<DirectAllocator>,
+        term_byte_pool: &mut ByteBlockPool,
         terms_hash: &mut TermsHash,
         term_bytes: &[u8],
         doc_id: i32,
@@ -512,11 +492,6 @@ pub(crate) trait TermsHashPerFieldTrait {
 
         let stream_count = self.base().stream_count;
 
-        if BYTE_BLOCK_SIZE - terms_hash.byte_pool.byte_upto < (2 * stream_count) * FIRST_LEVEL_SIZE
-        {
-            terms_hash.byte_pool.next_buffer();
-        }
-
         let stream_address_offset = terms_hash.int_pool.len();
         terms_hash
             .int_pool
@@ -528,8 +503,7 @@ pub(crate) trait TermsHashPerFieldTrait {
 
         for i in 0..stream_count {
             let upto = ByteSlicePool::new_slice(&mut terms_hash.byte_pool, FIRST_LEVEL_SIZE);
-            terms_hash.int_pool[stream_address_offset + i] =
-                (upto as i32) + terms_hash.byte_pool.byte_offset;
+            terms_hash.int_pool[stream_address_offset + i] = upto as i32;
         }
 
         let byte_starts = terms_hash.int_pool[stream_address_offset];
@@ -620,7 +594,7 @@ impl FreqProxTermsWriterPerField {
     /// `current_offset_length` before calling this method.
     pub(crate) fn add(
         &mut self,
-        term_byte_pool: &mut ByteBlockPool<DirectAllocator>,
+        term_byte_pool: &mut ByteBlockPool,
         terms_hash: &mut TermsHash,
         term_bytes: &[u8],
         doc_id: i32,
@@ -634,7 +608,7 @@ impl FreqProxTermsWriterPerField {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_at(
         &mut self,
-        term_byte_pool: &mut ByteBlockPool<DirectAllocator>,
+        term_byte_pool: &mut ByteBlockPool,
         terms_hash: &mut TermsHash,
         term_bytes: &[u8],
         doc_id: i32,
@@ -666,7 +640,7 @@ impl FreqProxTermsWriterPerField {
     }
 
     /// Sort terms lexicographically.
-    pub(crate) fn sort_terms(&mut self, byte_pool: &ByteBlockPool<DirectAllocator>) {
+    pub(crate) fn sort_terms(&mut self, byte_pool: &ByteBlockPool) {
         self.base.sort_terms(byte_pool);
     }
 
@@ -676,11 +650,7 @@ impl FreqProxTermsWriterPerField {
     }
 
     /// Returns the bytes for a given term ID.
-    pub(crate) fn term_bytes<'a>(
-        &self,
-        byte_pool: &'a ByteBlockPool<DirectAllocator>,
-        term_id: usize,
-    ) -> &'a [u8] {
+    pub(crate) fn term_bytes<'a>(&self, byte_pool: &'a ByteBlockPool, term_id: usize) -> &'a [u8] {
         self.base.term_bytes(byte_pool, term_id)
     }
 
@@ -955,18 +925,16 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
 mod tests {
     use super::*;
     use crate::store;
-    use crate::util::byte_block_pool::{Allocator, ByteSliceReader};
+    use crate::util::byte_block_pool::ByteSliceReader;
     use assertables::*;
 
     /// Helper to read a VInt from a byte slice reader.
-    fn read_vint<A: Allocator>(reader: &mut ByteSliceReader<'_, A>) -> i32 {
+    fn read_vint(reader: &mut ByteSliceReader<'_>) -> i32 {
         store::read_vint(reader).unwrap()
     }
 
-    fn new_term_pool() -> ByteBlockPool<DirectAllocator> {
-        let mut pool = ByteBlockPool::new(DirectAllocator);
-        pool.next_buffer();
-        pool
+    fn new_term_pool() -> ByteBlockPool {
+        ByteBlockPool::new(32 * 1024)
     }
 
     #[test]

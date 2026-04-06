@@ -9,9 +9,7 @@
 
 use std::fmt;
 
-use crate::util::byte_block_pool::{
-    BYTE_BLOCK_MASK, BYTE_BLOCK_SHIFT, BYTE_BLOCK_SIZE, ByteBlockPool, DirectAllocator,
-};
+use crate::util::byte_block_pool::ByteBlockPool;
 
 /// Hash map that interns byte sequences into an external [`ByteBlockPool`] and
 /// assigns sequential integer IDs.
@@ -67,14 +65,14 @@ impl BytesRefHash {
     ///
     /// # Panics
     /// Panics if `bytes_id` is out of range.
-    pub fn get<'a>(&self, pool: &'a ByteBlockPool<DirectAllocator>, bytes_id: usize) -> &'a [u8] {
+    pub fn get<'a>(&self, pool: &'a ByteBlockPool, bytes_id: usize) -> &'a [u8] {
         let start = self.bytes_start[bytes_id] as usize;
         Self::read_bytes_at_pool(pool, start)
     }
 
     /// Adds a byte sequence. Returns the new ID (>= 0) if the bytes are new,
     /// or `-(existing_id) - 1` if already present.
-    pub fn add(&mut self, pool: &mut ByteBlockPool<DirectAllocator>, bytes: &[u8]) -> i32 {
+    pub fn add(&mut self, pool: &mut ByteBlockPool, bytes: &[u8]) -> i32 {
         let hashcode = do_hash(bytes);
         let hash_pos = self.find_hash(pool, bytes, hashcode);
         let e = self.ids[hash_pos];
@@ -131,7 +129,7 @@ impl BytesRefHash {
     ///
     /// This is a destructive operation. [`clear`](Self::clear) must be called
     /// before reusing.
-    pub fn sort(&mut self, pool: &ByteBlockPool<DirectAllocator>) -> Vec<i32> {
+    pub fn sort(&mut self, pool: &ByteBlockPool) -> Vec<i32> {
         let compact = self.compact().to_vec();
         let mut sorted = compact;
         sorted.sort_by(|&a, &b| {
@@ -155,12 +153,7 @@ impl BytesRefHash {
 
     // --- Internal methods ---
 
-    fn find_hash(
-        &self,
-        pool: &ByteBlockPool<DirectAllocator>,
-        bytes: &[u8],
-        hashcode: i32,
-    ) -> usize {
+    fn find_hash(&self, pool: &ByteBlockPool, bytes: &[u8], hashcode: i32) -> usize {
         let mut code = hashcode;
         let mut hash_pos = (code & self.hash_mask) as usize;
         let mut e = self.ids[hash_pos];
@@ -182,12 +175,7 @@ impl BytesRefHash {
         hash_pos
     }
 
-    fn rehash(
-        &mut self,
-        pool: Option<&ByteBlockPool<DirectAllocator>>,
-        new_size: usize,
-        hash_on_data: bool,
-    ) {
+    fn rehash(&mut self, pool: Option<&ByteBlockPool>, new_size: usize, hash_on_data: bool) {
         let new_mask = (new_size - 1) as i32;
         let new_high_mask = !new_mask;
         let mut new_hash = vec![-1i32; new_size];
@@ -247,58 +235,38 @@ impl BytesRefHash {
     }
 
     /// Adds bytes to the pool with length prefix. Returns the start offset.
-    fn add_bytes_to_pool(pool: &mut ByteBlockPool<DirectAllocator>, bytes: &[u8]) -> i32 {
+    fn add_bytes_to_pool(pool: &mut ByteBlockPool, bytes: &[u8]) -> i32 {
         let length = bytes.len();
-        let len2 = 2 + length;
-        if len2 + pool.byte_upto > BYTE_BLOCK_SIZE {
-            if len2 > BYTE_BLOCK_SIZE {
-                panic!(
-                    "bytes can be at most {} in length; got {}",
-                    BYTE_BLOCK_SIZE - 2,
-                    length
-                );
-            }
-            pool.next_buffer();
-        }
-        let buffer_upto = pool.byte_upto;
-        let text_start = buffer_upto as i32 + pool.byte_offset;
+        let len_bytes = if length < 128 { 1 } else { 2 };
+        let start = pool.alloc(len_bytes + length);
 
         if length < 128 {
-            // 1 byte to store length
-            pool.current_buffer_mut()[buffer_upto] = length as u8;
-            pool.current_buffer_mut()[buffer_upto + 1..buffer_upto + 1 + length]
-                .copy_from_slice(bytes);
-            pool.byte_upto += length + 1;
+            pool.data[start] = length as u8;
+            pool.data[start + 1..start + 1 + length].copy_from_slice(bytes);
         } else {
-            // 2 bytes to store length (big-endian with high bit set)
             let encoded = (length as u16) | 0x8000;
-            pool.current_buffer_mut()[buffer_upto] = (encoded >> 8) as u8;
-            pool.current_buffer_mut()[buffer_upto + 1] = encoded as u8;
-            pool.current_buffer_mut()[buffer_upto + 2..buffer_upto + 2 + length]
-                .copy_from_slice(bytes);
-            pool.byte_upto += length + 2;
+            pool.data[start] = (encoded >> 8) as u8;
+            pool.data[start + 1] = encoded as u8;
+            pool.data[start + 2..start + 2 + length].copy_from_slice(bytes);
         }
 
-        text_start
+        start as i32
     }
 
     /// Reads the length-prefixed bytes at the given pool offset.
-    pub fn read_bytes_at_pool(pool: &ByteBlockPool<DirectAllocator>, start: usize) -> &[u8] {
-        let buffer_index = start >> BYTE_BLOCK_SHIFT;
-        let pos = start & BYTE_BLOCK_MASK;
-        let buffer = &pool.buffers[buffer_index];
-
-        if (buffer[pos] & 0x80) == 0 {
-            let length = buffer[pos] as usize;
-            &buffer[pos + 1..pos + 1 + length]
+    pub fn read_bytes_at_pool(pool: &ByteBlockPool, start: usize) -> &[u8] {
+        if (pool.data[start] & 0x80) == 0 {
+            let length = pool.data[start] as usize;
+            &pool.data[start + 1..start + 1 + length]
         } else {
-            let length = (((buffer[pos] as usize) << 8) | (buffer[pos + 1] as usize)) & 0x7FFF;
-            &buffer[pos + 2..pos + 2 + length]
+            let length =
+                (((pool.data[start] as usize) << 8) | (pool.data[start + 1] as usize)) & 0x7FFF;
+            &pool.data[start + 2..start + 2 + length]
         }
     }
 
     /// Compares the bytes at `start` in the pool with `other`.
-    fn pool_bytes_equal(pool: &ByteBlockPool<DirectAllocator>, start: i32, other: &[u8]) -> bool {
+    fn pool_bytes_equal(pool: &ByteBlockPool, start: i32, other: &[u8]) -> bool {
         Self::read_bytes_at_pool(pool, start as usize) == other
     }
 }
@@ -345,7 +313,7 @@ impl BytesRefHash {
 #[cfg(test)]
 impl BytesRefHash {
     /// Looks up a byte sequence. Returns the ID if found, or -1 if not present.
-    pub fn find(&self, pool: &ByteBlockPool<DirectAllocator>, bytes: &[u8]) -> i32 {
+    pub fn find(&self, pool: &ByteBlockPool, bytes: &[u8]) -> i32 {
         let hashcode = do_hash(bytes);
         let id = self.ids[self.find_hash(pool, bytes, hashcode)];
         if id == -1 { -1 } else { id & self.hash_mask }
@@ -448,10 +416,8 @@ mod tests {
     use super::*;
     use assertables::*;
 
-    fn make_pool() -> ByteBlockPool<DirectAllocator> {
-        let mut pool = ByteBlockPool::new(DirectAllocator);
-        pool.next_buffer();
-        pool
+    fn make_pool() -> ByteBlockPool {
+        ByteBlockPool::new(32 * 1024)
     }
 
     #[test]

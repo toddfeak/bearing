@@ -15,7 +15,7 @@ use crate::encoding::lz4;
 use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_bits_required};
 use crate::index::index_file_names;
 use crate::store::{self, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
-use crate::util::byte_block_pool::{ByteSliceReader, DirectAllocator};
+use crate::util::byte_block_pool::ByteSliceReader;
 
 // File extensions
 pub(crate) const VECTORS_EXTENSION: &str = "tvd";
@@ -330,8 +330,8 @@ impl CompressingTermVectorsWriter {
     pub(crate) fn add_prox(
         &mut self,
         num_prox: i32,
-        positions: Option<&mut ByteSliceReader<'_, DirectAllocator>>,
-        offsets: Option<&mut ByteSliceReader<'_, DirectAllocator>>,
+        positions: Option<&mut ByteSliceReader<'_>>,
+        offsets: Option<&mut ByteSliceReader<'_>>,
     ) {
         let (pos_start, off_start, pay_start, total_pos, has_payloads) = {
             let f = self.cur_field.as_ref().unwrap();

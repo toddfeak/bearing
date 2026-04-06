@@ -19,9 +19,7 @@ use crate::index::pipeline::terms_hash::{
     BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
     oversize,
 };
-use crate::util::byte_block_pool::{
-    ByteBlockPool, ByteSliceReader, DirectAllocator, FIRST_LEVEL_SIZE,
-};
+use crate::util::byte_block_pool::{ByteBlockPool, ByteSliceReader, FIRST_LEVEL_SIZE};
 use crate::util::bytes_ref_hash::BytesRefHash;
 
 /// Per-field term vector writer.
@@ -97,7 +95,7 @@ impl TermVectorsConsumerPerField {
     pub(crate) fn finish_document(
         &mut self,
         field_number: u32,
-        term_byte_pool: &ByteBlockPool<DirectAllocator>,
+        term_byte_pool: &ByteBlockPool,
         tv_terms_hash: &TermsHash,
         writer: &mut CompressingTermVectorsWriter,
     ) -> io::Result<()> {
@@ -378,17 +376,15 @@ mod tests {
     use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
     use crate::store;
     use crate::store::{MemoryDirectory, SharedDirectory};
-    use crate::util::byte_block_pool::{Allocator, ByteBlockPool, DirectAllocator};
+    use crate::util::byte_block_pool::ByteBlockPool;
     use assertables::*;
 
-    fn new_term_pool() -> ByteBlockPool<DirectAllocator> {
-        let mut pool = ByteBlockPool::new(DirectAllocator);
-        pool.next_buffer();
-        pool
+    fn new_term_pool() -> ByteBlockPool {
+        ByteBlockPool::new(32 * 1024)
     }
 
     /// Helper to read a VInt from a byte slice reader.
-    fn read_vint<A: Allocator>(reader: &mut ByteSliceReader<'_, A>) -> i32 {
+    fn read_vint(reader: &mut ByteSliceReader<'_>) -> i32 {
         store::read_vint(reader).unwrap()
     }
 

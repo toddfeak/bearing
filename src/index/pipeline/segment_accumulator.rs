@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::mem;
 
-use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
+use crate::util::byte_block_pool::ByteBlockPool;
 
 /// Shared state accumulated across all documents in a segment.
 ///
@@ -28,7 +28,7 @@ use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
 pub struct SegmentAccumulator {
     /// Shared term text byte pool. Postings interns term bytes here;
     /// term vectors references them by offset. Matches Java's `termBytePool`.
-    term_byte_pool: ByteBlockPool<DirectAllocator>,
+    term_byte_pool: ByteBlockPool,
     /// Per-token hint from postings to term vectors: the byte pool offset
     /// and term bytes of the most recently interned term.
     text_start_hint: Option<i32>,
@@ -56,8 +56,7 @@ pub struct PerFieldNormsData {
 impl SegmentAccumulator {
     /// Creates an empty accumulator with an initialized term byte pool.
     pub fn new() -> Self {
-        let mut term_byte_pool = ByteBlockPool::new(DirectAllocator);
-        term_byte_pool.next_buffer();
+        let term_byte_pool = ByteBlockPool::new(32 * 1024);
         Self {
             term_byte_pool,
             text_start_hint: None,
@@ -69,14 +68,14 @@ impl SegmentAccumulator {
     /// Returns a reference to the shared term byte pool.
     ///
     /// Used at flush time to read term text for sorted output.
-    pub fn term_byte_pool(&self) -> &ByteBlockPool<DirectAllocator> {
+    pub fn term_byte_pool(&self) -> &ByteBlockPool {
         &self.term_byte_pool
     }
 
     /// Returns a mutable reference to the shared term byte pool.
     ///
     /// Used by the postings consumer to intern term bytes during `add_token`.
-    pub fn term_byte_pool_mut(&mut self) -> &mut ByteBlockPool<DirectAllocator> {
+    pub fn term_byte_pool_mut(&mut self) -> &mut ByteBlockPool {
         &mut self.term_byte_pool
     }
 
@@ -155,7 +154,7 @@ impl Default for SegmentAccumulator {
 impl fmt::Debug for SegmentAccumulator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SegmentAccumulator")
-            .field("term_byte_pool_buffers", &self.term_byte_pool.buffers.len())
+            .field("term_byte_pool_len", &self.term_byte_pool.data.len())
             .field("text_start_hint", &self.text_start_hint)
             .field("norms_fields", &self.norms.len())
             .field("doc_count", &self.doc_count)
@@ -184,7 +183,7 @@ mod tests {
     #[test]
     fn mem_size_empty_includes_pool() {
         let acc = SegmentAccumulator::new();
-        // Pool has one 32KB buffer allocated
+        // Pool pre-allocates 32KB capacity
         assert_gt!(acc.mem_size(SizeFlags::CAPACITY), 30_000);
     }
 
@@ -247,6 +246,6 @@ mod tests {
     fn term_byte_pool_accessible() {
         let acc = SegmentAccumulator::new();
         let pool = acc.term_byte_pool();
-        assert_eq!(pool.buffers.len(), 1);
+        assert_eq!(pool.data.len(), 0);
     }
 }

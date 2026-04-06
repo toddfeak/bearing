@@ -511,7 +511,7 @@ mod tests {
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::memory::MemoryDirectory;
     use crate::store::{Directory, SharedDirectory};
-    use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
+    use crate::util::byte_block_pool::ByteBlockPool;
 
     fn make_field_info(name: &str, number: u32) -> FieldInfo {
         FieldInfo::new(
@@ -527,14 +527,13 @@ mod tests {
 
     struct TestTerms {
         writer: FreqProxTermsWriterPerField,
-        term_pool: ByteBlockPool<DirectAllocator>,
+        term_pool: ByteBlockPool,
         terms_hash: TermsHash,
     }
 
     impl TestTerms {
         fn new(field_name: &str) -> Self {
-            let mut term_pool = ByteBlockPool::new(DirectAllocator);
-            term_pool.next_buffer();
+            let term_pool = ByteBlockPool::new(32 * 1024);
             Self {
                 writer: FreqProxTermsWriterPerField::new(
                     field_name.to_string(),

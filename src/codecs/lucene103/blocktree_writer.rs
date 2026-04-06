@@ -20,7 +20,7 @@ use crate::index::index_file_names::segment_file_name;
 use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::BytesRef;
-use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
+use crate::util::byte_block_pool::ByteBlockPool;
 
 use super::postings_writer::PostingsWriter;
 
@@ -146,7 +146,7 @@ impl BlockTreeTermsWriter {
         &mut self,
         field_ctx: &FieldWriteContext,
         per_field: &FreqProxTermsWriterPerField,
-        term_byte_pool: &ByteBlockPool<DirectAllocator>,
+        term_byte_pool: &ByteBlockPool,
         terms_hash: &TermsHash,
         norms: &NormsLookup,
     ) -> io::Result<()> {
@@ -1285,7 +1285,7 @@ mod tests {
     use crate::document::IndexOptions;
     use crate::store::memory::MemoryIndexOutput;
     use crate::store::{MemoryDirectory, SharedDirectory};
-    use crate::util::byte_block_pool::{ByteBlockPool, DirectAllocator};
+    use crate::util::byte_block_pool::ByteBlockPool;
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
@@ -1298,7 +1298,7 @@ mod tests {
     /// FreqProxTermsWriterPerField uses a shared last_doc_id assertion.
     struct TestTerms {
         writer: FreqProxTermsWriterPerField,
-        term_pool: ByteBlockPool<DirectAllocator>,
+        term_pool: ByteBlockPool,
         terms_hash: TermsHash,
     }
 
@@ -1309,8 +1309,7 @@ mod tests {
             } else {
                 IndexOptions::DocsAndFreqs
             };
-            let mut term_pool = ByteBlockPool::new(DirectAllocator);
-            term_pool.next_buffer();
+            let term_pool = ByteBlockPool::new(32 * 1024);
             Self {
                 writer: FreqProxTermsWriterPerField::new("test".to_string(), opts),
                 term_pool,

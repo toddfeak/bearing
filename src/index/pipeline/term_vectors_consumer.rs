@@ -347,7 +347,7 @@ mod tests {
     fn mem_size_empty_is_small() {
         use mem_dbg::{MemSize, SizeFlags};
         let consumer = TermVectorsConsumer::new();
-        assert_lt!(consumer.mem_size(SizeFlags::CAPACITY), 34_000);
+        assert_lt!(consumer.mem_size(SizeFlags::CAPACITY), 68_000);
     }
 
     #[test]
