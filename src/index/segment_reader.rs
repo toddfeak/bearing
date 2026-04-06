@@ -291,7 +291,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::codecs::lucene103::postings_reader::BlockPostingsEnum;
+    use crate::codecs::lucene103::postings_reader::{BlockPostingsEnum, IndexFeatures};
     use crate::document::{DocumentBuilder, IndexOptions};
     use crate::index::config::IndexWriterConfig;
     use crate::index::field::{string, text};
@@ -410,18 +410,14 @@ mod tests {
             return Ok(None);
         }
         let state = terms_enum.term_state()?;
-        let index_has_freq = field_info.index_options().has_freqs();
-        let index_has_pos = field_info.index_options().has_positions();
         let index_has_offsets =
             field_info.index_options() >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
-        let index_has_offsets_or_payloads = index_has_offsets || field_info.has_payloads();
-        let iter = postings_reader.postings(
-            &state,
-            index_has_freq,
-            index_has_pos,
-            index_has_offsets_or_payloads,
-            false,
-        )?;
+        let index_features = IndexFeatures {
+            has_freq: field_info.index_options().has_freqs(),
+            has_pos: field_info.index_options().has_positions(),
+            has_offsets_or_payloads: index_has_offsets || field_info.has_payloads(),
+        };
+        let iter = postings_reader.postings(&state, index_features, false)?;
         Ok(Some(iter))
     }
 

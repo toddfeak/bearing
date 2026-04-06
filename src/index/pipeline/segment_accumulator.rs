@@ -181,19 +181,22 @@ mod tests {
     use mem_dbg::{MemSize, SizeFlags};
 
     #[test]
-    fn mem_size_empty_includes_pool() {
+    fn mem_size_empty_is_small() {
         let acc = SegmentAccumulator::new();
-        // Pool pre-allocates 32KB capacity
-        assert_gt!(acc.mem_size(SizeFlags::CAPACITY), 30_000);
+        // Empty pool has no used bytes — only struct overhead
+        let size = acc.mem_size(SizeFlags::default());
+        assert_gt!(size, 0);
+        assert_lt!(size, 1_000);
     }
 
     #[test]
     fn mem_size_grows_with_norms() {
         let mut acc = SegmentAccumulator::new();
+        let before = acc.mem_size(SizeFlags::default());
         for doc_id in 0..100 {
             acc.record_norm(0, "body", doc_id, 42);
         }
-        assert_gt!(acc.mem_size(SizeFlags::CAPACITY), 0);
+        assert_gt!(acc.mem_size(SizeFlags::default()), before);
     }
 
     #[test]

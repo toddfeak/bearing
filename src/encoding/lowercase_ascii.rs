@@ -34,9 +34,8 @@ pub fn compress(input: &[u8], len: usize) -> Option<Vec<u8>> {
     let max_exceptions = len >> 5;
     let mut previous_exception_index: usize = 0;
     let mut num_exceptions: usize = 0;
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..len {
-        if !is_compressible(input[i]) {
+    for (i, &byte) in input[..len].iter().enumerate() {
+        if !is_compressible(byte) {
             while i - previous_exception_index > 0xFF {
                 num_exceptions += 1;
                 previous_exception_index += 0xFF;

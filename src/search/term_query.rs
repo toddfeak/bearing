@@ -6,7 +6,7 @@ use std::fmt;
 use std::io;
 use std::slice;
 
-use crate::codecs::lucene103::postings_reader::BlockPostingsEnum;
+use crate::codecs::lucene103::postings_reader::{BlockPostingsEnum, IndexFeatures};
 use crate::document::IndexOptions;
 use crate::index::directory_reader::LeafReaderContext;
 use crate::index::numeric_doc_values::NumericDocValues;
@@ -172,28 +172,18 @@ impl Weight for TermWeight {
             None => return Ok(None),
         };
 
-        let index_has_freq = field_info.index_options().has_freqs();
-        let index_has_pos = field_info.index_options().has_positions();
         let index_has_offsets =
             field_info.index_options() >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
-        let index_has_offsets_or_payloads = index_has_offsets || field_info.has_payloads();
+        let index_features = IndexFeatures {
+            has_freq: field_info.index_options().has_freqs(),
+            has_pos: field_info.index_options().has_positions(),
+            has_offsets_or_payloads: index_has_offsets || field_info.has_payloads(),
+        };
         let needs_freq = self.score_mode.needs_scores();
         let postings_enum = if self.score_mode == ScoreMode::TopScores {
-            postings_reader.impacts(
-                &state,
-                index_has_freq,
-                index_has_pos,
-                index_has_offsets_or_payloads,
-                needs_freq,
-            )?
+            postings_reader.impacts(&state, index_features, needs_freq)?
         } else {
-            postings_reader.postings(
-                &state,
-                index_has_freq,
-                index_has_pos,
-                index_has_offsets_or_payloads,
-                needs_freq,
-            )?
+            postings_reader.postings(&state, index_features, needs_freq)?
         };
 
         // Java: norms = context.reader().getNormValues(term.field())

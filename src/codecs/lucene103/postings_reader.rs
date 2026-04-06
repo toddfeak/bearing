@@ -34,6 +34,26 @@ const DUMMY_IMPACTS: [Impact; 1] = [Impact {
 /// Impacts when there is no frequency: max frequency is 1.
 const IMPACTS_NO_FREQ: [Impact; 1] = [Impact { freq: 1, norm: 1 }];
 
+/// Impact statistics read from the `.psm` metadata file.
+#[derive(Debug, Clone, Copy)]
+pub struct ImpactStats {
+    max_num_impacts_at_level0: i32,
+    max_impact_num_bytes_at_level0: i32,
+    max_num_impacts_at_level1: i32,
+    max_impact_num_bytes_at_level1: i32,
+}
+
+/// Per-field index feature flags passed to [`BlockPostingsEnum`].
+#[derive(Debug, Clone, Copy)]
+pub struct IndexFeatures {
+    /// Whether the field indexes term frequencies.
+    pub has_freq: bool,
+    /// Whether the field indexes positions.
+    pub has_pos: bool,
+    /// Whether the field indexes offsets or payloads.
+    pub has_offsets_or_payloads: bool,
+}
+
 /// Reads postings metadata for a segment and provides access to doc ID iteration.
 ///
 /// Opens `.psm`, `.doc`, and `.pos` files during construction. Only the `.psm`
@@ -42,14 +62,8 @@ const IMPACTS_NO_FREQ: [Impact; 1] = [Impact { freq: 1, norm: 1 }];
 pub struct PostingsReader {
     /// Open handle to the `.doc` file for reading posting lists.
     doc_in: Box<dyn IndexInput>,
-    /// Maximum number of competitive impacts at skip level 0.
-    max_num_impacts_at_level0: i32,
-    /// Maximum bytes for encoded impacts at skip level 0.
-    max_impact_num_bytes_at_level0: i32,
-    /// Maximum number of competitive impacts at skip level 1.
-    max_num_impacts_at_level1: i32,
-    /// Maximum bytes for encoded impacts at skip level 1.
-    max_impact_num_bytes_at_level1: i32,
+    /// Impact statistics from the `.psm` metadata file.
+    impact_stats: ImpactStats,
 }
 
 impl PostingsReader {
@@ -118,6 +132,13 @@ impl PostingsReader {
             )?;
         }
 
+        let impact_stats = ImpactStats {
+            max_num_impacts_at_level0,
+            max_impact_num_bytes_at_level0,
+            max_num_impacts_at_level1,
+            max_impact_num_bytes_at_level1,
+        };
+
         debug!(
             "postings_reader: opened for segment {segment_name}, \
              impacts=[{max_num_impacts_at_level0}, {max_impact_num_bytes_at_level0}, \
@@ -126,31 +147,13 @@ impl PostingsReader {
 
         Ok(Self {
             doc_in,
-            max_num_impacts_at_level0,
-            max_impact_num_bytes_at_level0,
-            max_num_impacts_at_level1,
-            max_impact_num_bytes_at_level1,
+            impact_stats,
         })
     }
 
-    /// Returns the maximum number of competitive impacts at skip level 0.
-    pub fn max_num_impacts_at_level0(&self) -> i32 {
-        self.max_num_impacts_at_level0
-    }
-
-    /// Returns the maximum impact byte size at skip level 0.
-    pub fn max_impact_num_bytes_at_level0(&self) -> i32 {
-        self.max_impact_num_bytes_at_level0
-    }
-
-    /// Returns the maximum number of competitive impacts at skip level 1.
-    pub fn max_num_impacts_at_level1(&self) -> i32 {
-        self.max_num_impacts_at_level1
-    }
-
-    /// Returns the maximum impact byte size at skip level 1.
-    pub fn max_impact_num_bytes_at_level1(&self) -> i32 {
-        self.max_impact_num_bytes_at_level1
+    /// Returns the impact statistics read from segment metadata.
+    pub fn impact_stats(&self) -> &ImpactStats {
+        &self.impact_stats
     }
 
     /// Creates a [`BlockPostingsEnum`] for the given term state, matching Java's `postings()`.
@@ -159,23 +162,16 @@ impl PostingsReader {
     pub fn postings(
         &self,
         term_state: &postings_format::IntBlockTermState,
-        index_has_freq: bool,
-        index_has_pos: bool,
-        index_has_offsets_or_payloads: bool,
+        index_features: IndexFeatures,
         needs_freq: bool,
     ) -> io::Result<BlockPostingsEnum> {
         BlockPostingsEnum::new(
             &*self.doc_in,
             term_state,
-            index_has_freq,
-            index_has_pos,
-            index_has_offsets_or_payloads,
+            index_features,
             needs_freq,
-            false, // needsImpacts
-            self.max_num_impacts_at_level0,
-            self.max_impact_num_bytes_at_level0,
-            self.max_num_impacts_at_level1,
-            self.max_impact_num_bytes_at_level1,
+            false,
+            &self.impact_stats,
         )
     }
 
@@ -183,23 +179,16 @@ impl PostingsReader {
     pub fn impacts(
         &self,
         term_state: &postings_format::IntBlockTermState,
-        index_has_freq: bool,
-        index_has_pos: bool,
-        index_has_offsets_or_payloads: bool,
+        index_features: IndexFeatures,
         needs_freq: bool,
     ) -> io::Result<BlockPostingsEnum> {
         BlockPostingsEnum::new(
             &*self.doc_in,
             term_state,
-            index_has_freq,
-            index_has_pos,
-            index_has_offsets_or_payloads,
+            index_features,
             needs_freq,
-            true, // needsImpacts
-            self.max_num_impacts_at_level0,
-            self.max_impact_num_bytes_at_level0,
-            self.max_num_impacts_at_level1,
-            self.max_impact_num_bytes_at_level1,
+            true,
+            &self.impact_stats,
         )
     }
 }
@@ -325,19 +314,13 @@ pub struct BlockPostingsEnum {
 
 impl BlockPostingsEnum {
     /// Creates a new `BlockPostingsEnum` and resets it for the given term state.
-    #[allow(clippy::too_many_arguments)]
     fn new(
         doc_in: &dyn IndexInput,
         term_state: &postings_format::IntBlockTermState,
-        index_has_freq: bool,
-        index_has_pos: bool,
-        index_has_offsets_or_payloads: bool,
+        index_features: IndexFeatures,
         needs_freq: bool,
         needs_impacts: bool,
-        max_num_impacts_at_level0: i32,
-        max_impact_num_bytes_at_level0: i32,
-        max_num_impacts_at_level1: i32,
-        max_impact_num_bytes_at_level1: i32,
+        impact_stats: &ImpactStats,
     ) -> io::Result<Self> {
         let needs_docs_and_freqs_only = !needs_impacts;
 
@@ -348,8 +331,13 @@ impl BlockPostingsEnum {
 
         let (level0_serialized_impacts, level0_impacts) = if needs_freq && needs_impacts {
             (
-                Some(vec![0u8; max_impact_num_bytes_at_level0 as usize]),
-                Some(MutableImpactList::new(max_num_impacts_at_level0)),
+                Some(vec![
+                    0u8;
+                    impact_stats.max_impact_num_bytes_at_level0 as usize
+                ]),
+                Some(MutableImpactList::new(
+                    impact_stats.max_num_impacts_at_level0,
+                )),
             )
         } else {
             (None, None)
@@ -357,8 +345,13 @@ impl BlockPostingsEnum {
 
         let (level1_serialized_impacts, level1_impacts) = if needs_freq && needs_impacts {
             (
-                Some(vec![0u8; max_impact_num_bytes_at_level1 as usize]),
-                Some(MutableImpactList::new(max_num_impacts_at_level1)),
+                Some(vec![
+                    0u8;
+                    impact_stats.max_impact_num_bytes_at_level1 as usize
+                ]),
+                Some(MutableImpactList::new(
+                    impact_stats.max_num_impacts_at_level1,
+                )),
             )
         } else {
             (None, None)
@@ -385,9 +378,9 @@ impl BlockPostingsEnum {
             doc_in: doc_in.slice("BlockPostingsEnum", 0, doc_in.length())?,
             freq_buffer,
             freq_fp: -1,
-            index_has_freq,
-            index_has_pos,
-            index_has_offsets_or_payloads,
+            index_has_freq: index_features.has_freq,
+            index_has_pos: index_features.has_pos,
+            index_has_offsets_or_payloads: index_features.has_offsets_or_payloads,
             needs_freq,
             needs_impacts,
             needs_docs_and_freqs_only,
@@ -1080,6 +1073,18 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
+    const NO_FEATURES: IndexFeatures = IndexFeatures {
+        has_freq: false,
+        has_pos: false,
+        has_offsets_or_payloads: false,
+    };
+
+    const FREQ_FEATURES: IndexFeatures = IndexFeatures {
+        has_freq: true,
+        has_pos: false,
+        has_offsets_or_payloads: false,
+    };
+
     /// Write postings for a single DOCS-only term and return the term state + directory.
     fn write_single_term(
         doc_ids: &[i32],
@@ -1187,10 +1192,11 @@ mod tests {
         let reader =
             PostingsReader::open(&**dir, &seg.name, &suffix, &seg.id, &field_infos).unwrap();
 
-        assert_ge!(reader.max_num_impacts_at_level0(), 0);
-        assert_ge!(reader.max_impact_num_bytes_at_level0(), 0);
-        assert_ge!(reader.max_num_impacts_at_level1(), 0);
-        assert_ge!(reader.max_impact_num_bytes_at_level1(), 0);
+        let stats = reader.impact_stats();
+        assert_ge!(stats.max_num_impacts_at_level0, 0);
+        assert_ge!(stats.max_impact_num_bytes_at_level0, 0);
+        assert_ge!(stats.max_num_impacts_at_level1, 0);
+        assert_ge!(stats.max_impact_num_bytes_at_level1, 0);
     }
 
     #[test]
@@ -1200,7 +1206,7 @@ mod tests {
         assert_eq!(state.singleton_doc_id, 42);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, vec![42]);
     }
@@ -1213,7 +1219,7 @@ mod tests {
         assert_eq!(state.singleton_doc_id, -1);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1225,7 +1231,7 @@ mod tests {
         assert_eq!(state.doc_freq, 7);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1238,7 +1244,7 @@ mod tests {
         assert_eq!(state.doc_freq, 128);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1251,7 +1257,7 @@ mod tests {
         assert_eq!(state.doc_freq, 200);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1264,7 +1270,7 @@ mod tests {
         assert_eq!(state.doc_freq, 300);
 
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1273,7 +1279,7 @@ mod tests {
     fn test_exhausted_returns_no_more_docs() {
         let (state, dir) = write_single_term(&[7]).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.next_doc().unwrap(), 7);
         assert_eq!(iter.next_doc().unwrap(), NO_MORE_DOCS);
@@ -1284,7 +1290,7 @@ mod tests {
     fn test_advance_singleton() {
         let (state, dir) = write_single_term(&[42]).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(42).unwrap(), 42);
         assert_eq!(iter.next_doc().unwrap(), NO_MORE_DOCS);
@@ -1294,7 +1300,7 @@ mod tests {
     fn test_advance_past_end() {
         let (state, dir) = write_single_term(&[42]).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(100).unwrap(), NO_MORE_DOCS);
     }
@@ -1304,7 +1310,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..10).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(5).unwrap(), 5);
         assert_eq!(iter.next_doc().unwrap(), 6);
@@ -1317,7 +1323,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..128).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(64).unwrap(), 64);
         assert_eq!(iter.advance(127).unwrap(), 127);
@@ -1329,7 +1335,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..300).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         // Advance into second block
         assert_eq!(iter.advance(200).unwrap(), 200);
@@ -1343,7 +1349,7 @@ mod tests {
         let doc_ids = vec![0, 100, 200, 300, 400, 500, 600, 700, 800, 900];
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(250).unwrap(), 300);
         assert_eq!(iter.advance(600).unwrap(), 600);
@@ -1355,7 +1361,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..50).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let iter = reader.postings(&state, false, false, false, false).unwrap();
+        let iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         assert_eq!(iter.cost(), 50);
     }
 
@@ -1409,7 +1415,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..2000).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(1500).unwrap(), 1500);
         assert_eq!(iter.next_doc().unwrap(), 1501);
@@ -1423,7 +1429,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..300).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.impacts(&state, false, false, false, false).unwrap();
+        let mut iter = reader.impacts(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1434,7 +1440,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..500).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, false, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
     }
@@ -1449,7 +1455,7 @@ mod tests {
         let (state, dir) =
             write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, true, false, false, true).unwrap();
+        let mut iter = reader.postings(&state, FREQ_FEATURES, true).unwrap();
 
         // Advance to doc 100, which is bit index 100 in the UNARY block (word_index=1,
         // bit offset 36). This is fine.
@@ -1469,7 +1475,7 @@ mod tests {
         let (state, dir) =
             write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, true, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, FREQ_FEATURES, false).unwrap();
 
         assert_eq!(iter.next_doc().unwrap(), 0);
         // Each doc has freq=1 since write_single_term uses freq=1
@@ -1485,7 +1491,7 @@ mod tests {
         let (state, dir) =
             write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
         let reader = open_reader(dir.as_ref()).unwrap();
-        let mut iter = reader.postings(&state, true, false, false, false).unwrap();
+        let mut iter = reader.postings(&state, FREQ_FEATURES, false).unwrap();
 
         // Read into the packed block
         for expected in 0..128 {

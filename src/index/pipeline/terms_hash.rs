@@ -605,20 +605,17 @@ impl FreqProxTermsWriterPerField {
 
     /// Convenience: sets position/offset state and calls `add()`.
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_at(
         &mut self,
         term_byte_pool: &mut ByteBlockPool,
         terms_hash: &mut TermsHash,
         term_bytes: &[u8],
         doc_id: i32,
-        position: i32,
-        start_offset: i32,
-        offset_length: u16,
+        pos: TermPosition,
     ) -> io::Result<usize> {
-        self.current_position = position;
-        self.current_start_offset = start_offset;
-        self.current_offset_length = offset_length;
+        self.current_position = pos.position;
+        self.current_start_offset = pos.start_offset;
+        self.current_offset_length = pos.offset_length;
         self.add(term_byte_pool, terms_hash, term_bytes, doc_id)
     }
 
@@ -921,6 +918,25 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
     }
 }
 
+/// Position, start offset, and offset length for a term occurrence.
+#[cfg(test)]
+pub(crate) struct TermPosition {
+    position: i32,
+    start_offset: i32,
+    offset_length: u16,
+}
+
+#[cfg(test)]
+impl TermPosition {
+    fn new(position: i32, start_offset: i32, offset_length: u16) -> Self {
+        Self {
+            position,
+            start_offset,
+            offset_length,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,7 +961,13 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
 
         assert_eq!(field.num_terms(), 1);
@@ -962,10 +984,22 @@ mod tests {
         );
 
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 1, 6, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(1, 6, 5),
+            )
             .unwrap();
 
         assert_eq!(field.num_terms(), 1);
@@ -981,13 +1015,31 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"world", 0, 1, 6, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"world",
+                0,
+                TermPosition::new(1, 6, 5),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 2, 12, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(2, 12, 5),
+            )
             .unwrap();
 
         assert_eq!(field.num_terms(), 2);
@@ -1011,15 +1063,33 @@ mod tests {
 
         // Doc 0: "hello world"
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"world", 0, 1, 6, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"world",
+                0,
+                TermPosition::new(1, 6, 5),
+            )
             .unwrap();
 
         // Doc 1: "hello"
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 1, 0, 0, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                1,
+                TermPosition::new(0, 0, 5),
+            )
             .unwrap();
 
         assert_eq!(field.num_terms(), 2);
@@ -1045,13 +1115,31 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"cherry", 0, 0, 0, 6u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"cherry",
+                0,
+                TermPosition::new(0, 0, 6u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"apple", 0, 1, 7, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"apple",
+                0,
+                TermPosition::new(1, 7, 5),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"banana", 0, 2, 13, 6)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"banana",
+                0,
+                TermPosition::new(2, 13, 6),
+            )
             .unwrap();
 
         field.sort_terms(&term_pool);
@@ -1070,13 +1158,31 @@ mod tests {
         let mut field = FreqProxTermsWriterPerField::new("tags".to_string(), IndexOptions::Docs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"tag1", 0, 0, 0, 4u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"tag1",
+                0,
+                TermPosition::new(0, 0, 4u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"tag1", 1, 0, 0, 4u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"tag1",
+                1,
+                TermPosition::new(0, 0, 4u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"tag1", 2, 0, 0, 4u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"tag1",
+                2,
+                TermPosition::new(0, 0, 4u16),
+            )
             .unwrap();
 
         assert_eq!(field.num_terms(), 1);
@@ -1106,16 +1212,40 @@ mod tests {
 
         // "hello" appears at positions 0 and 3 in doc 0
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"other", 0, 1, 6, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"other",
+                0,
+                TermPosition::new(1, 6, 5),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"stuff", 0, 2, 12, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"stuff",
+                0,
+                TermPosition::new(2, 12, 5),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 3, 18, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(3, 18, 5),
+            )
             .unwrap();
 
         let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
@@ -1142,26 +1272,62 @@ mod tests {
 
         // Doc 0: "hello" x3
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 1, 6, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(1, 6, 5),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 2, 12, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(2, 12, 5),
+            )
             .unwrap();
 
         // Doc 1: "hello" x1
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 1, 0, 0, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                1,
+                TermPosition::new(0, 0, 5),
+            )
             .unwrap();
 
         // Doc 2: "hello" x2
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 2, 0, 0, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                2,
+                TermPosition::new(0, 0, 5),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 2, 1, 6, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                2,
+                TermPosition::new(1, 6, 5),
+            )
             .unwrap();
 
         let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;
@@ -1190,16 +1356,22 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 0, 0, 1u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"a",
+                0,
+                TermPosition::new(0, 0, 1u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"b", 0, 1, 2, 1)
+            .add_at(&mut term_pool, &mut th, b"b", 0, TermPosition::new(1, 2, 1))
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 2, 4, 1)
+            .add_at(&mut term_pool, &mut th, b"a", 0, TermPosition::new(2, 4, 1))
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 3, 6, 1)
+            .add_at(&mut term_pool, &mut th, b"a", 0, TermPosition::new(3, 6, 1))
             .unwrap();
 
         assert_eq!(field.max_term_frequency, 3); // "a" appeared 3 times
@@ -1213,13 +1385,19 @@ mod tests {
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
 
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 0, 0, 1u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"a",
+                0,
+                TermPosition::new(0, 0, 1u16),
+            )
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"b", 0, 1, 2, 1)
+            .add_at(&mut term_pool, &mut th, b"b", 0, TermPosition::new(1, 2, 1))
             .unwrap();
         field
-            .add_at(&mut term_pool, &mut th, b"a", 0, 2, 4, 1)
+            .add_at(&mut term_pool, &mut th, b"a", 0, TermPosition::new(2, 4, 1))
             .unwrap();
 
         assert_eq!(field.unique_term_count, 2);
@@ -1240,7 +1418,13 @@ mod tests {
         let mut field =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
 
         th.reset();
@@ -1248,7 +1432,13 @@ mod tests {
         let mut field2 =
             FreqProxTermsWriterPerField::new("body".to_string(), IndexOptions::DocsAndFreqs);
         field2
-            .add_at(&mut term_pool, &mut th, b"world", 0, 0, 0, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"world",
+                0,
+                TermPosition::new(0, 0, 5),
+            )
             .unwrap();
         assert_eq!(field2.num_terms(), 1);
     }
@@ -1305,11 +1495,23 @@ mod tests {
 
         // "hello" at position 0 with offsets [0, 5)
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
         // "hello" at position 3 with offsets [18, 23)
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 3, 18, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(3, 18, 5),
+            )
             .unwrap();
 
         assert_eq!(field.num_terms(), 1);
@@ -1351,11 +1553,23 @@ mod tests {
 
         // Doc 0: "hello" at pos 0, offsets [0, 5)
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 0, 0, 0, 5u16)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                0,
+                TermPosition::new(0, 0, 5u16),
+            )
             .unwrap();
         // Doc 1: "hello" at pos 0, offsets [0, 5) — offsets reset per new doc
         field
-            .add_at(&mut term_pool, &mut th, b"hello", 1, 0, 0, 5)
+            .add_at(
+                &mut term_pool,
+                &mut th,
+                b"hello",
+                1,
+                TermPosition::new(0, 0, 5),
+            )
             .unwrap();
 
         let hello_id = field.base.bytes_hash.find(&term_pool, b"hello") as usize;

@@ -722,20 +722,19 @@ fn pack_index(
     let mut last_split_values = vec![0u8; bytes_per_dim * num_index_dims];
     let mut negative_deltas = vec![false; num_index_dims];
 
-    let total_size = recurse_pack_index(
-        &mut write_buffer,
-        leaf_block_fps,
-        0,
-        &mut blocks,
-        &mut last_split_values,
-        &mut negative_deltas,
-        false,
-        0,
-        num_leaves,
+    let params = BkdIndexParams {
         split_packed_values,
         bytes_per_dim,
         num_index_dims,
-    );
+    };
+    let mut pack_state = BkdPackState {
+        write_buffer: &mut write_buffer,
+        leaf_block_fps,
+        blocks: &mut blocks,
+        last_split_values: &mut last_split_values,
+        negative_deltas: &mut negative_deltas,
+    };
+    let total_size = recurse_pack_index(&mut pack_state, 0, false, 0, num_leaves, &params);
 
     // Compact blocks into single byte array
     let mut index = Vec::with_capacity(total_size);
@@ -747,45 +746,58 @@ fn pack_index(
     index
 }
 
+/// Immutable parameters for BKD tree index packing.
+struct BkdIndexParams<'a> {
+    split_packed_values: &'a [u8],
+    bytes_per_dim: usize,
+    num_index_dims: usize,
+}
+
+/// Mutable state threaded through the recursive BKD index packing.
+struct BkdPackState<'a> {
+    write_buffer: &'a mut Vec<u8>,
+    leaf_block_fps: &'a [u64],
+    blocks: &'a mut Vec<Vec<u8>>,
+    last_split_values: &'a mut [u8],
+    negative_deltas: &'a mut [bool],
+}
+
 /// Recursively encodes the BKD tree index using prefix-coded split values.
 ///
 /// lastSplitValues is per-dimension split value previously seen; we use this to
 /// prefix-code the split byte[] on each inner node.
-#[allow(clippy::too_many_arguments)]
 fn recurse_pack_index(
-    write_buffer: &mut Vec<u8>,
-    leaf_block_fps: &[u64],
+    state: &mut BkdPackState,
     min_block_fp: u64,
-    blocks: &mut Vec<Vec<u8>>,
-    last_split_values: &mut [u8],
-    negative_deltas: &mut [bool],
     is_left: bool,
     leaves_offset: usize,
     num_leaves: usize,
-    split_packed_values: &[u8],
-    bytes_per_dim: usize,
-    num_index_dims: usize,
+    params: &BkdIndexParams,
 ) -> usize {
     if num_leaves == 1 {
         if is_left {
-            debug_assert_eq!(leaf_block_fps[leaves_offset] - min_block_fp, 0);
+            debug_assert_eq!(state.leaf_block_fps[leaves_offset] - min_block_fp, 0);
             return 0;
         } else {
-            let delta = leaf_block_fps[leaves_offset] - min_block_fp;
-            VecOutput(write_buffer).write_vlong(delta as i64).unwrap();
-            return append_block(write_buffer, blocks);
+            let delta = state.leaf_block_fps[leaves_offset] - min_block_fp;
+            VecOutput(state.write_buffer)
+                .write_vlong(delta as i64)
+                .unwrap();
+            return append_block(state.write_buffer, state.blocks);
         }
     }
 
     // Inner node
     let left_block_fp;
     if is_left {
-        debug_assert_eq!(leaf_block_fps[leaves_offset], min_block_fp);
+        debug_assert_eq!(state.leaf_block_fps[leaves_offset], min_block_fp);
         left_block_fp = min_block_fp;
     } else {
-        left_block_fp = leaf_block_fps[leaves_offset];
+        left_block_fp = state.leaf_block_fps[leaves_offset];
         let delta = left_block_fp - min_block_fp;
-        VecOutput(write_buffer).write_vlong(delta as i64).unwrap();
+        VecOutput(state.write_buffer)
+            .write_vlong(delta as i64)
+            .unwrap();
     }
 
     let num_left_leaf_nodes = get_num_left_leaf_nodes(num_leaves);
@@ -793,21 +805,21 @@ fn recurse_pack_index(
     let split_offset = right_offset - 1;
 
     let split_dim = 0; // Always 0 for 1D
-    let address = split_offset * bytes_per_dim;
-    let split_value = &split_packed_values[address..address + bytes_per_dim];
+    let address = split_offset * params.bytes_per_dim;
+    let split_value = &params.split_packed_values[address..address + params.bytes_per_dim];
 
     // Find common prefix with last split value in this dim
-    let last_value_start = split_dim * bytes_per_dim;
+    let last_value_start = split_dim * params.bytes_per_dim;
     let prefix = common_prefix_length(
         split_value,
-        &last_split_values[last_value_start..last_value_start + bytes_per_dim],
+        &state.last_split_values[last_value_start..last_value_start + params.bytes_per_dim],
     );
 
     let first_diff_byte_delta;
-    if prefix < bytes_per_dim {
-        let mut delta =
-            (split_value[prefix] as i32) - (last_split_values[last_value_start + prefix] as i32);
-        if negative_deltas[split_dim] {
+    if prefix < params.bytes_per_dim {
+        let mut delta = (split_value[prefix] as i32)
+            - (state.last_split_values[last_value_start + prefix] as i32);
+        if state.negative_deltas[split_dim] {
             delta = -delta;
         }
         debug_assert!(delta > 0);
@@ -817,84 +829,75 @@ fn recurse_pack_index(
     }
 
     // Pack prefix, splitDim and firstDiffByteDelta into a single VInt
-    let code = (first_diff_byte_delta * (1 + bytes_per_dim as i32) + prefix as i32)
-        * num_index_dims as i32
+    let code = (first_diff_byte_delta * (1 + params.bytes_per_dim as i32) + prefix as i32)
+        * params.num_index_dims as i32
         + split_dim as i32;
-    VecOutput(write_buffer).write_vint(code).unwrap();
+    VecOutput(state.write_buffer).write_vint(code).unwrap();
 
     // Write suffix bytes (prefix-coded, skipping first diff byte which is in code)
-    let suffix = bytes_per_dim - prefix;
+    let suffix = params.bytes_per_dim - prefix;
     if suffix > 1 {
-        write_buffer.extend_from_slice(&split_value[prefix + 1..prefix + suffix]);
+        state
+            .write_buffer
+            .extend_from_slice(&split_value[prefix + 1..prefix + suffix]);
     }
 
     // Save split value suffix for restoration after recursion
-    let sav_split_value =
-        last_split_values[last_value_start + prefix..last_value_start + prefix + suffix].to_vec();
+    let sav_split_value = state.last_split_values
+        [last_value_start + prefix..last_value_start + prefix + suffix]
+        .to_vec();
 
     // Copy our split value into last_split_values for children to prefix-code against
-    last_split_values[last_value_start + prefix..last_value_start + prefix + suffix]
+    state.last_split_values[last_value_start + prefix..last_value_start + prefix + suffix]
         .copy_from_slice(&split_value[prefix..prefix + suffix]);
 
-    let num_bytes = append_block(write_buffer, blocks);
+    let num_bytes = append_block(state.write_buffer, state.blocks);
 
     // Placeholder for left-tree numBytes
-    let idx_sav = blocks.len();
-    blocks.push(Vec::new());
+    let idx_sav = state.blocks.len();
+    state.blocks.push(Vec::new());
 
-    let sav_negative_delta = negative_deltas[split_dim];
-    negative_deltas[split_dim] = true;
+    let sav_negative_delta = state.negative_deltas[split_dim];
+    state.negative_deltas[split_dim] = true;
 
     let left_num_bytes = recurse_pack_index(
-        write_buffer,
-        leaf_block_fps,
+        state,
         left_block_fp,
-        blocks,
-        last_split_values,
-        negative_deltas,
         true,
         leaves_offset,
         num_left_leaf_nodes,
-        split_packed_values,
-        bytes_per_dim,
-        num_index_dims,
+        params,
     );
 
     // Write left subtree size (only if left child is not a single leaf)
     if num_left_leaf_nodes != 1 {
-        VecOutput(write_buffer)
+        VecOutput(state.write_buffer)
             .write_vint(left_num_bytes as i32)
             .unwrap();
     } else {
         debug_assert_eq!(left_num_bytes, 0);
     }
 
-    let bytes2 = mem::take(write_buffer);
-    blocks[idx_sav] = bytes2;
+    let bytes2 = mem::take(state.write_buffer);
+    state.blocks[idx_sav] = bytes2;
 
-    negative_deltas[split_dim] = false;
+    state.negative_deltas[split_dim] = false;
     let right_num_bytes = recurse_pack_index(
-        write_buffer,
-        leaf_block_fps,
+        state,
         left_block_fp,
-        blocks,
-        last_split_values,
-        negative_deltas,
         false,
         right_offset,
         num_leaves - num_left_leaf_nodes,
-        split_packed_values,
-        bytes_per_dim,
-        num_index_dims,
+        params,
     );
 
-    negative_deltas[split_dim] = sav_negative_delta;
+    state.negative_deltas[split_dim] = sav_negative_delta;
 
     // Restore last_split_values
-    last_split_values[last_value_start + prefix..last_value_start + prefix + suffix]
+    state.last_split_values[last_value_start + prefix..last_value_start + prefix + suffix]
         .copy_from_slice(&sav_split_value);
 
-    num_bytes + blocks[idx_sav].len() + left_num_bytes + right_num_bytes
+    num_bytes + state.blocks[idx_sav].len() + left_num_bytes + right_num_bytes
 }
 
 #[cfg(test)]
