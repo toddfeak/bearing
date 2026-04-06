@@ -24,7 +24,6 @@ use crate::util::byte_block_pool::{
     DirectAllocator, FIRST_LEVEL_SIZE,
 };
 use crate::util::bytes_ref_hash::BytesRefHash;
-use crate::util::int_block_pool::{INT_BLOCK_MASK, INT_BLOCK_SHIFT, INT_BLOCK_SIZE, IntBlockPool};
 
 // ---------------------------------------------------------------------------
 // ParallelPostingsArray / FreqProxPostingsArray — per-term posting metadata
@@ -212,11 +211,12 @@ const HASH_INIT_SIZE: usize = 4;
 
 /// Shared pool storage for all TermsHashPerField instances in a segment.
 ///
-/// Owns the IntBlockPool and ByteBlockPool that all per-field writers
-/// share for posting stream data. In Java, this is `TermsHash` which
-/// `FreqProxTermsWriter` extends.
+/// Owns the int pool (stream address table) and `ByteBlockPool` that all
+/// per-field writers share for posting stream data. In Java, this is
+/// `TermsHash` which `FreqProxTermsWriter` extends.
 pub(crate) struct TermsHash {
-    pub(crate) int_pool: IntBlockPool,
+    /// Flat table of byte-pool write offsets, indexed by stream address.
+    pub(crate) int_pool: Vec<i32>,
     pub(crate) byte_pool: ByteBlockPool<DirectAllocator>,
 }
 
@@ -224,14 +224,14 @@ impl TermsHash {
     /// Creates a new `TermsHash` with initialized pools.
     pub(crate) fn new() -> Self {
         Self {
-            int_pool: IntBlockPool::new(),
+            int_pool: Vec::with_capacity(8192),
             byte_pool: ByteBlockPool::new(DirectAllocator),
         }
     }
 
     /// Resets both pools for reuse.
     pub(crate) fn reset(&mut self) {
-        self.int_pool.reset(false, false);
+        self.int_pool.clear();
         self.byte_pool.reset(false, false);
     }
 }
@@ -245,7 +245,7 @@ impl Default for TermsHash {
 impl fmt::Debug for TermsHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TermsHash")
-            .field("int_pool_buffers", &self.int_pool.buffers.len())
+            .field("int_pool_len", &self.int_pool.len())
             .field("byte_pool_buffers", &self.byte_pool.buffers.len())
             .finish()
     }
@@ -257,30 +257,20 @@ impl mem_dbg::MemSize for TermsHash {
         flags: mem_dbg::SizeFlags,
         refs: &mut mem_dbg::HashMap<usize, usize>,
     ) -> usize {
-        // IntBlockPool doesn't derive MemSize; estimate from buffer capacity.
-        let int_pool_size: usize = self
-            .int_pool
-            .buffers
-            .iter()
-            .map(|b| b.capacity() * mem::size_of::<i32>())
-            .sum::<usize>()
-            + self.int_pool.buffers.capacity() * mem::size_of::<Vec<i32>>();
-        int_pool_size + self.byte_pool.mem_size_rec(flags, refs)
+        self.int_pool.capacity() * mem::size_of::<i32>() + self.byte_pool.mem_size_rec(flags, refs)
     }
 }
 
 /// Per-field term processing for the inverted index.
 ///
 /// Deduplicates terms, allocates byte stream slices, and provides write methods.
-/// Stream addresses are stored in `IntBlockPool` entries. Each term gets
+/// Stream addresses are stored in `int_pool` entries. Each term gets
 /// `stream_count` consecutive int slots holding the current write address for
 /// each stream.
 ///
 /// Pools are owned by [`TermsHash`] and passed to methods that need them.
 pub(crate) struct TermsHashPerField {
-    // termStreamAddressBuffer: index into int_pool.buffers identifying the
-    // current buffer holding stream addresses for the most recently accessed term.
-    pub(crate) term_stream_address_buffer_index: usize,
+    /// Direct offset into the flat `int_pool` for the current term's stream addresses.
     pub(crate) stream_address_offset: usize,
     pub(crate) stream_count: usize,
     field_name: String,
@@ -304,7 +294,6 @@ impl TermsHashPerField {
         let bytes_hash = BytesRefHash::new(HASH_INIT_SIZE);
 
         Self {
-            term_stream_address_buffer_index: 0,
             stream_address_offset: 0,
             stream_count,
             field_name,
@@ -358,8 +347,7 @@ impl TermsHashPerField {
     /// Write a single byte to the given stream for the current term.
     pub(crate) fn write_byte(&mut self, terms_hash: &mut TermsHash, stream: usize, b: u8) {
         let stream_address = self.stream_address_offset + stream;
-        let upto = terms_hash.int_pool.buffers[self.term_stream_address_buffer_index]
-            [stream_address] as usize;
+        let upto = terms_hash.int_pool[stream_address] as usize;
         let buffer_index = upto >> BYTE_BLOCK_SHIFT;
         let offset = upto & BYTE_BLOCK_MASK;
         if terms_hash.byte_pool.buffers[buffer_index][offset] != 0 {
@@ -367,13 +355,13 @@ impl TermsHashPerField {
             let new_offset =
                 ByteSlicePool::alloc_slice(&mut terms_hash.byte_pool, buffer_index, offset);
             let new_buf_idx = terms_hash.byte_pool.current_buffer_index();
-            terms_hash.int_pool.buffers[self.term_stream_address_buffer_index][stream_address] =
+            terms_hash.int_pool[stream_address] =
                 (new_offset as i32) + terms_hash.byte_pool.byte_offset;
             terms_hash.byte_pool.buffers[new_buf_idx][new_offset] = b;
-            terms_hash.int_pool.buffers[self.term_stream_address_buffer_index][stream_address] += 1;
+            terms_hash.int_pool[stream_address] += 1;
         } else {
             terms_hash.byte_pool.buffers[buffer_index][offset] = b;
-            terms_hash.int_pool.buffers[self.term_stream_address_buffer_index][stream_address] += 1;
+            terms_hash.int_pool[stream_address] += 1;
         }
     }
 
@@ -382,8 +370,7 @@ impl TermsHashPerField {
     pub(crate) fn write_bytes(&mut self, terms_hash: &mut TermsHash, stream: usize, data: &[u8]) {
         let end = data.len();
         let stream_address = self.stream_address_offset + stream;
-        let upto = terms_hash.int_pool.buffers[self.term_stream_address_buffer_index]
-            [stream_address] as usize;
+        let upto = terms_hash.int_pool[stream_address] as usize;
         let mut buffer_index = upto >> BYTE_BLOCK_SHIFT;
         let mut slice_offset = upto & BYTE_BLOCK_MASK;
         let mut offset = 0;
@@ -393,7 +380,7 @@ impl TermsHashPerField {
             terms_hash.byte_pool.buffers[buffer_index][slice_offset] = data[offset];
             slice_offset += 1;
             offset += 1;
-            terms_hash.int_pool.buffers[self.term_stream_address_buffer_index][stream_address] += 1;
+            terms_hash.int_pool[stream_address] += 1;
         }
 
         // If we still have data, grow slices as needed
@@ -410,7 +397,7 @@ impl TermsHashPerField {
                 .copy_from_slice(&data[offset..offset + write_length]);
             slice_offset = new_slice_offset + write_length;
             offset += write_length;
-            terms_hash.int_pool.buffers[self.term_stream_address_buffer_index][stream_address] =
+            terms_hash.int_pool[stream_address] =
                 (slice_offset as i32) + terms_hash.byte_pool.byte_offset;
         }
     }
@@ -525,35 +512,27 @@ pub(crate) trait TermsHashPerFieldTrait {
 
         let stream_count = self.base().stream_count;
 
-        if stream_count + terms_hash.int_pool.int_upto > INT_BLOCK_SIZE {
-            terms_hash.int_pool.next_buffer();
-        }
-
         if BYTE_BLOCK_SIZE - terms_hash.byte_pool.byte_upto < (2 * stream_count) * FIRST_LEVEL_SIZE
         {
             terms_hash.byte_pool.next_buffer();
         }
 
-        let buffer_index = terms_hash.int_pool.current_buffer_index();
-        let stream_address_offset = terms_hash.int_pool.int_upto;
-        terms_hash.int_pool.int_upto += stream_count;
+        let stream_address_offset = terms_hash.int_pool.len();
+        terms_hash
+            .int_pool
+            .resize(stream_address_offset + stream_count, 0);
 
-        {
-            let base = self.base_mut();
-            base.term_stream_address_buffer_index = buffer_index;
-            base.stream_address_offset = stream_address_offset;
-        }
+        self.base_mut().stream_address_offset = stream_address_offset;
 
-        let address_offset = stream_address_offset as i32 + terms_hash.int_pool.int_offset;
-        self.postings_array_base_mut().address_offset[term_id] = address_offset;
+        self.postings_array_base_mut().address_offset[term_id] = stream_address_offset as i32;
 
         for i in 0..stream_count {
             let upto = ByteSlicePool::new_slice(&mut terms_hash.byte_pool, FIRST_LEVEL_SIZE);
-            terms_hash.int_pool.buffers[buffer_index][stream_address_offset + i] =
+            terms_hash.int_pool[stream_address_offset + i] =
                 (upto as i32) + terms_hash.byte_pool.byte_offset;
         }
 
-        let byte_starts = terms_hash.int_pool.buffers[buffer_index][stream_address_offset];
+        let byte_starts = terms_hash.int_pool[stream_address_offset];
         self.postings_array_base_mut().byte_starts[term_id] = byte_starts;
 
         self.new_term(terms_hash, term_id, doc_id);
@@ -562,11 +541,7 @@ pub(crate) trait TermsHashPerFieldTrait {
     /// Position stream cursors for an existing term, then dispatch to `add_term`.
     fn position_stream_slice(&mut self, terms_hash: &mut TermsHash, term_id: usize, doc_id: i32) {
         let int_start = self.postings_array_base().address_offset[term_id] as usize;
-        {
-            let base = self.base_mut();
-            base.term_stream_address_buffer_index = int_start >> INT_BLOCK_SHIFT;
-            base.stream_address_offset = int_start & INT_BLOCK_MASK;
-        }
+        self.base_mut().stream_address_offset = int_start;
 
         self.add_term(terms_hash, term_id, doc_id);
     }
@@ -718,8 +693,7 @@ impl FreqProxTermsWriterPerField {
         for term_id in 0..num_terms {
             // Position the stream cursor for this term
             let int_start = self.postings_array.base.address_offset[term_id] as usize;
-            self.base.term_stream_address_buffer_index = int_start >> INT_BLOCK_SHIFT;
-            self.base.stream_address_offset = int_start & INT_BLOCK_MASK;
+            self.base.stream_address_offset = int_start;
 
             if !self.has_freq {
                 // DOCS only: write last doc code
@@ -815,15 +789,13 @@ impl FreqProxTermsWriterPerField {
     /// Returns the stream range for constructing a reader.
     pub(crate) fn get_stream_range(
         &self,
-        int_pool: &IntBlockPool,
+        int_pool: &[i32],
         term_id: usize,
         stream: usize,
     ) -> (usize, usize) {
         assert!(stream < self.base.stream_count);
-        let address_offset = self.postings_array.base.address_offset[term_id];
-        let buffer_index = (address_offset as usize) >> INT_BLOCK_SHIFT;
-        let offset_in_buffer = (address_offset as usize) & INT_BLOCK_MASK;
-        let end = int_pool.buffers[buffer_index][offset_in_buffer + stream] as usize;
+        let address_offset = self.postings_array.base.address_offset[term_id] as usize;
+        let end = int_pool[address_offset + stream] as usize;
         let start =
             self.postings_array.base.byte_starts[term_id] as usize + stream * FIRST_LEVEL_SIZE;
         (start, end)
@@ -1316,7 +1288,7 @@ mod tests {
     #[test]
     fn test_terms_hash_default() {
         let th = TermsHash::default();
-        assert_is_empty!(&th.int_pool.buffers);
+        assert_eq!(th.int_pool.len(), 0);
     }
 
     #[test]
@@ -1324,7 +1296,7 @@ mod tests {
         let th = TermsHash::new();
         let debug = format!("{th:?}");
         assert_contains!(debug, "TermsHash");
-        assert_contains!(debug, "int_pool_buffers");
+        assert_contains!(debug, "int_pool_len");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use std::io;
 use std::mem;
 
 use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
+use crate::document::IndexOptions;
 use crate::index::pipeline::terms_hash::{
     BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
     oversize,
@@ -22,9 +23,6 @@ use crate::util::byte_block_pool::{
     ByteBlockPool, ByteSliceReader, DirectAllocator, FIRST_LEVEL_SIZE,
 };
 use crate::util::bytes_ref_hash::BytesRefHash;
-use crate::util::int_block_pool::{INT_BLOCK_MASK, INT_BLOCK_SHIFT, IntBlockPool};
-
-use crate::document::IndexOptions;
 
 /// Per-field term vector writer.
 ///
@@ -228,15 +226,13 @@ impl TermVectorsConsumerPerField {
     /// Returns the stream range `(start, end)` for the given term and stream.
     pub(crate) fn get_stream_range(
         &self,
-        int_pool: &IntBlockPool,
+        int_pool: &[i32],
         term_id: usize,
         stream: usize,
     ) -> (usize, usize) {
         assert!(stream < self.base.stream_count);
-        let address_offset = self.postings_array.base.address_offset[term_id];
-        let buffer_index = (address_offset as usize) >> INT_BLOCK_SHIFT;
-        let offset_in_buffer = (address_offset as usize) & INT_BLOCK_MASK;
-        let end = int_pool.buffers[buffer_index][offset_in_buffer + stream] as usize;
+        let address_offset = self.postings_array.base.address_offset[term_id] as usize;
+        let end = int_pool[address_offset + stream] as usize;
         let start =
             self.postings_array.base.byte_starts[term_id] as usize + stream * FIRST_LEVEL_SIZE;
         (start, end)
