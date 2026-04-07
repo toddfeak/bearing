@@ -43,6 +43,9 @@ const PAYLOADS: u8 = 0b100;
 const FLAGS_BITS: u32 = 4;
 
 /// Initial capacity for shared position/offset/payload buffers.
+/// 1024 i32 entries = 4 KB, one OS page. Buffers that stay at or below
+/// this size are kept for reuse across chunks; larger ones are replaced
+/// after each chunk flush so the OS can reclaim the pages.
 const INITIAL_BUF_SIZE: usize = 1024;
 
 /// Maximum docs per chunk before flushing.
@@ -270,6 +273,23 @@ impl CompressingTermVectorsWriter {
         self.num_docs += 1;
         if self.trigger_flush() {
             self.flush(false)?;
+            // Reclaim oversized buffers after chunk flush. Buffers at
+            // INITIAL_BUF_SIZE (4 KB) are kept for reuse; larger ones are
+            // replaced to avoid holding memory from worst-case documents.
+            if self.positions_buf.capacity() > INITIAL_BUF_SIZE {
+                self.positions_buf = vec![0; INITIAL_BUF_SIZE];
+            }
+            if self.start_offsets_buf.capacity() > INITIAL_BUF_SIZE {
+                self.start_offsets_buf = vec![0; INITIAL_BUF_SIZE];
+            }
+            if self.lengths_buf.capacity() > INITIAL_BUF_SIZE {
+                self.lengths_buf = vec![0; INITIAL_BUF_SIZE];
+            }
+            if self.payload_lengths_buf.capacity() > INITIAL_BUF_SIZE {
+                self.payload_lengths_buf = vec![0; INITIAL_BUF_SIZE];
+            }
+            self.pos_buf_used = 0;
+            self.off_buf_used = 0;
         }
         Ok(())
     }
