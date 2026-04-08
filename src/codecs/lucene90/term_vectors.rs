@@ -367,17 +367,12 @@ impl CompressingTermVectorsWriter {
         if let Some(pos_reader) = positions {
             let write_start = pos_start + total_pos;
             let needed = write_start + num_prox as usize;
-            if needed > self.positions_buf.len() {
-                self.positions_buf.resize(oversize(needed), 0);
-            }
+            grow(&mut self.positions_buf, needed);
 
             let mut position = 0i32;
             if has_payloads {
                 let pay_write = pay_start + total_pos;
-                if pay_write + num_prox as usize > self.payload_lengths_buf.len() {
-                    self.payload_lengths_buf
-                        .resize(oversize(pay_write + num_prox as usize), 0);
-                }
+                grow(&mut self.payload_lengths_buf, pay_write + num_prox as usize);
                 for i in 0..num_prox as usize {
                     let code = store::read_vint(pos_reader).unwrap();
                     if (code & 1) != 0 {
@@ -406,11 +401,8 @@ impl CompressingTermVectorsWriter {
         if let Some(off_reader) = offsets {
             let write_start = off_start + total_pos;
             let needed = write_start + num_prox as usize;
-            if needed > self.start_offsets_buf.len() {
-                let new_len = oversize(needed);
-                self.start_offsets_buf.resize(new_len, 0);
-                self.lengths_buf.resize(new_len, 0);
-            }
+            grow(&mut self.start_offsets_buf, needed);
+            grow(&mut self.lengths_buf, needed);
 
             let mut last_end_offset = 0i32;
             for i in 0..num_prox as usize {
@@ -949,10 +941,16 @@ impl CompressingTermVectorsWriter {
 // Utilities
 // ---------------------------------------------------------------------------
 
-/// Grows a buffer size by at least 1/8 plus a small constant.
-pub(crate) fn oversize(min_size: usize) -> usize {
-    let extra = (min_size >> 3).max(3);
-    min_size + extra
+/// Grows a buffer to at least `min_len` with 1/8 over-allocation, using exact
+/// capacity control to prevent Vec's default doubling. Matches Java's
+/// `ArrayUtil.grow`.
+fn grow(buf: &mut Vec<i32>, min_len: usize) {
+    if min_len > buf.len() {
+        let extra = (min_len >> 3).max(3);
+        let target = min_len + extra;
+        buf.reserve_exact(target - buf.capacity());
+        buf.resize(target, 0);
+    }
 }
 
 /// Returns the length of the shared prefix between two byte slices.
@@ -1281,18 +1279,29 @@ mod tests {
         assert_eq!(doc.fields[3].flags, 0b000);
     }
 
-    // -- Buffer growth via oversize -----------------------------------------
+    // -- Buffer growth helpers ------------------------------------------------
 
     #[test]
-    fn test_oversize_grows_by_at_least_one_eighth() {
-        assert_ge!(oversize(100), 100 + 100 / 8);
-        assert_ge!(oversize(1000), 1000 + 1000 / 8);
+    fn test_grow_by_at_least_one_eighth() {
+        let mut buf = vec![0i32; 10];
+        grow(&mut buf, 100);
+        assert_ge!(buf.len(), 100 + 100 / 8);
+        assert_eq!(buf.len(), buf.capacity());
     }
 
     #[test]
-    fn test_oversize_small_inputs_grow_by_at_least_3() {
-        assert_ge!(oversize(1), 4);
-        assert_ge!(oversize(0), 3);
+    fn test_grow_small_inputs_grow_by_at_least_3() {
+        let mut buf = Vec::new();
+        grow(&mut buf, 1);
+        assert_ge!(buf.len(), 4);
+        assert_eq!(buf.len(), buf.capacity());
+    }
+
+    #[test]
+    fn test_grow_no_op_when_large_enough() {
+        let mut buf = vec![0i32; 100];
+        grow(&mut buf, 50);
+        assert_eq!(buf.len(), 100);
     }
 
     #[test]
