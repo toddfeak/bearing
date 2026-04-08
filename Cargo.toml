@@ -13,6 +13,10 @@ categories = ["text-processing"]
 rust-version = "1.88"
 include = ["/src/", "/tests/*.rs", "/Cargo.toml", "/LICENSE", "/NOTICE", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md"]
 
+[profile.profiling]
+inherits = "release"
+debug = 1
+
 [lints.clippy]
 absolute_paths = "warn"
 
