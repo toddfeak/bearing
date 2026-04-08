@@ -226,10 +226,22 @@ impl TermsHash {
         }
     }
 
-    /// Resets both pools for reuse.
+    /// Resets both pools for reuse. Releases backing storage if capacity
+    /// exceeds 64 KB to avoid pinning memory from worst-case documents.
     pub(crate) fn reset(&mut self) {
-        self.int_pool.clear();
-        self.byte_pool.reset();
+        const BYTE_POOL_SHRINK_THRESHOLD: usize = 64 * 1024;
+        const INT_POOL_SHRINK_THRESHOLD: usize = BYTE_POOL_SHRINK_THRESHOLD / mem::size_of::<i32>();
+
+        if self.byte_pool.data.capacity() > BYTE_POOL_SHRINK_THRESHOLD {
+            self.byte_pool.data = Vec::with_capacity(BYTE_POOL_SHRINK_THRESHOLD);
+        } else {
+            self.byte_pool.reset();
+        }
+        if self.int_pool.capacity() > INT_POOL_SHRINK_THRESHOLD {
+            self.int_pool = Vec::with_capacity(INT_POOL_SHRINK_THRESHOLD);
+        } else {
+            self.int_pool.clear();
+        }
     }
 }
 
