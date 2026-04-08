@@ -6,6 +6,7 @@ use std::io;
 use std::str;
 
 use log::debug;
+use smallvec::SmallVec;
 
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::NormsLookup;
@@ -189,9 +190,8 @@ impl BlockTreeTermsWriter {
                 norms,
             )?;
 
-            let term = BytesRef::from_utf8(term_str);
             tw.add_term(
-                &term,
+                term_str.as_bytes(),
                 state,
                 &mut *self.terms_out,
                 &self.postings_writer,
@@ -268,7 +268,7 @@ impl PendingEntry {
 }
 
 struct PendingTerm {
-    term_bytes: Vec<u8>,
+    term_bytes: SmallVec<[u8; 16]>,
     state: IntBlockTermState,
 }
 
@@ -325,7 +325,7 @@ impl TermsWriter {
 
     fn add_term(
         &mut self,
-        term: &BytesRef,
+        term: &[u8],
         state: IntBlockTermState,
         terms_out: &mut dyn IndexOutput,
         postings_writer: &PostingsWriter,
@@ -339,16 +339,17 @@ impl TermsWriter {
 
         if self.num_terms == 1 {
             self.first_term_bytes.clear();
-            self.first_term_bytes.extend_from_slice(&term.bytes);
+            self.first_term_bytes.extend_from_slice(term);
         }
         self.last_term_bytes.clear();
-        self.last_term_bytes.extend_from_slice(&term.bytes);
+        self.last_term_bytes.extend_from_slice(term);
 
-        let term_bytes = term.bytes.clone();
-        self.push_term(&term_bytes, terms_out, postings_writer, field_ctx)?;
+        self.push_term(term, terms_out, postings_writer, field_ctx)?;
 
-        self.pending
-            .push(PendingEntry::Term(PendingTerm { term_bytes, state }));
+        self.pending.push(PendingEntry::Term(PendingTerm {
+            term_bytes: SmallVec::from_slice(term),
+            state,
+        }));
 
         Ok(())
     }
@@ -391,7 +392,8 @@ impl TermsWriter {
             self.prefix_starts[i] = self.pending.len();
         }
 
-        self.last_term = text.to_vec();
+        self.last_term.clear();
+        self.last_term.extend_from_slice(text);
 
         Ok(())
     }
