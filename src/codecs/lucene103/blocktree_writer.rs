@@ -17,7 +17,7 @@ use crate::codecs::lucene103::postings_format::{
 use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4};
 use crate::index::index_file_names::segment_file_name;
-use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
+use crate::index::pipeline::terms_hash::{DecodedPostings, FreqProxTermsWriterPerField, TermsHash};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::byte_block_pool::ByteBlockPool;
 
@@ -164,22 +164,20 @@ impl BlockTreeTermsWriter {
         let mut tw = TermsWriter::new(field_ctx, self.min_items_in_block, self.max_items_in_block);
 
         let mut docs_seen = HashSet::new();
+        let mut decoded = DecodedPostings::new();
 
         for &sorted_id in &sorted_ids[..num_terms] {
             let term_id = sorted_id as usize;
             let term_bytes = per_field.term_bytes(term_byte_pool, term_id);
 
-            let decoded = per_field.decode_term(terms_hash, term_id)?;
+            per_field.decode_term_into(terms_hash, term_id, &mut decoded)?;
 
             // Accumulate unique doc IDs for doc_count
-            for &(doc_id, _, _) in &decoded {
+            for (doc_id, _, _) in decoded.iter() {
                 docs_seen.insert(doc_id);
             }
 
-            let postings_data: Vec<(i32, i32, &[i32])> = decoded
-                .iter()
-                .map(|(doc_id, freq, positions)| (*doc_id, *freq, positions.as_slice()))
-                .collect();
+            let postings_data: Vec<(i32, i32, &[i32])> = decoded.iter().collect();
 
             let state = self.postings_writer.write_term(
                 &postings_data,

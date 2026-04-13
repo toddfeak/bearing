@@ -542,6 +542,58 @@ pub(crate) trait TermsHashPerFieldTrait {
 /// Extends `TermsHashPerField` via composition. Implements the `newTerm` and
 /// `addTerm` logic that encodes doc IDs, frequencies, positions, and offsets
 /// into the byte pool streams.
+/// Reusable buffers for decoded term postings.
+///
+/// Avoids per-term allocation by reusing flat buffers across calls to
+/// `decode_term_into`. Each doc entry stores `(doc_id, freq, pos_start,
+/// pos_count)` where `pos_start` and `pos_count` index into the flat
+/// `positions` buffer.
+pub(crate) struct DecodedPostings {
+    /// (doc_id, freq, pos_start, pos_count) per document.
+    pub docs: Vec<(i32, i32, u32, u32)>,
+    /// Flat positions buffer; docs reference ranges via pos_start/pos_count.
+    pub positions: Vec<i32>,
+}
+
+/// Buffer capacity threshold in bytes. Buffers larger than this are replaced
+/// to allow the OS to reclaim the pages.
+const DECODED_SHRINK_THRESHOLD: usize = 4096;
+
+impl DecodedPostings {
+    /// Creates new empty buffers.
+    pub fn new() -> Self {
+        Self {
+            docs: Vec::new(),
+            positions: Vec::new(),
+        }
+    }
+
+    /// Clears for reuse. Shrinks buffers that have grown beyond the threshold.
+    pub fn clear(&mut self) {
+        self.docs.clear();
+        if self.docs.capacity() * mem::size_of::<(i32, i32, u32, u32)>() > DECODED_SHRINK_THRESHOLD
+        {
+            self.docs = Vec::new();
+        }
+        self.positions.clear();
+        if self.positions.capacity() * mem::size_of::<i32>() > DECODED_SHRINK_THRESHOLD {
+            self.positions = Vec::new();
+        }
+    }
+
+    /// Returns an iterator yielding `(doc_id, freq, &[i32])` slices for the
+    /// caller to consume.
+    pub fn iter(&self) -> impl Iterator<Item = (i32, i32, &[i32])> {
+        self.docs
+            .iter()
+            .map(|&(doc_id, freq, pos_start, pos_count)| {
+                let start = pos_start as usize;
+                let end = start + pos_count as usize;
+                (doc_id, freq, &self.positions[start..end])
+            })
+    }
+}
+
 ///
 /// Stream 0: doc codes and frequencies
 /// Stream 1: position codes, offsets, and payloads (when has_prox)
@@ -691,17 +743,20 @@ impl FreqProxTermsWriterPerField {
         }
     }
 
-    /// Decodes one term's postings from the shared pools.
+    /// Decodes one term's postings from the shared pools into reusable buffers.
     ///
     /// Reads the Lucene-style `(doc_delta << 1) | freq_is_1` encoding
     /// from stream 0 and `position << 1` from stream 1.
-    pub(crate) fn decode_term(
+    pub(crate) fn decode_term_into(
         &self,
         terms_hash: &TermsHash,
         term_id: usize,
-    ) -> io::Result<Vec<(i32, i32, Vec<i32>)>> {
+        buf: &mut DecodedPostings,
+    ) -> io::Result<()> {
         use crate::store;
         use crate::util::byte_block_pool::ByteSliceReader;
+
+        buf.clear();
 
         let (start, end) = self.get_stream_range(&terms_hash.int_pool, term_id, 0);
         let mut reader = ByteSliceReader::new(&terms_hash.byte_pool, start, end);
@@ -713,7 +768,6 @@ impl FreqProxTermsWriterPerField {
             None
         };
 
-        let mut result = Vec::new();
         let mut last_doc_id = 0;
 
         while !reader.eof() {
@@ -737,15 +791,16 @@ impl FreqProxTermsWriterPerField {
             let doc_id = last_doc_id + doc_delta;
             last_doc_id = doc_id;
 
-            let positions = if let Some(ref mut pr) = pos_reader {
-                let mut positions = Vec::with_capacity(freq as usize);
+            let pos_start = buf.positions.len() as u32;
+
+            if let Some(ref mut pr) = pos_reader {
                 let mut last_pos = 0;
                 for _ in 0..freq {
                     let prox_code = store::read_vint(pr)?;
                     // proxCode = positionDelta << 1 (no payload support)
                     let pos_delta = prox_code >> 1;
                     let pos = last_pos + pos_delta;
-                    positions.push(pos);
+                    buf.positions.push(pos);
                     last_pos = pos;
 
                     if self.has_offsets {
@@ -754,15 +809,13 @@ impl FreqProxTermsWriterPerField {
                         store::read_vint(pr)?; // length
                     }
                 }
-                positions
-            } else {
-                Vec::new()
-            };
+            }
 
-            result.push((doc_id, freq, positions));
+            let pos_count = buf.positions.len() as u32 - pos_start;
+            buf.docs.push((doc_id, freq, pos_start, pos_count));
         }
 
-        Ok(result)
+        Ok(())
     }
 
     /// Returns the stream range for constructing a reader.
