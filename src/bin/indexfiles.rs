@@ -2,6 +2,10 @@
 
 //! Indexes documents from a directory into a Lucene-compatible index.
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 use std::env;
 use std::fs;
 use std::io;
