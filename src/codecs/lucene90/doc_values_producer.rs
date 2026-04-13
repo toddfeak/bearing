@@ -355,7 +355,6 @@ mod tests {
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::test_util;
-    use crate::util::BytesRef;
     use assertables::*;
 
     fn make_field_info(name: &str, number: u32, dv_type: DocValuesType) -> FieldInfo {
@@ -384,7 +383,7 @@ mod tests {
         }
     }
 
-    fn make_dv_sorted(name: &str, number: u32, values: Vec<(i32, BytesRef)>) -> DocValuesFieldData {
+    fn make_dv_sorted(name: &str, number: u32, values: Vec<(i32, Vec<u8>)>) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
             number,
@@ -409,7 +408,7 @@ mod tests {
     fn make_dv_sorted_set(
         name: &str,
         number: u32,
-        values: Vec<(i32, Vec<BytesRef>)>,
+        values: Vec<(i32, Vec<Vec<u8>>)>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -518,9 +517,9 @@ mod tests {
             "category",
             0,
             vec![
-                (0, BytesRef::new(b"alpha".to_vec())),
-                (1, BytesRef::new(b"beta".to_vec())),
-                (2, BytesRef::new(b"alpha".to_vec())),
+                (0, (b"alpha".to_vec())),
+                (1, (b"beta".to_vec())),
+                (2, (b"alpha".to_vec())),
             ],
         )];
 
@@ -578,9 +577,9 @@ mod tests {
             "tag",
             0,
             vec![
-                (0, vec![BytesRef::new(b"a".to_vec())]),
-                (1, vec![BytesRef::new(b"b".to_vec())]),
-                (2, vec![BytesRef::new(b"c".to_vec())]),
+                (0, vec![(b"a".to_vec())]),
+                (1, vec![(b"b".to_vec())]),
+                (2, vec![(b"c".to_vec())]),
             ],
         )];
 
@@ -596,15 +595,9 @@ mod tests {
             "tags",
             0,
             vec![
-                (
-                    0,
-                    vec![BytesRef::new(b"a".to_vec()), BytesRef::new(b"b".to_vec())],
-                ),
-                (1, vec![BytesRef::new(b"c".to_vec())]),
-                (
-                    2,
-                    vec![BytesRef::new(b"a".to_vec()), BytesRef::new(b"d".to_vec())],
-                ),
+                (0, vec![(b"a".to_vec()), (b"b".to_vec())]),
+                (1, vec![(b"c".to_vec())]),
+                (2, vec![(b"a".to_vec()), (b"d".to_vec())]),
             ],
         )];
 

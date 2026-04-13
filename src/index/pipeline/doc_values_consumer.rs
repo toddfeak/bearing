@@ -13,7 +13,6 @@ use crate::index::field::{DocValue, Field};
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
 use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
 use crate::index::pipeline::segment_context::SegmentContext;
-use crate::util::BytesRef;
 
 /// Per-field state for accumulating doc values during indexing.
 #[derive(mem_dbg::MemSize)]
@@ -91,13 +90,10 @@ impl FieldConsumer for DocValuesConsumer {
                     vals.push((doc_id, b.clone()));
                 }
                 (DocValuesAccumulator::Sorted(vals), DocValue::Sorted(b)) => {
-                    vals.push((doc_id, BytesRef::new(b.clone())));
+                    vals.push((doc_id, b.clone()));
                 }
                 (DocValuesAccumulator::SortedSet(vals), DocValue::SortedSet(terms)) => {
-                    vals.push((
-                        doc_id,
-                        terms.iter().map(|t| BytesRef::new(t.clone())).collect(),
-                    ));
+                    vals.push((doc_id, terms.clone()));
                 }
                 (DocValuesAccumulator::SortedNumeric(vals), DocValue::SortedNumeric(numbers)) => {
                     vals.push((doc_id, numbers.clone()));

@@ -12,7 +12,6 @@ use crate::search::query::{Query, Weight};
 use crate::search::similarity::{BM25Similarity, CollectionStatistics, Similarity, TermStatistics};
 use crate::search::top_docs::{ScoreDoc, TopDocs};
 use crate::search::top_score_doc_collector::TopScoreDocCollectorManager;
-use crate::util::BytesRef;
 
 /// By default, we count hits accurately up to 1,000.
 const TOTAL_HITS_THRESHOLD: i32 = 1000;
@@ -196,7 +195,7 @@ impl<'a> IndexSearcher<'a> {
         total_term_freq: i64,
     ) -> io::Result<TermStatistics> {
         Ok(TermStatistics::new(
-            BytesRef::new(term.to_vec()),
+            term.to_vec(),
             doc_freq,
             total_term_freq,
         ))

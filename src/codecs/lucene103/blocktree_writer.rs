@@ -20,7 +20,6 @@ use crate::encoding::{lowercase_ascii, lz4};
 use crate::index::index_file_names::segment_file_name;
 use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
-use crate::util::BytesRef;
 use crate::util::byte_block_pool::ByteBlockPool;
 
 use super::postings_writer::PostingsWriter;
@@ -519,19 +518,14 @@ impl TermsWriter {
                 floor_data_bytes = Some(fd);
             }
 
-            let floor_data = floor_data_bytes
-                .as_ref()
-                .map(|fd| BytesRef::new(fd.clone()));
-
             let output = TrieOutput {
                 fp: new_blocks[0].fp as i64,
                 has_terms: new_blocks[0].has_terms,
-                floor_data,
+                floor_data: floor_data_bytes,
             };
 
             let prefix_bytes = new_blocks[0].prefix.clone();
-            let mut trie_builder =
-                TrieBuilder::from_bytes_ref(&BytesRef::new(prefix_bytes), output);
+            let mut trie_builder = TrieBuilder::from_bytes(&prefix_bytes, output);
 
             for block in new_blocks.iter_mut() {
                 if let Some(sub_indices) = block.sub_indices.take() {
@@ -909,7 +903,7 @@ const NON_LEAF_NODE_HAS_FLOOR: u64 = 1 << 0;
 pub struct TrieOutput {
     pub fp: i64,
     pub has_terms: bool,
-    pub floor_data: Option<BytesRef>,
+    pub floor_data: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -927,7 +921,7 @@ pub struct TrieBuilder {
 }
 
 impl TrieBuilder {
-    pub fn from_bytes_ref(key: &BytesRef, output: TrieOutput) -> Self {
+    pub fn from_bytes(key: &[u8], output: TrieOutput) -> Self {
         let mut root = TrieNode {
             label: 0,
             output: if key.is_empty() {
@@ -942,8 +936,8 @@ impl TrieBuilder {
             // Build chain of nodes for each byte
             let mut nodes: Vec<TrieNode> = Vec::new();
 
-            for (i, &b) in key.bytes.iter().enumerate() {
-                let is_last = i == key.bytes.len() - 1;
+            for (i, &b) in key.iter().enumerate() {
+                let is_last = i == key.len() - 1;
                 nodes.push(TrieNode {
                     label: b,
                     output: if is_last { Some(output.clone()) } else { None },
@@ -964,8 +958,8 @@ impl TrieBuilder {
 
         Self {
             root,
-            min_key: key.bytes.clone(),
-            max_key: key.bytes.clone(),
+            min_key: key.to_vec(),
+            max_key: key.to_vec(),
         }
     }
 
@@ -1391,7 +1385,7 @@ mod tests {
             has_terms: true,
             floor_data: None,
         };
-        let trie = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("abc"), output);
+        let trie = TrieBuilder::from_bytes(b"abc", output);
 
         assert_none!(trie.root.output);
         assert_len_eq_x!(&trie.root.children, 1);
@@ -1405,7 +1399,7 @@ mod tests {
             has_terms: true,
             floor_data: None,
         };
-        let trie = TrieBuilder::from_bytes_ref(&BytesRef::new(Vec::new()), output);
+        let trie = TrieBuilder::from_bytes(b"", output);
 
         assert_some!(trie.root.output);
         assert_is_empty!(trie.root.children);
@@ -1424,8 +1418,8 @@ mod tests {
             floor_data: None,
         };
 
-        let mut trie1 = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("abc"), out1);
-        let trie2 = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("abd"), out2);
+        let mut trie1 = TrieBuilder::from_bytes(b"abc", out1);
+        let trie2 = TrieBuilder::from_bytes(b"abd", out2);
 
         trie1.append(trie2);
 
@@ -1450,7 +1444,7 @@ mod tests {
             has_terms: true,
             floor_data: None,
         };
-        let trie = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("a"), output);
+        let trie = TrieBuilder::from_bytes(b"a", output);
 
         let mut meta = Vec::new();
         let mut index = MemoryIndexOutput::new("test.tip".to_string());
@@ -1478,11 +1472,8 @@ mod tests {
             has_terms: true,
             floor_data: None,
         };
-        let mut trie = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("a"), output_a);
-        trie.append(TrieBuilder::from_bytes_ref(
-            &BytesRef::from_utf8("b"),
-            output_b,
-        ));
+        let mut trie = TrieBuilder::from_bytes(b"a", output_a);
+        trie.append(TrieBuilder::from_bytes(b"b", output_b));
 
         let mut meta = Vec::new();
         let mut index = MemoryIndexOutput::new("test.tip".to_string());
@@ -1849,7 +1840,7 @@ mod tests {
             has_terms: true,
             floor_data: None,
         };
-        let trie = TrieBuilder::from_bytes_ref(&BytesRef::from_utf8("ab"), output);
+        let trie = TrieBuilder::from_bytes(b"ab", output);
 
         let mut meta = Vec::new();
         let mut index = MemoryIndexOutput::new("test.tip".to_string());

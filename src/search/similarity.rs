@@ -2,7 +2,6 @@
 
 //! Scoring similarity models, collection/term statistics, and BM25.
 
-use crate::util::BytesRef;
 use crate::util::small_float;
 
 // ---------------------------------------------------------------------------
@@ -132,7 +131,7 @@ impl CollectionStatistics {
 /// - `doc_freq` <= `total_term_freq`
 #[derive(Debug, Clone)]
 pub struct TermStatistics {
-    term: BytesRef,
+    term: Vec<u8>,
     doc_freq: i64,
     total_term_freq: i64,
 }
@@ -144,7 +143,7 @@ impl TermStatistics {
     ///
     /// Panics if `doc_freq` is not positive, `total_term_freq` is not positive,
     /// or `total_term_freq` is less than `doc_freq`.
-    pub fn new(term: BytesRef, doc_freq: i64, total_term_freq: i64) -> Self {
+    pub fn new(term: Vec<u8>, doc_freq: i64, total_term_freq: i64) -> Self {
         assert!(
             doc_freq > 0,
             "docFreq must be positive, docFreq: {}",
@@ -169,7 +168,7 @@ impl TermStatistics {
     }
 
     /// Term bytes.
-    pub fn term(&self) -> &BytesRef {
+    pub fn term(&self) -> &[u8] {
         &self.term
     }
 
@@ -545,8 +544,8 @@ mod tests {
 
     // -- TermStatistics tests --
 
-    fn term(s: &str) -> BytesRef {
-        BytesRef::from_utf8(s)
+    fn term(s: &str) -> Vec<u8> {
+        s.as_bytes().to_vec()
     }
 
     #[test]
@@ -657,7 +656,7 @@ mod tests {
     }
 
     fn test_term_stats() -> TermStatistics {
-        TermStatistics::new(BytesRef::from_utf8("test"), 10, 50)
+        TermStatistics::new(term("test"), 10, 50)
     }
 
     #[test]

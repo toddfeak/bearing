@@ -16,7 +16,6 @@ use crate::encoding::packed::unsigned_bits_required;
 use crate::index::index_file_names;
 use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
-use crate::util::BytesRef;
 use crate::util::string_helper;
 
 /// Per-field doc values accumulation state.
@@ -26,9 +25,9 @@ pub(crate) enum DocValuesAccumulator {
     None,
     Numeric(Vec<(i32, i64)>),
     Binary(Vec<(i32, Vec<u8>)>),
-    Sorted(Vec<(i32, BytesRef)>),
+    Sorted(Vec<(i32, Vec<u8>)>),
     SortedNumeric(Vec<(i32, Vec<i64>)>),
-    SortedSet(Vec<(i32, Vec<BytesRef>)>),
+    SortedSet(Vec<(i32, Vec<Vec<u8>>)>),
 }
 
 /// Per-field data passed to the doc values writer.
@@ -270,19 +269,19 @@ fn add_binary_field(
 fn add_sorted_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    vals: &[(i32, BytesRef)],
+    vals: &[(i32, Vec<u8>)],
     num_docs: i32,
 ) -> io::Result<()> {
     // No skip index for MVP
 
     // Build sorted unique terms and assign ordinals
-    let mut unique_terms: BTreeSet<BytesRef> = BTreeSet::new();
+    let mut unique_terms: BTreeSet<Vec<u8>> = BTreeSet::new();
     for (_doc_id, v) in vals {
         unique_terms.insert(v.clone());
     }
 
-    let mut ord_map: HashMap<BytesRef, i64> = HashMap::with_capacity(unique_terms.len());
-    let sorted_terms: Vec<BytesRef> = unique_terms
+    let mut ord_map: HashMap<Vec<u8>, i64> = HashMap::with_capacity(unique_terms.len());
+    let sorted_terms: Vec<Vec<u8>> = unique_terms
         .into_iter()
         .enumerate()
         .map(|(i, term)| {
@@ -380,21 +379,21 @@ fn add_sorted_numeric_field(
 fn add_sorted_set_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    vals: &[(i32, Vec<BytesRef>)],
+    vals: &[(i32, Vec<Vec<u8>>)],
     num_docs: i32,
 ) -> io::Result<()> {
     let is_single_valued = vals.iter().all(|(_, v)| v.len() == 1);
 
     // Build sorted unique terms and assign ordinals
-    let mut unique_terms: BTreeSet<BytesRef> = BTreeSet::new();
+    let mut unique_terms: BTreeSet<Vec<u8>> = BTreeSet::new();
     for (_doc_id, values) in vals {
         for v in values {
             unique_terms.insert(v.clone());
         }
     }
 
-    let mut ord_map: HashMap<BytesRef, i64> = HashMap::with_capacity(unique_terms.len());
-    let sorted_terms: Vec<BytesRef> = unique_terms
+    let mut ord_map: HashMap<Vec<u8>, i64> = HashMap::with_capacity(unique_terms.len());
+    let sorted_terms: Vec<Vec<u8>> = unique_terms
         .into_iter()
         .enumerate()
         .map(|(i, term)| {
@@ -690,7 +689,7 @@ fn gcd_compute(a: i64, b: i64) -> i64 {
 fn add_terms_dict(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    sorted_terms: &[BytesRef],
+    sorted_terms: &[Vec<u8>],
 ) -> io::Result<()> {
     let size = sorted_terms.len() as i64;
     meta.write_vlong(size)?;
@@ -728,15 +727,15 @@ fn add_terms_dict(
             dm_writer.add((data.file_pointer() as i64) - start);
 
             // Write first term of block directly to data
-            data.write_vint(term.bytes.len() as i32)?;
-            data.write_bytes(&term.bytes)?;
+            data.write_vint(term.len() as i32)?;
+            data.write_bytes(term)?;
 
             // Save first term as dictionary for LZ4 compression
-            dict_bytes = term.bytes.clone();
+            dict_bytes = term.clone();
         } else {
             // Prefix-compress subsequent terms
-            let prefix_length = string_helper::bytes_difference(previous, &term.bytes);
-            let suffix_length = term.bytes.len() - prefix_length;
+            let prefix_length = string_helper::bytes_difference(previous, term);
+            let suffix_length = term.len() - prefix_length;
             assert!(suffix_length > 0, "duplicate terms in sorted set");
 
             // Pack prefix/suffix into a byte
@@ -751,11 +750,11 @@ fn add_terms_dict(
                 VecOutput(&mut suffix_buffer).write_vint((suffix_length - 16) as i32)?;
             }
 
-            suffix_buffer.extend_from_slice(&term.bytes[prefix_length..]);
+            suffix_buffer.extend_from_slice(&term[prefix_length..]);
         }
 
-        max_length = max_length.max(term.bytes.len() as i32);
-        previous = &term.bytes;
+        max_length = max_length.max(term.len() as i32);
+        previous = term;
     }
 
     // Flush last block if there's suffix data
@@ -812,7 +811,7 @@ fn compress_and_write_terms_block(
 fn write_terms_index(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    sorted_terms: &[BytesRef],
+    sorted_terms: &[Vec<u8>],
 ) -> io::Result<()> {
     meta.write_le_int(TERMS_DICT_REVERSE_INDEX_SHIFT)?;
 
@@ -830,14 +829,14 @@ fn write_terms_index(
             let sort_key_len = if ord == 0 {
                 0 // no previous term: no bytes to write
             } else {
-                string_helper::sort_key_length(previous.unwrap(), &term.bytes)
+                string_helper::sort_key_length(previous.unwrap(), term)
             };
             offset += sort_key_len as i64;
-            data.write_bytes(&term.bytes[..sort_key_len])?;
+            data.write_bytes(&term[..sort_key_len])?;
         }
         // Track previous for the term just before the next boundary
         if (ord & TERMS_DICT_REVERSE_INDEX_MASK) == TERMS_DICT_REVERSE_INDEX_MASK {
-            previous = Some(&term.bytes);
+            previous = Some(term);
         }
     }
 
@@ -864,6 +863,10 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::test_util::TestDataReader;
     use assertables::{assert_ge, assert_gt};
+
+    fn bytes(s: &str) -> Vec<u8> {
+        s.as_bytes().to_vec()
+    }
 
     fn make_test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
@@ -898,7 +901,7 @@ mod tests {
     fn make_field_data_sorted(
         name: &str,
         number: u32,
-        values: Vec<(i32, BytesRef)>,
+        values: Vec<(i32, Vec<u8>)>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -924,7 +927,7 @@ mod tests {
     fn make_field_data_sorted_set(
         name: &str,
         number: u32,
-        values: Vec<(i32, Vec<BytesRef>)>,
+        values: Vec<(i32, Vec<Vec<u8>>)>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -1066,9 +1069,9 @@ mod tests {
             "path",
             0,
             vec![
-                (0, vec![BytesRef::from_utf8("/a.txt")]),
-                (1, vec![BytesRef::from_utf8("/b.txt")]),
-                (2, vec![BytesRef::from_utf8("/c.txt")]),
+                (0, vec![bytes("/a.txt")]),
+                (1, vec![bytes("/b.txt")]),
+                (2, vec![bytes("/c.txt")]),
             ],
         )];
 
@@ -1147,9 +1150,9 @@ mod tests {
                 "path",
                 0,
                 vec![
-                    (0, vec![BytesRef::from_utf8("/a.txt")]),
-                    (1, vec![BytesRef::from_utf8("/b.txt")]),
-                    (2, vec![BytesRef::from_utf8("/c.txt")]),
+                    (0, vec![bytes("/a.txt")]),
+                    (1, vec![bytes("/b.txt")]),
+                    (2, vec![bytes("/c.txt")]),
                 ],
             ),
             make_field_data_sorted_numeric(
@@ -1311,9 +1314,9 @@ mod tests {
                 "path",
                 0,
                 vec![
-                    (0, vec![BytesRef::from_utf8("/a.txt")]),
-                    (1, vec![BytesRef::from_utf8("/b.txt")]),
-                    (2, vec![BytesRef::from_utf8("/c.txt")]),
+                    (0, vec![bytes("/a.txt")]),
+                    (1, vec![bytes("/b.txt")]),
+                    (2, vec![bytes("/c.txt")]),
                 ],
             ),
             make_field_data_sorted_numeric(
@@ -1381,9 +1384,9 @@ mod tests {
             "path",
             0,
             vec![
-                (0, vec![BytesRef::from_utf8("/same.txt")]),
-                (1, vec![BytesRef::from_utf8("/same.txt")]),
-                (2, vec![BytesRef::from_utf8("/same.txt")]),
+                (0, vec![bytes("/same.txt")]),
+                (1, vec![bytes("/same.txt")]),
+                (2, vec![bytes("/same.txt")]),
             ],
         )];
 
@@ -1480,11 +1483,7 @@ mod tests {
         let fields = vec![make_field_data_sorted(
             "category",
             0,
-            vec![
-                (0, BytesRef::from_utf8("alpha")),
-                (1, BytesRef::from_utf8("beta")),
-                (2, BytesRef::from_utf8("alpha")),
-            ],
+            vec![(0, bytes("alpha")), (1, bytes("beta")), (2, bytes("alpha"))],
         )];
 
         let segment_id = [0u8; 16];
@@ -1507,11 +1506,7 @@ mod tests {
         let fields = vec![make_field_data_sorted(
             "category",
             0,
-            vec![
-                (0, BytesRef::from_utf8("x")),
-                (1, BytesRef::from_utf8("y")),
-                (2, BytesRef::from_utf8("z")),
-            ],
+            vec![(0, bytes("x")), (1, bytes("y")), (2, bytes("z"))],
         )];
 
         let segment_id = [0u8; 16];
@@ -1624,19 +1619,15 @@ mod tests {
             make_field_data_sorted(
                 "sort",
                 2,
-                vec![
-                    (0, BytesRef::from_utf8("a")),
-                    (1, BytesRef::from_utf8("b")),
-                    (2, BytesRef::from_utf8("c")),
-                ],
+                vec![(0, bytes("a")), (1, bytes("b")), (2, bytes("c"))],
             ),
             make_field_data_sorted_set(
                 "sortset",
                 3,
                 vec![
-                    (0, vec![BytesRef::from_utf8("x")]),
-                    (1, vec![BytesRef::from_utf8("y")]),
-                    (2, vec![BytesRef::from_utf8("z")]),
+                    (0, vec![bytes("x")]),
+                    (1, vec![bytes("y")]),
+                    (2, vec![bytes("z")]),
                 ],
             ),
             make_field_data_sorted_numeric(
@@ -1752,9 +1743,9 @@ mod tests {
                 "path",
                 0,
                 vec![
-                    (0, vec![BytesRef::from_utf8("/a.txt")]),
-                    (1, vec![BytesRef::from_utf8("/b.txt")]),
-                    (2, vec![BytesRef::from_utf8("/c.txt")]),
+                    (0, vec![bytes("/a.txt")]),
+                    (1, vec![bytes("/b.txt")]),
+                    (2, vec![bytes("/c.txt")]),
                 ],
             ),
             make_field_data_sorted_numeric(
@@ -1793,19 +1784,9 @@ mod tests {
             "tags",
             0,
             vec![
-                (0, vec![BytesRef::from_utf8("alpha")]),
-                (
-                    1,
-                    vec![BytesRef::from_utf8("gamma"), BytesRef::from_utf8("beta")],
-                ),
-                (
-                    2,
-                    vec![
-                        BytesRef::from_utf8("delta"),
-                        BytesRef::from_utf8("alpha"),
-                        BytesRef::from_utf8("gamma"),
-                    ],
-                ),
+                (0, vec![bytes("alpha")]),
+                (1, vec![bytes("gamma"), bytes("beta")]),
+                (2, vec![bytes("delta"), bytes("alpha"), bytes("gamma")]),
             ],
         )];
 
@@ -1834,18 +1815,8 @@ mod tests {
             "tags",
             0,
             vec![
-                (
-                    0,
-                    vec![
-                        BytesRef::from_utf8("alpha"),
-                        BytesRef::from_utf8("alpha"),
-                        BytesRef::from_utf8("beta"),
-                    ],
-                ),
-                (
-                    1,
-                    vec![BytesRef::from_utf8("beta"), BytesRef::from_utf8("beta")],
-                ),
+                (0, vec![bytes("alpha"), bytes("alpha"), bytes("beta")]),
+                (1, vec![bytes("beta"), bytes("beta")]),
             ],
         )];
 
@@ -1875,9 +1846,9 @@ mod tests {
                 "tags",
                 0,
                 vec![
-                    (0, vec![BytesRef::from_utf8("a"), BytesRef::from_utf8("b")]),
-                    (1, vec![BytesRef::from_utf8("c")]),
-                    (2, vec![BytesRef::from_utf8("a"), BytesRef::from_utf8("c")]),
+                    (0, vec![bytes("a"), bytes("b")]),
+                    (1, vec![bytes("c")]),
+                    (2, vec![bytes("a"), bytes("c")]),
                 ],
             ),
             make_field_data_sorted_numeric(
@@ -2014,10 +1985,7 @@ mod tests {
         let fields = vec![make_field_data_sorted(
             "category",
             0,
-            vec![
-                (0, BytesRef::new(b"alpha".to_vec())),
-                (3, BytesRef::new(b"beta".to_vec())),
-            ],
+            vec![(0, b"alpha".to_vec()), (3, b"beta".to_vec())],
         )];
 
         let segment_id = [0u8; 16];

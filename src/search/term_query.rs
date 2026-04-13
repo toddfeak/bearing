@@ -20,7 +20,6 @@ use crate::search::scorable::Scorable;
 use crate::search::scorer::{MaxScoreCache, Scorer};
 use crate::search::similarity::{CollectionStatistics, SimScorer, TermStatistics};
 use crate::search::term_states::TermStates;
-use crate::util::BytesRef;
 
 // ---------------------------------------------------------------------------
 // TermQuery
@@ -92,7 +91,7 @@ impl Query for TermQuery {
         } else {
             // We do not need actual stats, use fake stats with docFreq=maxDoc=ttf=1
             collection_stats = Some(CollectionStatistics::new(self.field.clone(), 1, 1, 1, 1));
-            term_stats = Some(TermStatistics::new(BytesRef::new(self.term.clone()), 1, 1));
+            term_stats = Some(TermStatistics::new(self.term.clone(), 1, 1));
         }
 
         // Java: L75-94 — create simScorer once, or null if term doesn't exist

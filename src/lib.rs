@@ -36,7 +36,7 @@
 //! - [`encoding`] — Data encoding/decoding algorithms (varint, zigzag, packed ints, compression).
 //! - [`index`] — Index writer, configuration, and segment metadata types.
 //! - [`store`] — Storage abstraction (in-memory and filesystem directories).
-//! - [`util`] — Utility types such as [`util::BytesRef`].
+//! - [`util`] — Utility types (byte block pool, bytes ref hash).
 
 #[cfg(test)]
 #[macro_use]
