@@ -6,7 +6,6 @@ use std::io;
 use std::str;
 
 use log::debug;
-use smallvec::SmallVec;
 
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::NormsLookup;
@@ -169,7 +168,6 @@ impl BlockTreeTermsWriter {
         for &sorted_id in &sorted_ids[..num_terms] {
             let term_id = sorted_id as usize;
             let term_bytes = per_field.term_bytes(term_byte_pool, term_id);
-            let term_str = str::from_utf8(term_bytes).expect("term bytes must be valid UTF-8");
 
             let decoded = per_field.decode_term(terms_hash, term_id)?;
 
@@ -190,7 +188,7 @@ impl BlockTreeTermsWriter {
             )?;
 
             tw.add_term(
-                term_str.as_bytes(),
+                term_bytes,
                 state,
                 &mut *self.terms_out,
                 &self.postings_writer,
@@ -255,19 +253,19 @@ impl BlockTreeTermsWriter {
 // PendingEntry / TermsWriter
 // ============================================================================
 
-enum PendingEntry {
-    Term(PendingTerm),
+enum PendingEntry<'a> {
+    Term(PendingTerm<'a>),
     Block(PendingBlock),
 }
 
-impl PendingEntry {
+impl PendingEntry<'_> {
     fn is_term(&self) -> bool {
         matches!(self, PendingEntry::Term(_))
     }
 }
 
-struct PendingTerm {
-    term_bytes: SmallVec<[u8; 16]>,
+struct PendingTerm<'a> {
+    term_bytes: &'a [u8],
     state: IntBlockTermState,
 }
 
@@ -282,11 +280,11 @@ struct PendingBlock {
 }
 
 /// Accumulates terms for a single field and builds blocks.
-struct TermsWriter {
+struct TermsWriter<'a> {
     write_freqs: bool,
     min_items_in_block: usize,
     max_items_in_block: usize,
-    pending: Vec<PendingEntry>,
+    pending: Vec<PendingEntry<'a>>,
     last_term: Vec<u8>,
     prefix_starts: Vec<usize>,
     num_terms: u64,
@@ -298,7 +296,7 @@ struct TermsWriter {
     lz4_ht: lz4::HighCompressionHashTable,
 }
 
-impl TermsWriter {
+impl<'a> TermsWriter<'a> {
     fn new(
         field_ctx: &FieldWriteContext,
         min_items_in_block: usize,
@@ -324,7 +322,7 @@ impl TermsWriter {
 
     fn add_term(
         &mut self,
-        term: &[u8],
+        term: &'a [u8],
         state: IntBlockTermState,
         terms_out: &mut dyn IndexOutput,
         postings_writer: &PostingsWriter,
@@ -346,7 +344,7 @@ impl TermsWriter {
         self.push_term(term, terms_out, postings_writer, field_ctx)?;
 
         self.pending.push(PendingEntry::Term(PendingTerm {
-            term_bytes: SmallVec::from_slice(term),
+            term_bytes: term,
             state,
         }));
 
@@ -630,15 +628,15 @@ impl TermsWriter {
 }
 
 /// Groups the accumulated terms state passed into block writing.
-struct BlockWriteInput<'a> {
-    pending: &'a [PendingEntry],
+struct BlockWriteInput<'a, 'b> {
+    pending: &'a [PendingEntry<'b>],
     last_term: &'a [u8],
     prefix_length: usize,
 }
 
 /// Write a single block to .tim output.
 fn write_block_to_output(
-    input: &BlockWriteInput<'_>,
+    input: &BlockWriteInput<'_, '_>,
     spec: &BlockSpec,
     terms_out: &mut dyn IndexOutput,
     postings_writer: &PostingsWriter,

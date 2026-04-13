@@ -30,7 +30,6 @@ log = "0.4"
 mem_dbg = "0.4"
 memmap2 = "0.9.10"
 serde = { version = "1", features = ["derive"] }
-smallvec = "1"
 serde_json = "1"
 simple_logger = { version = "5.2", default-features = false }
 unicode-segmentation = "1.13"

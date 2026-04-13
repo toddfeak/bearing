@@ -275,24 +275,27 @@ fn add_sorted_field(
     // No skip index for MVP
 
     // Build sorted unique terms and assign ordinals
-    let mut unique_terms: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
     for (_doc_id, v) in vals {
-        unique_terms.insert(v.clone());
+        unique_terms.insert(v);
     }
 
-    let mut ord_map: HashMap<Vec<u8>, i64> = HashMap::with_capacity(unique_terms.len());
-    let sorted_terms: Vec<Vec<u8>> = unique_terms
+    let mut ord_map: HashMap<&[u8], i64> = HashMap::with_capacity(unique_terms.len());
+    let sorted_terms: Vec<&[u8]> = unique_terms
         .into_iter()
         .enumerate()
         .map(|(i, term)| {
-            ord_map.insert(term.clone(), i as i64);
+            ord_map.insert(term, i as i64);
             term
         })
         .collect();
 
     // Build per-doc ordinal array
     let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
-    let ordinals: Vec<i64> = vals.iter().map(|(_doc_id, v)| ord_map[v]).collect();
+    let ordinals: Vec<i64> = vals
+        .iter()
+        .map(|(_doc_id, v)| ord_map[v.as_slice()])
+        .collect();
 
     // writeValues for ordinals (ords=true) — no multiValued byte, no numDocsWithField
     write_values(
@@ -385,19 +388,19 @@ fn add_sorted_set_field(
     let is_single_valued = vals.iter().all(|(_, v)| v.len() == 1);
 
     // Build sorted unique terms and assign ordinals
-    let mut unique_terms: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
     for (_doc_id, values) in vals {
         for v in values {
-            unique_terms.insert(v.clone());
+            unique_terms.insert(v);
         }
     }
 
-    let mut ord_map: HashMap<Vec<u8>, i64> = HashMap::with_capacity(unique_terms.len());
-    let sorted_terms: Vec<Vec<u8>> = unique_terms
+    let mut ord_map: HashMap<&[u8], i64> = HashMap::with_capacity(unique_terms.len());
+    let sorted_terms: Vec<&[u8]> = unique_terms
         .into_iter()
         .enumerate()
         .map(|(i, term)| {
-            ord_map.insert(term.clone(), i as i64);
+            ord_map.insert(term, i as i64);
             term
         })
         .collect();
@@ -410,7 +413,7 @@ fn add_sorted_set_field(
         let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
         let ordinals: Vec<i64> = vals
             .iter()
-            .map(|(_doc_id, values)| ord_map[&values[0]])
+            .map(|(_doc_id, values)| ord_map[values[0].as_slice()])
             .collect();
 
         write_values(
@@ -432,7 +435,7 @@ fn add_sorted_set_field(
         let ord_vals: Vec<(i32, Vec<i64>)> = vals
             .iter()
             .map(|(doc_id, values)| {
-                let mut ords: Vec<i64> = values.iter().map(|v| ord_map[v]).collect();
+                let mut ords: Vec<i64> = values.iter().map(|v| ord_map[v.as_slice()]).collect();
                 ords.sort();
                 ords.dedup();
                 (*doc_id, ords)
@@ -689,7 +692,7 @@ fn gcd_compute(a: i64, b: i64) -> i64 {
 fn add_terms_dict(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    sorted_terms: &[Vec<u8>],
+    sorted_terms: &[&[u8]],
 ) -> io::Result<()> {
     let size = sorted_terms.len() as i64;
     meta.write_vlong(size)?;
@@ -731,7 +734,7 @@ fn add_terms_dict(
             data.write_bytes(term)?;
 
             // Save first term as dictionary for LZ4 compression
-            dict_bytes = term.clone();
+            dict_bytes = term.to_vec();
         } else {
             // Prefix-compress subsequent terms
             let prefix_length = string_helper::bytes_difference(previous, term);
@@ -811,7 +814,7 @@ fn compress_and_write_terms_block(
 fn write_terms_index(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    sorted_terms: &[Vec<u8>],
+    sorted_terms: &[&[u8]],
 ) -> io::Result<()> {
     meta.write_le_int(TERMS_DICT_REVERSE_INDEX_SHIFT)?;
 
