@@ -28,14 +28,14 @@ use crate::codecs::codec_util;
 use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 use crate::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
 use crate::codecs::lucene90::compressing_term_vectors_reader::CompressingTermVectorsReader;
-use crate::codecs::lucene90::doc_values_producer::DocValuesProducer;
+use crate::codecs::lucene90::doc_values_producer::DocValuesReader;
 use crate::codecs::lucene90::norms_producer::NormsReader;
 use crate::codecs::lucene90::points_reader::PointsReader;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
 use crate::codecs::lucene103::postings_reader::PostingsReader;
-use crate::index::numeric_doc_values::NumericDocValues;
+use crate::index::doc_values_iterators::NumericDocValues;
 use crate::index::terms::Terms;
 use crate::index::{FieldInfos, SegmentInfo};
 use crate::store::Directory;
@@ -54,7 +54,7 @@ pub struct SegmentReader {
     max_doc: i32,
     stored_fields_reader: Option<CompressingStoredFieldsReader>,
     norms_reader: Option<NormsReader>,
-    doc_values_reader: Option<DocValuesProducer>,
+    doc_values_reader: Option<DocValuesReader>,
     term_vectors_reader: Option<CompressingTermVectorsReader>,
     points_reader: Option<PointsReader>,
     terms_reader: Option<BlockTreeTermsReader>,
@@ -136,7 +136,7 @@ impl SegmentReader {
                 derive_suffix(&field_infos, "PerFieldDocValuesFormat").ok_or_else(|| {
                     io::Error::other("segment has doc values but no PerFieldDocValuesFormat suffix")
                 })?;
-            Some(DocValuesProducer::open(
+            Some(DocValuesReader::open(
                 dir,
                 segment_name,
                 &suffix,
@@ -241,7 +241,7 @@ impl SegmentReader {
     }
 
     /// Returns the doc values reader, or `None` if no fields have doc values.
-    pub fn doc_values_reader(&self) -> Option<&DocValuesProducer> {
+    pub fn doc_values_reader(&self) -> Option<&DocValuesReader> {
         self.doc_values_reader.as_ref()
     }
 

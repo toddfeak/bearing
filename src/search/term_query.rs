@@ -9,7 +9,7 @@ use std::slice;
 use crate::codecs::lucene103::postings_reader::{BlockPostingsEnum, IndexFeatures};
 use crate::document::IndexOptions;
 use crate::index::directory_reader::LeafReaderContext;
-use crate::index::numeric_doc_values::NumericDocValues;
+use crate::index::doc_values_iterators::NumericDocValues;
 use crate::search::collector::{DocAndFloatFeatureBuffer, ScoreMode};
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
 use crate::search::index_searcher::IndexSearcher;

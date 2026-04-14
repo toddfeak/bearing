@@ -17,7 +17,7 @@ use crate::codecs::lucene90::indexed_disi::IndexedDISI;
 use crate::codecs::lucene90::norms::{
     DATA_CODEC, DATA_EXTENSION, META_CODEC, META_EXTENSION, VERSION,
 };
-use crate::index::numeric_doc_values::NumericDocValues;
+use crate::index::doc_values_iterators::{DocValuesIterator, NumericDocValues};
 use crate::index::pipeline::segment_accumulator::PerFieldNormsData;
 use crate::index::{FieldInfo, FieldInfos, index_file_names};
 use crate::search::DocIdSetIterator;
@@ -360,7 +360,7 @@ impl DocIdSetIterator for BufferedNorms<'_> {
     }
 }
 
-impl NumericDocValues for BufferedNorms<'_> {
+impl DocValuesIterator for BufferedNorms<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         // Binary search for the target doc
         match self.docs.binary_search(&target) {
@@ -371,7 +371,9 @@ impl NumericDocValues for BufferedNorms<'_> {
             Err(_) => Ok(false),
         }
     }
+}
 
+impl NumericDocValues for BufferedNorms<'_> {
     fn long_value(&self) -> io::Result<i64> {
         Ok(self.values[self.pos as usize])
     }
@@ -416,12 +418,14 @@ impl DocIdSetIterator for DenseNormsIterator {
     }
 }
 
-impl NumericDocValues for DenseNormsIterator {
+impl DocValuesIterator for DenseNormsIterator {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         self.doc = target;
         Ok(true)
     }
+}
 
+impl NumericDocValues for DenseNormsIterator {
     fn long_value(&self) -> io::Result<i64> {
         if self.bytes_per_norm == 0 {
             return Ok(self.constant_value);
@@ -479,11 +483,13 @@ impl DocIdSetIterator for SparseNormsIterator {
     }
 }
 
-impl NumericDocValues for SparseNormsIterator {
+impl DocValuesIterator for SparseNormsIterator {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         self.disi.advance_exact(target)
     }
+}
 
+impl NumericDocValues for SparseNormsIterator {
     fn long_value(&self) -> io::Result<i64> {
         if self.bytes_per_norm == 0 {
             return Ok(self.constant_value);

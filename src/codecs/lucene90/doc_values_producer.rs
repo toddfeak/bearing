@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Doc values metadata reader for the Lucene90 doc values format.
+//! Doc values producer trait and metadata reader for the Lucene90 doc values format.
 //!
-//! Reads `.dvm` (metadata) and `.dvd` (data) files written by [`super::doc_values`].
-//! Metadata is read eagerly during construction; value data is read lazily from
-//! the `.dvd` data file on demand.
+//! The [`DocValuesProducer`] trait abstracts access to per-field doc values,
+//! allowing both file-backed readers and in-memory buffered producers.
+//!
+//! [`DocValuesReader`] reads `.dvm` (metadata) and `.dvd` (data) files written
+//! by [`super::doc_values`]. Metadata is read eagerly during construction; value
+//! data is read lazily from the `.dvd` data file on demand.
 
+use std::fmt;
 use std::io;
 
 use log::debug;
@@ -15,7 +19,10 @@ use crate::codecs::lucene90::doc_values::{
     BINARY, DATA_CODEC, DATA_EXTENSION, DIRECT_MONOTONIC_BLOCK_SHIFT, META_CODEC, META_EXTENSION,
     NUMERIC, SORTED, SORTED_NUMERIC, SORTED_SET, VERSION,
 };
-use crate::index::{FieldInfos, index_file_names};
+use crate::index::doc_values_iterators::{
+    BinaryDocValues, NumericDocValues, SortedDocValues, SortedNumericDocValues, SortedSetDocValues,
+};
+use crate::index::{FieldInfo, FieldInfos, index_file_names};
 use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{DataInput, Directory, IndexInput};
 
@@ -33,6 +40,46 @@ struct DocValuesEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Trait
+// ---------------------------------------------------------------------------
+
+/// Produces per-field doc values.
+///
+/// Both file-backed readers and in-memory buffered producers implement this
+/// trait, allowing codec writers to accept data from either source.
+pub trait DocValuesProducer: fmt::Debug {
+    /// Returns a [`NumericDocValues`] iterator for the given field.
+    fn get_numeric(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>>;
+
+    /// Returns a [`BinaryDocValues`] iterator for the given field.
+    fn get_binary(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn BinaryDocValues + '_>>>;
+
+    /// Returns a [`SortedDocValues`] iterator for the given field.
+    fn get_sorted(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedDocValues + '_>>>;
+
+    /// Returns a [`SortedNumericDocValues`] iterator for the given field.
+    fn get_sorted_numeric(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedNumericDocValues + '_>>>;
+
+    /// Returns a [`SortedSetDocValues`] iterator for the given field.
+    fn get_sorted_set(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedSetDocValues + '_>>>;
+}
+
+// ---------------------------------------------------------------------------
 // Reader
 // ---------------------------------------------------------------------------
 
@@ -41,14 +88,25 @@ struct DocValuesEntry {
 /// Opens `.dvm` and `.dvd` files during construction. All metadata is read
 /// eagerly from `.dvm`; the `.dvd` data file handle is kept open for future
 /// lazy value reads.
-pub struct DocValuesProducer {
+pub struct DocValuesReader {
     /// Per-field metadata indexed by field number. `None` for fields without doc values.
     entries: Box<[Option<DocValuesEntry>]>,
     /// Open handle to the `.dvd` data file for lazy value reads.
     data: Box<dyn IndexInput>,
 }
 
-impl DocValuesProducer {
+impl fmt::Debug for DocValuesReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DocValuesReader")
+            .field(
+                "entries",
+                &self.entries.iter().filter(|e| e.is_some()).count(),
+            )
+            .finish()
+    }
+}
+
+impl DocValuesReader {
     /// Opens doc values files (`.dvm`, `.dvd`) for the given segment.
     pub fn open(
         directory: &dyn Directory,
@@ -116,6 +174,43 @@ impl DocValuesProducer {
             .get(field_number as usize)
             .and_then(|opt| opt.as_ref())
             .map(|e| e.num_docs_with_field)
+    }
+}
+
+impl DocValuesProducer for DocValuesReader {
+    fn get_numeric(
+        &self,
+        _field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>> {
+        todo!("disk-backed doc values reading for merge path")
+    }
+
+    fn get_binary(
+        &self,
+        _field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn BinaryDocValues + '_>>> {
+        todo!("disk-backed doc values reading for merge path")
+    }
+
+    fn get_sorted(
+        &self,
+        _field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedDocValues + '_>>> {
+        todo!("disk-backed doc values reading for merge path")
+    }
+
+    fn get_sorted_numeric(
+        &self,
+        _field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedNumericDocValues + '_>>> {
+        todo!("disk-backed doc values reading for merge path")
+    }
+
+    fn get_sorted_set(
+        &self,
+        _field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedSetDocValues + '_>>> {
+        todo!("disk-backed doc values reading for merge path")
     }
 }
 
@@ -424,12 +519,12 @@ mod tests {
         fields: &[DocValuesFieldData],
         num_docs: i32,
         suffix: &str,
-    ) -> DocValuesProducer {
+    ) -> DocValuesReader {
         let segment_id = [0u8; 16];
         let dir = test_directory();
         doc_values::write(&dir, "_0", suffix, &segment_id, fields, num_docs).unwrap();
         let guard = dir.lock().unwrap();
-        DocValuesProducer::open(guard.as_ref(), "_0", suffix, &segment_id, field_infos).unwrap()
+        DocValuesReader::open(guard.as_ref(), "_0", suffix, &segment_id, field_infos).unwrap()
     }
 
     #[test]
