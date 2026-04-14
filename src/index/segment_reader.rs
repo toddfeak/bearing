@@ -27,10 +27,10 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 use crate::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
-use crate::codecs::lucene90::compressing_term_vectors_reader::CompressingTermVectorsReader;
 use crate::codecs::lucene90::doc_values_producer::DocValuesReader;
 use crate::codecs::lucene90::norms_producer::NormsReader;
 use crate::codecs::lucene90::points_reader::PointsReader;
+use crate::codecs::lucene90::term_vectors_reader::TermVectorsReader;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
@@ -55,7 +55,7 @@ pub struct SegmentReader {
     stored_fields_reader: Option<CompressingStoredFieldsReader>,
     norms_reader: Option<NormsReader>,
     doc_values_reader: Option<DocValuesReader>,
-    term_vectors_reader: Option<CompressingTermVectorsReader>,
+    term_vectors_reader: Option<TermVectorsReader>,
     points_reader: Option<PointsReader>,
     terms_reader: Option<BlockTreeTermsReader>,
     postings_reader: Option<PostingsReader>,
@@ -148,12 +148,7 @@ impl SegmentReader {
         };
 
         let term_vectors_reader = if field_infos.has_vectors() {
-            Some(CompressingTermVectorsReader::open(
-                dir,
-                segment_name,
-                "",
-                segment_id,
-            )?)
+            Some(TermVectorsReader::open(dir, segment_name, "", segment_id)?)
         } else {
             None
         };
@@ -246,7 +241,7 @@ impl SegmentReader {
     }
 
     /// Returns the term vectors reader, or `None` if no fields have term vectors.
-    pub fn term_vectors_reader(&self) -> Option<&CompressingTermVectorsReader> {
+    pub fn term_vectors_reader(&self) -> Option<&TermVectorsReader> {
         self.term_vectors_reader.as_ref()
     }
 

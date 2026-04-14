@@ -25,7 +25,7 @@ use crate::store::{DataInput, Directory, IndexInput};
 /// Opens `.tvd` first (keeps handle),
 /// reads metadata from `.tvm`, creates chunk index from `.tvx`, validates
 /// dirty chunk invariants.
-pub struct CompressingTermVectorsReader {
+pub struct TermVectorsReader {
     /// Open handle to the `.tvd` data file.
     #[expect(dead_code)]
     vectors_stream: Box<dyn IndexInput>,
@@ -51,10 +51,10 @@ pub struct CompressingTermVectorsReader {
     num_dirty_docs: i64,
 }
 
-impl CompressingTermVectorsReader {
+impl TermVectorsReader {
     /// Opens term vectors files for the given segment.
     ///
-    /// Follows Java's `Lucene90CompressingCompressingTermVectorsReader` constructor order:
+    /// Follows Java's `Lucene90CompressingTermVectorsReader` constructor order:
     /// 1. Open `.tvd` (data) — keep handle
     /// 2. Open `.tvm` (meta) with checksum — read metadata
     /// 3. `FieldsIndexReader` opens `.tvx` internally
@@ -172,7 +172,7 @@ mod tests {
     }
 
     /// Writes docs via the streaming API, finishes, then opens a reader.
-    fn write_and_read<F>(num_docs: i32, build_fn: F) -> CompressingTermVectorsReader
+    fn write_and_read<F>(num_docs: i32, build_fn: F) -> TermVectorsReader
     where
         F: FnOnce(&mut CompressingTermVectorsWriter),
     {
@@ -183,7 +183,7 @@ mod tests {
             w.finish(num_docs).unwrap();
         }
         let guard = dir.lock().unwrap();
-        CompressingTermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id()).unwrap()
+        TermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id()).unwrap()
     }
 
     #[test]

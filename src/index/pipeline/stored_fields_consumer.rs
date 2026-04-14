@@ -167,9 +167,8 @@ impl FieldConsumer for StoredFieldsConsumer {
             writer.finish_document()?;
         }
 
-        let writer = self.writer.as_mut().unwrap();
+        let mut writer = self.writer.take().unwrap();
         writer.finish(num_docs)?;
-        writer.close()?;
 
         Ok(Lucene90StoredFieldsWriter::file_names(
             &context.segment_name,
