@@ -29,7 +29,7 @@ use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 use crate::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
 use crate::codecs::lucene90::compressing_term_vectors_reader::CompressingTermVectorsReader;
 use crate::codecs::lucene90::doc_values_producer::DocValuesProducer;
-use crate::codecs::lucene90::norms_producer::{NormsProducer, NormsReader};
+use crate::codecs::lucene90::norms_producer::NormsReader;
 use crate::codecs::lucene90::points_reader::PointsReader;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;

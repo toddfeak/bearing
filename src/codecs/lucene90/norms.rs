@@ -244,9 +244,11 @@ mod tests {
         )
     }
 
-    fn make_producer(
+    fn write_norms(
+        dir: &SharedDirectory,
         fields: &[(&str, u32, &[i64], &[i32])],
-    ) -> (BufferedNormsProducer, Vec<FieldInfo>) {
+        num_docs: i32,
+    ) -> io::Result<Vec<String>> {
         let mut norms_map = HashMap::new();
         let mut field_infos = Vec::new();
         for &(name, number, values, docs) in fields {
@@ -261,15 +263,7 @@ mod tests {
             field_infos.push(make_field_info(name, number));
         }
         field_infos.sort_by_key(|f| f.number());
-        (BufferedNormsProducer::new(&norms_map), field_infos)
-    }
-
-    fn write_norms(
-        dir: &SharedDirectory,
-        fields: &[(&str, u32, &[i64], &[i32])],
-        num_docs: i32,
-    ) -> io::Result<Vec<String>> {
-        let (producer, field_infos) = make_producer(fields);
+        let producer = BufferedNormsProducer::new(&norms_map);
         let field_info_refs: Vec<&FieldInfo> = field_infos.iter().collect();
         write(
             dir,

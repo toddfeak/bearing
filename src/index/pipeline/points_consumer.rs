@@ -8,7 +8,11 @@ use std::io;
 
 use crate::analysis::Token;
 use crate::codecs::lucene90::points::{self, PointsFieldData};
+use crate::codecs::lucene90::points_reader::BufferedPointsProducer;
+use crate::document::{DocValuesType, IndexOptions};
+use crate::index::FieldInfo;
 use crate::index::field::{Field, PointsValue};
+use crate::index::field_infos::PointDimensionConfig;
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
 use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
 use crate::index::pipeline::segment_context::SegmentContext;
@@ -170,12 +174,36 @@ impl FieldConsumer for PointsConsumer {
         // Sort by field number for deterministic output
         fields_data.sort_by_key(|f| f.field_number);
 
+        let producer = BufferedPointsProducer::new(&fields_data);
+
+        let mut field_infos: Vec<FieldInfo> = fields_data
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.field_name.clone(),
+                    f.field_number,
+                    false,
+                    true,
+                    IndexOptions::None,
+                    DocValuesType::None,
+                    PointDimensionConfig {
+                        dimension_count: f.dimension_count,
+                        index_dimension_count: f.index_dimension_count,
+                        num_bytes: f.bytes_per_dim,
+                    },
+                )
+            })
+            .collect();
+        field_infos.sort_by_key(|f| f.number());
+        let field_info_refs: Vec<&FieldInfo> = field_infos.iter().collect();
+
         points::write(
             &context.directory,
             &context.segment_name,
             "",
             &context.segment_id,
-            &fields_data,
+            &field_info_refs,
+            &producer,
         )
     }
 }

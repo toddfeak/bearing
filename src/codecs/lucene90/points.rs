@@ -7,6 +7,8 @@ use std::mem;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::lucene90::points_reader::PointsProducer;
+use crate::index::FieldInfo;
 use crate::index::index_file_names;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 
@@ -36,7 +38,7 @@ const BPV_32: u8 = 32;
 
 /// Per-field point data for the points writer.
 #[derive(Debug)]
-pub(crate) struct PointsFieldData {
+pub struct PointsFieldData {
     /// Field name.
     pub field_name: String,
     /// Field number.
@@ -51,15 +53,22 @@ pub(crate) struct PointsFieldData {
     pub points: Vec<(i32, Vec<u8>)>,
 }
 
-/// Writes points files (.kdd, .kdi, .kdm) for a segment.
-/// Returns a list of file names written.
+/// Writes points files (.kdd, .kdi, .kdm) for a segment using a [`PointsProducer`].
+///
+/// `field_infos` must be sorted by field number.
+/// Returns a list of file names written, or an empty vec if no fields provided.
 pub(crate) fn write(
     directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
-    fields: &[PointsFieldData],
+    field_infos: &[&FieldInfo],
+    producer: &dyn PointsProducer,
 ) -> io::Result<Vec<String>> {
+    if field_infos.is_empty() {
+        return Ok(vec![]);
+    }
+
     let kdd_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
     let kdi_name =
@@ -99,30 +108,34 @@ pub(crate) fn write(
         segment_suffix,
     )?;
 
-    // Iterate fields (caller provides them sorted by field number)
-    for field in fields {
-        if field.points.is_empty() {
+    for &field_info in field_infos {
+        let point_values = match producer.get_points(field_info)? {
+            Some(pv) => pv,
+            None => continue,
+        };
+
+        let points = point_values.points();
+        if points.is_empty() {
             continue;
         }
 
         debug!(
             "points: field={:?} (#{}) num_points={}",
-            field.field_name,
-            field.field_number,
-            field.points.len()
+            field_info.name(),
+            field_info.number(),
+            points.len()
         );
 
-        // Write field number to meta
-        meta.write_le_int(field.field_number as i32)?;
+        meta.write_le_int(field_info.number() as i32)?;
 
         write_bkd_field(
             &mut *data,
             &mut *index,
             &mut *meta,
-            &field.points,
-            field.dimension_count,
-            field.index_dimension_count,
-            field.bytes_per_dim,
+            points,
+            point_values.num_dimensions(),
+            point_values.num_index_dimensions(),
+            point_values.bytes_per_dimension(),
         )?;
     }
 
@@ -904,6 +917,9 @@ fn recurse_pack_index(
 mod tests {
     use super::*;
     use crate::codecs::codec_util::{FOOTER_LENGTH, header_length, index_header_length};
+    use crate::codecs::lucene90::points_reader::BufferedPointsProducer;
+    use crate::document::{DocValuesType, IndexOptions};
+    use crate::index::{FieldInfo, PointDimensionConfig};
     use crate::store::memory::MemoryIndexOutput;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
@@ -937,6 +953,34 @@ mod tests {
 
     fn make_1d_long_field(name: &str, number: u32, points: Vec<(i32, Vec<u8>)>) -> PointsFieldData {
         make_points_field_data(name, number, 1, 1, 8, points)
+    }
+
+    fn make_field_info(f: &PointsFieldData) -> FieldInfo {
+        FieldInfo::new(
+            f.field_name.clone(),
+            f.field_number,
+            false,
+            true,
+            IndexOptions::None,
+            DocValuesType::None,
+            PointDimensionConfig {
+                dimension_count: f.dimension_count,
+                index_dimension_count: f.index_dimension_count,
+                num_bytes: f.bytes_per_dim,
+            },
+        )
+    }
+
+    fn write_points(
+        dir: &SharedDirectory,
+        segment_suffix: &str,
+        segment_id: &[u8; 16],
+        fields: &[PointsFieldData],
+    ) -> io::Result<Vec<String>> {
+        let producer = BufferedPointsProducer::new(fields);
+        let field_infos: Vec<FieldInfo> = fields.iter().map(make_field_info).collect();
+        let fi_refs: Vec<&FieldInfo> = field_infos.iter().collect();
+        write(dir, "_0", segment_suffix, segment_id, &fi_refs, &producer)
     }
 
     #[test]
@@ -1067,7 +1111,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "Lucene90_0", &segment_id, &fields).unwrap();
+        let names = write_points(&dir, "Lucene90_0", &segment_id, &fields).unwrap();
 
         assert_len_eq_x!(&names, 3);
         let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
@@ -1161,7 +1205,7 @@ mod tests {
 
         let segment_id = [0xABu8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "Lucene90_0", &segment_id, &fields).unwrap();
+        let names = write_points(&dir, "Lucene90_0", &segment_id, &fields).unwrap();
 
         // Check file names
         assert_eq!(names[0], "_0_Lucene90_0.kdd");
@@ -1226,7 +1270,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
+        let names = write_points(&dir, "", &segment_id, &fields).unwrap();
         assert_len_eq_x!(&names, 3);
 
         // Verify the .kdd leaf block contains correctly sorted data
@@ -1269,7 +1313,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
+        let names = write_points(&dir, "", &segment_id, &fields).unwrap();
 
         let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let kdi = dir.lock().unwrap().read_file(&names[1]).unwrap();
@@ -1312,7 +1356,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
+        let names = write_points(&dir, "", &segment_id, &fields).unwrap();
 
         // Should succeed and produce 3 files
         assert_len_eq_x!(&names, 3);
@@ -1402,7 +1446,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
+        let names = write_points(&dir, "", &segment_id, &fields).unwrap();
         let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let kdi = dir.lock().unwrap().read_file(&names[1]).unwrap();
         let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
@@ -1630,7 +1674,7 @@ mod tests {
 
         let dir = make_test_directory();
         let segment_id = [0u8; 16];
-        let names = write(&dir, "_0", "", &segment_id, &fields).unwrap();
+        let names = write_points(&dir, "", &segment_id, &fields).unwrap();
         assert_len_eq_x!(&names, 3);
     }
 }

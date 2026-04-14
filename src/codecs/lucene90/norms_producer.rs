@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::sync::Arc;
 
 use log::debug;
 
@@ -54,7 +53,10 @@ pub trait NormsProducer: fmt::Debug {
     ///
     /// Each call returns a **fresh** iterator positioned before the first document.
     /// Returns `None` if the field has no norms.
-    fn get_norms(&self, field_info: &FieldInfo) -> io::Result<Option<Box<dyn NumericDocValues>>>;
+    fn get_norms(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>>;
 }
 
 /// Reads norms for a segment from `.nvm` / `.nvd` files.
@@ -145,23 +147,14 @@ impl NormsReader {
         })
     }
 
-    /// Returns the number of documents that have norms for the given field.
+    /// Returns a [`NumericDocValues`] for the given field, or `None` if absent.
     ///
-    /// Returns `None` if no norms entry exists for this field number.
-    pub fn num_docs_with_field(&self, field_number: u32) -> Option<i32> {
-        self.entry(field_number).map(|e| e.num_docs_with_field)
-    }
-
-    /// Returns the norms entry for a field number, or `None` if absent.
-    fn entry(&self, field_number: u32) -> Option<&NormsEntry> {
-        self.entries
-            .get(field_number as usize)
-            .and_then(|opt| opt.as_ref())
-    }
-}
-
-impl NormsProducer for NormsReader {
-    fn get_norms(&self, field_info: &FieldInfo) -> io::Result<Option<Box<dyn NumericDocValues>>> {
+    /// The returned iterators own their data (file-backed slices), so they are
+    /// `'static`. The [`NormsProducer`] trait impl delegates here.
+    pub fn get_norms(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn NumericDocValues>>> {
         let entry = match self.entry(field_info.number()) {
             Some(e) => e,
             None => return Ok(None),
@@ -225,44 +218,67 @@ impl NormsProducer for NormsReader {
             constant_value: 0,
         })))
     }
+
+    /// Returns the number of documents that have norms for the given field.
+    ///
+    /// Returns `None` if no norms entry exists for this field number.
+    pub fn num_docs_with_field(&self, field_number: u32) -> Option<i32> {
+        self.entry(field_number).map(|e| e.num_docs_with_field)
+    }
+
+    /// Returns the norms entry for a field number, or `None` if absent.
+    fn entry(&self, field_number: u32) -> Option<&NormsEntry> {
+        self.entries
+            .get(field_number as usize)
+            .and_then(|opt| opt.as_ref())
+    }
+}
+
+impl NormsProducer for NormsReader {
+    fn get_norms(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>> {
+        // Delegates to the inherent method. The returned iterators are 'static
+        // (they own their data), so widening to '_ is safe.
+        Ok(self
+            .get_norms(field_info)?
+            .map(|v| -> Box<dyn NumericDocValues + '_> { v }))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // BufferedNormsProducer — in-memory norms from the indexing pipeline
 // ---------------------------------------------------------------------------
 
-/// Per-field norms data stored in memory.
-///
-/// Wrapped in `Arc` so that iterators can share data without copying.
+/// Per-field norms data borrowed from the accumulator.
 #[derive(Debug)]
-struct BufferedFieldNorms {
-    /// Doc IDs that have a norm value for this field.
-    docs: Arc<[i32]>,
-    /// Norm values, parallel with `docs`.
-    values: Arc<[i64]>,
+struct BufferedFieldNorms<'a> {
+    docs: &'a [i32],
+    values: &'a [i64],
 }
 
-/// In-memory [`NormsProducer`] wrapping indexing pipeline buffers.
+/// In-memory [`NormsProducer`] borrowing from indexing pipeline buffers.
 ///
 /// Each call to [`get_norms`](NormsProducer::get_norms) returns a fresh iterator
-/// over the buffered data, allowing the writer to make multiple passes.
+/// over the borrowed data, allowing the writer to make multiple passes.
 #[derive(Debug)]
-pub struct BufferedNormsProducer {
+pub struct BufferedNormsProducer<'a> {
     /// Per-field norms data indexed by field number.
-    fields: Vec<Option<BufferedFieldNorms>>,
+    fields: Vec<Option<BufferedFieldNorms<'a>>>,
 }
 
-impl BufferedNormsProducer {
-    /// Creates a new buffered producer from accumulated norms data.
-    pub fn new(norms: &HashMap<u32, PerFieldNormsData>) -> Self {
+impl<'a> BufferedNormsProducer<'a> {
+    /// Creates a new buffered producer borrowing from accumulated norms data.
+    pub fn new(norms: &'a HashMap<u32, PerFieldNormsData>) -> Self {
         let max_field = norms.keys().max().map_or(0, |&k| k as usize + 1);
         let mut fields = Vec::with_capacity(max_field);
         fields.resize_with(max_field, || None);
 
         for (&field_number, data) in norms {
             fields[field_number as usize] = Some(BufferedFieldNorms {
-                docs: Arc::from(data.docs.as_slice()),
-                values: Arc::from(data.values.as_slice()),
+                docs: &data.docs,
+                values: &data.values,
             });
         }
 
@@ -279,8 +295,11 @@ impl BufferedNormsProducer {
     }
 }
 
-impl NormsProducer for BufferedNormsProducer {
-    fn get_norms(&self, field_info: &FieldInfo) -> io::Result<Option<Box<dyn NumericDocValues>>> {
+impl NormsProducer for BufferedNormsProducer<'_> {
+    fn get_norms(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>> {
         let field_data = match self.fields.get(field_info.number() as usize) {
             Some(Some(data)) => data,
             _ => return Ok(None),
@@ -291,22 +310,22 @@ impl NormsProducer for BufferedNormsProducer {
         }
 
         Ok(Some(Box::new(BufferedNorms {
-            docs: Arc::clone(&field_data.docs),
-            values: Arc::clone(&field_data.values),
+            docs: field_data.docs,
+            values: field_data.values,
             pos: -1,
         })))
     }
 }
 
 /// Forward iterator over in-memory buffered norms.
-struct BufferedNorms {
-    docs: Arc<[i32]>,
-    values: Arc<[i64]>,
+struct BufferedNorms<'a> {
+    docs: &'a [i32],
+    values: &'a [i64],
     /// Current position in the docs/values arrays, or -1 if not started.
     pos: i32,
 }
 
-impl DocIdSetIterator for BufferedNorms {
+impl DocIdSetIterator for BufferedNorms<'_> {
     fn doc_id(&self) -> i32 {
         if self.pos < 0 {
             -1
@@ -341,7 +360,7 @@ impl DocIdSetIterator for BufferedNorms {
     }
 }
 
-impl NumericDocValues for BufferedNorms {
+impl NumericDocValues for BufferedNorms<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         // Binary search for the target doc
         match self.docs.binary_search(&target) {
