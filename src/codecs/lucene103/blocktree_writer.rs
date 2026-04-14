@@ -147,7 +147,7 @@ impl BlockTreeTermsWriter {
         per_field: &FreqProxTermsWriterPerField,
         term_byte_pool: &ByteBlockPool,
         terms_hash: &TermsHash,
-        norms: &NormsLookup,
+        norms: &dyn NormsLookup,
     ) -> io::Result<()> {
         let num_terms = per_field.num_terms();
         if num_terms == 0 {
@@ -1275,6 +1275,7 @@ fn choose_child_save_strategy(min_label: u8, max_label: u8, label_cnt: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::document::IndexOptions;
     use crate::store::memory::MemoryIndexOutput;
     use crate::store::{MemoryDirectory, SharedDirectory};
@@ -1551,7 +1552,7 @@ mod tests {
             &tt.writer,
             &tt.term_pool,
             &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();
@@ -1595,7 +1596,7 @@ mod tests {
             &tt.writer,
             &tt.term_pool,
             &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();
@@ -1629,7 +1630,7 @@ mod tests {
             &tt.writer,
             &tt.term_pool,
             &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();
@@ -1660,7 +1661,7 @@ mod tests {
             &tt.writer,
             &tt.term_pool,
             &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();
@@ -1715,7 +1716,7 @@ mod tests {
             &tt.writer,
             &tt.term_pool,
             &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();
@@ -1811,7 +1812,7 @@ mod tests {
             &tt.writer,
             &tt.term_pool,
             &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();

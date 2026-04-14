@@ -9,7 +9,7 @@ use std::io;
 use std::mem;
 
 use crate::analysis::Token;
-use crate::codecs::competitive_impact::NormsLookup;
+use crate::codecs::competitive_impact::BufferedNormsLookup;
 use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
 use crate::document::IndexOptions;
 use crate::index::field::{Field, InvertableValue};
@@ -264,9 +264,9 @@ impl FieldConsumer for PostingsConsumer {
             }
 
             let norms = if let Some(field_norms) = norms_data.get(&field_id) {
-                NormsLookup::new(&field_norms.values, &field_norms.docs)
+                BufferedNormsLookup::new(&field_norms.values, &field_norms.docs)
             } else {
-                NormsLookup::no_norms()
+                BufferedNormsLookup::no_norms()
             };
 
             let field_ctx = FieldWriteContext {

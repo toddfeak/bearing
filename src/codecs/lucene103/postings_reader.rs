@@ -1060,7 +1060,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::codecs::competitive_impact::NormsLookup;
+    use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::codecs::lucene103::postings_writer::PostingsWriter;
     use crate::codecs::{lucene94, lucene99};
     use crate::document::{DocValuesType, DocumentBuilder, IndexOptions};
@@ -1105,7 +1105,7 @@ mod tests {
             .iter()
             .map(|&id| (id, 1i32, &[] as &[i32]))
             .collect();
-        let norms = NormsLookup::no_norms();
+        let norms = BufferedNormsLookup::no_norms();
 
         let term_state = {
             let mut writer = PostingsWriter::new(

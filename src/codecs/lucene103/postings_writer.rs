@@ -304,7 +304,7 @@ impl PostingsWriter {
         &mut self,
         postings: &[(i32, i32, &[i32])], // (doc_id, freq, positions)
         index_options: IndexOptions,
-        norms: &NormsLookup,
+        norms: &dyn NormsLookup,
     ) -> io::Result<IntBlockTermState> {
         let doc_freq = postings.len() as i32;
         let write_freqs = index_options.has_freqs();
@@ -426,7 +426,7 @@ impl PostingsWriter {
         &mut self,
         postings: &[(i32, i32, &[i32])],
         ctx: &TermWriteContext,
-        norms: &NormsLookup,
+        norms: &dyn NormsLookup,
     ) -> io::Result<IntBlockTermState> {
         let doc_freq = ctx.doc_freq;
         let total_term_freq = ctx.total_term_freq;
@@ -716,6 +716,7 @@ fn write_vint_block_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
@@ -731,7 +732,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -756,7 +757,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -775,7 +776,11 @@ mod tests {
         let postings = vec![(7, 1, [].as_slice()), (11, 1, [].as_slice())];
         let header_size = pw.doc_out.file_pointer();
         let state = pw
-            .write_term(&postings, IndexOptions::Docs, &NormsLookup::no_norms())
+            .write_term(
+                &postings,
+                IndexOptions::Docs,
+                &BufferedNormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 2);
@@ -796,7 +801,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -836,7 +841,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -873,7 +878,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -918,7 +923,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -960,7 +965,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1001,7 +1006,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1028,7 +1033,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1074,7 +1079,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1242,7 +1247,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1271,7 +1276,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1297,7 +1302,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1321,7 +1326,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1349,7 +1354,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1370,7 +1375,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1386,7 +1391,11 @@ mod tests {
         let postings: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
         let state = pw
-            .write_term(&postings, IndexOptions::Docs, &NormsLookup::no_norms())
+            .write_term(
+                &postings,
+                IndexOptions::Docs,
+                &BufferedNormsLookup::no_norms(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 128);
@@ -1405,7 +1414,7 @@ mod tests {
             .write_term(
                 &postings,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
             )
             .unwrap();
 
@@ -1427,7 +1436,7 @@ mod tests {
         pw.write_term(
             &postings,
             IndexOptions::DocsAndFreqs,
-            &NormsLookup::no_norms(),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
 

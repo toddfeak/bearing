@@ -474,7 +474,7 @@ impl DataInput for SliceReader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::competitive_impact::NormsLookup;
+    use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
     use crate::document::DocValuesType;
@@ -582,7 +582,7 @@ mod tests {
                 write_freqs: index_options.has_freqs(),
                 write_positions: index_options.has_positions(),
             };
-            let norms = NormsLookup::no_norms();
+            let norms = BufferedNormsLookup::no_norms();
             writer.write_field(&ctx, &tt.writer, &tt.term_pool, &tt.terms_hash, &norms)?;
 
             writer.finish()?;
