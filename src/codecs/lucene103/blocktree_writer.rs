@@ -161,7 +161,8 @@ impl BlockTreeTermsWriter {
             field_ctx.field_name, num_terms
         );
 
-        let mut tw = TermsWriter::new(field_ctx, self.min_items_in_block, self.max_items_in_block);
+        let mut tw =
+            BlockTreeFieldWriter::new(field_ctx, self.min_items_in_block, self.max_items_in_block);
 
         let mut docs_seen = HashSet::new();
         let mut decoded = DecodedPostings::new();
@@ -278,7 +279,7 @@ struct PendingBlock {
 }
 
 /// Accumulates terms for a single field and builds blocks.
-struct TermsWriter<'a> {
+struct BlockTreeFieldWriter<'a> {
     write_freqs: bool,
     min_items_in_block: usize,
     max_items_in_block: usize,
@@ -294,7 +295,7 @@ struct TermsWriter<'a> {
     lz4_ht: lz4::HighCompressionHashTable,
 }
 
-impl<'a> TermsWriter<'a> {
+impl<'a> BlockTreeFieldWriter<'a> {
     fn new(
         field_ctx: &FieldWriteContext,
         min_items_in_block: usize,

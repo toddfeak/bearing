@@ -29,7 +29,7 @@ use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 use crate::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
 use crate::codecs::lucene90::compressing_term_vectors_reader::CompressingTermVectorsReader;
 use crate::codecs::lucene90::doc_values_producer::DocValuesProducer;
-use crate::codecs::lucene90::norms_producer::NormsProducer;
+use crate::codecs::lucene90::norms_producer::{NormsProducer, NormsReader};
 use crate::codecs::lucene90::points_reader::PointsReader;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
@@ -53,7 +53,7 @@ pub struct SegmentReader {
     field_infos: FieldInfos,
     max_doc: i32,
     stored_fields_reader: Option<CompressingStoredFieldsReader>,
-    norms_reader: Option<NormsProducer>,
+    norms_reader: Option<NormsReader>,
     doc_values_reader: Option<DocValuesProducer>,
     term_vectors_reader: Option<CompressingTermVectorsReader>,
     points_reader: Option<PointsReader>,
@@ -119,7 +119,7 @@ impl SegmentReader {
         )?);
 
         let norms_reader = if field_infos.has_norms() {
-            Some(NormsProducer::open(
+            Some(NormsReader::open(
                 dir,
                 segment_name,
                 "",
@@ -220,10 +220,8 @@ impl SegmentReader {
         self.stored_fields_reader.as_mut()
     }
 
-    /// Returns a reference to the norms producer, or `None` if no fields have norms.
-    ///
-    /// Matches Java's `CodecReader.getNormsReader()`.
-    pub fn norms_reader(&self) -> Option<&NormsProducer> {
+    /// Returns a reference to the norms reader, or `None` if no fields have norms.
+    pub fn norms_reader(&self) -> Option<&NormsReader> {
         self.norms_reader.as_ref()
     }
 

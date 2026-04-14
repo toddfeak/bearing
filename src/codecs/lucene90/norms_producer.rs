@@ -6,7 +6,10 @@
 //! Metadata is read eagerly during construction; norm values are read lazily from
 //! the `.nvd` data file on demand.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::io;
+use std::sync::Arc;
 
 use log::debug;
 
@@ -16,7 +19,10 @@ use crate::codecs::lucene90::norms::{
     DATA_CODEC, DATA_EXTENSION, META_CODEC, META_EXTENSION, VERSION,
 };
 use crate::index::numeric_doc_values::NumericDocValues;
+use crate::index::pipeline::segment_accumulator::PerFieldNormsData;
 use crate::index::{FieldInfo, FieldInfos, index_file_names};
+use crate::search::DocIdSetIterator;
+use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
 use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{DataInput, Directory, IndexInput, RandomAccessInput};
 
@@ -40,12 +46,23 @@ struct NormsEntry {
     norms_offset: i64,
 }
 
-/// Reads norms for a segment.
+/// Produces per-field normalization values.
 ///
-/// Opens `.nvm` and `.nvd` files during construction. Metadata entries are read
-/// eagerly and stored as an immutable slice; the `.nvd` data file handle is kept
-/// open for lazy value reads via [`get_norms`](Self::get_norms).
-pub struct NormsProducer {
+/// Both file-backed readers and in-memory buffered producers implement this trait.
+pub trait NormsProducer: fmt::Debug {
+    /// Returns a [`NumericDocValues`] iterator for the given field.
+    ///
+    /// Each call returns a **fresh** iterator positioned before the first document.
+    /// Returns `None` if the field has no norms.
+    fn get_norms(&self, field_info: &FieldInfo) -> io::Result<Option<Box<dyn NumericDocValues>>>;
+}
+
+/// Reads norms for a segment from `.nvm` / `.nvd` files.
+///
+/// Opens files during construction. Metadata entries are read eagerly and stored
+/// as an immutable slice; the `.nvd` data file handle is kept open for lazy value
+/// reads via [`get_norms`](NormsProducer::get_norms).
+pub struct NormsReader {
     /// Per-field metadata indexed by field number. `None` for fields without norms.
     entries: Box<[Option<NormsEntry>]>,
     /// Maximum document ID + 1 for this segment.
@@ -54,11 +71,20 @@ pub struct NormsProducer {
     data: Box<dyn IndexInput>,
 }
 
-impl NormsProducer {
+impl fmt::Debug for NormsReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NormsReader")
+            .field("entries", &self.entries.len())
+            .field("max_doc", &self.max_doc)
+            .finish()
+    }
+}
+
+impl NormsReader {
     /// Opens norms files (`.nvm`, `.nvd`) for the given segment.
     ///
     /// Reads all metadata eagerly from `.nvm`; the `.nvd` data file is opened but
-    /// no data is read until [`get_norms`](Self::get_norms) is called.
+    /// no data is read until [`get_norms`](NormsProducer::get_norms) is called.
     pub fn open(
         directory: &dyn Directory,
         segment_name: &str,
@@ -126,16 +152,16 @@ impl NormsProducer {
         self.entry(field_number).map(|e| e.num_docs_with_field)
     }
 
-    /// Returns a [`NumericDocValues`] for the given field, or `None` if the field
-    /// has no norms (EMPTY pattern or no entry).
-    ///
-    /// For dense norms (all docs have a value), the returned iterator does a single
-    /// random-access read per `long_value()` call — no seeking. For sparse norms,
-    /// it wraps an [`IndexedDISI`] for presence checks.
-    pub fn get_norms(
-        &self,
-        field_info: &FieldInfo,
-    ) -> io::Result<Option<Box<dyn NumericDocValues>>> {
+    /// Returns the norms entry for a field number, or `None` if absent.
+    fn entry(&self, field_number: u32) -> Option<&NormsEntry> {
+        self.entries
+            .get(field_number as usize)
+            .and_then(|opt| opt.as_ref())
+    }
+}
+
+impl NormsProducer for NormsReader {
+    fn get_norms(&self, field_info: &FieldInfo) -> io::Result<Option<Box<dyn NumericDocValues>>> {
         let entry = match self.entry(field_info.number()) {
             Some(e) => e,
             None => return Ok(None),
@@ -199,12 +225,136 @@ impl NormsProducer {
             constant_value: 0,
         })))
     }
+}
 
-    /// Returns the norms entry for a field number, or `None` if absent.
-    fn entry(&self, field_number: u32) -> Option<&NormsEntry> {
-        self.entries
-            .get(field_number as usize)
-            .and_then(|opt| opt.as_ref())
+// ---------------------------------------------------------------------------
+// BufferedNormsProducer — in-memory norms from the indexing pipeline
+// ---------------------------------------------------------------------------
+
+/// Per-field norms data stored in memory.
+///
+/// Wrapped in `Arc` so that iterators can share data without copying.
+#[derive(Debug)]
+struct BufferedFieldNorms {
+    /// Doc IDs that have a norm value for this field.
+    docs: Arc<[i32]>,
+    /// Norm values, parallel with `docs`.
+    values: Arc<[i64]>,
+}
+
+/// In-memory [`NormsProducer`] wrapping indexing pipeline buffers.
+///
+/// Each call to [`get_norms`](NormsProducer::get_norms) returns a fresh iterator
+/// over the buffered data, allowing the writer to make multiple passes.
+#[derive(Debug)]
+pub struct BufferedNormsProducer {
+    /// Per-field norms data indexed by field number.
+    fields: Vec<Option<BufferedFieldNorms>>,
+}
+
+impl BufferedNormsProducer {
+    /// Creates a new buffered producer from accumulated norms data.
+    pub fn new(norms: &HashMap<u32, PerFieldNormsData>) -> Self {
+        let max_field = norms.keys().max().map_or(0, |&k| k as usize + 1);
+        let mut fields = Vec::with_capacity(max_field);
+        fields.resize_with(max_field, || None);
+
+        for (&field_number, data) in norms {
+            fields[field_number as usize] = Some(BufferedFieldNorms {
+                docs: Arc::from(data.docs.as_slice()),
+                values: Arc::from(data.values.as_slice()),
+            });
+        }
+
+        Self { fields }
+    }
+
+    /// Returns the field numbers that have norms, sorted.
+    pub fn field_numbers(&self) -> Vec<u32> {
+        self.fields
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.as_ref().map(|_| i as u32))
+            .collect()
+    }
+}
+
+impl NormsProducer for BufferedNormsProducer {
+    fn get_norms(&self, field_info: &FieldInfo) -> io::Result<Option<Box<dyn NumericDocValues>>> {
+        let field_data = match self.fields.get(field_info.number() as usize) {
+            Some(Some(data)) => data,
+            _ => return Ok(None),
+        };
+
+        if field_data.docs.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Box::new(BufferedNorms {
+            docs: Arc::clone(&field_data.docs),
+            values: Arc::clone(&field_data.values),
+            pos: -1,
+        })))
+    }
+}
+
+/// Forward iterator over in-memory buffered norms.
+struct BufferedNorms {
+    docs: Arc<[i32]>,
+    values: Arc<[i64]>,
+    /// Current position in the docs/values arrays, or -1 if not started.
+    pos: i32,
+}
+
+impl DocIdSetIterator for BufferedNorms {
+    fn doc_id(&self) -> i32 {
+        if self.pos < 0 {
+            -1
+        } else if (self.pos as usize) < self.docs.len() {
+            self.docs[self.pos as usize]
+        } else {
+            NO_MORE_DOCS
+        }
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        self.pos += 1;
+        if (self.pos as usize) < self.docs.len() {
+            Ok(self.docs[self.pos as usize])
+        } else {
+            self.pos = self.docs.len() as i32;
+            Ok(NO_MORE_DOCS)
+        }
+    }
+
+    fn advance(&mut self, target: i32) -> io::Result<i32> {
+        loop {
+            let doc = self.next_doc()?;
+            if doc >= target || doc == NO_MORE_DOCS {
+                return Ok(doc);
+            }
+        }
+    }
+
+    fn cost(&self) -> i64 {
+        self.docs.len() as i64
+    }
+}
+
+impl NumericDocValues for BufferedNorms {
+    fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        // Binary search for the target doc
+        match self.docs.binary_search(&target) {
+            Ok(idx) => {
+                self.pos = idx as i32;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn long_value(&self) -> io::Result<i64> {
+        Ok(self.values[self.pos as usize])
     }
 }
 
@@ -218,11 +368,33 @@ impl NormsProducer {
 /// data slice. For `bytes_per_norm == 0`, returns a constant value.
 struct DenseNormsIterator {
     doc: i32,
-    #[expect(dead_code)]
     max_doc: i32,
     slice: Option<Box<dyn RandomAccessInput>>,
     bytes_per_norm: u8,
     constant_value: i64,
+}
+
+impl DocIdSetIterator for DenseNormsIterator {
+    fn doc_id(&self) -> i32 {
+        self.doc
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        self.advance(self.doc + 1)
+    }
+
+    fn advance(&mut self, target: i32) -> io::Result<i32> {
+        if target >= self.max_doc {
+            self.doc = NO_MORE_DOCS;
+        } else {
+            self.doc = target;
+        }
+        Ok(self.doc)
+    }
+
+    fn cost(&self) -> i64 {
+        self.max_doc as i64
+    }
 }
 
 impl NumericDocValues for DenseNormsIterator {
@@ -262,6 +434,30 @@ struct SparseNormsIterator {
     slice: Option<Box<dyn RandomAccessInput>>,
     bytes_per_norm: u8,
     constant_value: i64,
+}
+
+impl DocIdSetIterator for SparseNormsIterator {
+    fn doc_id(&self) -> i32 {
+        self.disi.doc_id()
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        match self.disi.next_doc()? {
+            Some(doc) => Ok(doc),
+            None => Ok(NO_MORE_DOCS),
+        }
+    }
+
+    fn advance(&mut self, target: i32) -> io::Result<i32> {
+        match self.disi.advance(target)? {
+            Some(doc) => Ok(doc),
+            None => Ok(NO_MORE_DOCS),
+        }
+    }
+
+    fn cost(&self) -> i64 {
+        self.disi.cost()
+    }
 }
 
 impl NumericDocValues for SparseNormsIterator {
@@ -351,56 +547,63 @@ fn read_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::norms::{self, NormsFieldData};
+    use crate::codecs::lucene90::norms;
     use crate::document::{DocValuesType, IndexOptions};
+    use crate::index::field_infos::PointDimensionConfig;
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
-    use crate::test_util;
     use assertables::*;
 
     fn make_field_info(name: &str, number: u32, has_norms: bool) -> FieldInfo {
-        test_util::make_field_info(
-            name,
+        FieldInfo::new(
+            name.to_string(),
             number,
+            false,
             !has_norms,
             IndexOptions::DocsAndFreqsAndPositions,
             DocValuesType::None,
+            PointDimensionConfig::default(),
         )
-    }
-
-    fn make_norms_field(
-        name: &str,
-        number: u32,
-        norms_vals: Vec<i64>,
-        norms_docs: Vec<i32>,
-    ) -> NormsFieldData {
-        NormsFieldData {
-            field_name: name.to_string(),
-            field_number: number,
-            norms: norms_vals,
-            docs: norms_docs,
-        }
     }
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    /// Writes norms and opens a reader, returning the reader.
+    /// Writes norms using the production path and opens a reader.
     fn write_and_read(
-        fields: &[NormsFieldData],
+        fields: &[(&str, u32, &[i64], &[i32])],
         field_infos: &FieldInfos,
         num_docs: i32,
-    ) -> NormsProducer {
+    ) -> NormsReader {
         let segment_id = [0u8; 16];
         let dir = test_directory();
-        norms::write(&dir, "_0", "", &segment_id, fields, num_docs).unwrap();
+
+        let mut norms_map = HashMap::new();
+        let mut infos = Vec::new();
+        for &(name, number, values, docs) in fields {
+            norms_map.insert(
+                number,
+                PerFieldNormsData {
+                    field_name: name.to_string(),
+                    docs: docs.to_vec(),
+                    values: values.to_vec(),
+                },
+            );
+            infos.push(make_field_info(name, number, true));
+        }
+        infos.sort_by_key(|f| f.number());
+        let producer = BufferedNormsProducer::new(&norms_map);
+        let info_refs: Vec<&FieldInfo> = infos.iter().collect();
+
+        norms::write(&dir, "_0", "", &segment_id, &info_refs, &producer, num_docs).unwrap();
+
         let guard = dir.lock().unwrap();
-        NormsProducer::open(guard.as_ref(), "_0", "", &segment_id, field_infos, num_docs).unwrap()
+        NormsReader::open(guard.as_ref(), "_0", "", &segment_id, field_infos, num_docs).unwrap()
     }
 
     /// Helper: get a single norm value using get_norms + advance_exact + long_value.
-    fn get_norm(reader: &NormsProducer, fi: &FieldInfo, doc_id: i32) -> io::Result<Option<i64>> {
+    fn get_norm(reader: &NormsReader, fi: &FieldInfo, doc_id: i32) -> io::Result<Option<i64>> {
         let mut norms = match reader.get_norms(fi)? {
             Some(n) => n,
             None => return Ok(None),
@@ -416,21 +619,15 @@ mod tests {
 
     #[test]
     fn test_all_constant() {
-        // ALL pattern with constant norms (bytes_per_norm=0)
-        let fields = vec![make_norms_field(
-            "contents",
-            0,
-            vec![42, 42, 42],
-            vec![0, 1, 2],
-        )];
         let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 3);
+        let reader = write_and_read(
+            &[("contents", 0, &[42, 42, 42], &[0, 1, 2])],
+            &field_infos,
+            3,
+        );
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
-
-        // All docs return the constant value
         for doc in 0..3 {
             assert_eq!(get_norm(&reader, fi, doc).unwrap(), Some(42), "doc {doc}");
         }
@@ -438,17 +635,13 @@ mod tests {
 
     #[test]
     fn test_all_variable_1byte() {
-        // ALL pattern with 1-byte variable norms
-        let fields = vec![make_norms_field(
-            "contents",
-            0,
-            vec![12, 8, 10],
-            vec![0, 1, 2],
-        )];
         let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 3);
+        let reader = write_and_read(
+            &[("contents", 0, &[12, 8, 10], &[0, 1, 2])],
+            &field_infos,
+            3,
+        );
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(12));
@@ -458,17 +651,13 @@ mod tests {
 
     #[test]
     fn test_all_variable_2byte() {
-        // ALL pattern with 2-byte norms (values outside i8 range)
-        let fields = vec![make_norms_field(
-            "f",
-            0,
-            vec![1000, -500, 32000],
-            vec![0, 1, 2],
-        )];
         let field_infos = FieldInfos::new(vec![make_field_info("f", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 3);
+        let reader = write_and_read(
+            &[("f", 0, &[1000, -500, 32000], &[0, 1, 2])],
+            &field_infos,
+            3,
+        );
 
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(1000));
         assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-500));
@@ -477,17 +666,9 @@ mod tests {
 
     #[test]
     fn test_all_variable_4byte() {
-        // ALL pattern with 4-byte norms
-        let fields = vec![make_norms_field(
-            "f",
-            0,
-            vec![100_000, -100_000],
-            vec![0, 1],
-        )];
         let field_infos = FieldInfos::new(vec![make_field_info("f", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 2);
+        let reader = write_and_read(&[("f", 0, &[100_000, -100_000], &[0, 1])], &field_infos, 2);
 
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(100_000));
         assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-100_000));
@@ -495,17 +676,9 @@ mod tests {
 
     #[test]
     fn test_all_variable_8byte() {
-        // ALL pattern with 8-byte norms
-        let fields = vec![make_norms_field(
-            "f",
-            0,
-            vec![i64::MAX, i64::MIN],
-            vec![0, 1],
-        )];
         let field_infos = FieldInfos::new(vec![make_field_info("f", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 2);
+        let reader = write_and_read(&[("f", 0, &[i64::MAX, i64::MIN], &[0, 1])], &field_infos, 2);
 
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(i64::MAX));
         assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(i64::MIN));
@@ -513,12 +686,9 @@ mod tests {
 
     #[test]
     fn test_empty_pattern() {
-        // EMPTY: field has norms but no documents contributed
-        let fields = vec![make_norms_field("contents", 0, vec![], vec![])];
         let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 3);
+        let reader = write_and_read(&[("contents", 0, &[], &[])], &field_infos, 3);
 
         assert_eq!(reader.num_docs_with_field(0), Some(0));
         assert_none!(get_norm(&reader, fi, 0).unwrap());
@@ -527,12 +697,9 @@ mod tests {
 
     #[test]
     fn test_sparse_variable() {
-        // SPARSE: 2 of 5 docs have norms
-        let fields = vec![make_norms_field("contents", 0, vec![12, 8], vec![1, 3])];
         let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 5);
+        let reader = write_and_read(&[("contents", 0, &[12, 8], &[1, 3])], &field_infos, 5);
 
         assert_eq!(reader.num_docs_with_field(0), Some(2));
         assert_none!(get_norm(&reader, fi, 0).unwrap());
@@ -544,17 +711,9 @@ mod tests {
 
     #[test]
     fn test_sparse_constant() {
-        // SPARSE with constant value: 3 of 5 docs, all same norm
-        let fields = vec![make_norms_field(
-            "title",
-            0,
-            vec![42, 42, 42],
-            vec![0, 2, 4],
-        )];
         let field_infos = FieldInfos::new(vec![make_field_info("title", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 5);
+        let reader = write_and_read(&[("title", 0, &[42, 42, 42], &[0, 2, 4])], &field_infos, 5);
 
         assert_eq!(reader.num_docs_with_field(0), Some(3));
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(42));
@@ -566,19 +725,20 @@ mod tests {
 
     #[test]
     fn test_multiple_fields_mixed_patterns() {
-        // Field 0: ALL constant, Field 1: SPARSE variable
-        let fields = vec![
-            make_norms_field("alpha", 0, vec![5, 5, 5], vec![0, 1, 2]),
-            make_norms_field("beta", 1, vec![10, 20], vec![0, 2]),
-        ];
         let field_infos = FieldInfos::new(vec![
             make_field_info("alpha", 0, true),
             make_field_info("beta", 1, true),
         ]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
         let fi1 = field_infos.field_info_by_number(1).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 3);
+        let reader = write_and_read(
+            &[
+                ("alpha", 0, &[5, 5, 5], &[0, 1, 2]),
+                ("beta", 1, &[10, 20], &[0, 2]),
+            ],
+            &field_infos,
+            3,
+        );
 
         // alpha: ALL constant
         assert_eq!(reader.num_docs_with_field(0), Some(3));
@@ -595,27 +755,21 @@ mod tests {
 
     #[test]
     fn test_nonexistent_field() {
-        let fields = vec![make_norms_field("contents", 0, vec![10], vec![0])];
         let field_infos = FieldInfos::new(vec![make_field_info("contents", 0, true)]);
-
-        let reader = write_and_read(&fields, &field_infos, 1);
+        let reader = write_and_read(&[("contents", 0, &[10], &[0])], &field_infos, 1);
 
         assert_none!(reader.num_docs_with_field(99));
     }
 
     #[test]
     fn test_negative_norm_values() {
-        // Norms can be negative (signed byte range)
-        let fields = vec![make_norms_field(
-            "f",
-            0,
-            vec![-128, -1, 0, 127],
-            vec![0, 1, 2, 3],
-        )];
         let field_infos = FieldInfos::new(vec![make_field_info("f", 0, true)]);
-
         let fi = field_infos.field_info_by_number(0).unwrap();
-        let reader = write_and_read(&fields, &field_infos, 4);
+        let reader = write_and_read(
+            &[("f", 0, &[-128, -1, 0, 127], &[0, 1, 2, 3])],
+            &field_infos,
+            4,
+        );
 
         assert_eq!(get_norm(&reader, fi, 0).unwrap(), Some(-128));
         assert_eq!(get_norm(&reader, fi, 1).unwrap(), Some(-1));

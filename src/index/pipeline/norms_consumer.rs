@@ -5,8 +5,12 @@
 use std::io;
 
 use crate::analysis::Token;
-use crate::codecs::lucene90::norms::{self, NormsFieldData};
+use crate::codecs::lucene90::norms;
+use crate::codecs::lucene90::norms_producer::BufferedNormsProducer;
+use crate::document::{DocValuesType, IndexOptions};
+use crate::index::FieldInfo;
 use crate::index::field::Field;
+use crate::index::field_infos::PointDimensionConfig;
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
 use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
 use crate::index::pipeline::segment_context::SegmentContext;
@@ -103,29 +107,38 @@ impl FieldConsumer for NormsConsumer {
         context: &SegmentContext,
         accumulator: &SegmentAccumulator,
     ) -> io::Result<Vec<String>> {
-        let norms = accumulator.norms();
-        if norms.is_empty() {
+        let norms_data = accumulator.norms();
+        if norms_data.is_empty() {
             return Ok(vec![]);
         }
 
-        // Build sorted field data for the codec writer
-        let mut fields: Vec<NormsFieldData> = norms
+        let producer = BufferedNormsProducer::new(norms_data);
+
+        // Build FieldInfo objects for each norms field, sorted by field number
+        let mut field_infos: Vec<FieldInfo> = norms_data
             .iter()
-            .map(|(&field_number, data)| NormsFieldData {
-                field_name: data.field_name.clone(),
-                field_number,
-                norms: data.values.clone(),
-                docs: data.docs.clone(),
+            .map(|(&field_number, data)| {
+                FieldInfo::new(
+                    data.field_name.clone(),
+                    field_number,
+                    false,
+                    false, // omit_norms = false → has_norms() = true
+                    IndexOptions::DocsAndFreqsAndPositions,
+                    DocValuesType::None,
+                    PointDimensionConfig::default(),
+                )
             })
             .collect();
-        fields.sort_by_key(|f| f.field_number);
+        field_infos.sort_by_key(|f| f.number());
+        let field_info_refs: Vec<&FieldInfo> = field_infos.iter().collect();
 
         norms::write(
             &context.directory,
             &context.segment_name,
             "",
             &context.segment_id,
-            &fields,
+            &field_info_refs,
+            &producer,
             accumulator.doc_count(),
         )
     }

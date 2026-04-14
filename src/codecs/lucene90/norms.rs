@@ -7,8 +7,11 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::indexed_disi;
+use crate::codecs::lucene90::norms_producer::NormsProducer;
+use crate::index::FieldInfo;
 use crate::index::index_file_names;
-use crate::store::{DataOutput, SharedDirectory};
+use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
+use crate::store::{DataOutput, IndexOutput, SharedDirectory};
 
 // File extensions
 pub(crate) const DATA_EXTENSION: &str = "nvd";
@@ -19,151 +22,7 @@ pub(crate) const DATA_CODEC: &str = "Lucene90NormsData";
 pub(crate) const META_CODEC: &str = "Lucene90NormsMetadata";
 pub(crate) const VERSION: i32 = 0;
 
-/// Per-field norms data for writing.
-#[derive(Debug)]
-pub(crate) struct NormsFieldData {
-    /// Field name (for debug logging).
-    pub field_name: String,
-    /// Field number (must be unique, fields sorted by this).
-    pub field_number: u32,
-    /// Norm values, one per document that has a norm for this field.
-    pub norms: Vec<i64>,
-    /// Doc IDs corresponding to each norm value (parallel with `norms`).
-    pub docs: Vec<i32>,
-}
-
-/// Writes norms files (.nvm, .nvd) for a segment.
-///
-/// `fields` must be sorted by `field_number`.
-/// Returns the names of the files written, or an empty vec if no fields have norms.
-pub(crate) fn write(
-    directory: &SharedDirectory,
-    segment_name: &str,
-    segment_suffix: &str,
-    segment_id: &[u8; 16],
-    fields: &[NormsFieldData],
-    num_docs: i32,
-) -> io::Result<Vec<String>> {
-    if fields.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let nvm_name =
-        index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-    let nvd_name =
-        index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
-
-    let (mut nvm, mut nvd) = {
-        let mut dir = directory.lock().unwrap();
-        (dir.create_output(&nvm_name)?, dir.create_output(&nvd_name)?)
-    };
-
-    // Write index headers
-    codec_util::write_index_header(&mut *nvm, META_CODEC, VERSION, segment_id, segment_suffix)?;
-    codec_util::write_index_header(&mut *nvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
-
-    for field in fields {
-        let num_docs_with_value = field.docs.len() as i32;
-
-        if num_docs_with_value == 0 {
-            debug!(
-                "norms: field={:?} (#{}) -> EMPTY pattern",
-                field.field_name, field.field_number
-            );
-            write_empty_norms_metadata(&mut *nvm, field.field_number)?;
-            continue;
-        }
-
-        // Compute min and max norm values
-        let min = *field.norms.iter().min().unwrap();
-        let max = *field.norms.iter().max().unwrap();
-        let bytes_per_norm = num_bytes_per_value(min, max);
-
-        if num_docs_with_value == num_docs {
-            // ALL pattern: every document has a norm for this field
-            debug!(
-                "norms: field={:?} (#{}) -> ALL pattern, bytes_per_norm={}, min={}, max={}, num_docs_with_field={}",
-                field.field_name, field.field_number, bytes_per_norm, min, max, num_docs_with_value
-            );
-            nvm.write_le_int(field.field_number as i32)?;
-            nvm.write_le_long(-1)?; // docs_with_field_offset = ALL
-            nvm.write_le_long(0)?; // docs_with_field_length
-            nvm.write_le_short(-1)?; // jump_table_entry_count
-            nvm.write_byte(0xFF)?; // dense_rank_power (-1 as byte)
-            nvm.write_le_int(num_docs_with_value)?;
-
-            if bytes_per_norm == 0 {
-                // Constant: all norms are the same value, store in metadata
-                nvm.write_byte(0)?;
-                nvm.write_le_long(min)?;
-            } else {
-                nvm.write_byte(bytes_per_norm)?;
-                let data_offset = nvd.file_pointer() as i64;
-                nvm.write_le_long(data_offset)?;
-                write_norm_values(&mut *nvd, &field.norms, bytes_per_norm)?;
-            }
-        } else {
-            // SPARSE pattern: some but not all documents have norms
-            debug!(
-                "norms: field={:?} (#{}) -> SPARSE pattern, bytes_per_norm={}, min={}, max={}, num_docs_with_field={}/{}",
-                field.field_name,
-                field.field_number,
-                bytes_per_norm,
-                min,
-                max,
-                num_docs_with_value,
-                num_docs
-            );
-            nvm.write_le_int(field.field_number as i32)?;
-
-            // Write IndexedDISI bitset to .nvd
-            let disi_offset = nvd.file_pointer() as i64;
-            nvm.write_le_long(disi_offset)?;
-            let jump_table_entry_count =
-                indexed_disi::write_bit_set(&field.docs, num_docs, &mut *nvd)?;
-            nvm.write_le_long(nvd.file_pointer() as i64 - disi_offset)?;
-            nvm.write_le_short(jump_table_entry_count)?;
-            nvm.write_byte(indexed_disi::DEFAULT_DENSE_RANK_POWER as u8)?;
-
-            nvm.write_le_int(num_docs_with_value)?;
-
-            if bytes_per_norm == 0 {
-                nvm.write_byte(0)?;
-                nvm.write_le_long(min)?;
-            } else {
-                nvm.write_byte(bytes_per_norm)?;
-                let data_offset = nvd.file_pointer() as i64;
-                nvm.write_le_long(data_offset)?;
-                write_norm_values(&mut *nvd, &field.norms, bytes_per_norm)?;
-            }
-        }
-    }
-
-    // EOF marker
-    nvm.write_le_int(-1)?;
-
-    // Write footers
-    codec_util::write_footer(&mut *nvm)?;
-    codec_util::write_footer(&mut *nvd)?;
-
-    Ok(vec![nvm_name, nvd_name])
-}
-
-/// Writes metadata for a field with no norms (EMPTY pattern).
-fn write_empty_norms_metadata(nvm: &mut dyn DataOutput, field_number: u32) -> io::Result<()> {
-    nvm.write_le_int(field_number as i32)?; // field_number
-    nvm.write_le_long(-2)?; // docs_with_field_offset = EMPTY
-    nvm.write_le_long(0)?; // docs_with_field_length
-    nvm.write_le_short(-1)?; // jump_table_entry_count
-    nvm.write_byte(0xFF)?; // dense_rank_power (-1 as byte)
-    nvm.write_le_int(0)?; // num_docs_with_field
-    nvm.write_byte(0)?; // bytes_per_norm
-    nvm.write_le_long(0)?; // norms_offset
-    Ok(())
-}
-
 /// Determines how many bytes are needed per norm value.
-/// Matches Java's Lucene90NormsConsumer.numBytesPerValue.
 fn num_bytes_per_value(min: i64, max: i64) -> u8 {
     if min >= max {
         0
@@ -178,28 +37,193 @@ fn num_bytes_per_value(min: i64, max: i64) -> u8 {
     }
 }
 
-/// Writes norm values to the data file using the given bytes_per_norm encoding.
-fn write_norm_values(
-    nvd: &mut dyn DataOutput,
-    norms: &[i64],
-    bytes_per_norm: u8,
+/// Writes norms files (.nvm, .nvd) for a segment using a [`NormsProducer`].
+///
+/// `field_infos` must be sorted by field number.
+/// Returns the names of the files written, or an empty vec if no fields provided.
+pub(crate) fn write(
+    directory: &SharedDirectory,
+    segment_name: &str,
+    segment_suffix: &str,
+    segment_id: &[u8; 16],
+    field_infos: &[&FieldInfo],
+    producer: &dyn NormsProducer,
+    max_doc: i32,
+) -> io::Result<Vec<String>> {
+    if field_infos.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let nvm_name =
+        index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
+    let nvd_name =
+        index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
+
+    let (mut nvm, mut nvd) = {
+        let mut dir = directory.lock().unwrap();
+        (dir.create_output(&nvm_name)?, dir.create_output(&nvd_name)?)
+    };
+
+    codec_util::write_index_header(&mut *nvm, META_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_util::write_index_header(&mut *nvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
+
+    for &field_info in field_infos {
+        add_norms_field(field_info, producer, max_doc, &mut *nvm, &mut *nvd)?;
+    }
+
+    // EOF marker
+    nvm.write_le_int(-1)?;
+
+    codec_util::write_footer(&mut *nvm)?;
+    codec_util::write_footer(&mut *nvd)?;
+
+    Ok(vec![nvm_name, nvd_name])
+}
+
+/// Writes norms for a single field.
+///
+/// Three passes over the producer's iterator:
+/// 1. Compute num_docs_with_value, min, max
+/// 2. Write IndexedDISI bitset (sparse case only)
+/// 3. Write norm values (if not constant)
+fn add_norms_field(
+    field: &FieldInfo,
+    norms_producer: &dyn NormsProducer,
+    max_doc: i32,
+    meta: &mut dyn DataOutput,
+    data: &mut dyn IndexOutput,
 ) -> io::Result<()> {
-    for &norm in norms {
-        match bytes_per_norm {
-            1 => nvd.write_byte(norm as u8)?,
-            2 => nvd.write_le_short(norm as i16)?,
-            4 => nvd.write_le_int(norm as i32)?,
-            8 => nvd.write_le_long(norm)?,
-            _ => unreachable!("invalid bytes_per_norm: {}", bytes_per_norm),
+    // Pass 1: compute count, min, max
+    let mut values = match norms_producer.get_norms(field)? {
+        Some(v) => v,
+        None => {
+            // EMPTY pattern: no documents have norms for this field
+            debug!(
+                "norms: field={:?} (#{}) -> EMPTY pattern",
+                field.name(),
+                field.number()
+            );
+            meta.write_le_int(field.number() as i32)?;
+            meta.write_le_long(-2)?; // docsWithFieldOffset
+            meta.write_le_long(0)?; // docsWithFieldLength
+            meta.write_le_short(-1)?; // jumpTableEntryCount
+            meta.write_byte(0xFF)?; // denseRankPower
+            meta.write_le_int(0)?; // numDocsWithField
+            meta.write_byte(0)?; // bytesPerNorm
+            meta.write_le_long(0)?; // normsOffset
+            return Ok(());
+        }
+    };
+    let mut num_docs_with_value = 0i32;
+    let mut min = i64::MAX;
+    let mut max = i64::MIN;
+    loop {
+        let doc = values.next_doc()?;
+        if doc == NO_MORE_DOCS {
+            break;
+        }
+        num_docs_with_value += 1;
+        let v = values.long_value()?;
+        min = min.min(v);
+        max = max.max(v);
+    }
+    // The indexing pipeline may record multiple norms per doc (multi-valued fields),
+    // so num_docs_with_value can exceed max_doc. The writer handles this correctly
+    // by using the sparse pattern when they differ.
+
+    meta.write_le_int(field.number() as i32)?;
+
+    if num_docs_with_value == 0 {
+        debug!(
+            "norms: field={:?} (#{}) -> EMPTY pattern",
+            field.name(),
+            field.number()
+        );
+        meta.write_le_long(-2)?; // docsWithFieldOffset
+        meta.write_le_long(0)?; // docsWithFieldLength
+        meta.write_le_short(-1)?; // jumpTableEntryCount
+        meta.write_byte(0xFF)?; // denseRankPower
+    } else if num_docs_with_value == max_doc {
+        debug!(
+            "norms: field={:?} (#{}) -> ALL pattern, num_docs_with_field={}",
+            field.name(),
+            field.number(),
+            num_docs_with_value
+        );
+        meta.write_le_long(-1)?; // docsWithFieldOffset
+        meta.write_le_long(0)?; // docsWithFieldLength
+        meta.write_le_short(-1)?; // jumpTableEntryCount
+        meta.write_byte(0xFF)?; // denseRankPower
+    } else {
+        // Pass 2: write IndexedDISI bitset (sparse case)
+        debug!(
+            "norms: field={:?} (#{}) -> SPARSE pattern, num_docs_with_field={}/{}",
+            field.name(),
+            field.number(),
+            num_docs_with_value,
+            max_doc
+        );
+        let offset = data.file_pointer() as i64;
+        meta.write_le_long(offset)?; // docsWithFieldOffset
+        let mut values = norms_producer.get_norms(field)?.unwrap();
+        let mut doc_ids = Vec::with_capacity(num_docs_with_value as usize);
+        loop {
+            let doc = values.next_doc()?;
+            if doc == NO_MORE_DOCS {
+                break;
+            }
+            doc_ids.push(doc);
+        }
+        let jump_table_entry_count = indexed_disi::write_bit_set(&doc_ids, max_doc, data)?;
+        meta.write_le_long(data.file_pointer() as i64 - offset)?; // docsWithFieldLength
+        meta.write_le_short(jump_table_entry_count)?;
+        meta.write_byte(indexed_disi::DEFAULT_DENSE_RANK_POWER as u8)?;
+    }
+
+    meta.write_le_int(num_docs_with_value)?;
+    let num_bytes_per_value = num_bytes_per_value(min, max);
+
+    meta.write_byte(num_bytes_per_value)?;
+    if num_bytes_per_value == 0 {
+        meta.write_le_long(min)?;
+    } else {
+        meta.write_le_long(data.file_pointer() as i64)?; // normsOffset
+        // Pass 3: write norm values
+        let mut values = norms_producer.get_norms(field)?.unwrap();
+        loop {
+            let doc = values.next_doc()?;
+            if doc == NO_MORE_DOCS {
+                break;
+            }
+            let v = values.long_value()?;
+            write_norm_value(data, v, num_bytes_per_value)?;
         }
     }
+
     Ok(())
+}
+
+/// Writes a single norm value.
+fn write_norm_value(out: &mut dyn DataOutput, value: i64, bytes_per_norm: u8) -> io::Result<()> {
+    match bytes_per_norm {
+        1 => out.write_byte(value as u8),
+        2 => out.write_le_short(value as i16),
+        4 => out.write_le_int(value as i32),
+        8 => out.write_le_long(value),
+        _ => unreachable!("invalid bytes_per_norm: {}", bytes_per_norm),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::codecs::codec_util::{FOOTER_LENGTH, index_header_length};
+    use crate::codecs::lucene90::norms_producer::BufferedNormsProducer;
+    use crate::document::{DocValuesType, IndexOptions};
+    use crate::index::field_infos::PointDimensionConfig;
+    use crate::index::pipeline::segment_accumulator::PerFieldNormsData;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::test_util::TestDataReader;
     use assertables::*;
@@ -208,13 +232,54 @@ mod tests {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    fn make_field(name: &str, number: u32, norms: Vec<i64>, docs: Vec<i32>) -> NormsFieldData {
-        NormsFieldData {
-            field_name: name.to_string(),
-            field_number: number,
-            norms,
-            docs,
+    fn make_field_info(name: &str, number: u32) -> FieldInfo {
+        FieldInfo::new(
+            name.to_string(),
+            number,
+            false,
+            false, // omit_norms = false
+            IndexOptions::DocsAndFreqsAndPositions,
+            DocValuesType::None,
+            PointDimensionConfig::default(),
+        )
+    }
+
+    fn make_producer(
+        fields: &[(&str, u32, &[i64], &[i32])],
+    ) -> (BufferedNormsProducer, Vec<FieldInfo>) {
+        let mut norms_map = HashMap::new();
+        let mut field_infos = Vec::new();
+        for &(name, number, values, docs) in fields {
+            norms_map.insert(
+                number,
+                PerFieldNormsData {
+                    field_name: name.to_string(),
+                    docs: docs.to_vec(),
+                    values: values.to_vec(),
+                },
+            );
+            field_infos.push(make_field_info(name, number));
         }
+        field_infos.sort_by_key(|f| f.number());
+        (BufferedNormsProducer::new(&norms_map), field_infos)
+    }
+
+    fn write_norms(
+        dir: &SharedDirectory,
+        fields: &[(&str, u32, &[i64], &[i32])],
+        num_docs: i32,
+    ) -> io::Result<Vec<String>> {
+        let (producer, field_infos) = make_producer(fields);
+        let field_info_refs: Vec<&FieldInfo> = field_infos.iter().collect();
+        write(
+            dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            &field_info_refs,
+            &producer,
+            num_docs,
+        )
     }
 
     /// Size of one metadata entry in bytes:
@@ -225,15 +290,14 @@ mod tests {
     #[test]
     fn empty_fields_returns_no_files() {
         let dir = test_directory();
-        let names = write(&dir, "_0", "", &[0u8; 16], &[], 3).unwrap();
+        let names = write_norms(&dir, &[], 3).unwrap();
         assert_is_empty!(&names);
     }
 
     #[test]
     fn all_pattern_1byte_norms() {
         let dir = test_directory();
-        let fields = vec![make_field("contents", 2, vec![12, 8, 10], vec![0, 1, 2])];
-        let names = write(&dir, "_0", "", &[0u8; 16], &fields, 3).unwrap();
+        let names = write_norms(&dir, &[("contents", 2, &[12, 8, 10], &[0, 1, 2])], 3).unwrap();
 
         assert_len_eq_x!(&names, 2);
         assert_eq!(names[0], "_0.nvm");
@@ -294,8 +358,7 @@ mod tests {
     #[test]
     fn empty_pattern() {
         let dir = test_directory();
-        let fields = vec![make_field("contents", 0, vec![], vec![])];
-        let names = write(&dir, "_0", "", &[0u8; 16], &fields, 3).unwrap();
+        let names = write_norms(&dir, &[("contents", 0, &[], &[])], 3).unwrap();
 
         let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
@@ -311,8 +374,7 @@ mod tests {
     #[test]
     fn constant_norms() {
         let dir = test_directory();
-        let fields = vec![make_field("contents", 1, vec![12, 12, 12], vec![0, 1, 2])];
-        let names = write(&dir, "_0", "", &[0u8; 16], &fields, 3).unwrap();
+        let names = write_norms(&dir, &[("contents", 1, &[12, 12, 12], &[0, 1, 2])], 3).unwrap();
 
         let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
@@ -336,11 +398,15 @@ mod tests {
     #[test]
     fn multiple_fields() {
         let dir = test_directory();
-        let fields = vec![
-            make_field("alpha", 0, vec![5, 5, 5], vec![0, 1, 2]),
-            make_field("beta", 1, vec![10, 20, 30], vec![0, 1, 2]),
-        ];
-        let names = write(&dir, "_0", "", &[0u8; 16], &fields, 3).unwrap();
+        let names = write_norms(
+            &dir,
+            &[
+                ("alpha", 0, &[5, 5, 5], &[0, 1, 2]),
+                ("beta", 1, &[10, 20, 30], &[0, 1, 2]),
+            ],
+            3,
+        )
+        .unwrap();
 
         let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
@@ -374,8 +440,7 @@ mod tests {
     fn sparse_norms() {
         let dir = test_directory();
         // 2 docs with norms out of 5 total
-        let fields = vec![make_field("contents", 0, vec![12, 8], vec![1, 3])];
-        let names = write(&dir, "_0", "", &[0u8; 16], &fields, 5).unwrap();
+        let names = write_norms(&dir, &[("contents", 0, &[12, 8], &[1, 3])], 5).unwrap();
 
         let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
@@ -416,8 +481,7 @@ mod tests {
     fn sparse_constant_norms() {
         let dir = test_directory();
         // 3 docs with identical norms out of 5 total
-        let fields = vec![make_field("title", 0, vec![42, 42, 42], vec![0, 2, 4])];
-        let names = write(&dir, "_0", "", &[0u8; 16], &fields, 5).unwrap();
+        let names = write_norms(&dir, &[("title", 0, &[42, 42, 42], &[0, 2, 4])], 5).unwrap();
 
         let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
