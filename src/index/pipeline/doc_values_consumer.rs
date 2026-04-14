@@ -11,8 +11,12 @@ use crate::codecs::lucene90::doc_values::{
     self, BinaryDocValue, DocValuesAccumulator, DocValuesFieldData, NumericDocValue,
     SortedDocValue, SortedNumericDocValue, SortedSetDocValue,
 };
+use crate::codecs::lucene90::doc_values_producer::BufferedDocValuesProducer;
 use crate::document::DocValuesType;
+use crate::document::IndexOptions;
+use crate::index::FieldInfo;
 use crate::index::field::{DocValue, Field};
+use crate::index::field_infos::PointDimensionConfig;
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
 use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
 use crate::index::pipeline::segment_context::SegmentContext;
@@ -184,6 +188,26 @@ impl FieldConsumer for DocValuesConsumer {
             .collect();
         fields.sort_by_key(|f| f.number);
 
+        let producer = BufferedDocValuesProducer::new(&fields);
+
+        // Build FieldInfo objects for each doc values field, sorted by field number
+        let mut field_infos: Vec<FieldInfo> = fields
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.name.clone(),
+                    f.number,
+                    false,
+                    true, // omit_norms
+                    IndexOptions::None,
+                    f.doc_values_type,
+                    PointDimensionConfig::default(),
+                )
+            })
+            .collect();
+        field_infos.sort_by_key(|f| f.number());
+        let field_info_refs: Vec<&FieldInfo> = field_infos.iter().collect();
+
         let num_docs = self.current_doc_id + 1;
 
         // Per-field doc values use suffix "Lucene90_0" matching Java's PerFieldDocValuesFormat
@@ -193,7 +217,8 @@ impl FieldConsumer for DocValuesConsumer {
             &context.segment_name,
             segment_suffix,
             &context.segment_id,
-            &fields,
+            &field_info_refs,
+            &producer,
             num_docs,
         )
     }

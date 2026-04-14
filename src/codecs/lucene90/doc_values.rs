@@ -8,12 +8,15 @@ use std::mem;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::codecs::lucene90::doc_values_producer::DocValuesProducer;
 use crate::codecs::lucene90::indexed_disi;
 use crate::codecs::packed_writers::{DirectMonotonicWriter, DirectWriter};
 use crate::document::DocValuesType;
 use crate::encoding::lz4::{self, FastHashTable};
 use crate::encoding::packed::unsigned_bits_required;
+use crate::index::FieldInfo;
 use crate::index::index_file_names;
+use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
 use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::string_helper;
@@ -70,7 +73,6 @@ pub(crate) enum DocValuesAccumulator {
 pub(crate) struct DocValuesFieldData {
     pub name: String,
     pub number: u32,
-    #[expect(dead_code)]
     pub doc_values_type: DocValuesType,
     pub doc_values: DocValuesAccumulator,
 }
@@ -100,15 +102,16 @@ const TERMS_DICT_REVERSE_INDEX_SIZE: usize = 1 << TERMS_DICT_REVERSE_INDEX_SHIFT
 const TERMS_DICT_REVERSE_INDEX_MASK: usize = TERMS_DICT_REVERSE_INDEX_SIZE - 1;
 pub(crate) const DIRECT_MONOTONIC_BLOCK_SHIFT: u32 = 16;
 
-/// Writes doc values files (.dvm, .dvd) for a segment.
+/// Writes doc values files (.dvm, .dvd) for a segment using a [`DocValuesProducer`].
 ///
-/// `fields` must be sorted by field number.
+/// `field_infos` must be sorted by field number.
 pub(crate) fn write(
     directory: &SharedDirectory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
-    fields: &[DocValuesFieldData],
+    field_infos: &[&FieldInfo],
+    producer: &dyn DocValuesProducer,
     num_docs: i32,
 ) -> io::Result<Vec<String>> {
     let dvm_name =
@@ -124,64 +127,62 @@ pub(crate) fn write(
     codec_util::write_index_header(&mut *meta, META_CODEC, VERSION, segment_id, segment_suffix)?;
     codec_util::write_index_header(&mut *data, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
 
-    for field in fields {
-        match &field.doc_values {
-            DocValuesAccumulator::Numeric(vals) => {
+    for &field_info in field_infos {
+        meta.write_le_int(field_info.number() as i32)?;
+
+        match field_info.doc_values_type() {
+            DocValuesType::Numeric => {
+                meta.write_byte(NUMERIC)?;
+                let vals = collect_numeric(producer, field_info)?;
                 debug!(
                     "doc_values: field={:?} (#{}) -> NUMERIC, {} docs",
-                    field.name,
-                    field.number,
+                    field_info.name(),
+                    field_info.number(),
                     vals.len()
                 );
-                meta.write_le_int(field.number as i32)?;
-                meta.write_byte(NUMERIC)?;
-                add_numeric_field(&mut *meta, &mut *data, vals, num_docs)?;
+                add_numeric_field(&mut *meta, &mut *data, &vals, num_docs)?;
             }
-            DocValuesAccumulator::Binary(vals) => {
+            DocValuesType::Binary => {
+                meta.write_byte(BINARY)?;
+                let vals = collect_binary(producer, field_info)?;
                 debug!(
                     "doc_values: field={:?} (#{}) -> BINARY, {} docs",
-                    field.name,
-                    field.number,
+                    field_info.name(),
+                    field_info.number(),
                     vals.len()
                 );
-                meta.write_le_int(field.number as i32)?;
-                meta.write_byte(BINARY)?;
-                add_binary_field(&mut *meta, &mut *data, vals, num_docs)?;
+                add_binary_field(&mut *meta, &mut *data, &vals, num_docs)?;
             }
-            DocValuesAccumulator::Sorted(vals) => {
-                debug!(
-                    "doc_values: field={:?} (#{}) -> SORTED, {} docs",
-                    field.name,
-                    field.number,
-                    vals.len()
-                );
-                meta.write_le_int(field.number as i32)?;
+            DocValuesType::Sorted => {
                 meta.write_byte(SORTED)?;
-                add_sorted_field(&mut *meta, &mut *data, vals, num_docs)?;
+                debug!(
+                    "doc_values: field={:?} (#{}) -> SORTED",
+                    field_info.name(),
+                    field_info.number(),
+                );
+                add_sorted_field(&mut *meta, &mut *data, producer, field_info, num_docs)?;
             }
-            DocValuesAccumulator::SortedNumeric(vals) => {
+            DocValuesType::SortedNumeric => {
+                meta.write_byte(SORTED_NUMERIC)?;
+                let vals = collect_sorted_numeric(producer, field_info)?;
                 debug!(
                     "doc_values: field={:?} (#{}) -> SORTED_NUMERIC, {} docs",
-                    field.name,
-                    field.number,
+                    field_info.name(),
+                    field_info.number(),
                     vals.len()
                 );
-                meta.write_le_int(field.number as i32)?;
-                meta.write_byte(SORTED_NUMERIC)?;
-                add_sorted_numeric_field(&mut *meta, &mut *data, vals, num_docs)?;
+                add_sorted_numeric_field(&mut *meta, &mut *data, &vals, num_docs)?;
             }
-            DocValuesAccumulator::SortedSet(vals) => {
-                debug!(
-                    "doc_values: field={:?} (#{}) -> SORTED_SET, {} docs",
-                    field.name,
-                    field.number,
-                    vals.len()
-                );
-                meta.write_le_int(field.number as i32)?;
+            DocValuesType::SortedSet => {
                 meta.write_byte(SORTED_SET)?;
-                add_sorted_set_field(&mut *meta, &mut *data, vals, num_docs)?;
+                debug!(
+                    "doc_values: field={:?} (#{}) -> SORTED_SET",
+                    field_info.name(),
+                    field_info.number(),
+                );
+                add_sorted_set_field(&mut *meta, &mut *data, producer, field_info, num_docs)?;
             }
-            DocValuesAccumulator::None => continue,
+            DocValuesType::None => continue,
         }
     }
 
@@ -193,6 +194,80 @@ pub(crate) fn write(
     codec_util::write_footer(&mut *data)?;
 
     Ok(vec![dvm_name, dvd_name])
+}
+
+/// Collects numeric doc values from the producer into a Vec.
+fn collect_numeric(
+    producer: &dyn DocValuesProducer,
+    field_info: &FieldInfo,
+) -> io::Result<Vec<NumericDocValue>> {
+    let mut iter = match producer.get_numeric(field_info)? {
+        Some(iter) => iter,
+        None => return Ok(vec![]),
+    };
+    let mut vals = Vec::new();
+    loop {
+        let doc = iter.next_doc()?;
+        if doc == NO_MORE_DOCS {
+            break;
+        }
+        vals.push(NumericDocValue {
+            doc_id: doc,
+            value: iter.long_value()?,
+        });
+    }
+    Ok(vals)
+}
+
+/// Collects binary doc values from the producer into a Vec.
+fn collect_binary(
+    producer: &dyn DocValuesProducer,
+    field_info: &FieldInfo,
+) -> io::Result<Vec<BinaryDocValue>> {
+    let mut iter = match producer.get_binary(field_info)? {
+        Some(iter) => iter,
+        None => return Ok(vec![]),
+    };
+    let mut vals = Vec::new();
+    loop {
+        let doc = iter.next_doc()?;
+        if doc == NO_MORE_DOCS {
+            break;
+        }
+        vals.push(BinaryDocValue {
+            doc_id: doc,
+            value: iter.binary_value()?.to_vec(),
+        });
+    }
+    Ok(vals)
+}
+
+/// Collects sorted-numeric doc values from the producer into a Vec.
+fn collect_sorted_numeric(
+    producer: &dyn DocValuesProducer,
+    field_info: &FieldInfo,
+) -> io::Result<Vec<SortedNumericDocValue>> {
+    let mut iter = match producer.get_sorted_numeric(field_info)? {
+        Some(iter) => iter,
+        None => return Ok(vec![]),
+    };
+    let mut vals = Vec::new();
+    loop {
+        let doc = iter.next_doc()?;
+        if doc == NO_MORE_DOCS {
+            break;
+        }
+        let count = iter.doc_value_count();
+        let mut values = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            values.push(iter.next_value()?);
+        }
+        vals.push(SortedNumericDocValue {
+            doc_id: doc,
+            values,
+        });
+    }
+    Ok(vals)
 }
 
 /// Adds a NUMERIC field (single value per doc, no numDocsWithField).
@@ -302,36 +377,45 @@ fn add_binary_field(
 }
 
 /// Adds a SORTED field (single ordinal per doc + terms dictionary).
+///
+/// Reads ordinals and term lookups from the [`DocValuesProducer`].
 fn add_sorted_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    vals: &[SortedDocValue],
+    producer: &dyn DocValuesProducer,
+    field_info: &FieldInfo,
     num_docs: i32,
 ) -> io::Result<()> {
     // No skip index for MVP
 
-    // Build sorted unique terms and assign ordinals
-    let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
-    for entry in vals {
-        unique_terms.insert(&entry.value);
+    let mut sorted_dv = match producer.get_sorted(field_info)? {
+        Some(dv) => dv,
+        None => {
+            // Empty: write zero-length values block + empty terms dict
+            write_values(meta, data, &[], &[], 0, num_docs, true)?;
+            add_terms_dict(meta, data, &[])?;
+            return Ok(());
+        }
+    };
+
+    // Build terms dictionary from ordinal lookups
+    let value_count = sorted_dv.value_count();
+    let mut sorted_terms: Vec<Vec<u8>> = Vec::with_capacity(value_count as usize);
+    for ord in 0..value_count {
+        sorted_terms.push(sorted_dv.lookup_ord(ord)?.to_vec());
     }
 
-    let mut ord_map: HashMap<&[u8], i64> = HashMap::with_capacity(unique_terms.len());
-    let sorted_terms: Vec<&[u8]> = unique_terms
-        .into_iter()
-        .enumerate()
-        .map(|(i, term)| {
-            ord_map.insert(term, i as i64);
-            term
-        })
-        .collect();
-
-    // Build per-doc ordinal array
-    let doc_ids: Vec<i32> = vals.iter().map(|entry| entry.doc_id).collect();
-    let ordinals: Vec<i64> = vals
-        .iter()
-        .map(|entry| ord_map[entry.value.as_slice()])
-        .collect();
+    // Collect per-doc ordinals
+    let mut doc_ids = Vec::new();
+    let mut ordinals = Vec::new();
+    loop {
+        let doc = sorted_dv.next_doc()?;
+        if doc == NO_MORE_DOCS {
+            break;
+        }
+        doc_ids.push(doc);
+        ordinals.push(sorted_dv.ord_value()? as i64);
+    }
 
     // writeValues for ordinals (ords=true) — no multiValued byte, no numDocsWithField
     write_values(
@@ -339,13 +423,14 @@ fn add_sorted_field(
         data,
         &ordinals,
         &doc_ids,
-        vals.len() as i32,
+        doc_ids.len() as i32,
         num_docs,
         true,
     )?;
 
     // Write terms dictionary
-    add_terms_dict(meta, data, &sorted_terms)?;
+    let term_refs: Vec<&[u8]> = sorted_terms.iter().map(|t| t.as_slice()).collect();
+    add_terms_dict(meta, data, &term_refs)?;
 
     Ok(())
 }
@@ -418,74 +503,79 @@ fn add_sorted_numeric_field(
 
 /// Adds a SORTED_SET field.
 ///
+/// Reads ordinals and term lookups from the [`DocValuesProducer`].
 /// Single-valued: uses the SORTED reader path (writeByte(0), writeValues, termDict).
 /// Multi-valued: uses the SORTED_NUMERIC reader path (writeByte(1), writeValues,
 /// numDocsWithField, address table, termDict).
 fn add_sorted_set_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    vals: &[SortedSetDocValue],
+    producer: &dyn DocValuesProducer,
+    field_info: &FieldInfo,
     num_docs: i32,
 ) -> io::Result<()> {
-    let is_single_valued = vals.iter().all(|entry| entry.values.len() == 1);
-
-    // Build sorted unique terms and assign ordinals
-    let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
-    for entry in vals {
-        for v in &entry.values {
-            unique_terms.insert(v);
+    // First pass: detect single-valued and collect per-doc ordinals
+    let mut sorted_set_dv = match producer.get_sorted_set(field_info)? {
+        Some(dv) => dv,
+        None => {
+            // Empty: single-valued path with zero entries
+            meta.write_byte(0)?;
+            write_values(meta, data, &[], &[], 0, num_docs, true)?;
+            add_terms_dict(meta, data, &[])?;
+            return Ok(());
         }
-    }
+    };
 
-    let mut ord_map: HashMap<&[u8], i64> = HashMap::with_capacity(unique_terms.len());
-    let sorted_terms: Vec<&[u8]> = unique_terms
-        .into_iter()
-        .enumerate()
-        .map(|(i, term)| {
-            ord_map.insert(term, i as i64);
-            term
-        })
-        .collect();
+    // Build terms dictionary from ordinal lookups
+    let value_count = sorted_set_dv.value_count();
+    let mut sorted_terms: Vec<Vec<u8>> = Vec::with_capacity(value_count as usize);
+    for ord in 0..value_count {
+        sorted_terms.push(sorted_set_dv.lookup_ord(ord)?.to_vec());
+    }
+    let term_refs: Vec<&[u8]> = sorted_terms.iter().map(|t| t.as_slice()).collect();
+
+    // Collect per-doc ordinal lists
+    let mut is_single_valued = true;
+    let mut ord_vals: Vec<(i32, Vec<i64>)> = Vec::new();
+    loop {
+        let doc = sorted_set_dv.next_doc()?;
+        if doc == NO_MORE_DOCS {
+            break;
+        }
+        let count = sorted_set_dv.doc_value_count();
+        if count > 1 {
+            is_single_valued = false;
+        }
+        let mut ords = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            ords.push(sorted_set_dv.next_ord()?);
+        }
+        ord_vals.push((doc, ords));
+    }
 
     if is_single_valued {
         // Single-valued path: writeByte(0), writeValues (ords), termDict
         // Java's readSorted() does NOT read numDocsWithField.
         meta.write_byte(0)?;
 
-        let doc_ids: Vec<i32> = vals.iter().map(|entry| entry.doc_id).collect();
-        let ordinals: Vec<i64> = vals
-            .iter()
-            .map(|entry| ord_map[entry.values[0].as_slice()])
-            .collect();
+        let doc_ids: Vec<i32> = ord_vals.iter().map(|(doc_id, _)| *doc_id).collect();
+        let ordinals: Vec<i64> = ord_vals.iter().map(|(_, ords)| ords[0]).collect();
 
         write_values(
             meta,
             data,
             &ordinals,
             &doc_ids,
-            vals.len() as i32,
+            doc_ids.len() as i32,
             num_docs,
             true,
         )?;
-        add_terms_dict(meta, data, &sorted_terms)?;
+        add_terms_dict(meta, data, &term_refs)?;
     } else {
         // Multi-valued path: doAddSortedNumericField(ords=true) writes multiValued
         // byte (1), writeValues, numDocsWithField, address table. Then termDict.
         meta.write_byte(1)?;
 
-        // Build per-doc ordinal lists: map terms → ordinals, sort, dedup (set semantics)
-        let ord_vals: Vec<(i32, Vec<i64>)> = vals
-            .iter()
-            .map(|entry| {
-                let mut ords: Vec<i64> =
-                    entry.values.iter().map(|v| ord_map[v.as_slice()]).collect();
-                ords.sort();
-                ords.dedup();
-                (entry.doc_id, ords)
-            })
-            .collect();
-
-        // Sort values within each doc (already done above via sort+dedup)
         // Flatten ordinals
         let doc_ids: Vec<i32> = ord_vals.iter().map(|(doc_id, _)| *doc_id).collect();
         let all_ordinals: Vec<i64> = ord_vals
@@ -528,7 +618,7 @@ fn add_sorted_set_field(
             meta.write_le_long(data.file_pointer() as i64 - addresses_start)?;
         }
 
-        add_terms_dict(meta, data, &sorted_terms)?;
+        add_terms_dict(meta, data, &term_refs)?;
     }
 
     Ok(())
@@ -905,7 +995,10 @@ fn write_terms_index(
 mod tests {
     use super::*;
     use crate::codecs::codec_util::{FOOTER_LENGTH, index_header_length};
-    use crate::document::DocValuesType;
+    use crate::codecs::lucene90::doc_values_producer::BufferedDocValuesProducer;
+    use crate::document::{DocValuesType, IndexOptions};
+    use crate::index::FieldInfo;
+    use crate::index::field_infos::PointDimensionConfig;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::test_util::TestDataReader;
     use assertables::{assert_ge, assert_gt};
@@ -916,6 +1009,42 @@ mod tests {
 
     fn make_test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
+
+    /// Test helper: wraps fields in a BufferedDocValuesProducer and calls write().
+    fn test_write(
+        directory: &SharedDirectory,
+        segment_name: &str,
+        segment_suffix: &str,
+        segment_id: &[u8; 16],
+        fields: &[DocValuesFieldData],
+        num_docs: i32,
+    ) -> io::Result<Vec<String>> {
+        let producer = BufferedDocValuesProducer::new(fields);
+        let field_infos: Vec<FieldInfo> = fields
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.name.clone(),
+                    f.number,
+                    false,
+                    true,
+                    IndexOptions::None,
+                    f.doc_values_type,
+                    PointDimensionConfig::default(),
+                )
+            })
+            .collect();
+        let fi_refs: Vec<&FieldInfo> = field_infos.iter().collect();
+        write(
+            directory,
+            segment_name,
+            segment_suffix,
+            segment_id,
+            &fi_refs,
+            &producer,
+            num_docs,
+        )
     }
 
     fn nv(doc_id: i32, value: i64) -> NumericDocValue {
@@ -1041,7 +1170,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         assert_len_eq_x!(&result, 2);
         assert_eq!(result[0], "_0_Lucene90_0.dvm");
@@ -1099,7 +1228,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
@@ -1143,7 +1272,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
@@ -1185,7 +1314,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "", &segment_id, &fields, 1).unwrap();
+        let result = test_write(&directory, "_0", "", &segment_id, &fields, 1).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
 
@@ -1230,7 +1359,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         assert_len_eq_x!(&result, 2);
         assert_eq!(result[0], "_0_Lucene90_0.dvm");
@@ -1394,7 +1523,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
 
         // Parse the .dvm like Java's Lucene90DocValuesProducer.readFields()
@@ -1437,7 +1566,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
 
         // Should complete without error
         assert_len_eq_x!(&result, 2);
@@ -1458,7 +1587,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
         assert_len_eq_x!(&result, 2);
     }
 
@@ -1472,7 +1601,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1504,7 +1633,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
@@ -1523,7 +1652,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1558,7 +1687,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1581,7 +1710,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1611,7 +1740,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1635,7 +1764,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1661,7 +1790,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1713,7 +1842,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1763,7 +1892,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
@@ -1796,7 +1925,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         // The .dvm metadata should have numValues=6 (total across all docs)
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
@@ -1835,7 +1964,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1870,7 +1999,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
@@ -1900,7 +2029,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 2).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 2).unwrap();
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
@@ -1942,7 +2071,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
-        let result = write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
+        let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1973,7 +2102,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &fields, 10).unwrap();
+        let names = test_write(&dir, "_0", "", &segment_id, &fields, 10).unwrap();
 
         let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
         let dvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
@@ -2029,7 +2158,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
+        let names = test_write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
         let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
 
@@ -2072,7 +2201,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
+        let names = test_write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
         let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
 
@@ -2107,7 +2236,7 @@ mod tests {
 
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
-        let names = write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
+        let names = test_write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
         let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
 

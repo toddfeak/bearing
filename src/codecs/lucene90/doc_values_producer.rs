@@ -446,22 +446,16 @@ fn skip_terms_dict(meta: &mut dyn DataInput) -> io::Result<()> {
 // BufferedDocValuesProducer — in-memory doc values from the indexing pipeline
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
 use std::collections::{BTreeSet, HashMap};
 
-#[cfg(test)]
 use crate::codecs::lucene90::doc_values::{
     BinaryDocValue, DocValuesAccumulator, DocValuesFieldData, NumericDocValue, SortedDocValue,
     SortedNumericDocValue, SortedSetDocValue,
 };
-#[cfg(test)]
 use crate::index::doc_values_iterators::DocValuesIterator;
-#[cfg(test)]
 use crate::search::DocIdSetIterator;
-#[cfg(test)]
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
 
-#[cfg(test)]
 /// Per-field buffered doc values data borrowed from the accumulator.
 enum BufferedFieldDocValues<'a> {
     Numeric(&'a [NumericDocValue]),
@@ -471,7 +465,6 @@ enum BufferedFieldDocValues<'a> {
     SortedSet(&'a [SortedSetDocValue]),
 }
 
-#[cfg(test)]
 /// In-memory [`DocValuesProducer`] borrowing from indexing pipeline buffers.
 ///
 /// Each call to a `get_*` method returns a fresh iterator over the borrowed
@@ -482,7 +475,6 @@ pub struct BufferedDocValuesProducer<'a> {
     fields: Vec<Option<BufferedFieldDocValues<'a>>>,
 }
 
-#[cfg(test)]
 impl fmt::Debug for BufferedFieldDocValues<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -495,7 +487,6 @@ impl fmt::Debug for BufferedFieldDocValues<'_> {
     }
 }
 
-#[cfg(test)]
 impl<'a> BufferedDocValuesProducer<'a> {
     /// Creates a new buffered producer borrowing from accumulated doc values data.
     pub(crate) fn new(fields_data: &'a [DocValuesFieldData]) -> Self {
@@ -525,7 +516,6 @@ impl<'a> BufferedDocValuesProducer<'a> {
     }
 }
 
-#[cfg(test)]
 impl DocValuesProducer for BufferedDocValuesProducer<'_> {
     fn get_numeric(
         &self,
@@ -596,13 +586,11 @@ impl DocValuesProducer for BufferedDocValuesProducer<'_> {
 
 // --- Buffered iterator: Numeric ---
 
-#[cfg(test)]
 struct BufferedNumericDV<'a> {
     entries: &'a [NumericDocValue],
     pos: i32,
 }
 
-#[cfg(test)]
 impl fmt::Debug for BufferedNumericDV<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferedNumericDV")
@@ -612,7 +600,6 @@ impl fmt::Debug for BufferedNumericDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl DocIdSetIterator for BufferedNumericDV<'_> {
     fn doc_id(&self) -> i32 {
         if self.pos < 0 {
@@ -643,7 +630,6 @@ impl DocIdSetIterator for BufferedNumericDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl DocValuesIterator for BufferedNumericDV<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
@@ -656,7 +642,6 @@ impl DocValuesIterator for BufferedNumericDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl NumericDocValues for BufferedNumericDV<'_> {
     fn long_value(&self) -> io::Result<i64> {
         Ok(self.entries[self.pos as usize].value)
@@ -665,13 +650,11 @@ impl NumericDocValues for BufferedNumericDV<'_> {
 
 // --- Buffered iterator: Binary ---
 
-#[cfg(test)]
 struct BufferedBinaryDV<'a> {
     entries: &'a [BinaryDocValue],
     pos: i32,
 }
 
-#[cfg(test)]
 impl fmt::Debug for BufferedBinaryDV<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferedBinaryDV")
@@ -681,7 +664,6 @@ impl fmt::Debug for BufferedBinaryDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl DocIdSetIterator for BufferedBinaryDV<'_> {
     fn doc_id(&self) -> i32 {
         if self.pos < 0 {
@@ -712,7 +694,6 @@ impl DocIdSetIterator for BufferedBinaryDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl DocValuesIterator for BufferedBinaryDV<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
@@ -725,7 +706,6 @@ impl DocValuesIterator for BufferedBinaryDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl BinaryDocValues for BufferedBinaryDV<'_> {
     fn binary_value(&self) -> io::Result<&[u8]> {
         Ok(&self.entries[self.pos as usize].value)
@@ -734,7 +714,6 @@ impl BinaryDocValues for BufferedBinaryDV<'_> {
 
 // --- Buffered iterator: Sorted ---
 
-#[cfg(test)]
 struct BufferedSortedDV<'a> {
     entries: &'a [SortedDocValue],
     sorted_terms: Vec<&'a [u8]>,
@@ -742,7 +721,6 @@ struct BufferedSortedDV<'a> {
     pos: i32,
 }
 
-#[cfg(test)]
 impl fmt::Debug for BufferedSortedDV<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferedSortedDV")
@@ -752,7 +730,6 @@ impl fmt::Debug for BufferedSortedDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl<'a> BufferedSortedDV<'a> {
     fn new(entries: &'a [SortedDocValue]) -> Self {
         let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
@@ -779,7 +756,6 @@ impl<'a> BufferedSortedDV<'a> {
     }
 }
 
-#[cfg(test)]
 impl DocIdSetIterator for BufferedSortedDV<'_> {
     fn doc_id(&self) -> i32 {
         if self.pos < 0 {
@@ -810,7 +786,6 @@ impl DocIdSetIterator for BufferedSortedDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl DocValuesIterator for BufferedSortedDV<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
@@ -823,7 +798,6 @@ impl DocValuesIterator for BufferedSortedDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl SortedDocValues for BufferedSortedDV<'_> {
     fn ord_value(&self) -> io::Result<i32> {
         let value = &self.entries[self.pos as usize].value;
@@ -841,7 +815,6 @@ impl SortedDocValues for BufferedSortedDV<'_> {
 
 // --- Buffered iterator: SortedNumeric ---
 
-#[cfg(test)]
 struct BufferedSortedNumericDV<'a> {
     entries: &'a [SortedNumericDocValue],
     pos: i32,
@@ -849,7 +822,6 @@ struct BufferedSortedNumericDV<'a> {
     value_idx: usize,
 }
 
-#[cfg(test)]
 impl fmt::Debug for BufferedSortedNumericDV<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferedSortedNumericDV")
@@ -859,7 +831,6 @@ impl fmt::Debug for BufferedSortedNumericDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl<'a> BufferedSortedNumericDV<'a> {
     fn new(entries: &'a [SortedNumericDocValue]) -> Self {
         let sorted_values: Vec<Vec<i64>> = entries
@@ -880,7 +851,6 @@ impl<'a> BufferedSortedNumericDV<'a> {
     }
 }
 
-#[cfg(test)]
 impl DocIdSetIterator for BufferedSortedNumericDV<'_> {
     fn doc_id(&self) -> i32 {
         if self.pos < 0 {
@@ -912,7 +882,6 @@ impl DocIdSetIterator for BufferedSortedNumericDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl DocValuesIterator for BufferedSortedNumericDV<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
@@ -926,7 +895,6 @@ impl DocValuesIterator for BufferedSortedNumericDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl SortedNumericDocValues for BufferedSortedNumericDV<'_> {
     fn doc_value_count(&self) -> i32 {
         self.sorted_values[self.pos as usize].len() as i32
@@ -941,7 +909,6 @@ impl SortedNumericDocValues for BufferedSortedNumericDV<'_> {
 
 // --- Buffered iterator: SortedSet ---
 
-#[cfg(test)]
 struct BufferedSortedSetDV<'a> {
     entries: &'a [SortedSetDocValue],
     sorted_terms: Vec<&'a [u8]>,
@@ -951,7 +918,6 @@ struct BufferedSortedSetDV<'a> {
     ord_idx: usize,
 }
 
-#[cfg(test)]
 impl fmt::Debug for BufferedSortedSetDV<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufferedSortedSetDV")
@@ -961,7 +927,6 @@ impl fmt::Debug for BufferedSortedSetDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl<'a> BufferedSortedSetDV<'a> {
     fn new(entries: &'a [SortedSetDocValue]) -> Self {
         let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
@@ -1002,7 +967,6 @@ impl<'a> BufferedSortedSetDV<'a> {
     }
 }
 
-#[cfg(test)]
 impl DocIdSetIterator for BufferedSortedSetDV<'_> {
     fn doc_id(&self) -> i32 {
         if self.pos < 0 {
@@ -1034,7 +998,6 @@ impl DocIdSetIterator for BufferedSortedSetDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl DocValuesIterator for BufferedSortedSetDV<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
@@ -1048,7 +1011,6 @@ impl DocValuesIterator for BufferedSortedSetDV<'_> {
     }
 }
 
-#[cfg(test)]
 impl SortedSetDocValues for BufferedSortedSetDV<'_> {
     fn doc_value_count(&self) -> i32 {
         self.doc_ords[self.pos as usize].len() as i32
@@ -1167,7 +1129,7 @@ mod tests {
         SortedSetDocValue { doc_id, values }
     }
 
-    /// Writes doc values and opens a reader.
+    /// Writes doc values via BufferedDocValuesProducer and opens a reader.
     fn write_and_read(
         field_infos: &FieldInfos,
         fields: &[DocValuesFieldData],
@@ -1176,7 +1138,22 @@ mod tests {
     ) -> DocValuesReader {
         let segment_id = [0u8; 16];
         let dir = test_directory();
-        doc_values::write(&dir, "_0", suffix, &segment_id, fields, num_docs).unwrap();
+
+        let producer = BufferedDocValuesProducer::new(fields);
+        let fi_refs: Vec<&FieldInfo> = (0..field_infos.len())
+            .filter_map(|i| field_infos.field_info_by_number(i as u32))
+            .collect();
+
+        doc_values::write(
+            &dir,
+            "_0",
+            suffix,
+            &segment_id,
+            &fi_refs,
+            &producer,
+            num_docs,
+        )
+        .unwrap();
         let guard = dir.lock().unwrap();
         DocValuesReader::open(guard.as_ref(), "_0", suffix, &segment_id, field_infos).unwrap()
     }
