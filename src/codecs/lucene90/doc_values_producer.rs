@@ -507,7 +507,6 @@ impl<'a> BufferedDocValuesProducer<'a> {
                     BufferedFieldDocValues::SortedNumeric(vals)
                 }
                 DocValuesAccumulator::SortedSet(vals) => BufferedFieldDocValues::SortedSet(vals),
-                DocValuesAccumulator::None => continue,
             };
             fields[field.number as usize] = Some(buffered);
         }

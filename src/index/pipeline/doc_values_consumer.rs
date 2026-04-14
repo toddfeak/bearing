@@ -88,6 +88,9 @@ impl FieldConsumer for DocValuesConsumer {
             }
         });
 
+        // TODO: These clones could be eliminated by making FieldConsumer methods
+        // take `&mut Field`, allowing us to take ownership of DocValue data via
+        // Option::take instead of cloning. Only this consumer reads doc_value().
         if let Some(dv) = field.field_type().doc_value() {
             match (&mut state.accumulator, dv) {
                 (DocValuesAccumulator::Numeric(vals), DocValue::Numeric(v)) => {
@@ -171,7 +174,6 @@ impl FieldConsumer for DocValuesConsumer {
             .drain()
             .map(|(field_id, state)| {
                 let dv_type = match &state.accumulator {
-                    DocValuesAccumulator::None => DocValuesType::None,
                     DocValuesAccumulator::Numeric(_) => DocValuesType::Numeric,
                     DocValuesAccumulator::Binary(_) => DocValuesType::Binary,
                     DocValuesAccumulator::Sorted(_) => DocValuesType::Sorted,

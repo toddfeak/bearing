@@ -60,8 +60,6 @@ pub(crate) struct SortedSetDocValue {
 /// Per-field doc values accumulation state.
 #[derive(mem_dbg::MemSize)]
 pub(crate) enum DocValuesAccumulator {
-    #[expect(dead_code)]
-    None,
     Numeric(Vec<NumericDocValue>),
     Binary(Vec<BinaryDocValue>),
     Sorted(Vec<SortedDocValue>),
