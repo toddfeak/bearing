@@ -159,8 +159,7 @@ impl CompressingTermVectorsReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, VECTORS_EXTENSION};
-    use crate::index::index_file_names;
+    use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
@@ -178,14 +177,11 @@ mod tests {
         F: FnOnce(&mut CompressingTermVectorsWriter),
     {
         let dir = test_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &segment_id(), "").unwrap();
-        build_fn(&mut w);
-        w.finish(&dir, "_0", "", &segment_id(), num_docs).unwrap();
+        {
+            let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &segment_id()).unwrap();
+            build_fn(&mut w);
+            w.finish(num_docs).unwrap();
+        }
         let guard = dir.lock().unwrap();
         CompressingTermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id()).unwrap()
     }

@@ -13,9 +13,8 @@ use std::io;
 use std::mem;
 
 use crate::analysis::Token;
-use crate::codecs::lucene90::term_vectors::{self, CompressingTermVectorsWriter};
+use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
 use crate::index::field::Field;
-use crate::index::index_file_names;
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
 use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
 use crate::index::pipeline::segment_context::SegmentContext;
@@ -197,19 +196,11 @@ impl FieldConsumer for TermVectorsConsumer {
 
         // Lazy-create the writer
         if self.writer.is_none() {
-            let tvd_name = index_file_names::segment_file_name(
+            self.writer = Some(CompressingTermVectorsWriter::new(
+                &context.directory,
                 &context.segment_name,
                 "",
-                term_vectors::VECTORS_EXTENSION,
-            );
-            let tvd = {
-                let mut dir = context.directory.lock().unwrap();
-                dir.create_output(&tvd_name)?
-            };
-            self.writer = Some(CompressingTermVectorsWriter::new(
-                tvd,
                 &context.segment_id,
-                "",
             )?);
         }
 
@@ -259,19 +250,15 @@ impl FieldConsumer for TermVectorsConsumer {
         context: &SegmentContext,
         accumulator: &SegmentAccumulator,
     ) -> io::Result<Vec<String>> {
-        let Some(writer) = self.writer.take() else {
+        let Some(mut writer) = self.writer.take() else {
             return Ok(Vec::new());
         };
 
-        // Fill remaining gap docs
-        // The writer's finish will flush any remaining pending docs
-        writer.finish(
-            &context.directory,
+        writer.finish(accumulator.doc_count())?;
+        Ok(CompressingTermVectorsWriter::file_names(
             &context.segment_name,
             "",
-            &context.segment_id,
-            accumulator.doc_count(),
-        )
+        ))
     }
 }
 

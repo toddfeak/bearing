@@ -159,8 +159,12 @@ impl DocData {
 
 /// Writes term vector `.tvd`, `.tvx`, `.tvm` files for a segment.
 pub(crate) struct CompressingTermVectorsWriter {
-    /// Open `.tvd` handle (header already written).
-    vectors_stream: Box<dyn IndexOutput>,
+    /// Open `.tvd` data handle (header already written).
+    data_stream: Box<dyn IndexOutput>,
+    /// Open `.tvx` index handle (header already written).
+    index_stream: Box<dyn IndexOutput>,
+    /// Open `.tvm` meta handle (header already written, packed version + chunk size written).
+    meta_stream: Box<dyn IndexOutput>,
     /// Documents in the current (unflushed) chunk.
     pending_docs: Vec<DocData>,
     /// Current document being built.
@@ -219,21 +223,54 @@ impl mem_dbg::MemSize for CompressingTermVectorsWriter {
 }
 
 impl CompressingTermVectorsWriter {
-    /// Creates a new writer. Writes the `.tvd` header immediately.
+    /// Creates a new writer. Opens `.tvd`, `.tvx`, and `.tvm` files and writes
+    /// their headers immediately.
     pub(crate) fn new(
-        mut vectors_stream: Box<dyn IndexOutput>,
-        segment_id: &[u8; 16],
+        directory: &SharedDirectory,
+        segment_name: &str,
         segment_suffix: &str,
+        segment_id: &[u8; 16],
     ) -> io::Result<Self> {
+        let names = Self::file_names(segment_name, segment_suffix);
+
+        let (mut data_stream, mut index_stream, mut meta_stream) = {
+            let mut dir = directory.lock().unwrap();
+            (
+                dir.create_output(&names[0])?,
+                dir.create_output(&names[1])?,
+                dir.create_output(&names[2])?,
+            )
+        };
+
         codec_util::write_index_header(
-            &mut *vectors_stream,
+            &mut *data_stream,
             DATA_CODEC,
             VERSION,
             segment_id,
             segment_suffix,
         )?;
+        codec_util::write_index_header(
+            &mut *index_stream,
+            INDEX_CODEC_IDX,
+            VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+        codec_util::write_index_header(
+            &mut *meta_stream,
+            INDEX_CODEC_META,
+            VERSION,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        meta_stream.write_vint(PACKED_INTS_VERSION)?;
+        meta_stream.write_vint(CHUNK_SIZE)?;
+
         Ok(Self {
-            vectors_stream,
+            data_stream,
+            index_stream,
+            meta_stream,
             pending_docs: Vec::new(),
             cur_doc: None,
             cur_field: None,
@@ -253,6 +290,15 @@ impl CompressingTermVectorsWriter {
             pos_buf_used: 0,
             off_buf_used: 0,
         })
+    }
+
+    /// Returns the file names produced by this writer for the given segment.
+    pub(crate) fn file_names(segment_name: &str, segment_suffix: &str) -> Vec<String> {
+        vec![
+            index_file_names::segment_file_name(segment_name, segment_suffix, VECTORS_EXTENSION),
+            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION),
+            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION),
+        ]
     }
 
     // -- Streaming API -------------------------------------------------------
@@ -487,13 +533,12 @@ impl CompressingTermVectorsWriter {
         let doc_base = self.num_docs - chunk_docs;
         self.doc_bases.push(doc_base as i64);
         self.start_pointers
-            .push(self.vectors_stream.file_pointer() as i64);
+            .push(self.data_stream.file_pointer() as i64);
 
         // Chunk header: docBase, (chunkDocs << 1) | dirty_bit
-        self.vectors_stream.write_vint(doc_base)?;
+        self.data_stream.write_vint(doc_base)?;
         let dirty_bit = if force { 1 } else { 0 };
-        self.vectors_stream
-            .write_vint((chunk_docs << 1) | dirty_bit)?;
+        self.data_stream.write_vint((chunk_docs << 1) | dirty_bit)?;
 
         let total_fields = self.flush_num_fields(chunk_docs)?;
 
@@ -510,7 +555,7 @@ impl CompressingTermVectorsWriter {
 
             // Compress term suffixes with plain LZ4 (CompressionMode.FAST)
             let compressed = lz4::compress(&self.term_suffixes);
-            self.vectors_stream.write_bytes(&compressed)?;
+            self.data_stream.write_bytes(&compressed)?;
         }
 
         // Reset
@@ -524,63 +569,23 @@ impl CompressingTermVectorsWriter {
     }
 
     /// Flushes any remaining docs as a dirty chunk, then writes `.tvx` and `.tvm`
-    /// index/meta files. Consumes the writer.
-    ///
-    /// Returns the names of the three files written (`.tvd`, `.tvx`, `.tvm`).
-    pub(crate) fn finish(
-        mut self,
-        directory: &SharedDirectory,
-        segment_name: &str,
-        segment_suffix: &str,
-        segment_id: &[u8; 16],
-        num_docs: i32,
-    ) -> io::Result<Vec<String>> {
+    /// index/meta data and footers for all three files.
+    pub(crate) fn finish(&mut self, num_docs: i32) -> io::Result<()> {
         // Flush remaining docs as a dirty chunk
         if !self.pending_docs.is_empty() {
             self.flush(true)?;
         }
 
-        let tvd_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, VECTORS_EXTENSION);
-        let tvx_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let tvm_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-
-        let (mut tvx, mut tvm) = {
-            let mut dir = directory.lock().unwrap();
-            (dir.create_output(&tvx_name)?, dir.create_output(&tvm_name)?)
-        };
-
-        // Write .tvx and .tvm headers
-        codec_util::write_index_header(
-            &mut *tvx,
-            INDEX_CODEC_IDX,
-            VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
-        codec_util::write_index_header(
-            &mut *tvm,
-            INDEX_CODEC_META,
-            VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
-
-        // PackedInts version and chunk size
-        tvm.write_vint(PACKED_INTS_VERSION)?;
-        tvm.write_vint(CHUNK_SIZE)?;
-
-        let max_pointer = self.vectors_stream.file_pointer() as i64;
+        let max_pointer = self.data_stream.file_pointer() as i64;
         let total_chunks = self.num_chunks as u32;
 
         // Write FieldsIndex to .tvx and .tvm (mirrors FieldsIndexWriter.finish())
-        tvm.write_le_int(num_docs)?;
-        tvm.write_le_int(BLOCK_SHIFT as i32)?;
-        tvm.write_le_int((total_chunks + 1) as i32)?;
+        self.meta_stream.write_le_int(num_docs)?;
+        self.meta_stream.write_le_int(BLOCK_SHIFT as i32)?;
+        self.meta_stream.write_le_int((total_chunks + 1) as i32)?;
 
-        tvm.write_le_long(tvx.file_pointer() as i64)?;
+        self.meta_stream
+            .write_le_long(self.index_stream.file_pointer() as i64)?;
 
         let mut docs_writer = DirectMonotonicWriter::new(BLOCK_SHIFT);
         for &db in &self.doc_bases {
@@ -589,34 +594,36 @@ impl CompressingTermVectorsWriter {
         if total_chunks > 0 {
             docs_writer.add(num_docs as i64);
         }
-        docs_writer.finish(&mut *tvm, &mut *tvx)?;
+        docs_writer.finish(&mut *self.meta_stream, &mut *self.index_stream)?;
 
-        tvm.write_le_long(tvx.file_pointer() as i64)?;
+        self.meta_stream
+            .write_le_long(self.index_stream.file_pointer() as i64)?;
 
         let mut fp_writer = DirectMonotonicWriter::new(BLOCK_SHIFT);
         for &sp in &self.start_pointers {
             fp_writer.add(sp);
         }
         fp_writer.add(max_pointer);
-        fp_writer.finish(&mut *tvm, &mut *tvx)?;
+        fp_writer.finish(&mut *self.meta_stream, &mut *self.index_stream)?;
 
-        tvm.write_le_long(tvx.file_pointer() as i64)?;
-        codec_util::write_footer(&mut *tvx)?;
+        self.meta_stream
+            .write_le_long(self.index_stream.file_pointer() as i64)?;
+        codec_util::write_footer(&mut *self.index_stream)?;
 
-        tvm.write_le_long(max_pointer)?;
+        self.meta_stream.write_le_long(max_pointer)?;
 
         debug!(
             "term_vectors: num_chunks={}, num_dirty_chunks={}, num_dirty_docs={}",
             self.num_chunks, self.num_dirty_chunks, self.num_dirty_docs
         );
-        tvm.write_vlong(self.num_chunks)?;
-        tvm.write_vlong(self.num_dirty_chunks)?;
-        tvm.write_vlong(self.num_dirty_docs)?;
+        self.meta_stream.write_vlong(self.num_chunks)?;
+        self.meta_stream.write_vlong(self.num_dirty_chunks)?;
+        self.meta_stream.write_vlong(self.num_dirty_docs)?;
 
-        codec_util::write_footer(&mut *tvm)?;
-        codec_util::write_footer(&mut *self.vectors_stream)?;
+        codec_util::write_footer(&mut *self.meta_stream)?;
+        codec_util::write_footer(&mut *self.data_stream)?;
 
-        Ok(vec![tvd_name, tvx_name, tvm_name])
+        Ok(())
     }
 
     // -- Flush helpers -------------------------------------------------------
@@ -624,17 +631,17 @@ impl CompressingTermVectorsWriter {
     fn flush_num_fields(&mut self, chunk_docs: i32) -> io::Result<i32> {
         if chunk_docs == 1 {
             let num_fields = self.pending_docs[0].num_fields;
-            self.vectors_stream.write_vint(num_fields)?;
+            self.data_stream.write_vint(num_fields)?;
             return Ok(num_fields);
         }
 
         let mut writer = BlockPackedWriter::new(PACKED_BLOCK_SIZE);
         let mut total_fields = 0i32;
         for doc in &self.pending_docs {
-            writer.add(&mut *self.vectors_stream, doc.num_fields as i64)?;
+            writer.add(&mut *self.data_stream, doc.num_fields as i64)?;
             total_fields += doc.num_fields;
         }
-        writer.finish(&mut *self.vectors_stream)?;
+        writer.finish(&mut *self.data_stream)?;
         Ok(total_fields)
     }
 
@@ -653,15 +660,15 @@ impl CompressingTermVectorsWriter {
         let max_field_num = field_nums[num_distinct - 1] as i64;
         let bits_required = packed_bits_required(max_field_num);
         let token = ((num_distinct - 1).min(0x07) << 5) as u8 | bits_required as u8;
-        self.vectors_stream.write_byte(token)?;
+        self.data_stream.write_byte(token)?;
         if num_distinct > 0x07 {
-            self.vectors_stream
+            self.data_stream
                 .write_vint((num_distinct - 1 - 0x07) as i32)?;
         }
 
         let values: Vec<i64> = field_nums.iter().map(|&n| n as i64).collect();
         packed_ints_write(
-            &mut DataOutputWriter(&mut *self.vectors_stream),
+            &mut DataOutputWriter(&mut *self.data_stream),
             &values,
             bits_required,
         )?;
@@ -682,8 +689,8 @@ impl CompressingTermVectorsWriter {
         }
         let mut scratch = Vec::new();
         writer.finish(&mut VecOutput(&mut scratch))?;
-        self.vectors_stream.write_vlong(scratch.len() as i64)?;
-        self.vectors_stream.write_bytes(&scratch)
+        self.data_stream.write_vlong(scratch.len() as i64)?;
+        self.data_stream.write_bytes(&scratch)
     }
 
     fn flush_flags(&mut self, _total_fields: i32, field_nums: &[u32]) -> io::Result<()> {
@@ -705,7 +712,7 @@ impl CompressingTermVectorsWriter {
         }
 
         if non_changing {
-            self.vectors_stream.write_vint(0)?;
+            self.data_stream.write_vint(0)?;
             let mut scratch = Vec::new();
             let mut writer = DirectWriter::new(FLAGS_BITS);
             for &flags in &field_flags {
@@ -713,10 +720,10 @@ impl CompressingTermVectorsWriter {
                 writer.add(flags as i64);
             }
             writer.finish(&mut VecOutput(&mut scratch))?;
-            self.vectors_stream.write_vint(scratch.len() as i32)?;
-            self.vectors_stream.write_bytes(&scratch)
+            self.data_stream.write_vint(scratch.len() as i32)?;
+            self.data_stream.write_bytes(&scratch)
         } else {
-            self.vectors_stream.write_vint(1)?;
+            self.data_stream.write_vint(1)?;
             let mut scratch = Vec::new();
             let mut writer = DirectWriter::new(FLAGS_BITS);
             for doc in &self.pending_docs {
@@ -725,8 +732,8 @@ impl CompressingTermVectorsWriter {
                 }
             }
             writer.finish(&mut VecOutput(&mut scratch))?;
-            self.vectors_stream.write_vint(scratch.len() as i32)?;
-            self.vectors_stream.write_bytes(&scratch)
+            self.data_stream.write_vint(scratch.len() as i32)?;
+            self.data_stream.write_bytes(&scratch)
         }
     }
 
@@ -739,7 +746,7 @@ impl CompressingTermVectorsWriter {
         }
 
         let bpv = unsigned_bits_required(max_num_terms as i64);
-        self.vectors_stream.write_vint(bpv as i32)?;
+        self.data_stream.write_vint(bpv as i32)?;
         let mut scratch = Vec::new();
         let mut writer = DirectWriter::new(bpv);
         for doc in &self.pending_docs {
@@ -748,8 +755,8 @@ impl CompressingTermVectorsWriter {
             }
         }
         writer.finish(&mut VecOutput(&mut scratch))?;
-        self.vectors_stream.write_vint(scratch.len() as i32)?;
-        self.vectors_stream.write_bytes(&scratch)
+        self.data_stream.write_vint(scratch.len() as i32)?;
+        self.data_stream.write_bytes(&scratch)
     }
 
     fn flush_term_lengths(&mut self) -> io::Result<()> {
@@ -757,21 +764,21 @@ impl CompressingTermVectorsWriter {
         for doc in &self.pending_docs {
             for fd in &doc.fields {
                 for i in 0..fd.num_terms {
-                    writer.add(&mut *self.vectors_stream, fd.prefix_lengths[i] as i64)?;
+                    writer.add(&mut *self.data_stream, fd.prefix_lengths[i] as i64)?;
                 }
             }
         }
-        writer.finish(&mut *self.vectors_stream)?;
+        writer.finish(&mut *self.data_stream)?;
 
         writer.reset();
         for doc in &self.pending_docs {
             for fd in &doc.fields {
                 for i in 0..fd.num_terms {
-                    writer.add(&mut *self.vectors_stream, fd.suffix_lengths[i] as i64)?;
+                    writer.add(&mut *self.data_stream, fd.suffix_lengths[i] as i64)?;
                 }
             }
         }
-        writer.finish(&mut *self.vectors_stream)
+        writer.finish(&mut *self.data_stream)
     }
 
     fn flush_term_freqs(&mut self) -> io::Result<()> {
@@ -779,11 +786,11 @@ impl CompressingTermVectorsWriter {
         for doc in &self.pending_docs {
             for fd in &doc.fields {
                 for i in 0..fd.num_terms {
-                    writer.add(&mut *self.vectors_stream, (fd.freqs[i] - 1) as i64)?;
+                    writer.add(&mut *self.data_stream, (fd.freqs[i] - 1) as i64)?;
                 }
             }
         }
-        writer.finish(&mut *self.vectors_stream)
+        writer.finish(&mut *self.data_stream)
     }
 
     fn flush_positions(&mut self) -> io::Result<()> {
@@ -797,7 +804,7 @@ impl CompressingTermVectorsWriter {
                         for _ in 0..fd.freqs[i] as usize {
                             let position = self.positions_buf[fd.pos_start + pos];
                             writer.add(
-                                &mut *self.vectors_stream,
+                                &mut *self.data_stream,
                                 (position - previous_position) as i64,
                             )?;
                             previous_position = position;
@@ -808,7 +815,7 @@ impl CompressingTermVectorsWriter {
                 }
             }
         }
-        writer.finish(&mut *self.vectors_stream)
+        writer.finish(&mut *self.data_stream)
     }
 
     fn flush_offsets(&mut self, field_nums: &[u32]) -> io::Result<()> {
@@ -859,7 +866,7 @@ impl CompressingTermVectorsWriter {
 
         // Write charsPerTerm as LE ints
         for &cpt in &chars_per_term {
-            self.vectors_stream.write_le_int(f32::to_bits(cpt) as i32)?;
+            self.data_stream.write_le_int(f32::to_bits(cpt) as i32)?;
         }
 
         // Start offset deltas
@@ -885,7 +892,7 @@ impl CompressingTermVectorsWriter {
                             let delta = start_offset
                                 - previous_off
                                 - (cpt * (position - previous_pos) as f32) as i32;
-                            writer.add(&mut *self.vectors_stream, delta as i64)?;
+                            writer.add(&mut *self.data_stream, delta as i64)?;
                             previous_pos = position;
                             previous_off = start_offset;
                             pos += 1;
@@ -894,7 +901,7 @@ impl CompressingTermVectorsWriter {
                 }
             }
         }
-        writer.finish(&mut *self.vectors_stream)?;
+        writer.finish(&mut *self.data_stream)?;
 
         // Offset lengths: length - prefixLength - suffixLength
         writer.reset();
@@ -906,7 +913,7 @@ impl CompressingTermVectorsWriter {
                         for _ in 0..fd.freqs[i] as usize {
                             let length = self.lengths_buf[fd.off_start + pos];
                             writer.add(
-                                &mut *self.vectors_stream,
+                                &mut *self.data_stream,
                                 (length - fd.prefix_lengths[i] - fd.suffix_lengths[i]) as i64,
                             )?;
                             pos += 1;
@@ -916,7 +923,7 @@ impl CompressingTermVectorsWriter {
                 }
             }
         }
-        writer.finish(&mut *self.vectors_stream)
+        writer.finish(&mut *self.data_stream)
     }
 
     fn flush_payload_lengths(&mut self) -> io::Result<()> {
@@ -926,14 +933,14 @@ impl CompressingTermVectorsWriter {
                 if fd.has_payloads {
                     for i in 0..fd.total_positions {
                         writer.add(
-                            &mut *self.vectors_stream,
+                            &mut *self.data_stream,
                             self.payload_lengths_buf[fd.pay_start + i] as i64,
                         )?;
                     }
                 }
             }
         }
-        writer.finish(&mut *self.vectors_stream)
+        writer.finish(&mut *self.data_stream)
     }
 }
 
@@ -984,15 +991,10 @@ mod tests {
     where
         F: FnOnce(&mut CompressingTermVectorsWriter),
     {
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(dir, "_0", "", &make_segment_id()).unwrap();
         build_fn(&mut w);
-        w.finish(dir, "_0", "", &make_segment_id(), num_docs)
-            .unwrap()
+        w.finish(num_docs).unwrap();
+        CompressingTermVectorsWriter::file_names("_0", "")
     }
 
     #[test]
@@ -1335,12 +1337,7 @@ mod tests {
     #[test]
     fn test_trigger_flush_by_suffix_size() {
         let dir = make_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &make_segment_id()).unwrap();
 
         assert!(!w.trigger_flush());
 
@@ -1352,12 +1349,7 @@ mod tests {
     #[test]
     fn test_trigger_flush_by_doc_count() {
         let dir = make_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &make_segment_id()).unwrap();
 
         assert!(!w.trigger_flush());
 
@@ -1379,12 +1371,7 @@ mod tests {
     #[test]
     fn test_finish_document_moves_cur_doc_to_pending() {
         let dir = make_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &make_segment_id()).unwrap();
 
         assert!(w.pending_docs.is_empty());
         assert!(w.cur_doc.is_none());
@@ -1408,12 +1395,7 @@ mod tests {
     #[test]
     fn test_finish_document_increments_num_docs() {
         let dir = make_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &make_segment_id()).unwrap();
 
         assert_eq!(w.num_docs, 0);
 
@@ -1433,12 +1415,7 @@ mod tests {
         use mem_dbg::MemSize;
 
         let dir = make_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &make_segment_id()).unwrap();
 
         let mut refs = mem_dbg::HashMap::default();
         let empty_size = w.mem_size_rec(mem_dbg::SizeFlags::default(), &mut refs);
@@ -1477,12 +1454,7 @@ mod tests {
     #[test]
     fn test_start_term_accumulates_suffixes() {
         let dir = make_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &make_segment_id()).unwrap();
 
         w.start_document(1);
         w.start_field(0, 3, false, false, false);
@@ -1505,12 +1477,7 @@ mod tests {
     #[test]
     fn test_start_term_resets_prefix_per_field() {
         let dir = make_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &make_segment_id()).unwrap();
 
         w.start_document(2);
         // Field 0: term "abc"
@@ -1535,12 +1502,7 @@ mod tests {
     #[test]
     fn test_flush_resets_pending_and_suffixes() {
         let dir = make_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &make_segment_id(), "").unwrap();
+        let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &make_segment_id()).unwrap();
 
         w.start_document(1);
         w.start_field(0, 1, false, false, false);
