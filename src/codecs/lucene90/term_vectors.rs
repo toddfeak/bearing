@@ -2,6 +2,7 @@
 //! Term vectors writer producing `.tvd`, `.tvx`, `.tvm` files.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::io;
 use std::mem;
 
@@ -154,10 +155,52 @@ impl DocData {
 }
 
 // ---------------------------------------------------------------------------
+// TermVectorsWriter trait
+// ---------------------------------------------------------------------------
+
+/// Per-document streaming writer for term vector data.
+///
+/// Callers drive the writer with a sequence of calls:
+/// 1. [`start_document`](Self::start_document) for each document
+/// 2. [`start_field`](Self::start_field) for each field with vectors
+/// 3. [`start_term`](Self::start_term) / [`finish_term`](Self::finish_term) per term
+/// 4. [`finish_field`](Self::finish_field) / [`finish_document`](Self::finish_document)
+/// 5. [`finish`](Self::finish) after all documents
+pub(crate) trait TermVectorsWriter: fmt::Debug {
+    /// Begins a new document with the given number of vector fields.
+    fn start_document(&mut self, num_vector_fields: i32);
+
+    /// Finishes the current document, flushing if the chunk is full.
+    fn finish_document(&mut self) -> io::Result<()>;
+
+    /// Begins a new field within the current document.
+    fn start_field(
+        &mut self,
+        field_number: u32,
+        num_terms: i32,
+        positions: bool,
+        offsets: bool,
+        payloads: bool,
+    );
+
+    /// Finishes the current field.
+    fn finish_field(&mut self);
+
+    /// Begins a new term within the current field.
+    fn start_term(&mut self, term: &[u8], freq: i32);
+
+    /// Finishes the current term.
+    fn finish_term(&mut self);
+
+    /// Finalizes the writer after all documents have been added.
+    fn finish(&mut self, num_docs: i32) -> io::Result<()>;
+}
+
+// ---------------------------------------------------------------------------
 // CompressingTermVectorsWriter
 // ---------------------------------------------------------------------------
 
-/// Writes term vector `.tvd`, `.tvx`, `.tvm` files for a segment.
+/// Compressing term vector writer producing `.tvd`, `.tvx`, `.tvm` files.
 pub(crate) struct CompressingTermVectorsWriter {
     /// Open `.tvd` data handle (header already written).
     data_stream: Box<dyn IndexOutput>,
@@ -201,6 +244,16 @@ pub(crate) struct CompressingTermVectorsWriter {
     pub(crate) pos_buf_used: usize,
     /// High-water mark of offset buffer usage in current chunk (for MemSize).
     pub(crate) off_buf_used: usize,
+}
+
+impl fmt::Debug for CompressingTermVectorsWriter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompressingTermVectorsWriter")
+            .field("num_docs", &self.num_docs)
+            .field("num_chunks", &self.num_chunks)
+            .field("pending_docs", &self.pending_docs.len())
+            .finish()
+    }
 }
 
 impl mem_dbg::MemSize for CompressingTermVectorsWriter {
@@ -301,98 +354,11 @@ impl CompressingTermVectorsWriter {
         ]
     }
 
-    // -- Streaming API -------------------------------------------------------
-
-    /// Begins a new document.
-    pub(crate) fn start_document(&mut self, num_vector_fields: i32) {
-        self.cur_doc = Some(self.add_doc_data(num_vector_fields));
-    }
-
-    /// Finishes the current document.
-    pub(crate) fn finish_document(&mut self) -> io::Result<()> {
-        // Move cur_doc into pending_docs. Stored separately during building
-        // because Rust can't hold a reference into a Vec while mutating it.
-        let doc = self.cur_doc.take().unwrap();
-        self.pending_docs.push(doc);
-        // Append payload bytes after the term suffixes
-        self.term_suffixes.append(&mut self.payload_bytes);
-        self.num_docs += 1;
-        if self.trigger_flush() {
-            self.flush(false)?;
-            // Reclaim oversized buffers after chunk flush. Buffers at
-            // INITIAL_BUF_SIZE (4 KB) are kept for reuse; larger ones are
-            // replaced to avoid holding memory from worst-case documents.
-            if self.positions_buf.capacity() > INITIAL_BUF_SIZE {
-                self.positions_buf = vec![0; INITIAL_BUF_SIZE];
-            }
-            if self.start_offsets_buf.capacity() > INITIAL_BUF_SIZE {
-                self.start_offsets_buf = vec![0; INITIAL_BUF_SIZE];
-            }
-            if self.lengths_buf.capacity() > INITIAL_BUF_SIZE {
-                self.lengths_buf = vec![0; INITIAL_BUF_SIZE];
-            }
-            if self.payload_lengths_buf.capacity() > INITIAL_BUF_SIZE {
-                self.payload_lengths_buf = vec![0; INITIAL_BUF_SIZE];
-            }
-            self.pos_buf_used = 0;
-            self.off_buf_used = 0;
-        }
-        Ok(())
-    }
-
-    /// Begins a new field within the current document.
-    pub(crate) fn start_field(
-        &mut self,
-        field_number: u32,
-        num_terms: i32,
-        positions: bool,
-        offsets: bool,
-        payloads: bool,
-    ) {
-        let doc = self.cur_doc.as_mut().unwrap();
-        doc.add_field(
-            field_number,
-            num_terms as usize,
-            positions,
-            offsets,
-            payloads,
-        );
-        // Move the field out of cur_doc into cur_field for the borrow checker
-        self.cur_field = self.cur_doc.as_mut().unwrap().fields.pop();
-        self.last_term.clear();
-    }
-
-    /// Finishes the current field.
-    pub(crate) fn finish_field(&mut self) {
-        let field = self.cur_field.take().unwrap();
-        self.cur_doc.as_mut().unwrap().fields.push(field);
-    }
-
-    /// Begins a new term.
-    pub(crate) fn start_term(&mut self, term: &[u8], freq: i32) {
-        assert!(freq >= 1);
-        let prefix = if self.last_term.is_empty() {
-            0
-        } else {
-            shared_prefix_length(&self.last_term, term)
-        };
-
-        self.cur_field.as_mut().unwrap().add_term(
-            freq,
-            prefix as i32,
-            (term.len() - prefix) as i32,
-        );
-        self.term_suffixes.extend_from_slice(&term[prefix..]);
-
-        // Copy last term
-        self.last_term.clear();
-        self.last_term.extend_from_slice(term);
-    }
-
-    /// No-op kept for caller compatibility — there is no corresponding finish step.
-    pub(crate) fn finish_term(&mut self) {}
-
     /// Bulk-reads position/offset data from byte slice readers.
+    ///
+    /// Indexing-path fast method that grows buffers once per term and decodes
+    /// VInt-encoded streams directly into internal buffers. Not on the
+    /// [`TermVectorsWriter`] trait — the merge path will use bulk chunk copy.
     pub(crate) fn add_prox(
         &mut self,
         num_prox: i32,
@@ -570,7 +536,7 @@ impl CompressingTermVectorsWriter {
 
     /// Flushes any remaining docs as a dirty chunk, then writes `.tvx` and `.tvm`
     /// index/meta data and footers for all three files.
-    pub(crate) fn finish(&mut self, num_docs: i32) -> io::Result<()> {
+    fn finish_impl(&mut self, num_docs: i32) -> io::Result<()> {
         // Flush remaining docs as a dirty chunk
         if !self.pending_docs.is_empty() {
             self.flush(true)?;
@@ -941,6 +907,95 @@ impl CompressingTermVectorsWriter {
             }
         }
         writer.finish(&mut *self.data_stream)
+    }
+}
+
+impl TermVectorsWriter for CompressingTermVectorsWriter {
+    fn start_document(&mut self, num_vector_fields: i32) {
+        self.cur_doc = Some(self.add_doc_data(num_vector_fields));
+    }
+
+    fn finish_document(&mut self) -> io::Result<()> {
+        // Move cur_doc into pending_docs. Stored separately during building
+        // because Rust can't hold a reference into a Vec while mutating it.
+        let doc = self.cur_doc.take().unwrap();
+        self.pending_docs.push(doc);
+        // Append payload bytes after the term suffixes
+        self.term_suffixes.append(&mut self.payload_bytes);
+        self.num_docs += 1;
+        if self.trigger_flush() {
+            self.flush(false)?;
+            // Reclaim oversized buffers after chunk flush. Buffers at
+            // INITIAL_BUF_SIZE (4 KB) are kept for reuse; larger ones are
+            // replaced to avoid holding memory from worst-case documents.
+            if self.positions_buf.capacity() > INITIAL_BUF_SIZE {
+                self.positions_buf = vec![0; INITIAL_BUF_SIZE];
+            }
+            if self.start_offsets_buf.capacity() > INITIAL_BUF_SIZE {
+                self.start_offsets_buf = vec![0; INITIAL_BUF_SIZE];
+            }
+            if self.lengths_buf.capacity() > INITIAL_BUF_SIZE {
+                self.lengths_buf = vec![0; INITIAL_BUF_SIZE];
+            }
+            if self.payload_lengths_buf.capacity() > INITIAL_BUF_SIZE {
+                self.payload_lengths_buf = vec![0; INITIAL_BUF_SIZE];
+            }
+            self.pos_buf_used = 0;
+            self.off_buf_used = 0;
+        }
+        Ok(())
+    }
+
+    fn start_field(
+        &mut self,
+        field_number: u32,
+        num_terms: i32,
+        positions: bool,
+        offsets: bool,
+        payloads: bool,
+    ) {
+        let doc = self.cur_doc.as_mut().unwrap();
+        doc.add_field(
+            field_number,
+            num_terms as usize,
+            positions,
+            offsets,
+            payloads,
+        );
+        // Move the field out of cur_doc into cur_field for the borrow checker
+        self.cur_field = self.cur_doc.as_mut().unwrap().fields.pop();
+        self.last_term.clear();
+    }
+
+    fn finish_field(&mut self) {
+        let field = self.cur_field.take().unwrap();
+        self.cur_doc.as_mut().unwrap().fields.push(field);
+    }
+
+    fn start_term(&mut self, term: &[u8], freq: i32) {
+        assert!(freq >= 1);
+        let prefix = if self.last_term.is_empty() {
+            0
+        } else {
+            shared_prefix_length(&self.last_term, term)
+        };
+
+        self.cur_field.as_mut().unwrap().add_term(
+            freq,
+            prefix as i32,
+            (term.len() - prefix) as i32,
+        );
+        self.term_suffixes.extend_from_slice(&term[prefix..]);
+
+        // Copy last term
+        self.last_term.clear();
+        self.last_term.extend_from_slice(term);
+    }
+
+    fn finish_term(&mut self) {}
+
+    fn finish(&mut self, num_docs: i32) -> io::Result<()> {
+        self.finish_impl(num_docs)
     }
 }
 

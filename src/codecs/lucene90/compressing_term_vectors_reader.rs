@@ -159,7 +159,7 @@ impl CompressingTermVectorsReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
+    use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 

@@ -13,7 +13,7 @@ use std::fmt;
 use std::io;
 use std::mem;
 
-use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
+use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
 use crate::document::IndexOptions;
 use crate::index::pipeline::terms_hash::{
     BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
@@ -373,7 +373,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
+    use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
     use crate::store;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::util::byte_block_pool::ByteBlockPool;

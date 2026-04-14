@@ -13,7 +13,7 @@ use std::io;
 use std::mem;
 
 use crate::analysis::Token;
-use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
+use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
 use crate::index::field::Field;
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
 use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
