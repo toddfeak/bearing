@@ -18,16 +18,52 @@ use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::string_helper;
 
+/// A single numeric doc value entry.
+#[derive(mem_dbg::MemSize)]
+#[mem_size_flat]
+pub(crate) struct NumericDocValue {
+    pub doc_id: i32,
+    pub value: i64,
+}
+
+/// A single binary doc value entry.
+#[derive(mem_dbg::MemSize)]
+pub(crate) struct BinaryDocValue {
+    pub doc_id: i32,
+    pub value: Vec<u8>,
+}
+
+/// A single sorted doc value entry.
+#[derive(mem_dbg::MemSize)]
+pub(crate) struct SortedDocValue {
+    pub doc_id: i32,
+    pub value: Vec<u8>,
+}
+
+/// A single sorted-numeric doc value entry.
+#[derive(mem_dbg::MemSize)]
+pub(crate) struct SortedNumericDocValue {
+    pub doc_id: i32,
+    pub values: Vec<i64>,
+}
+
+/// A single sorted-set doc value entry.
+#[derive(mem_dbg::MemSize)]
+pub(crate) struct SortedSetDocValue {
+    pub doc_id: i32,
+    pub values: Vec<Vec<u8>>,
+}
+
 /// Per-field doc values accumulation state.
 #[derive(mem_dbg::MemSize)]
 pub(crate) enum DocValuesAccumulator {
     #[expect(dead_code)]
     None,
-    Numeric(Vec<(i32, i64)>),
-    Binary(Vec<(i32, Vec<u8>)>),
-    Sorted(Vec<(i32, Vec<u8>)>),
-    SortedNumeric(Vec<(i32, Vec<i64>)>),
-    SortedSet(Vec<(i32, Vec<Vec<u8>>)>),
+    Numeric(Vec<NumericDocValue>),
+    Binary(Vec<BinaryDocValue>),
+    Sorted(Vec<SortedDocValue>),
+    SortedNumeric(Vec<SortedNumericDocValue>),
+    SortedSet(Vec<SortedSetDocValue>),
 }
 
 /// Per-field data passed to the doc values writer.
@@ -163,13 +199,13 @@ pub(crate) fn write(
 fn add_numeric_field(
     meta: &mut dyn DataOutput,
     data: &mut dyn IndexOutput,
-    vals: &[(i32, i64)],
+    vals: &[NumericDocValue],
     num_docs: i32,
 ) -> io::Result<()> {
     // No skip index for MVP
 
-    let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
-    let all_values: Vec<i64> = vals.iter().map(|(_doc_id, v)| *v).collect();
+    let doc_ids: Vec<i32> = vals.iter().map(|entry| entry.doc_id).collect();
+    let all_values: Vec<i64> = vals.iter().map(|entry| entry.value).collect();
 
     // Unlike SORTED_NUMERIC, NUMERIC does NOT write numDocsWithField after writeValues
     write_values(
@@ -189,7 +225,7 @@ fn add_numeric_field(
 fn add_binary_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    vals: &[(i32, Vec<u8>)],
+    vals: &[BinaryDocValue],
     num_docs: i32,
 ) -> io::Result<()> {
     // Write data offset
@@ -199,11 +235,11 @@ fn add_binary_field(
     // Write concatenated binary values to data
     let mut min_length = i32::MAX;
     let mut max_length = 0i32;
-    for (_doc_id, bytes) in vals {
-        let len = bytes.len() as i32;
+    for entry in vals {
+        let len = entry.value.len() as i32;
         min_length = min_length.min(len);
         max_length = max_length.max(len);
-        data.write_bytes(bytes)?;
+        data.write_bytes(&entry.value)?;
     }
 
     let num_docs_with_field = vals.len() as i32;
@@ -227,7 +263,7 @@ fn add_binary_field(
         meta.write_byte(0xFF)?;
     } else {
         // SPARSE — write IndexedDISI bitset
-        let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
+        let doc_ids: Vec<i32> = vals.iter().map(|entry| entry.doc_id).collect();
         let disi_offset = data.file_pointer() as i64;
         meta.write_le_long(disi_offset)?;
         let jump_table_entry_count = indexed_disi::write_bit_set(&doc_ids, num_docs, &mut *data)?;
@@ -250,9 +286,9 @@ fn add_binary_field(
         let mut dm_writer = DirectMonotonicWriter::new(DIRECT_MONOTONIC_BLOCK_SHIFT);
 
         let mut cumulative: i64 = 0;
-        for (_doc_id, bytes) in vals {
+        for entry in vals {
             dm_writer.add(cumulative);
-            cumulative += bytes.len() as i64;
+            cumulative += entry.value.len() as i64;
         }
         dm_writer.add(cumulative); // final entry for total length
 
@@ -269,15 +305,15 @@ fn add_binary_field(
 fn add_sorted_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    vals: &[(i32, Vec<u8>)],
+    vals: &[SortedDocValue],
     num_docs: i32,
 ) -> io::Result<()> {
     // No skip index for MVP
 
     // Build sorted unique terms and assign ordinals
     let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
-    for (_doc_id, v) in vals {
-        unique_terms.insert(v);
+    for entry in vals {
+        unique_terms.insert(&entry.value);
     }
 
     let mut ord_map: HashMap<&[u8], i64> = HashMap::with_capacity(unique_terms.len());
@@ -291,10 +327,10 @@ fn add_sorted_field(
         .collect();
 
     // Build per-doc ordinal array
-    let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
+    let doc_ids: Vec<i32> = vals.iter().map(|entry| entry.doc_id).collect();
     let ordinals: Vec<i64> = vals
         .iter()
-        .map(|(_doc_id, v)| ord_map[v.as_slice()])
+        .map(|entry| ord_map[entry.value.as_slice()])
         .collect();
 
     // writeValues for ordinals (ords=true) — no multiValued byte, no numDocsWithField
@@ -318,22 +354,28 @@ fn add_sorted_field(
 fn add_sorted_numeric_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    vals: &[(i32, Vec<i64>)],
+    vals: &[SortedNumericDocValue],
     num_docs: i32,
 ) -> io::Result<()> {
     // No skip index for MVP
 
     // Sort values within each doc (Java's SortedNumericDocValues contract)
-    let mut sorted_vals: Vec<(i32, Vec<i64>)> = vals.to_vec();
-    for (_doc_id, values) in sorted_vals.iter_mut() {
-        values.sort();
+    let mut sorted_vals: Vec<SortedNumericDocValue> = vals
+        .iter()
+        .map(|entry| SortedNumericDocValue {
+            doc_id: entry.doc_id,
+            values: entry.values.clone(),
+        })
+        .collect();
+    for entry in sorted_vals.iter_mut() {
+        entry.values.sort();
     }
 
     // Collect all values in doc order (flattened)
-    let doc_ids: Vec<i32> = sorted_vals.iter().map(|(doc_id, _)| *doc_id).collect();
+    let doc_ids: Vec<i32> = sorted_vals.iter().map(|entry| entry.doc_id).collect();
     let all_values: Vec<i64> = sorted_vals
         .iter()
-        .flat_map(|(_doc_id, values)| values.iter().copied())
+        .flat_map(|entry| entry.values.iter().copied())
         .collect();
 
     let num_docs_with_value = sorted_vals.len() as i32;
@@ -359,9 +401,9 @@ fn add_sorted_numeric_field(
         let mut dm_writer = DirectMonotonicWriter::new(DIRECT_MONOTONIC_BLOCK_SHIFT);
 
         let mut cumulative: i64 = 0;
-        for (_doc_id, values) in &sorted_vals {
+        for entry in &sorted_vals {
             dm_writer.add(cumulative);
-            cumulative += values.len() as i64;
+            cumulative += entry.values.len() as i64;
         }
         dm_writer.add(cumulative);
 
@@ -382,15 +424,15 @@ fn add_sorted_numeric_field(
 fn add_sorted_set_field(
     meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
-    vals: &[(i32, Vec<Vec<u8>>)],
+    vals: &[SortedSetDocValue],
     num_docs: i32,
 ) -> io::Result<()> {
-    let is_single_valued = vals.iter().all(|(_, v)| v.len() == 1);
+    let is_single_valued = vals.iter().all(|entry| entry.values.len() == 1);
 
     // Build sorted unique terms and assign ordinals
     let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
-    for (_doc_id, values) in vals {
-        for v in values {
+    for entry in vals {
+        for v in &entry.values {
             unique_terms.insert(v);
         }
     }
@@ -410,10 +452,10 @@ fn add_sorted_set_field(
         // Java's readSorted() does NOT read numDocsWithField.
         meta.write_byte(0)?;
 
-        let doc_ids: Vec<i32> = vals.iter().map(|(doc_id, _)| *doc_id).collect();
+        let doc_ids: Vec<i32> = vals.iter().map(|entry| entry.doc_id).collect();
         let ordinals: Vec<i64> = vals
             .iter()
-            .map(|(_doc_id, values)| ord_map[values[0].as_slice()])
+            .map(|entry| ord_map[entry.values[0].as_slice()])
             .collect();
 
         write_values(
@@ -434,11 +476,12 @@ fn add_sorted_set_field(
         // Build per-doc ordinal lists: map terms → ordinals, sort, dedup (set semantics)
         let ord_vals: Vec<(i32, Vec<i64>)> = vals
             .iter()
-            .map(|(doc_id, values)| {
-                let mut ords: Vec<i64> = values.iter().map(|v| ord_map[v.as_slice()]).collect();
+            .map(|entry| {
+                let mut ords: Vec<i64> =
+                    entry.values.iter().map(|v| ord_map[v.as_slice()]).collect();
                 ords.sort();
                 ords.dedup();
-                (*doc_id, ords)
+                (entry.doc_id, ords)
             })
             .collect();
 
@@ -875,10 +918,30 @@ mod tests {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
+    fn nv(doc_id: i32, value: i64) -> NumericDocValue {
+        NumericDocValue { doc_id, value }
+    }
+
+    fn bv(doc_id: i32, value: Vec<u8>) -> BinaryDocValue {
+        BinaryDocValue { doc_id, value }
+    }
+
+    fn sv(doc_id: i32, value: Vec<u8>) -> SortedDocValue {
+        SortedDocValue { doc_id, value }
+    }
+
+    fn snv(doc_id: i32, values: Vec<i64>) -> SortedNumericDocValue {
+        SortedNumericDocValue { doc_id, values }
+    }
+
+    fn ssv(doc_id: i32, values: Vec<Vec<u8>>) -> SortedSetDocValue {
+        SortedSetDocValue { doc_id, values }
+    }
+
     fn make_field_data_numeric(
         name: &str,
         number: u32,
-        values: Vec<(i32, i64)>,
+        values: Vec<NumericDocValue>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -891,7 +954,7 @@ mod tests {
     fn make_field_data_binary(
         name: &str,
         number: u32,
-        values: Vec<(i32, Vec<u8>)>,
+        values: Vec<BinaryDocValue>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -904,7 +967,7 @@ mod tests {
     fn make_field_data_sorted(
         name: &str,
         number: u32,
-        values: Vec<(i32, Vec<u8>)>,
+        values: Vec<SortedDocValue>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -917,7 +980,7 @@ mod tests {
     fn make_field_data_sorted_numeric(
         name: &str,
         number: u32,
-        values: Vec<(i32, Vec<i64>)>,
+        values: Vec<SortedNumericDocValue>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -930,7 +993,7 @@ mod tests {
     fn make_field_data_sorted_set(
         name: &str,
         number: u32,
-        values: Vec<(i32, Vec<Vec<u8>>)>,
+        values: Vec<SortedSetDocValue>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -973,7 +1036,7 @@ mod tests {
         let fields = vec![make_field_data_sorted_numeric(
             "modified",
             1,
-            vec![(0, vec![42]), (1, vec![42]), (2, vec![42])],
+            vec![snv(0, vec![42]), snv(1, vec![42]), snv(2, vec![42])],
         )];
 
         let segment_id = [0u8; 16];
@@ -1031,7 +1094,7 @@ mod tests {
         let fields = vec![make_field_data_sorted_numeric(
             "modified",
             1,
-            vec![(0, vec![1000]), (1, vec![2000]), (2, vec![3000])],
+            vec![snv(0, vec![1000]), snv(1, vec![2000]), snv(2, vec![3000])],
         )];
 
         let segment_id = [0u8; 16];
@@ -1072,9 +1135,9 @@ mod tests {
             "path",
             0,
             vec![
-                (0, vec![bytes("/a.txt")]),
-                (1, vec![bytes("/b.txt")]),
-                (2, vec![bytes("/c.txt")]),
+                ssv(0, vec![bytes("/a.txt")]),
+                ssv(1, vec![bytes("/b.txt")]),
+                ssv(2, vec![bytes("/c.txt")]),
             ],
         )];
 
@@ -1117,7 +1180,7 @@ mod tests {
         let fields = vec![make_field_data_sorted_numeric(
             "modified",
             0,
-            vec![(0, vec![1])],
+            vec![snv(0, vec![1])],
         )];
 
         let segment_id = [0u8; 16];
@@ -1153,15 +1216,15 @@ mod tests {
                 "path",
                 0,
                 vec![
-                    (0, vec![bytes("/a.txt")]),
-                    (1, vec![bytes("/b.txt")]),
-                    (2, vec![bytes("/c.txt")]),
+                    ssv(0, vec![bytes("/a.txt")]),
+                    ssv(1, vec![bytes("/b.txt")]),
+                    ssv(2, vec![bytes("/c.txt")]),
                 ],
             ),
             make_field_data_sorted_numeric(
                 "modified",
                 1,
-                vec![(0, vec![1000]), (1, vec![2000]), (2, vec![3000])],
+                vec![snv(0, vec![1000]), snv(1, vec![2000]), snv(2, vec![3000])],
             ),
         ];
 
@@ -1317,15 +1380,15 @@ mod tests {
                 "path",
                 0,
                 vec![
-                    (0, vec![bytes("/a.txt")]),
-                    (1, vec![bytes("/b.txt")]),
-                    (2, vec![bytes("/c.txt")]),
+                    ssv(0, vec![bytes("/a.txt")]),
+                    ssv(1, vec![bytes("/b.txt")]),
+                    ssv(2, vec![bytes("/c.txt")]),
                 ],
             ),
             make_field_data_sorted_numeric(
                 "modified",
                 1,
-                vec![(0, vec![1000]), (1, vec![2000]), (2, vec![3000])],
+                vec![snv(0, vec![1000]), snv(1, vec![2000]), snv(2, vec![3000])],
             ),
         ];
 
@@ -1369,7 +1432,7 @@ mod tests {
         let fields = vec![make_field_data_sorted_numeric(
             "field",
             0,
-            vec![(0, vec![100]), (1, vec![200]), (2, vec![300])],
+            vec![snv(0, vec![100]), snv(1, vec![200]), snv(2, vec![300])],
         )];
 
         let segment_id = [0u8; 16];
@@ -1387,9 +1450,9 @@ mod tests {
             "path",
             0,
             vec![
-                (0, vec![bytes("/same.txt")]),
-                (1, vec![bytes("/same.txt")]),
-                (2, vec![bytes("/same.txt")]),
+                ssv(0, vec![bytes("/same.txt")]),
+                ssv(1, vec![bytes("/same.txt")]),
+                ssv(2, vec![bytes("/same.txt")]),
             ],
         )];
 
@@ -1404,7 +1467,7 @@ mod tests {
         let fields = vec![make_field_data_numeric(
             "count",
             0,
-            vec![(0, 42), (1, 42), (2, 42)],
+            vec![nv(0, 42), nv(1, 42), nv(2, 42)],
         )];
 
         let segment_id = [0u8; 16];
@@ -1436,7 +1499,7 @@ mod tests {
         let fields = vec![make_field_data_numeric(
             "score",
             0,
-            vec![(0, 10), (1, 20), (2, 30)],
+            vec![nv(0, 10), nv(1, 20), nv(2, 30)],
         )];
 
         let segment_id = [0u8; 16];
@@ -1455,7 +1518,7 @@ mod tests {
         let fields = vec![make_field_data_numeric(
             "count",
             0,
-            vec![(0, 100), (1, 200), (2, 300)],
+            vec![nv(0, 100), nv(1, 200), nv(2, 300)],
         )];
 
         let segment_id = [0u8; 16];
@@ -1486,7 +1549,11 @@ mod tests {
         let fields = vec![make_field_data_sorted(
             "category",
             0,
-            vec![(0, bytes("alpha")), (1, bytes("beta")), (2, bytes("alpha"))],
+            vec![
+                sv(0, bytes("alpha")),
+                sv(1, bytes("beta")),
+                sv(2, bytes("alpha")),
+            ],
         )];
 
         let segment_id = [0u8; 16];
@@ -1509,7 +1576,7 @@ mod tests {
         let fields = vec![make_field_data_sorted(
             "category",
             0,
-            vec![(0, bytes("x")), (1, bytes("y")), (2, bytes("z"))],
+            vec![sv(0, bytes("x")), sv(1, bytes("y")), sv(2, bytes("z"))],
         )];
 
         let segment_id = [0u8; 16];
@@ -1536,9 +1603,9 @@ mod tests {
             "hash",
             0,
             vec![
-                (0, vec![0xAA, 0xBB, 0xCC, 0xDD]),
-                (1, vec![0x11, 0x22, 0x33, 0x44]),
-                (2, vec![0xFF, 0xEE, 0xDD, 0xCC]),
+                bv(0, vec![0xAA, 0xBB, 0xCC, 0xDD]),
+                bv(1, vec![0x11, 0x22, 0x33, 0x44]),
+                bv(2, vec![0xFF, 0xEE, 0xDD, 0xCC]),
             ],
         )];
 
@@ -1559,7 +1626,11 @@ mod tests {
         let fields = vec![make_field_data_binary(
             "data",
             0,
-            vec![(0, vec![1, 2, 3]), (1, vec![4, 5, 6]), (2, vec![7, 8, 9])],
+            vec![
+                bv(0, vec![1, 2, 3]),
+                bv(1, vec![4, 5, 6]),
+                bv(2, vec![7, 8, 9]),
+            ],
         )];
 
         let segment_id = [0u8; 16];
@@ -1585,7 +1656,7 @@ mod tests {
         let fields = vec![make_field_data_binary(
             "payload",
             0,
-            vec![(0, vec![1]), (1, vec![2, 3, 4]), (2, vec![5, 6])],
+            vec![bv(0, vec![1]), bv(1, vec![2, 3, 4]), bv(2, vec![5, 6])],
         )];
 
         let segment_id = [0u8; 16];
@@ -1613,30 +1684,30 @@ mod tests {
     fn test_all_dv_types_combined() {
         // Write all 5 doc values types in one segment and verify parseability
         let fields = vec![
-            make_field_data_numeric("num", 0, vec![(0, 10), (1, 20), (2, 30)]),
+            make_field_data_numeric("num", 0, vec![nv(0, 10), nv(1, 20), nv(2, 30)]),
             make_field_data_binary(
                 "bin",
                 1,
-                vec![(0, vec![0xAA]), (1, vec![0xBB]), (2, vec![0xCC])],
+                vec![bv(0, vec![0xAA]), bv(1, vec![0xBB]), bv(2, vec![0xCC])],
             ),
             make_field_data_sorted(
                 "sort",
                 2,
-                vec![(0, bytes("a")), (1, bytes("b")), (2, bytes("c"))],
+                vec![sv(0, bytes("a")), sv(1, bytes("b")), sv(2, bytes("c"))],
             ),
             make_field_data_sorted_set(
                 "sortset",
                 3,
                 vec![
-                    (0, vec![bytes("x")]),
-                    (1, vec![bytes("y")]),
-                    (2, vec![bytes("z")]),
+                    ssv(0, vec![bytes("x")]),
+                    ssv(1, vec![bytes("y")]),
+                    ssv(2, vec![bytes("z")]),
                 ],
             ),
             make_field_data_sorted_numeric(
                 "sortnum",
                 4,
-                vec![(0, vec![100]), (1, vec![200]), (2, vec![300])],
+                vec![snv(0, vec![100]), snv(1, vec![200]), snv(2, vec![300])],
             ),
         ];
 
@@ -1684,9 +1755,9 @@ mod tests {
             "tags",
             0,
             vec![
-                (0, vec![100]),
-                (1, vec![300, 200]),      // unsorted — should be sorted by codec
-                (2, vec![600, 400, 500]), // unsorted — should be sorted by codec
+                snv(0, vec![100]),
+                snv(1, vec![300, 200]), // unsorted — should be sorted by codec
+                snv(2, vec![600, 400, 500]), // unsorted — should be sorted by codec
             ],
         )];
 
@@ -1717,9 +1788,9 @@ mod tests {
             "nums",
             0,
             vec![
-                (0, vec![100]),
-                (1, vec![300, 200]),
-                (2, vec![600, 400, 500]),
+                snv(0, vec![100]),
+                snv(1, vec![300, 200]),
+                snv(2, vec![600, 400, 500]),
             ],
         )];
 
@@ -1746,15 +1817,19 @@ mod tests {
                 "path",
                 0,
                 vec![
-                    (0, vec![bytes("/a.txt")]),
-                    (1, vec![bytes("/b.txt")]),
-                    (2, vec![bytes("/c.txt")]),
+                    ssv(0, vec![bytes("/a.txt")]),
+                    ssv(1, vec![bytes("/b.txt")]),
+                    ssv(2, vec![bytes("/c.txt")]),
                 ],
             ),
             make_field_data_sorted_numeric(
                 "counts",
                 1,
-                vec![(0, vec![10, 20]), (1, vec![30]), (2, vec![40, 50, 60])],
+                vec![
+                    snv(0, vec![10, 20]),
+                    snv(1, vec![30]),
+                    snv(2, vec![40, 50, 60]),
+                ],
             ),
         ];
 
@@ -1787,9 +1862,9 @@ mod tests {
             "tags",
             0,
             vec![
-                (0, vec![bytes("alpha")]),
-                (1, vec![bytes("gamma"), bytes("beta")]),
-                (2, vec![bytes("delta"), bytes("alpha"), bytes("gamma")]),
+                ssv(0, vec![bytes("alpha")]),
+                ssv(1, vec![bytes("gamma"), bytes("beta")]),
+                ssv(2, vec![bytes("delta"), bytes("alpha"), bytes("gamma")]),
             ],
         )];
 
@@ -1818,8 +1893,8 @@ mod tests {
             "tags",
             0,
             vec![
-                (0, vec![bytes("alpha"), bytes("alpha"), bytes("beta")]),
-                (1, vec![bytes("beta"), bytes("beta")]),
+                ssv(0, vec![bytes("alpha"), bytes("alpha"), bytes("beta")]),
+                ssv(1, vec![bytes("beta"), bytes("beta")]),
             ],
         )];
 
@@ -1849,15 +1924,19 @@ mod tests {
                 "tags",
                 0,
                 vec![
-                    (0, vec![bytes("a"), bytes("b")]),
-                    (1, vec![bytes("c")]),
-                    (2, vec![bytes("a"), bytes("c")]),
+                    ssv(0, vec![bytes("a"), bytes("b")]),
+                    ssv(1, vec![bytes("c")]),
+                    ssv(2, vec![bytes("a"), bytes("c")]),
                 ],
             ),
             make_field_data_sorted_numeric(
                 "nums",
                 1,
-                vec![(0, vec![10, 20]), (1, vec![30]), (2, vec![40, 50, 60])],
+                vec![
+                    snv(0, vec![10, 20]),
+                    snv(1, vec![30]),
+                    snv(2, vec![40, 50, 60]),
+                ],
             ),
         ];
 
@@ -1889,7 +1968,7 @@ mod tests {
         let fields = vec![make_field_data_numeric(
             "score",
             0,
-            vec![(1, 100), (5, 200), (8, 300)],
+            vec![nv(1, 100), nv(5, 200), nv(8, 300)],
         )];
 
         let segment_id = [0u8; 16];
@@ -1945,7 +2024,7 @@ mod tests {
         let fields = vec![make_field_data_binary(
             "tag",
             0,
-            vec![(1, b"hello".to_vec()), (3, b"world".to_vec())],
+            vec![bv(1, b"hello".to_vec()), bv(3, b"world".to_vec())],
         )];
 
         let segment_id = [0u8; 16];
@@ -1988,7 +2067,7 @@ mod tests {
         let fields = vec![make_field_data_sorted(
             "category",
             0,
-            vec![(0, b"alpha".to_vec()), (3, b"beta".to_vec())],
+            vec![sv(0, b"alpha".to_vec()), sv(3, b"beta".to_vec())],
         )];
 
         let segment_id = [0u8; 16];
@@ -2023,7 +2102,7 @@ mod tests {
         let fields = vec![make_field_data_sorted_numeric(
             "counts",
             0,
-            vec![(1, vec![10, 20]), (4, vec![30])],
+            vec![snv(1, vec![10, 20]), snv(4, vec![30])],
         )];
 
         let segment_id = [0u8; 16];

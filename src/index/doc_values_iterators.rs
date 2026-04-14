@@ -12,6 +12,7 @@
 //! - [`SortedNumericDocValues`]: multiple sorted `i64` values per document
 //! - [`SortedSetDocValues`]: multiple sorted ordinals per document with term dictionary lookup
 
+use std::fmt;
 use std::io;
 
 use crate::search::DocIdSetIterator;
@@ -20,7 +21,7 @@ use crate::search::DocIdSetIterator;
 ///
 /// Callers use [`advance_exact`](Self::advance_exact) to position the iterator
 /// at a specific document and test whether that document has a value.
-pub trait DocValuesIterator: DocIdSetIterator {
+pub trait DocValuesIterator: DocIdSetIterator + fmt::Debug {
     /// Advances to exactly `target` and returns whether `target` has a value.
     ///
     /// `target` must be >= the current [`doc_id`](DocIdSetIterator::doc_id) and

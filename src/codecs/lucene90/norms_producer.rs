@@ -318,6 +318,7 @@ impl NormsProducer for BufferedNormsProducer<'_> {
 }
 
 /// Forward iterator over in-memory buffered norms.
+#[derive(Debug)]
 struct BufferedNorms<'a> {
     docs: &'a [i32],
     values: &'a [i64],
@@ -395,6 +396,16 @@ struct DenseNormsIterator {
     constant_value: i64,
 }
 
+impl fmt::Debug for DenseNormsIterator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DenseNormsIterator")
+            .field("doc", &self.doc)
+            .field("max_doc", &self.max_doc)
+            .field("bytes_per_norm", &self.bytes_per_norm)
+            .finish()
+    }
+}
+
 impl DocIdSetIterator for DenseNormsIterator {
     fn doc_id(&self) -> i32 {
         self.doc
@@ -457,6 +468,14 @@ struct SparseNormsIterator {
     slice: Option<Box<dyn RandomAccessInput>>,
     bytes_per_norm: u8,
     constant_value: i64,
+}
+
+impl fmt::Debug for SparseNormsIterator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SparseNormsIterator")
+            .field("bytes_per_norm", &self.bytes_per_norm)
+            .finish()
+    }
 }
 
 impl DocIdSetIterator for SparseNormsIterator {

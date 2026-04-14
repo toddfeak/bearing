@@ -442,10 +442,640 @@ fn skip_terms_dict(meta: &mut dyn DataInput) -> io::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// BufferedDocValuesProducer — in-memory doc values from the indexing pipeline
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+use std::collections::{BTreeSet, HashMap};
+
+#[cfg(test)]
+use crate::codecs::lucene90::doc_values::{
+    BinaryDocValue, DocValuesAccumulator, DocValuesFieldData, NumericDocValue, SortedDocValue,
+    SortedNumericDocValue, SortedSetDocValue,
+};
+#[cfg(test)]
+use crate::index::doc_values_iterators::DocValuesIterator;
+#[cfg(test)]
+use crate::search::DocIdSetIterator;
+#[cfg(test)]
+use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
+
+#[cfg(test)]
+/// Per-field buffered doc values data borrowed from the accumulator.
+enum BufferedFieldDocValues<'a> {
+    Numeric(&'a [NumericDocValue]),
+    Binary(&'a [BinaryDocValue]),
+    Sorted(&'a [SortedDocValue]),
+    SortedNumeric(&'a [SortedNumericDocValue]),
+    SortedSet(&'a [SortedSetDocValue]),
+}
+
+#[cfg(test)]
+/// In-memory [`DocValuesProducer`] borrowing from indexing pipeline buffers.
+///
+/// Each call to a `get_*` method returns a fresh iterator over the borrowed
+/// data, allowing the writer to make multiple passes.
+#[derive(Debug)]
+pub struct BufferedDocValuesProducer<'a> {
+    /// Per-field doc values data indexed by field number.
+    fields: Vec<Option<BufferedFieldDocValues<'a>>>,
+}
+
+#[cfg(test)]
+impl fmt::Debug for BufferedFieldDocValues<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Numeric(v) => write!(f, "Numeric({})", v.len()),
+            Self::Binary(v) => write!(f, "Binary({})", v.len()),
+            Self::Sorted(v) => write!(f, "Sorted({})", v.len()),
+            Self::SortedNumeric(v) => write!(f, "SortedNumeric({})", v.len()),
+            Self::SortedSet(v) => write!(f, "SortedSet({})", v.len()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<'a> BufferedDocValuesProducer<'a> {
+    /// Creates a new buffered producer borrowing from accumulated doc values data.
+    pub(crate) fn new(fields_data: &'a [DocValuesFieldData]) -> Self {
+        let max_field = fields_data
+            .iter()
+            .map(|f| f.number as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let mut fields = Vec::with_capacity(max_field);
+        fields.resize_with(max_field, || None);
+
+        for field in fields_data {
+            let buffered = match &field.doc_values {
+                DocValuesAccumulator::Numeric(vals) => BufferedFieldDocValues::Numeric(vals),
+                DocValuesAccumulator::Binary(vals) => BufferedFieldDocValues::Binary(vals),
+                DocValuesAccumulator::Sorted(vals) => BufferedFieldDocValues::Sorted(vals),
+                DocValuesAccumulator::SortedNumeric(vals) => {
+                    BufferedFieldDocValues::SortedNumeric(vals)
+                }
+                DocValuesAccumulator::SortedSet(vals) => BufferedFieldDocValues::SortedSet(vals),
+                DocValuesAccumulator::None => continue,
+            };
+            fields[field.number as usize] = Some(buffered);
+        }
+
+        Self { fields }
+    }
+}
+
+#[cfg(test)]
+impl DocValuesProducer for BufferedDocValuesProducer<'_> {
+    fn get_numeric(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>> {
+        match self.fields.get(field_info.number() as usize) {
+            Some(Some(BufferedFieldDocValues::Numeric(vals))) if !vals.is_empty() => {
+                Ok(Some(Box::new(BufferedNumericDV {
+                    entries: vals,
+                    pos: -1,
+                })))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn get_binary(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn BinaryDocValues + '_>>> {
+        match self.fields.get(field_info.number() as usize) {
+            Some(Some(BufferedFieldDocValues::Binary(vals))) if !vals.is_empty() => {
+                Ok(Some(Box::new(BufferedBinaryDV {
+                    entries: vals,
+                    pos: -1,
+                })))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn get_sorted(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedDocValues + '_>>> {
+        match self.fields.get(field_info.number() as usize) {
+            Some(Some(BufferedFieldDocValues::Sorted(vals))) if !vals.is_empty() => {
+                Ok(Some(Box::new(BufferedSortedDV::new(vals))))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn get_sorted_numeric(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedNumericDocValues + '_>>> {
+        match self.fields.get(field_info.number() as usize) {
+            Some(Some(BufferedFieldDocValues::SortedNumeric(vals))) if !vals.is_empty() => {
+                Ok(Some(Box::new(BufferedSortedNumericDV::new(vals))))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn get_sorted_set(
+        &self,
+        field_info: &FieldInfo,
+    ) -> io::Result<Option<Box<dyn SortedSetDocValues + '_>>> {
+        match self.fields.get(field_info.number() as usize) {
+            Some(Some(BufferedFieldDocValues::SortedSet(vals))) if !vals.is_empty() => {
+                Ok(Some(Box::new(BufferedSortedSetDV::new(vals))))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+// --- Buffered iterator: Numeric ---
+
+#[cfg(test)]
+struct BufferedNumericDV<'a> {
+    entries: &'a [NumericDocValue],
+    pos: i32,
+}
+
+#[cfg(test)]
+impl fmt::Debug for BufferedNumericDV<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufferedNumericDV")
+            .field("entries", &self.entries.len())
+            .field("pos", &self.pos)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl DocIdSetIterator for BufferedNumericDV<'_> {
+    fn doc_id(&self) -> i32 {
+        if self.pos < 0 {
+            -1
+        } else if (self.pos as usize) < self.entries.len() {
+            self.entries[self.pos as usize].doc_id
+        } else {
+            NO_MORE_DOCS
+        }
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        self.pos += 1;
+        Ok(self.doc_id())
+    }
+
+    fn advance(&mut self, target: i32) -> io::Result<i32> {
+        loop {
+            let doc = self.next_doc()?;
+            if doc >= target || doc == NO_MORE_DOCS {
+                return Ok(doc);
+            }
+        }
+    }
+
+    fn cost(&self) -> i64 {
+        self.entries.len() as i64
+    }
+}
+
+#[cfg(test)]
+impl DocValuesIterator for BufferedNumericDV<'_> {
+    fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
+            Ok(idx) => {
+                self.pos = idx as i32;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+impl NumericDocValues for BufferedNumericDV<'_> {
+    fn long_value(&self) -> io::Result<i64> {
+        Ok(self.entries[self.pos as usize].value)
+    }
+}
+
+// --- Buffered iterator: Binary ---
+
+#[cfg(test)]
+struct BufferedBinaryDV<'a> {
+    entries: &'a [BinaryDocValue],
+    pos: i32,
+}
+
+#[cfg(test)]
+impl fmt::Debug for BufferedBinaryDV<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufferedBinaryDV")
+            .field("entries", &self.entries.len())
+            .field("pos", &self.pos)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl DocIdSetIterator for BufferedBinaryDV<'_> {
+    fn doc_id(&self) -> i32 {
+        if self.pos < 0 {
+            -1
+        } else if (self.pos as usize) < self.entries.len() {
+            self.entries[self.pos as usize].doc_id
+        } else {
+            NO_MORE_DOCS
+        }
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        self.pos += 1;
+        Ok(self.doc_id())
+    }
+
+    fn advance(&mut self, target: i32) -> io::Result<i32> {
+        loop {
+            let doc = self.next_doc()?;
+            if doc >= target || doc == NO_MORE_DOCS {
+                return Ok(doc);
+            }
+        }
+    }
+
+    fn cost(&self) -> i64 {
+        self.entries.len() as i64
+    }
+}
+
+#[cfg(test)]
+impl DocValuesIterator for BufferedBinaryDV<'_> {
+    fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
+            Ok(idx) => {
+                self.pos = idx as i32;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+impl BinaryDocValues for BufferedBinaryDV<'_> {
+    fn binary_value(&self) -> io::Result<&[u8]> {
+        Ok(&self.entries[self.pos as usize].value)
+    }
+}
+
+// --- Buffered iterator: Sorted ---
+
+#[cfg(test)]
+struct BufferedSortedDV<'a> {
+    entries: &'a [SortedDocValue],
+    sorted_terms: Vec<&'a [u8]>,
+    ord_map: HashMap<&'a [u8], i32>,
+    pos: i32,
+}
+
+#[cfg(test)]
+impl fmt::Debug for BufferedSortedDV<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufferedSortedDV")
+            .field("entries", &self.entries.len())
+            .field("pos", &self.pos)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl<'a> BufferedSortedDV<'a> {
+    fn new(entries: &'a [SortedDocValue]) -> Self {
+        let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
+        for entry in entries {
+            unique_terms.insert(&entry.value);
+        }
+
+        let mut ord_map = HashMap::with_capacity(unique_terms.len());
+        let sorted_terms: Vec<&[u8]> = unique_terms
+            .into_iter()
+            .enumerate()
+            .map(|(i, term)| {
+                ord_map.insert(term, i as i32);
+                term
+            })
+            .collect();
+
+        Self {
+            entries,
+            sorted_terms,
+            ord_map,
+            pos: -1,
+        }
+    }
+}
+
+#[cfg(test)]
+impl DocIdSetIterator for BufferedSortedDV<'_> {
+    fn doc_id(&self) -> i32 {
+        if self.pos < 0 {
+            -1
+        } else if (self.pos as usize) < self.entries.len() {
+            self.entries[self.pos as usize].doc_id
+        } else {
+            NO_MORE_DOCS
+        }
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        self.pos += 1;
+        Ok(self.doc_id())
+    }
+
+    fn advance(&mut self, target: i32) -> io::Result<i32> {
+        loop {
+            let doc = self.next_doc()?;
+            if doc >= target || doc == NO_MORE_DOCS {
+                return Ok(doc);
+            }
+        }
+    }
+
+    fn cost(&self) -> i64 {
+        self.entries.len() as i64
+    }
+}
+
+#[cfg(test)]
+impl DocValuesIterator for BufferedSortedDV<'_> {
+    fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
+            Ok(idx) => {
+                self.pos = idx as i32;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SortedDocValues for BufferedSortedDV<'_> {
+    fn ord_value(&self) -> io::Result<i32> {
+        let value = &self.entries[self.pos as usize].value;
+        Ok(self.ord_map[value.as_slice()])
+    }
+
+    fn lookup_ord(&self, ord: i32) -> io::Result<&[u8]> {
+        Ok(self.sorted_terms[ord as usize])
+    }
+
+    fn value_count(&self) -> i32 {
+        self.sorted_terms.len() as i32
+    }
+}
+
+// --- Buffered iterator: SortedNumeric ---
+
+#[cfg(test)]
+struct BufferedSortedNumericDV<'a> {
+    entries: &'a [SortedNumericDocValue],
+    pos: i32,
+    sorted_values: Vec<Vec<i64>>,
+    value_idx: usize,
+}
+
+#[cfg(test)]
+impl fmt::Debug for BufferedSortedNumericDV<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufferedSortedNumericDV")
+            .field("entries", &self.entries.len())
+            .field("pos", &self.pos)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl<'a> BufferedSortedNumericDV<'a> {
+    fn new(entries: &'a [SortedNumericDocValue]) -> Self {
+        let sorted_values: Vec<Vec<i64>> = entries
+            .iter()
+            .map(|entry| {
+                let mut v = entry.values.clone();
+                v.sort();
+                v
+            })
+            .collect();
+
+        Self {
+            entries,
+            pos: -1,
+            sorted_values,
+            value_idx: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl DocIdSetIterator for BufferedSortedNumericDV<'_> {
+    fn doc_id(&self) -> i32 {
+        if self.pos < 0 {
+            -1
+        } else if (self.pos as usize) < self.entries.len() {
+            self.entries[self.pos as usize].doc_id
+        } else {
+            NO_MORE_DOCS
+        }
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        self.pos += 1;
+        self.value_idx = 0;
+        Ok(self.doc_id())
+    }
+
+    fn advance(&mut self, target: i32) -> io::Result<i32> {
+        loop {
+            let doc = self.next_doc()?;
+            if doc >= target || doc == NO_MORE_DOCS {
+                return Ok(doc);
+            }
+        }
+    }
+
+    fn cost(&self) -> i64 {
+        self.entries.len() as i64
+    }
+}
+
+#[cfg(test)]
+impl DocValuesIterator for BufferedSortedNumericDV<'_> {
+    fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
+            Ok(idx) => {
+                self.pos = idx as i32;
+                self.value_idx = 0;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SortedNumericDocValues for BufferedSortedNumericDV<'_> {
+    fn doc_value_count(&self) -> i32 {
+        self.sorted_values[self.pos as usize].len() as i32
+    }
+
+    fn next_value(&mut self) -> io::Result<i64> {
+        let val = self.sorted_values[self.pos as usize][self.value_idx];
+        self.value_idx += 1;
+        Ok(val)
+    }
+}
+
+// --- Buffered iterator: SortedSet ---
+
+#[cfg(test)]
+struct BufferedSortedSetDV<'a> {
+    entries: &'a [SortedSetDocValue],
+    sorted_terms: Vec<&'a [u8]>,
+    /// Per-doc ordinal lists (sorted, deduped).
+    doc_ords: Vec<Vec<i64>>,
+    pos: i32,
+    ord_idx: usize,
+}
+
+#[cfg(test)]
+impl fmt::Debug for BufferedSortedSetDV<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufferedSortedSetDV")
+            .field("entries", &self.entries.len())
+            .field("pos", &self.pos)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl<'a> BufferedSortedSetDV<'a> {
+    fn new(entries: &'a [SortedSetDocValue]) -> Self {
+        let mut unique_terms: BTreeSet<&[u8]> = BTreeSet::new();
+        for entry in entries {
+            for v in &entry.values {
+                unique_terms.insert(v);
+            }
+        }
+
+        let mut ord_map: HashMap<&[u8], i64> = HashMap::with_capacity(unique_terms.len());
+        let sorted_terms: Vec<&[u8]> = unique_terms
+            .into_iter()
+            .enumerate()
+            .map(|(i, term)| {
+                ord_map.insert(term, i as i64);
+                term
+            })
+            .collect();
+
+        let doc_ords: Vec<Vec<i64>> = entries
+            .iter()
+            .map(|entry| {
+                let mut ords: Vec<i64> =
+                    entry.values.iter().map(|v| ord_map[v.as_slice()]).collect();
+                ords.sort();
+                ords.dedup();
+                ords
+            })
+            .collect();
+
+        Self {
+            entries,
+            sorted_terms,
+            doc_ords,
+            pos: -1,
+            ord_idx: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl DocIdSetIterator for BufferedSortedSetDV<'_> {
+    fn doc_id(&self) -> i32 {
+        if self.pos < 0 {
+            -1
+        } else if (self.pos as usize) < self.entries.len() {
+            self.entries[self.pos as usize].doc_id
+        } else {
+            NO_MORE_DOCS
+        }
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        self.pos += 1;
+        self.ord_idx = 0;
+        Ok(self.doc_id())
+    }
+
+    fn advance(&mut self, target: i32) -> io::Result<i32> {
+        loop {
+            let doc = self.next_doc()?;
+            if doc >= target || doc == NO_MORE_DOCS {
+                return Ok(doc);
+            }
+        }
+    }
+
+    fn cost(&self) -> i64 {
+        self.entries.len() as i64
+    }
+}
+
+#[cfg(test)]
+impl DocValuesIterator for BufferedSortedSetDV<'_> {
+    fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
+        match self.entries.binary_search_by_key(&target, |e| e.doc_id) {
+            Ok(idx) => {
+                self.pos = idx as i32;
+                self.ord_idx = 0;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SortedSetDocValues for BufferedSortedSetDV<'_> {
+    fn doc_value_count(&self) -> i32 {
+        self.doc_ords[self.pos as usize].len() as i32
+    }
+
+    fn next_ord(&mut self) -> io::Result<i64> {
+        let ord = self.doc_ords[self.pos as usize][self.ord_idx];
+        self.ord_idx += 1;
+        Ok(ord)
+    }
+
+    fn lookup_ord(&self, ord: i64) -> io::Result<&[u8]> {
+        Ok(self.sorted_terms[ord as usize])
+    }
+
+    fn value_count(&self) -> i64 {
+        self.sorted_terms.len() as i64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::doc_values::{self, DocValuesAccumulator, DocValuesFieldData};
+    use crate::codecs::lucene90::doc_values::{
+        self, BinaryDocValue, DocValuesAccumulator, DocValuesFieldData, NumericDocValue,
+        SortedDocValue, SortedNumericDocValue, SortedSetDocValue,
+    };
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::{FieldInfo, FieldInfos};
     use crate::store::{MemoryDirectory, SharedDirectory};
@@ -460,7 +1090,11 @@ mod tests {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
-    fn make_dv_numeric(name: &str, number: u32, values: Vec<(i32, i64)>) -> DocValuesFieldData {
+    fn make_dv_numeric(
+        name: &str,
+        number: u32,
+        values: Vec<NumericDocValue>,
+    ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
             number,
@@ -469,7 +1103,7 @@ mod tests {
         }
     }
 
-    fn make_dv_binary(name: &str, number: u32, values: Vec<(i32, Vec<u8>)>) -> DocValuesFieldData {
+    fn make_dv_binary(name: &str, number: u32, values: Vec<BinaryDocValue>) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
             number,
@@ -478,7 +1112,7 @@ mod tests {
         }
     }
 
-    fn make_dv_sorted(name: &str, number: u32, values: Vec<(i32, Vec<u8>)>) -> DocValuesFieldData {
+    fn make_dv_sorted(name: &str, number: u32, values: Vec<SortedDocValue>) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
             number,
@@ -490,7 +1124,7 @@ mod tests {
     fn make_dv_sorted_numeric(
         name: &str,
         number: u32,
-        values: Vec<(i32, Vec<i64>)>,
+        values: Vec<SortedNumericDocValue>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -503,7 +1137,7 @@ mod tests {
     fn make_dv_sorted_set(
         name: &str,
         number: u32,
-        values: Vec<(i32, Vec<Vec<u8>>)>,
+        values: Vec<SortedSetDocValue>,
     ) -> DocValuesFieldData {
         DocValuesFieldData {
             name: name.to_string(),
@@ -511,6 +1145,26 @@ mod tests {
             doc_values_type: DocValuesType::SortedSet,
             doc_values: DocValuesAccumulator::SortedSet(values),
         }
+    }
+
+    fn nv(doc_id: i32, value: i64) -> NumericDocValue {
+        NumericDocValue { doc_id, value }
+    }
+
+    fn bv(doc_id: i32, value: Vec<u8>) -> BinaryDocValue {
+        BinaryDocValue { doc_id, value }
+    }
+
+    fn sv(doc_id: i32, value: Vec<u8>) -> SortedDocValue {
+        SortedDocValue { doc_id, value }
+    }
+
+    fn snv(doc_id: i32, values: Vec<i64>) -> SortedNumericDocValue {
+        SortedNumericDocValue { doc_id, values }
+    }
+
+    fn ssv(doc_id: i32, values: Vec<Vec<u8>>) -> SortedSetDocValue {
+        SortedSetDocValue { doc_id, values }
     }
 
     /// Writes doc values and opens a reader.
@@ -531,7 +1185,11 @@ mod tests {
     fn test_numeric_all_docs() {
         let fi = make_field_info("count", 0, DocValuesType::Numeric);
         let field_infos = FieldInfos::new(vec![fi]);
-        let fields = [make_dv_numeric("count", 0, vec![(0, 10), (1, 20), (2, 30)])];
+        let fields = [make_dv_numeric(
+            "count",
+            0,
+            vec![nv(0, 10), nv(1, 20), nv(2, 30)],
+        )];
 
         let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
@@ -542,7 +1200,7 @@ mod tests {
     fn test_numeric_sparse() {
         let fi = make_field_info("count", 0, DocValuesType::Numeric);
         let field_infos = FieldInfos::new(vec![fi]);
-        let fields = [make_dv_numeric("count", 0, vec![(1, 10), (3, 20)])];
+        let fields = [make_dv_numeric("count", 0, vec![nv(1, 10), nv(3, 20)])];
 
         let reader = write_and_read(&field_infos, &fields, 5, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(2));
@@ -566,9 +1224,9 @@ mod tests {
             "hash",
             0,
             vec![
-                (0, b"abc".to_vec()),
-                (1, b"def".to_vec()),
-                (2, b"ghi".to_vec()),
+                bv(0, b"abc".to_vec()),
+                bv(1, b"def".to_vec()),
+                bv(2, b"ghi".to_vec()),
             ],
         )];
 
@@ -583,7 +1241,10 @@ mod tests {
         let fields = [make_dv_binary(
             "data",
             0,
-            vec![(0, b"short".to_vec()), (1, b"a longer value here".to_vec())],
+            vec![
+                bv(0, b"short".to_vec()),
+                bv(1, b"a longer value here".to_vec()),
+            ],
         )];
 
         let reader = write_and_read(&field_infos, &fields, 2, "Lucene90_0");
@@ -597,7 +1258,7 @@ mod tests {
         let fields = [make_dv_binary(
             "data",
             0,
-            vec![(1, b"abc".to_vec()), (3, b"def".to_vec())],
+            vec![bv(1, b"abc".to_vec()), bv(3, b"def".to_vec())],
         )];
 
         let reader = write_and_read(&field_infos, &fields, 5, "Lucene90_0");
@@ -612,9 +1273,9 @@ mod tests {
             "category",
             0,
             vec![
-                (0, (b"alpha".to_vec())),
-                (1, (b"beta".to_vec())),
-                (2, (b"alpha".to_vec())),
+                sv(0, b"alpha".to_vec()),
+                sv(1, b"beta".to_vec()),
+                sv(2, b"alpha".to_vec()),
             ],
         )];
 
@@ -629,7 +1290,7 @@ mod tests {
         let fields = [make_dv_sorted_numeric(
             "priority",
             0,
-            vec![(0, vec![100]), (1, vec![200]), (2, vec![300])],
+            vec![snv(0, vec![100]), snv(1, vec![200]), snv(2, vec![300])],
         )];
 
         let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
@@ -643,7 +1304,7 @@ mod tests {
         let fields = [make_dv_sorted_numeric(
             "tags",
             0,
-            vec![(0, vec![1, 2, 3]), (1, vec![4]), (2, vec![5, 6])],
+            vec![snv(0, vec![1, 2, 3]), snv(1, vec![4]), snv(2, vec![5, 6])],
         )];
 
         let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
@@ -657,7 +1318,7 @@ mod tests {
         let fields = [make_dv_sorted_numeric(
             "tags",
             0,
-            vec![(1, vec![10, 20]), (3, vec![30])],
+            vec![snv(1, vec![10, 20]), snv(3, vec![30])],
         )];
 
         let reader = write_and_read(&field_infos, &fields, 5, "Lucene90_0");
@@ -672,9 +1333,9 @@ mod tests {
             "tag",
             0,
             vec![
-                (0, vec![(b"a".to_vec())]),
-                (1, vec![(b"b".to_vec())]),
-                (2, vec![(b"c".to_vec())]),
+                ssv(0, vec![b"a".to_vec()]),
+                ssv(1, vec![b"b".to_vec()]),
+                ssv(2, vec![b"c".to_vec()]),
             ],
         )];
 
@@ -690,9 +1351,9 @@ mod tests {
             "tags",
             0,
             vec![
-                (0, vec![(b"a".to_vec()), (b"b".to_vec())]),
-                (1, vec![(b"c".to_vec())]),
-                (2, vec![(b"a".to_vec()), (b"d".to_vec())]),
+                ssv(0, vec![b"a".to_vec(), b"b".to_vec()]),
+                ssv(1, vec![b"c".to_vec()]),
+                ssv(2, vec![b"a".to_vec(), b"d".to_vec()]),
             ],
         )];
 
@@ -707,9 +1368,13 @@ mod tests {
         let fi_sn = make_field_info("priority", 2, DocValuesType::SortedNumeric);
         let field_infos = FieldInfos::new(vec![fi_num, fi_bin, fi_sn]);
         let fields = [
-            make_dv_numeric("count", 0, vec![(0, 10), (1, 20), (2, 30)]),
-            make_dv_binary("hash", 1, vec![(0, b"abc".to_vec()), (1, b"def".to_vec())]),
-            make_dv_sorted_numeric("priority", 2, vec![(0, vec![1]), (2, vec![3])]),
+            make_dv_numeric("count", 0, vec![nv(0, 10), nv(1, 20), nv(2, 30)]),
+            make_dv_binary(
+                "hash",
+                1,
+                vec![bv(0, b"abc".to_vec()), bv(1, b"def".to_vec())],
+            ),
+            make_dv_sorted_numeric("priority", 2, vec![snv(0, vec![1]), snv(2, vec![3])]),
         ];
 
         let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
@@ -722,9 +1387,184 @@ mod tests {
     fn test_nonexistent_field() {
         let fi = make_field_info("count", 0, DocValuesType::Numeric);
         let field_infos = FieldInfos::new(vec![fi]);
-        let fields = [make_dv_numeric("count", 0, vec![(0, 10)])];
+        let fields = [make_dv_numeric("count", 0, vec![nv(0, 10)])];
 
         let reader = write_and_read(&field_infos, &fields, 1, "Lucene90_0");
         assert_none!(reader.num_docs_with_field(99));
+    }
+
+    // --- BufferedDocValuesProducer tests ---
+
+    fn make_fi(name: &str, number: u32, dv_type: DocValuesType) -> FieldInfo {
+        make_field_info(name, number, dv_type)
+    }
+
+    #[test]
+    fn buffered_numeric_iteration() {
+        let fields = [make_dv_numeric(
+            "n",
+            0,
+            vec![nv(0, 10), nv(2, 30), nv(4, 50)],
+        )];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("n", 0, DocValuesType::Numeric);
+
+        let mut iter = producer.get_numeric(&fi).unwrap().unwrap();
+        assert_eq!(iter.next_doc().unwrap(), 0);
+        assert_eq!(iter.long_value().unwrap(), 10);
+        assert_eq!(iter.next_doc().unwrap(), 2);
+        assert_eq!(iter.long_value().unwrap(), 30);
+        assert_eq!(iter.next_doc().unwrap(), 4);
+        assert_eq!(iter.long_value().unwrap(), 50);
+        assert_eq!(iter.next_doc().unwrap(), NO_MORE_DOCS);
+    }
+
+    #[test]
+    fn buffered_numeric_advance_exact() {
+        let fields = [make_dv_numeric(
+            "n",
+            0,
+            vec![nv(0, 10), nv(2, 30), nv(4, 50)],
+        )];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("n", 0, DocValuesType::Numeric);
+
+        let mut iter = producer.get_numeric(&fi).unwrap().unwrap();
+        assert!(iter.advance_exact(2).unwrap());
+        assert_eq!(iter.long_value().unwrap(), 30);
+        assert!(!iter.advance_exact(3).unwrap());
+        assert!(iter.advance_exact(4).unwrap());
+        assert_eq!(iter.long_value().unwrap(), 50);
+    }
+
+    #[test]
+    fn buffered_binary_iteration() {
+        let fields = [make_dv_binary(
+            "b",
+            0,
+            vec![bv(0, b"abc".to_vec()), bv(1, b"def".to_vec())],
+        )];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("b", 0, DocValuesType::Binary);
+
+        let mut iter = producer.get_binary(&fi).unwrap().unwrap();
+        assert!(iter.advance_exact(0).unwrap());
+        assert_eq!(iter.binary_value().unwrap(), b"abc");
+        assert!(iter.advance_exact(1).unwrap());
+        assert_eq!(iter.binary_value().unwrap(), b"def");
+        assert!(!iter.advance_exact(2).unwrap());
+    }
+
+    #[test]
+    fn buffered_sorted_ordinals() {
+        let fields = [make_dv_sorted(
+            "s",
+            0,
+            vec![
+                sv(0, b"beta".to_vec()),
+                sv(1, b"alpha".to_vec()),
+                sv(2, b"beta".to_vec()),
+            ],
+        )];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("s", 0, DocValuesType::Sorted);
+
+        let mut iter = producer.get_sorted(&fi).unwrap().unwrap();
+        assert_eq!(iter.value_count(), 2); // alpha=0, beta=1
+
+        assert!(iter.advance_exact(0).unwrap());
+        assert_eq!(iter.ord_value().unwrap(), 1); // "beta"
+        assert_eq!(iter.lookup_ord(0).unwrap(), b"alpha");
+        assert_eq!(iter.lookup_ord(1).unwrap(), b"beta");
+
+        assert!(iter.advance_exact(1).unwrap());
+        assert_eq!(iter.ord_value().unwrap(), 0); // "alpha"
+    }
+
+    #[test]
+    fn buffered_sorted_numeric_values() {
+        let fields = [make_dv_sorted_numeric(
+            "sn",
+            0,
+            vec![snv(0, vec![30, 10, 20]), snv(2, vec![5])],
+        )];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("sn", 0, DocValuesType::SortedNumeric);
+
+        let mut iter = producer.get_sorted_numeric(&fi).unwrap().unwrap();
+        assert!(iter.advance_exact(0).unwrap());
+        assert_eq!(iter.doc_value_count(), 3);
+        assert_eq!(iter.next_value().unwrap(), 10); // sorted
+        assert_eq!(iter.next_value().unwrap(), 20);
+        assert_eq!(iter.next_value().unwrap(), 30);
+
+        assert!(!iter.advance_exact(1).unwrap());
+
+        assert!(iter.advance_exact(2).unwrap());
+        assert_eq!(iter.doc_value_count(), 1);
+        assert_eq!(iter.next_value().unwrap(), 5);
+    }
+
+    #[test]
+    fn buffered_sorted_set_ordinals() {
+        let fields = [make_dv_sorted_set(
+            "ss",
+            0,
+            vec![
+                ssv(0, vec![b"b".to_vec(), b"a".to_vec()]),
+                ssv(1, vec![b"c".to_vec()]),
+            ],
+        )];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("ss", 0, DocValuesType::SortedSet);
+
+        let mut iter = producer.get_sorted_set(&fi).unwrap().unwrap();
+        assert_eq!(iter.value_count(), 3); // a=0, b=1, c=2
+        assert_eq!(iter.lookup_ord(0).unwrap(), b"a");
+        assert_eq!(iter.lookup_ord(1).unwrap(), b"b");
+        assert_eq!(iter.lookup_ord(2).unwrap(), b"c");
+
+        assert!(iter.advance_exact(0).unwrap());
+        assert_eq!(iter.doc_value_count(), 2);
+        assert_eq!(iter.next_ord().unwrap(), 0); // "a" (sorted)
+        assert_eq!(iter.next_ord().unwrap(), 1); // "b"
+
+        assert!(iter.advance_exact(1).unwrap());
+        assert_eq!(iter.doc_value_count(), 1);
+        assert_eq!(iter.next_ord().unwrap(), 2); // "c"
+    }
+
+    #[test]
+    fn buffered_empty_field_returns_none() {
+        let fields = [make_dv_numeric("n", 0, vec![])];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("n", 0, DocValuesType::Numeric);
+        assert_none!(producer.get_numeric(&fi).unwrap());
+    }
+
+    #[test]
+    fn buffered_missing_field_returns_none() {
+        let fields = [make_dv_numeric("n", 0, vec![nv(0, 10)])];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("other", 5, DocValuesType::Numeric);
+        assert_none!(producer.get_numeric(&fi).unwrap());
+    }
+
+    #[test]
+    fn buffered_fresh_iterator_each_call() {
+        let fields = [make_dv_numeric("n", 0, vec![nv(0, 10), nv(1, 20)])];
+        let producer = BufferedDocValuesProducer::new(&fields);
+        let fi = make_fi("n", 0, DocValuesType::Numeric);
+
+        // First iterator: advance to end
+        let mut iter1 = producer.get_numeric(&fi).unwrap().unwrap();
+        assert_eq!(iter1.next_doc().unwrap(), 0);
+        assert_eq!(iter1.next_doc().unwrap(), 1);
+        assert_eq!(iter1.next_doc().unwrap(), NO_MORE_DOCS);
+
+        // Second iterator: starts fresh
+        let mut iter2 = producer.get_numeric(&fi).unwrap().unwrap();
+        assert_eq!(iter2.next_doc().unwrap(), 0);
+        assert_eq!(iter2.long_value().unwrap(), 10);
     }
 }

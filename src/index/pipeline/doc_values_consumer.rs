@@ -7,7 +7,10 @@ use std::fmt;
 use std::io;
 
 use crate::analysis::Token;
-use crate::codecs::lucene90::doc_values::{self, DocValuesAccumulator, DocValuesFieldData};
+use crate::codecs::lucene90::doc_values::{
+    self, BinaryDocValue, DocValuesAccumulator, DocValuesFieldData, NumericDocValue,
+    SortedDocValue, SortedNumericDocValue, SortedSetDocValue,
+};
 use crate::document::DocValuesType;
 use crate::index::field::{DocValue, Field};
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
@@ -84,19 +87,31 @@ impl FieldConsumer for DocValuesConsumer {
         if let Some(dv) = field.field_type().doc_value() {
             match (&mut state.accumulator, dv) {
                 (DocValuesAccumulator::Numeric(vals), DocValue::Numeric(v)) => {
-                    vals.push((doc_id, *v));
+                    vals.push(NumericDocValue { doc_id, value: *v });
                 }
                 (DocValuesAccumulator::Binary(vals), DocValue::Binary(b)) => {
-                    vals.push((doc_id, b.clone()));
+                    vals.push(BinaryDocValue {
+                        doc_id,
+                        value: b.clone(),
+                    });
                 }
                 (DocValuesAccumulator::Sorted(vals), DocValue::Sorted(b)) => {
-                    vals.push((doc_id, b.clone()));
+                    vals.push(SortedDocValue {
+                        doc_id,
+                        value: b.clone(),
+                    });
                 }
                 (DocValuesAccumulator::SortedSet(vals), DocValue::SortedSet(terms)) => {
-                    vals.push((doc_id, terms.clone()));
+                    vals.push(SortedSetDocValue {
+                        doc_id,
+                        values: terms.clone(),
+                    });
                 }
                 (DocValuesAccumulator::SortedNumeric(vals), DocValue::SortedNumeric(numbers)) => {
-                    vals.push((doc_id, numbers.clone()));
+                    vals.push(SortedNumericDocValue {
+                        doc_id,
+                        values: numbers.clone(),
+                    });
                 }
                 _ => {
                     return Err(io::Error::other(format!(
