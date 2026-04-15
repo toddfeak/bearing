@@ -10,7 +10,7 @@ use std::mem;
 
 use crate::analysis::Token;
 use crate::codecs::competitive_impact::BufferedNormsLookup;
-use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
+use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, BufferedFieldTerms};
 use crate::document::IndexOptions;
 use crate::index::field::{Field, InvertableValue};
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
@@ -269,20 +269,15 @@ impl FieldConsumer for PostingsConsumer {
                 BufferedNormsLookup::no_norms()
             };
 
-            let field_ctx = FieldWriteContext {
-                field_name: state.field_name.clone(),
-                field_number: state.field_number,
-                write_freqs: state.index_options.has_freqs(),
-                write_positions: state.index_options.has_positions(),
-            };
-
-            writer.write_field(
-                &field_ctx,
+            let field_terms = BufferedFieldTerms::new(
                 &state.writer,
                 term_byte_pool,
                 &self.terms_hash,
-                &norms,
-            )?;
+                &state.field_name,
+                state.field_number,
+            );
+
+            writer.write_field(&field_terms, &norms)?;
         }
 
         writer.finish()

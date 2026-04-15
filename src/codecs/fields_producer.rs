@@ -94,11 +94,11 @@ pub trait FieldTerms {
     /// Whether any token in this field had a payload.
     fn has_payloads(&self) -> bool;
 
-    /// Number of documents that contain at least one term in this field.
-    fn doc_count(&self) -> i32;
-
     /// The field number in the segment's `FieldInfos`.
     fn field_number(&self) -> u32;
+
+    /// The field name.
+    fn field_name(&self) -> &str;
 }
 
 /// Iterator over postings (doc/freq/position/offset/payload) for a single term.

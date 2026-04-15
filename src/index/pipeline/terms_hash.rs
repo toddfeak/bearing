@@ -18,6 +18,7 @@ use std::fmt;
 use std::io;
 use std::mem;
 
+use crate::codecs::fields_producer::{NO_MORE_DOCS, PostingsEnumProducer};
 use crate::document::IndexOptions;
 use crate::util::byte_block_pool::{ByteBlockPool, ByteSlicePool, FIRST_LEVEL_SIZE};
 use crate::util::bytes_ref_hash::BytesRefHash;
@@ -551,17 +552,6 @@ pub(crate) struct DecodedDoc {
     pub doc_id: i32,
     pub freq: i32,
     pub pos_start: u32,
-    pub pos_count: u32,
-}
-
-/// A decoded posting for one document, with a borrowed position slice.
-///
-/// Returned by [`DecodedPostings::iter`].
-#[derive(Debug)]
-pub(crate) struct DecodedPosting<'a> {
-    pub doc_id: i32,
-    pub freq: i32,
-    pub positions: &'a [i32],
 }
 
 /// Reusable buffers for decoded term postings.
@@ -600,19 +590,82 @@ impl DecodedPostings {
             self.positions = Vec::new();
         }
     }
+}
 
-    /// Returns an iterator yielding [`DecodedPosting`] entries for the caller
-    /// to consume.
-    pub fn iter(&self) -> impl Iterator<Item = DecodedPosting<'_>> {
-        self.docs.iter().map(|doc| {
-            let start = doc.pos_start as usize;
-            let end = start + doc.pos_count as usize;
-            DecodedPosting {
-                doc_id: doc.doc_id,
-                freq: doc.freq,
-                positions: &self.positions[start..end],
-            }
-        })
+/// [`PostingsEnumProducer`] that owns a [`DecodedPostings`] and iterates
+/// over its contents.
+pub(crate) struct BufferedPostingsEnum {
+    decoded: DecodedPostings,
+    doc_freq: i32,
+    total_term_freq: i64,
+    doc_idx: usize,
+    pos_idx: usize,
+}
+
+impl BufferedPostingsEnum {
+    /// Creates a new enum from owned decoded postings data.
+    pub fn new(decoded: DecodedPostings, has_freqs: bool) -> Self {
+        let doc_freq = decoded.docs.len() as i32;
+        let total_term_freq = if has_freqs {
+            decoded.docs.iter().map(|d| d.freq as i64).sum()
+        } else {
+            -1
+        };
+        Self {
+            decoded,
+            doc_freq,
+            total_term_freq,
+            doc_idx: 0,
+            pos_idx: 0,
+        }
+    }
+
+    fn current_doc(&self) -> &DecodedDoc {
+        &self.decoded.docs[self.doc_idx - 1]
+    }
+}
+
+impl PostingsEnumProducer for BufferedPostingsEnum {
+    fn doc_freq(&self) -> i32 {
+        self.doc_freq
+    }
+
+    fn total_term_freq(&self) -> i64 {
+        self.total_term_freq
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        if self.doc_idx >= self.decoded.docs.len() {
+            return Ok(NO_MORE_DOCS);
+        }
+        let doc_id = self.decoded.docs[self.doc_idx].doc_id;
+        self.pos_idx = 0;
+        self.doc_idx += 1;
+        Ok(doc_id)
+    }
+
+    fn freq(&self) -> i32 {
+        self.current_doc().freq
+    }
+
+    fn next_position(&mut self) -> io::Result<i32> {
+        let doc = self.current_doc();
+        let abs_idx = doc.pos_start as usize + self.pos_idx;
+        let pos = self.decoded.positions[abs_idx];
+        self.pos_idx += 1;
+        Ok(pos)
+    }
+
+    fn start_offset(&self) -> i32 {
+        -1
+    }
+
+    fn end_offset(&self) -> i32 {
+        -1
+    }
+
+    fn payload(&self) -> Option<&[u8]> {
+        None
     }
 }
 
@@ -631,7 +684,6 @@ pub(crate) struct FreqProxTermsWriterPerField {
     /// Whether this field indexes offsets.
     pub has_offsets: bool,
     /// Whether any token had a payload in the current segment.
-    #[expect(dead_code)]
     pub saw_payloads: bool,
     /// Tracks max term frequency across all terms for the current document.
     pub max_term_frequency: i32,
@@ -833,12 +885,10 @@ impl FreqProxTermsWriterPerField {
                 }
             }
 
-            let pos_count = buf.positions.len() as u32 - pos_start;
             buf.docs.push(DecodedDoc {
                 doc_id,
                 freq,
                 pos_start,
-                pos_count,
             });
         }
 

@@ -399,7 +399,7 @@ fn read_bytes_ref(input: &mut dyn DataInput) -> io::Result<Box<[u8]>> {
 mod tests {
     use super::*;
     use crate::codecs::competitive_impact::BufferedNormsLookup;
-    use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
+    use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, BufferedFieldTerms};
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
@@ -428,12 +428,8 @@ mod tests {
     }
 
     impl TestTerms {
-        fn new(field_name: &str, has_positions: bool) -> Self {
-            let opts = if has_positions {
-                IndexOptions::DocsAndFreqsAndPositions
-            } else {
-                IndexOptions::DocsAndFreqs
-            };
+        fn new(field_name: &str, index_options: IndexOptions) -> Self {
+            let opts = index_options;
             let term_pool = ByteBlockPool::new(32 * 1024);
             Self {
                 writer: FreqProxTermsWriterPerField::new(field_name.to_string(), opts),
@@ -505,18 +501,19 @@ mod tests {
 
             for (field_number, (field_name, index_options, terms)) in fields_data.iter().enumerate()
             {
-                let mut tt = TestTerms::new(field_name, index_options.has_positions());
+                let mut tt = TestTerms::new(field_name, *index_options);
                 add_terms_doc_major(&mut tt, terms);
                 tt.finalize();
 
-                let ctx = FieldWriteContext {
-                    field_name: field_name.to_string(),
-                    field_number: field_number as u32,
-                    write_freqs: index_options.has_freqs(),
-                    write_positions: index_options.has_positions(),
-                };
+                let field_terms = BufferedFieldTerms::new(
+                    &tt.writer,
+                    &tt.term_pool,
+                    &tt.terms_hash,
+                    field_name,
+                    field_number as u32,
+                );
                 let norms = BufferedNormsLookup::no_norms();
-                writer.write_field(&ctx, &tt.writer, &tt.term_pool, &tt.terms_hash, &norms)?;
+                writer.write_field(&field_terms, &norms)?;
             }
 
             writer.finish()?;
