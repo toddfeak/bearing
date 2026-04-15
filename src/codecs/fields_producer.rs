@@ -61,6 +61,46 @@ pub trait TermsEnumProducer {
     // Needed for merge path. Add when segment merging is implemented.
 }
 
+/// Random-access terms for a single field.
+///
+/// Provides indexed access to term bytes and streaming postings. The key design
+/// property: `term_bytes(&self, i)` returns shared borrows from the backing
+/// store, so multiple calls produce simultaneously valid `&[u8]` slices. This
+/// enables `PendingTerm<'a>` to accumulate borrowed term bytes across all terms
+/// in a field.
+///
+/// `postings(&self, i)` returns an owned `Box` that borrows from `self` and is
+/// consumed within one loop iteration, so it never conflicts with accumulated
+/// term byte borrows.
+pub trait FieldTerms {
+    /// Number of terms in this field.
+    fn term_count(&self) -> usize;
+
+    /// Returns the term bytes at the given sorted index.
+    fn term_bytes(&self, index: usize) -> &[u8];
+
+    /// Returns a postings producer for the term at the given sorted index.
+    fn postings(&self, index: usize) -> io::Result<Box<dyn PostingsEnumProducer + '_>>;
+
+    /// Whether this field indexes term frequencies.
+    fn has_freqs(&self) -> bool;
+
+    /// Whether this field indexes positions.
+    fn has_positions(&self) -> bool;
+
+    /// Whether this field indexes offsets.
+    fn has_offsets(&self) -> bool;
+
+    /// Whether any token in this field had a payload.
+    fn has_payloads(&self) -> bool;
+
+    /// Number of documents that contain at least one term in this field.
+    fn doc_count(&self) -> i32;
+
+    /// The field number in the segment's `FieldInfos`.
+    fn field_number(&self) -> u32;
+}
+
 /// Iterator over postings (doc/freq/position/offset/payload) for a single term.
 ///
 /// Consumed by `PostingsWriter::write_term()` during flush and merge.
@@ -69,6 +109,16 @@ pub trait TermsEnumProducer {
 /// then `next_position()` x freq times, each optionally followed by
 /// `start_offset()`, `end_offset()`, `payload()`.
 pub trait PostingsEnumProducer {
+    /// Number of documents containing this term.
+    ///
+    /// Available before iteration begins. Used by the postings writer to choose
+    /// encoding paths (singleton vs vint vs block).
+    fn doc_freq(&self) -> i32;
+
+    /// Total number of term occurrences across all documents, or -1 if
+    /// frequencies are not indexed.
+    fn total_term_freq(&self) -> i64;
+
     /// Advances to the next document. Returns the doc ID, or
     /// [`NO_MORE_DOCS`] when exhausted.
     fn next_doc(&mut self) -> io::Result<i32>;

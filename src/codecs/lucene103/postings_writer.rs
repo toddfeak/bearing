@@ -7,6 +7,7 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::{CompetitiveImpactAccumulator, Impact, NormsLookup};
+use crate::codecs::fields_producer::{NO_MORE_DOCS, PostingsEnumProducer};
 use crate::codecs::lucene103::postings_format::{
     self, DOC_CODEC, DOC_EXTENSION, IntBlockTermState, META_CODEC, META_EXTENSION, POS_CODEC,
     POS_EXTENSION, VERSION_CURRENT,
@@ -295,6 +296,9 @@ impl PostingsWriter {
 
     /// Write postings for one term. Returns metadata for the term dictionary.
     ///
+    /// Pulls postings data from the producer via `next_doc()` / `freq()` /
+    /// `next_position()`, matching Java's `PushPostingsWriterBase.writeTerm()`.
+    ///
     /// - Singleton (docFreq==1): docID pulsed into IntBlockTermState, nothing to .doc
     /// - Block encoding (docFreq >= 128): FOR-encoded blocks with skip data
     /// - VInt tail (docFreq < 128):
@@ -303,19 +307,14 @@ impl PostingsWriter {
     /// - Positions: PFOR-encoded blocks of 128 + VInt tail for remainder
     pub(crate) fn write_term(
         &mut self,
-        postings: &[DecodedPosting<'_>],
+        postings: &mut dyn PostingsEnumProducer,
         index_options: IndexOptions,
         norms: &dyn NormsLookup,
     ) -> io::Result<IntBlockTermState> {
-        let doc_freq = postings.len() as i32;
+        let doc_freq = postings.doc_freq();
+        let total_term_freq = postings.total_term_freq();
         let write_freqs = index_options.has_freqs();
         let write_positions = index_options.has_positions();
-
-        let total_term_freq: i64 = if write_freqs {
-            postings.iter().map(|p| p.freq as i64).sum()
-        } else {
-            -1
-        };
 
         let doc_start_fp = self.doc_out.file_pointer() as i64;
         let pos_start_fp = self
@@ -326,19 +325,17 @@ impl PostingsWriter {
 
         if doc_freq == 1 {
             // Singleton: pulse docID into term dictionary
-            let singleton_doc_id = postings[0].doc_id;
-            debug!(
-                "postings_writer: singleton term, doc_id={}",
-                singleton_doc_id
-            );
+            let doc_id = postings.next_doc()?;
+            debug!("postings_writer: singleton term, doc_id={}", doc_id);
 
             // Write positions for singleton
             let mut last_pos_block_offset = -1i64;
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
-                let positions = postings[0].positions;
+                let freq = postings.freq();
                 let mut pe = PositionEncoder::new();
                 let mut last_pos = 0i32;
-                for &pos in positions {
+                for _ in 0..freq {
+                    let pos = postings.next_position()?;
                     pe.add_position(pos - last_pos, &mut **pos_out)?;
                     last_pos = pos;
                 }
@@ -352,7 +349,7 @@ impl PostingsWriter {
                 pos_start_fp,
 
                 last_pos_block_offset,
-                singleton_doc_id,
+                singleton_doc_id: doc_id,
             })
         } else if doc_freq >= BLOCK_SIZE as i32 {
             // Block encoding path for high-frequency terms
@@ -375,11 +372,34 @@ impl PostingsWriter {
             let mut freqs: Vec<i32> = Vec::with_capacity(doc_freq as usize);
             let mut last_doc_id = -1i32;
 
-            for p in postings {
-                let delta = p.doc_id - last_doc_id;
+            // First pass: collect doc deltas and freqs
+            // We need the full arrays for GroupVInt encoding before writing positions,
+            // so we buffer doc/freq data, then iterate positions in a second pass
+            // via a separate PostingsEnumProducer (the caller provides a fresh one
+            // if needed). For now, we collect positions inline.
+            //
+            // To write positions we need to pull them during the doc iteration,
+            // so we accumulate positions into a temporary buffer.
+            let mut all_positions: Vec<Vec<i32>> = Vec::new();
+
+            loop {
+                let doc_id = postings.next_doc()?;
+                if doc_id == NO_MORE_DOCS {
+                    break;
+                }
+                let delta = doc_id - last_doc_id;
                 doc_deltas.push(delta);
-                freqs.push(p.freq);
-                last_doc_id = p.doc_id;
+                let freq = postings.freq();
+                freqs.push(freq);
+                last_doc_id = doc_id;
+
+                if write_positions {
+                    let mut positions = Vec::with_capacity(freq as usize);
+                    for _ in 0..freq {
+                        positions.push(postings.next_position()?);
+                    }
+                    all_positions.push(positions);
+                }
             }
 
             write_vint_block(
@@ -400,9 +420,9 @@ impl PostingsWriter {
             let mut last_pos_block_offset = -1i64;
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
                 let mut pe = PositionEncoder::new();
-                for p in postings {
+                for positions in &all_positions {
                     let mut last_pos = 0i32;
-                    for &pos in p.positions {
+                    for &pos in positions {
                         pe.add_position(pos - last_pos, &mut **pos_out)?;
                         last_pos = pos;
                     }
@@ -425,7 +445,7 @@ impl PostingsWriter {
     /// Write a term with docFreq >= BLOCK_SIZE using block encoding with skip data.
     fn write_term_blocks(
         &mut self,
-        postings: &[DecodedPosting<'_>],
+        postings: &mut dyn PostingsEnumProducer,
         ctx: &TermWriteContext,
         norms: &dyn NormsLookup,
     ) -> io::Result<IntBlockTermState> {
@@ -445,20 +465,27 @@ impl PostingsWriter {
         let mut last_doc_id = -1i32;
         let mut doc_count = 0usize;
 
-        for p in postings {
-            // Buffer doc delta and freq
-            let doc_delta = p.doc_id - last_doc_id;
-            doc_delta_buffer[doc_buffer_upto] = doc_delta;
-            if write_freqs {
-                freq_buffer[doc_buffer_upto] = p.freq;
-                bfs.level0_accumulator.add(p.freq, norms.get(p.doc_id));
+        loop {
+            let doc_id = postings.next_doc()?;
+            if doc_id == NO_MORE_DOCS {
+                break;
             }
-            last_doc_id = p.doc_id;
+
+            // Buffer doc delta and freq
+            let doc_delta = doc_id - last_doc_id;
+            doc_delta_buffer[doc_buffer_upto] = doc_delta;
+            let freq = postings.freq();
+            if write_freqs {
+                freq_buffer[doc_buffer_upto] = freq;
+                bfs.level0_accumulator.add(freq, norms.get(doc_id));
+            }
+            last_doc_id = doc_id;
 
             // Buffer positions
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
                 let mut last_pos = 0i32;
-                for &pos in p.positions {
+                for _ in 0..freq {
+                    let pos = postings.next_position()?;
                     pe.add_position(pos - last_pos, &mut **pos_out)?;
                     last_pos = pos;
                 }
@@ -472,7 +499,7 @@ impl PostingsWriter {
                 bfs.flush_doc_block(
                     &doc_delta_buffer,
                     &mut freq_buffer,
-                    p.doc_id,
+                    doc_id,
                     pe.buffer_upto(),
                     self.pos_out
                         .as_ref()
@@ -714,6 +741,80 @@ fn write_vint_block_impl(
     Ok(())
 }
 
+/// Adapter that wraps a `&[DecodedPosting]` slice behind the [`PostingsEnumProducer`]
+/// trait. Used as a transition bridge while the blocktree writer still collects
+/// `DecodedPostings` before calling `write_term`. Will be removed when
+/// `BufferedFieldTerms` provides postings directly.
+pub(crate) struct SlicePostingsEnum<'a> {
+    postings: &'a [DecodedPosting<'a>],
+    doc_freq: i32,
+    total_term_freq: i64,
+    doc_idx: usize,
+    pos_idx: usize,
+}
+
+impl<'a> SlicePostingsEnum<'a> {
+    /// Creates a new adapter over a decoded postings slice.
+    pub fn new(postings: &'a [DecodedPosting<'a>], write_freqs: bool) -> Self {
+        let doc_freq = postings.len() as i32;
+        let total_term_freq = if write_freqs {
+            postings.iter().map(|p| p.freq as i64).sum()
+        } else {
+            -1
+        };
+        Self {
+            postings,
+            doc_freq,
+            total_term_freq,
+            doc_idx: 0,
+            pos_idx: 0,
+        }
+    }
+}
+
+impl PostingsEnumProducer for SlicePostingsEnum<'_> {
+    fn doc_freq(&self) -> i32 {
+        self.doc_freq
+    }
+
+    fn total_term_freq(&self) -> i64 {
+        self.total_term_freq
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        if self.doc_idx >= self.postings.len() {
+            return Ok(NO_MORE_DOCS);
+        }
+        let doc_id = self.postings[self.doc_idx].doc_id;
+        self.pos_idx = 0;
+        self.doc_idx += 1;
+        Ok(doc_id)
+    }
+
+    fn freq(&self) -> i32 {
+        self.postings[self.doc_idx - 1].freq
+    }
+
+    fn next_position(&mut self) -> io::Result<i32> {
+        let p = &self.postings[self.doc_idx - 1];
+        let pos = p.positions[self.pos_idx];
+        self.pos_idx += 1;
+        Ok(pos)
+    }
+
+    fn start_offset(&self) -> i32 {
+        -1
+    }
+
+    fn end_offset(&self) -> i32 {
+        -1
+    }
+
+    fn payload(&self) -> Option<&[u8]> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,6 +823,13 @@ mod tests {
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
+    }
+
+    fn make_enum<'a>(
+        postings: &'a [DecodedPosting<'a>],
+        opts: IndexOptions,
+    ) -> SlicePostingsEnum<'a> {
+        SlicePostingsEnum::new(postings, opts.has_freqs())
     }
 
     #[test]
@@ -735,7 +843,7 @@ mod tests {
         }];
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
                 IndexOptions::DocsAndFreqs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -772,7 +880,7 @@ mod tests {
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
                 IndexOptions::DocsAndFreqs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -805,7 +913,7 @@ mod tests {
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::Docs),
                 IndexOptions::Docs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -838,7 +946,7 @@ mod tests {
         ];
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -882,7 +990,7 @@ mod tests {
 
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -927,7 +1035,7 @@ mod tests {
 
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -976,7 +1084,7 @@ mod tests {
 
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1022,7 +1130,7 @@ mod tests {
 
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1071,7 +1179,7 @@ mod tests {
 
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1102,7 +1210,7 @@ mod tests {
 
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1152,7 +1260,7 @@ mod tests {
 
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1325,7 +1433,7 @@ mod tests {
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
                 IndexOptions::DocsAndFreqs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1359,7 +1467,7 @@ mod tests {
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
                 IndexOptions::DocsAndFreqs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1390,7 +1498,7 @@ mod tests {
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
                 IndexOptions::DocsAndFreqs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1419,7 +1527,7 @@ mod tests {
 
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqsAndPositions),
                 IndexOptions::DocsAndFreqsAndPositions,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1452,7 +1560,7 @@ mod tests {
             .collect();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
                 IndexOptions::DocsAndFreqs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1478,7 +1586,7 @@ mod tests {
             .collect();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
                 IndexOptions::DocsAndFreqs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1502,7 +1610,7 @@ mod tests {
             .collect();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::Docs),
                 IndexOptions::Docs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1527,7 +1635,7 @@ mod tests {
             .collect();
         let state = pw
             .write_term(
-                &postings,
+                &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
                 IndexOptions::DocsAndFreqs,
                 &BufferedNormsLookup::no_norms(),
             )
@@ -1554,7 +1662,7 @@ mod tests {
             })
             .collect();
         pw.write_term(
-            &postings,
+            &mut make_enum(&postings, IndexOptions::DocsAndFreqs),
             IndexOptions::DocsAndFreqs,
             &BufferedNormsLookup::no_norms(),
         )

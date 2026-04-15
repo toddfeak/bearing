@@ -21,7 +21,7 @@ use crate::index::pipeline::terms_hash::{DecodedPostings, FreqProxTermsWriterPer
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::byte_block_pool::ByteBlockPool;
 
-use super::postings_writer::PostingsWriter;
+use super::postings_writer::{PostingsWriter, SlicePostingsEnum};
 
 // ============================================================================
 // Block writing helper structs
@@ -179,9 +179,11 @@ impl BlockTreeTermsWriter {
             }
 
             let postings_data: Vec<_> = decoded.iter().collect();
+            let write_freqs = field_ctx.index_options().has_freqs();
+            let mut postings_enum = SlicePostingsEnum::new(&postings_data, write_freqs);
 
             let state = self.postings_writer.write_term(
-                &postings_data,
+                &mut postings_enum,
                 field_ctx.index_options(),
                 norms,
             )?;

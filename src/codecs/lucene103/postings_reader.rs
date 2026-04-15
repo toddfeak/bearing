@@ -1061,7 +1061,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::codecs::competitive_impact::BufferedNormsLookup;
-    use crate::codecs::lucene103::postings_writer::PostingsWriter;
+    use crate::codecs::lucene103::postings_writer::{PostingsWriter, SlicePostingsEnum};
     use crate::codecs::{lucene94, lucene99};
     use crate::document::{DocValuesType, DocumentBuilder, IndexOptions};
     use crate::index::config::IndexWriterConfig;
@@ -1120,7 +1120,8 @@ mod tests {
                 &segment_id,
                 false,
             )?;
-            let state = writer.write_term(&postings, options, &norms)?;
+            let mut pe = SlicePostingsEnum::new(&postings, options.has_freqs());
+            let state = writer.write_term(&mut pe, options, &norms)?;
             writer.finish()?;
             state
         };
