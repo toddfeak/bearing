@@ -94,3 +94,13 @@ The `Bump` would live in `worker_thread_loop`, outliving the `SegmentWorker`. On
 **Design note:** Lucene solves this with `ByteBlockPool` / `IntBlockPool` — fixed-size block arenas that are recycled. Bumpalo is a simpler approach that achieves the same goal (contiguous allocation, bulk deallocation) without requiring custom pool management. The two approaches are not mutually exclusive — existing pools can remain for postings while bumpalo handles term vectors.
 
 **Implementation cost:** `bumpalo::collections::Vec<'bump, T>` carries a lifetime tied to the arena. This requires a `'bump` parameter on `ByteBlockPool`, `TermsHash`, the TV consumer, and `SegmentWorker`. The lifetime is contained within the pipeline module — it does not propagate to `IndexCoordinator`, `IndexWriter`, or the public API. Works on stable Rust (no `allocator_api` needed).
+
+---
+
+## 9. DataInput/DataOutput Adapter Wrappers
+
+**Severity:** Unnecessary complexity
+
+`DataInputReader<'a, T>` and `DataOutputWriter<'a, T>` are newtype wrappers that bridge `DataInput` to `io::Read` and `DataOutput` to `io::Write`. Every default method on these traits (e.g., `read_vint`, `write_vint`) wraps `self` in the adapter before calling encoding functions that accept `impl Read` / `impl Write`.
+
+**Fix:** Make `io::Read` a supertrait of `DataInput` and `io::Write` a supertrait of `DataOutput`. Each implementor already provides the equivalent of `read`/`read_exact`/`write`/`flush` — making it explicit removes the adapter structs entirely. Default methods can then pass `self` directly to encoding functions without wrapping.
