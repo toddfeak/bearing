@@ -11,7 +11,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::codecs::lucene90::compressing_stored_fields_reader::FieldsIndexReader;
+use crate::codecs::lucene90::stored_fields_reader::FieldsIndexReader;
 use crate::codecs::lucene90::term_vectors::{
     DATA_CODEC, INDEX_CODEC_IDX, INDEX_CODEC_META, INDEX_EXTENSION, META_EXTENSION,
     VECTORS_EXTENSION, VERSION,

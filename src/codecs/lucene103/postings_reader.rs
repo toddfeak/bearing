@@ -1066,6 +1066,7 @@ mod tests {
     use crate::document::{DocValuesType, DocumentBuilder, IndexOptions};
     use crate::index::config::IndexWriterConfig;
     use crate::index::field::text;
+    use crate::index::pipeline::terms_hash::DecodedPosting;
     use crate::index::segment_infos;
     use crate::index::writer::IndexWriter;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
@@ -1101,9 +1102,13 @@ mod tests {
         let segment_id = [0u8; 16];
         let shared_dir = SharedDirectory::new(Box::new(MemoryDirectory::new()));
 
-        let postings: Vec<(i32, i32, &[i32])> = doc_ids
+        let postings: Vec<DecodedPosting<'_>> = doc_ids
             .iter()
-            .map(|&id| (id, 1i32, &[] as &[i32]))
+            .map(|&id| DecodedPosting {
+                doc_id: id,
+                freq: 1,
+                positions: &[],
+            })
             .collect();
         let norms = BufferedNormsLookup::no_norms();
 

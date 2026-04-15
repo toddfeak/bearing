@@ -542,16 +542,37 @@ pub(crate) trait TermsHashPerFieldTrait {
 /// Extends `TermsHashPerField` via composition. Implements the `newTerm` and
 /// `addTerm` logic that encodes doc IDs, frequencies, positions, and offsets
 /// into the byte pool streams.
+/// One document's entry in a decoded term's posting list.
+///
+/// Positions are stored in a separate flat buffer; `pos_start` and `pos_count`
+/// index into that buffer.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DecodedDoc {
+    pub doc_id: i32,
+    pub freq: i32,
+    pub pos_start: u32,
+    pub pos_count: u32,
+}
+
+/// A decoded posting for one document, with a borrowed position slice.
+///
+/// Returned by [`DecodedPostings::iter`].
+#[derive(Debug)]
+pub(crate) struct DecodedPosting<'a> {
+    pub doc_id: i32,
+    pub freq: i32,
+    pub positions: &'a [i32],
+}
+
 /// Reusable buffers for decoded term postings.
 ///
 /// Avoids per-term allocation by reusing flat buffers across calls to
-/// `decode_term_into`. Each doc entry stores `(doc_id, freq, pos_start,
-/// pos_count)` where `pos_start` and `pos_count` index into the flat
+/// `decode_term_into`. Each [`DecodedDoc`] entry indexes into the flat
 /// `positions` buffer.
 pub(crate) struct DecodedPostings {
-    /// (doc_id, freq, pos_start, pos_count) per document.
-    pub docs: Vec<(i32, i32, u32, u32)>,
-    /// Flat positions buffer; docs reference ranges via pos_start/pos_count.
+    /// Per-document metadata.
+    pub docs: Vec<DecodedDoc>,
+    /// Flat positions buffer; docs reference ranges via `pos_start`/`pos_count`.
     pub positions: Vec<i32>,
 }
 
@@ -571,8 +592,7 @@ impl DecodedPostings {
     /// Clears for reuse. Shrinks buffers that have grown beyond the threshold.
     pub fn clear(&mut self) {
         self.docs.clear();
-        if self.docs.capacity() * mem::size_of::<(i32, i32, u32, u32)>() > DECODED_SHRINK_THRESHOLD
-        {
+        if self.docs.capacity() * mem::size_of::<DecodedDoc>() > DECODED_SHRINK_THRESHOLD {
             self.docs = Vec::new();
         }
         self.positions.clear();
@@ -581,16 +601,18 @@ impl DecodedPostings {
         }
     }
 
-    /// Returns an iterator yielding `(doc_id, freq, &[i32])` slices for the
-    /// caller to consume.
-    pub fn iter(&self) -> impl Iterator<Item = (i32, i32, &[i32])> {
-        self.docs
-            .iter()
-            .map(|&(doc_id, freq, pos_start, pos_count)| {
-                let start = pos_start as usize;
-                let end = start + pos_count as usize;
-                (doc_id, freq, &self.positions[start..end])
-            })
+    /// Returns an iterator yielding [`DecodedPosting`] entries for the caller
+    /// to consume.
+    pub fn iter(&self) -> impl Iterator<Item = DecodedPosting<'_>> {
+        self.docs.iter().map(|doc| {
+            let start = doc.pos_start as usize;
+            let end = start + doc.pos_count as usize;
+            DecodedPosting {
+                doc_id: doc.doc_id,
+                freq: doc.freq,
+                positions: &self.positions[start..end],
+            }
+        })
     }
 }
 
@@ -812,7 +834,12 @@ impl FreqProxTermsWriterPerField {
             }
 
             let pos_count = buf.positions.len() as u32 - pos_start;
-            buf.docs.push((doc_id, freq, pos_start, pos_count));
+            buf.docs.push(DecodedDoc {
+                doc_id,
+                freq,
+                pos_start,
+                pos_count,
+            });
         }
 
         Ok(())

@@ -26,10 +26,10 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::compound_reader::CompoundDirectory;
-use crate::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
 use crate::codecs::lucene90::doc_values_producer::DocValuesReader;
 use crate::codecs::lucene90::norms_producer::NormsReader;
 use crate::codecs::lucene90::points_reader::PointsReader;
+use crate::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
 use crate::codecs::lucene90::term_vectors_reader::TermVectorsReader;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
@@ -52,7 +52,7 @@ pub struct SegmentReader {
     segment_name: String,
     field_infos: FieldInfos,
     max_doc: i32,
-    stored_fields_reader: Option<CompressingStoredFieldsReader>,
+    stored_fields_reader: Option<StoredFieldsReader>,
     norms_reader: Option<NormsReader>,
     doc_values_reader: Option<DocValuesReader>,
     term_vectors_reader: Option<TermVectorsReader>,
@@ -111,12 +111,8 @@ impl SegmentReader {
         let segment_id = &si.id;
         let max_doc = si.max_doc;
 
-        let stored_fields_reader = Some(CompressingStoredFieldsReader::open(
-            dir,
-            segment_name,
-            "",
-            segment_id,
-        )?);
+        let stored_fields_reader =
+            Some(StoredFieldsReader::open(dir, segment_name, "", segment_id)?);
 
         let norms_reader = if field_infos.has_norms() {
             Some(NormsReader::open(
@@ -211,7 +207,7 @@ impl SegmentReader {
     /// Returns a mutable reference to the stored fields reader.
     ///
     /// Matches Java's `CodecReader.getFieldsReader()`.
-    pub fn get_fields_reader(&mut self) -> Option<&mut CompressingStoredFieldsReader> {
+    pub fn get_fields_reader(&mut self) -> Option<&mut StoredFieldsReader> {
         self.stored_fields_reader.as_mut()
     }
 

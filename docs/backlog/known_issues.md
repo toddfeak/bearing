@@ -34,7 +34,7 @@ Analyzer owns its reader via `set_reader()`. Tokens are zero-copy `&str` borrows
 
 **Severity:** Architecture — two parallel representations for the same concept
 
-The write path uses `document::Document` / `index::field::Field` (the builder DSL with `text()`, `keyword()`, `stored()`, etc.). The read path uses `StoredField { field_number, StoredValue }` from `CompressingStoredFieldsReader` and `FieldInfo`/`FieldInfos` for metadata.
+The write path uses `document::Document` / `index::field::Field` (the builder DSL with `text()`, `keyword()`, `stored()`, etc.). The read path uses `StoredField { field_number, StoredValue }` from `StoredFieldsReader` and `FieldInfo`/`FieldInfos` for metadata.
 
 In Lucene's Java model, `Document` and `Field` serve both read and write — a `Document` is what you index AND what you get back from `IndexReader.document()`. In Rust, these are completely separate types.
 

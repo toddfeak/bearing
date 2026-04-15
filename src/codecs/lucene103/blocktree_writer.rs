@@ -174,11 +174,11 @@ impl BlockTreeTermsWriter {
             per_field.decode_term_into(terms_hash, term_id, &mut decoded)?;
 
             // Accumulate unique doc IDs for doc_count
-            for (doc_id, _, _) in decoded.iter() {
-                docs_seen.insert(doc_id);
+            for posting in decoded.iter() {
+                docs_seen.insert(posting.doc_id);
             }
 
-            let postings_data: Vec<(i32, i32, &[i32])> = decoded.iter().collect();
+            let postings_data: Vec<_> = decoded.iter().collect();
 
             let state = self.postings_writer.write_term(
                 &postings_data,

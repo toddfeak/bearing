@@ -15,6 +15,7 @@ use crate::document::IndexOptions;
 use crate::encoding::pfor::{self, BLOCK_SIZE};
 use crate::encoding::zigzag;
 use crate::index::index_file_names::segment_file_name;
+use crate::index::pipeline::terms_hash::DecodedPosting;
 use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 
 /// Buffers position deltas and PFOR-encodes them in blocks of 128.
@@ -300,9 +301,9 @@ impl PostingsWriter {
     ///   - With freqs: GroupVInt doc deltas with freq bits, then freqs for non-1
     ///   - Without freqs (DOCS only): GroupVInt doc deltas
     /// - Positions: PFOR-encoded blocks of 128 + VInt tail for remainder
-    pub fn write_term(
+    pub(crate) fn write_term(
         &mut self,
-        postings: &[(i32, i32, &[i32])], // (doc_id, freq, positions)
+        postings: &[DecodedPosting<'_>],
         index_options: IndexOptions,
         norms: &dyn NormsLookup,
     ) -> io::Result<IntBlockTermState> {
@@ -311,7 +312,7 @@ impl PostingsWriter {
         let write_positions = index_options.has_positions();
 
         let total_term_freq: i64 = if write_freqs {
-            postings.iter().map(|&(_, freq, _)| freq as i64).sum()
+            postings.iter().map(|p| p.freq as i64).sum()
         } else {
             -1
         };
@@ -325,7 +326,7 @@ impl PostingsWriter {
 
         if doc_freq == 1 {
             // Singleton: pulse docID into term dictionary
-            let singleton_doc_id = postings[0].0;
+            let singleton_doc_id = postings[0].doc_id;
             debug!(
                 "postings_writer: singleton term, doc_id={}",
                 singleton_doc_id
@@ -334,7 +335,7 @@ impl PostingsWriter {
             // Write positions for singleton
             let mut last_pos_block_offset = -1i64;
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
-                let (_, _, positions) = postings[0];
+                let positions = postings[0].positions;
                 let mut pe = PositionEncoder::new();
                 let mut last_pos = 0i32;
                 for &pos in positions {
@@ -374,11 +375,11 @@ impl PostingsWriter {
             let mut freqs: Vec<i32> = Vec::with_capacity(doc_freq as usize);
             let mut last_doc_id = -1i32;
 
-            for &(doc_id, freq, _) in postings {
-                let delta = doc_id - last_doc_id;
+            for p in postings {
+                let delta = p.doc_id - last_doc_id;
                 doc_deltas.push(delta);
-                freqs.push(freq);
-                last_doc_id = doc_id;
+                freqs.push(p.freq);
+                last_doc_id = p.doc_id;
             }
 
             write_vint_block(
@@ -399,9 +400,9 @@ impl PostingsWriter {
             let mut last_pos_block_offset = -1i64;
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
                 let mut pe = PositionEncoder::new();
-                for &(_, _, positions) in postings {
+                for p in postings {
                     let mut last_pos = 0i32;
-                    for &pos in positions {
+                    for &pos in p.positions {
                         pe.add_position(pos - last_pos, &mut **pos_out)?;
                         last_pos = pos;
                     }
@@ -424,7 +425,7 @@ impl PostingsWriter {
     /// Write a term with docFreq >= BLOCK_SIZE using block encoding with skip data.
     fn write_term_blocks(
         &mut self,
-        postings: &[(i32, i32, &[i32])],
+        postings: &[DecodedPosting<'_>],
         ctx: &TermWriteContext,
         norms: &dyn NormsLookup,
     ) -> io::Result<IntBlockTermState> {
@@ -444,20 +445,20 @@ impl PostingsWriter {
         let mut last_doc_id = -1i32;
         let mut doc_count = 0usize;
 
-        for &(doc_id, freq, positions) in postings {
+        for p in postings {
             // Buffer doc delta and freq
-            let doc_delta = doc_id - last_doc_id;
+            let doc_delta = p.doc_id - last_doc_id;
             doc_delta_buffer[doc_buffer_upto] = doc_delta;
             if write_freqs {
-                freq_buffer[doc_buffer_upto] = freq;
-                bfs.level0_accumulator.add(freq, norms.get(doc_id));
+                freq_buffer[doc_buffer_upto] = p.freq;
+                bfs.level0_accumulator.add(p.freq, norms.get(p.doc_id));
             }
-            last_doc_id = doc_id;
+            last_doc_id = p.doc_id;
 
             // Buffer positions
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
                 let mut last_pos = 0i32;
-                for &pos in positions {
+                for &pos in p.positions {
                     pe.add_position(pos - last_pos, &mut **pos_out)?;
                     last_pos = pos;
                 }
@@ -471,7 +472,7 @@ impl PostingsWriter {
                 bfs.flush_doc_block(
                     &doc_delta_buffer,
                     &mut freq_buffer,
-                    doc_id,
+                    p.doc_id,
                     pe.buffer_upto(),
                     self.pos_out
                         .as_ref()
@@ -727,7 +728,11 @@ mod tests {
     fn test_singleton_term() {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings = vec![(5, 1, [].as_slice())];
+        let postings = vec![DecodedPosting {
+            doc_id: 5,
+            freq: 1,
+            positions: &[],
+        }];
         let state = pw
             .write_term(
                 &postings,
@@ -748,9 +753,21 @@ mod tests {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         let postings = vec![
-            (0, 1, [].as_slice()),
-            (5, 3, [].as_slice()),
-            (10, 1, [].as_slice()),
+            DecodedPosting {
+                doc_id: 0,
+                freq: 1,
+                positions: &[],
+            },
+            DecodedPosting {
+                doc_id: 5,
+                freq: 3,
+                positions: &[],
+            },
+            DecodedPosting {
+                doc_id: 10,
+                freq: 1,
+                positions: &[],
+            },
         ];
         let header_size = pw.doc_out.file_pointer();
         let state = pw
@@ -773,7 +790,18 @@ mod tests {
     fn test_multi_doc_term_docs_only() {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings = vec![(7, 1, [].as_slice()), (11, 1, [].as_slice())];
+        let postings = vec![
+            DecodedPosting {
+                doc_id: 7,
+                freq: 1,
+                positions: &[],
+            },
+            DecodedPosting {
+                doc_id: 11,
+                freq: 1,
+                positions: &[],
+            },
+        ];
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
@@ -796,7 +824,18 @@ mod tests {
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
         let positions0 = vec![0, 5, 10];
         let positions1 = vec![3];
-        let postings = vec![(0, 3, positions0.as_slice()), (2, 1, positions1.as_slice())];
+        let postings = vec![
+            DecodedPosting {
+                doc_id: 0,
+                freq: 3,
+                positions: &positions0,
+            },
+            DecodedPosting {
+                doc_id: 2,
+                freq: 1,
+                positions: &positions1,
+            },
+        ];
         let state = pw
             .write_term(
                 &postings,
@@ -835,7 +874,11 @@ mod tests {
 
         // Create a single doc with exactly 128 positions (0, 1, 2, ..., 127)
         let positions: Vec<i32> = (0..postings_format::BLOCK_SIZE as i32).collect();
-        let postings = vec![(0, postings_format::BLOCK_SIZE as i32, positions.as_slice())];
+        let postings = vec![DecodedPosting {
+            doc_id: 0,
+            freq: postings_format::BLOCK_SIZE as i32,
+            positions: &positions,
+        }];
 
         let state = pw
             .write_term(
@@ -870,8 +913,16 @@ mod tests {
         let positions0: Vec<i32> = (0..128).collect();
         let positions1: Vec<i32> = vec![0, 5];
         let postings = vec![
-            (0, 128, positions0.as_slice()),
-            (1, 2, positions1.as_slice()),
+            DecodedPosting {
+                doc_id: 0,
+                freq: 128,
+                positions: &positions0,
+            },
+            DecodedPosting {
+                doc_id: 1,
+                freq: 2,
+                positions: &positions1,
+            },
         ];
 
         let state = pw
@@ -917,7 +968,11 @@ mod tests {
 
         // 300 positions: 2 full PFOR blocks (256) + 44 VInt tail
         let positions: Vec<i32> = (0..300).collect();
-        let postings = vec![(0, 300, positions.as_slice())];
+        let postings = vec![DecodedPosting {
+            doc_id: 0,
+            freq: 300,
+            positions: &positions,
+        }];
 
         let state = pw
             .write_term(
@@ -959,7 +1014,11 @@ mod tests {
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         let positions: Vec<i32> = (0..256).collect();
-        let postings = vec![(0, 256, positions.as_slice())];
+        let postings = vec![DecodedPosting {
+            doc_id: 0,
+            freq: 256,
+            positions: &positions,
+        }];
 
         let state = pw
             .write_term(
@@ -998,8 +1057,16 @@ mod tests {
         let positions0: Vec<i32> = (0..100).collect();
         let positions1: Vec<i32> = (0..50).collect();
         let postings = vec![
-            (0, 100, positions0.as_slice()),
-            (1, 50, positions1.as_slice()),
+            DecodedPosting {
+                doc_id: 0,
+                freq: 100,
+                positions: &positions0,
+            },
+            DecodedPosting {
+                doc_id: 1,
+                freq: 50,
+                positions: &positions1,
+            },
         ];
 
         let state = pw
@@ -1027,7 +1094,11 @@ mod tests {
 
         // 128 positions with gaps of 1000 each — requires ~10 bits per value
         let positions: Vec<i32> = (0..128).map(|i| i * 1000).collect();
-        let postings = vec![(0, 128, positions.as_slice())];
+        let postings = vec![DecodedPosting {
+            doc_id: 0,
+            freq: 128,
+            positions: &positions,
+        }];
 
         let state = pw
             .write_term(
@@ -1073,7 +1144,11 @@ mod tests {
                 _ => 1 + (i % 3),
             };
         }
-        let postings = vec![(0, 256, positions.as_slice())];
+        let postings = vec![DecodedPosting {
+            doc_id: 0,
+            freq: 256,
+            positions: &positions,
+        }];
 
         let state = pw
             .write_term(
@@ -1240,8 +1315,13 @@ mod tests {
         // Exactly 128 docs: 1 full block, no VInt tail
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..128)
+            .map(|i| DecodedPosting {
+                doc_id: i,
+                freq: 1,
+                positions: &[],
+            })
+            .collect();
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
@@ -1269,8 +1349,13 @@ mod tests {
         // 130 docs: 1 full block + 2 VInt tail docs
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..130).map(|i| (i, 1i32, [].as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..130)
+            .map(|i| DecodedPosting {
+                doc_id: i,
+                freq: 1,
+                positions: &[],
+            })
+            .collect();
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
@@ -1295,8 +1380,13 @@ mod tests {
         // 256 docs: 2 full blocks, no tail
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..256).map(|i| (i, 1i32, [].as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..256)
+            .map(|i| DecodedPosting {
+                doc_id: i,
+                freq: 1,
+                positions: &[],
+            })
+            .collect();
         let header_size = pw.doc_out.file_pointer();
         let state = pw
             .write_term(
@@ -1319,8 +1409,13 @@ mod tests {
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
         // Each doc has 2 positions [0, 1]
         let positions = vec![0i32, 1];
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, 2i32, positions.as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..128)
+            .map(|i| DecodedPosting {
+                doc_id: i,
+                freq: 2,
+                positions: &positions,
+            })
+            .collect();
 
         let state = pw
             .write_term(
@@ -1348,8 +1443,13 @@ mod tests {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         // doc IDs: 0, 1, 2, ..., 127 — deltas from -1 are 1, 1, 1, ... = range 128
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..128)
+            .map(|i| DecodedPosting {
+                doc_id: i,
+                freq: 1,
+                positions: &[],
+            })
+            .collect();
         let state = pw
             .write_term(
                 &postings,
@@ -1369,8 +1469,13 @@ mod tests {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         // doc IDs: 0, 100, 200, ..., 12700 — delta = 100 each (except first which is 1 from -1)
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i * 100, 1i32, [].as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..128)
+            .map(|i| DecodedPosting {
+                doc_id: i * 100,
+                freq: 1,
+                positions: &[],
+            })
+            .collect();
         let state = pw
             .write_term(
                 &postings,
@@ -1388,8 +1493,13 @@ mod tests {
         // DOCS-only index option (no freqs) with 128 docs
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..128)
+            .map(|i| DecodedPosting {
+                doc_id: i,
+                freq: 1,
+                positions: &[],
+            })
+            .collect();
         let state = pw
             .write_term(
                 &postings,
@@ -1408,8 +1518,13 @@ mod tests {
         // 128 docs with varied frequencies
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, (i % 10) + 1, [].as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..128)
+            .map(|i| DecodedPosting {
+                doc_id: i,
+                freq: (i % 10) + 1,
+                positions: &[],
+            })
+            .collect();
         let state = pw
             .write_term(
                 &postings,
@@ -1431,8 +1546,13 @@ mod tests {
         // (enough to produce non-zero level 0 impacts) and verifies level 1 stays 0.
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, (i % 10) + 1, [].as_slice())).collect();
+        let postings: Vec<DecodedPosting<'_>> = (0..128)
+            .map(|i| DecodedPosting {
+                doc_id: i,
+                freq: (i % 10) + 1,
+                positions: &[],
+            })
+            .collect();
         pw.write_term(
             &postings,
             IndexOptions::DocsAndFreqs,
