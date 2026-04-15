@@ -1058,14 +1058,16 @@ fn read_vint_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::sync::Arc;
 
-    use crate::codecs::competitive_impact::NormsLookup;
+    use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::codecs::lucene103::postings_writer::PostingsWriter;
     use crate::codecs::{lucene94, lucene99};
     use crate::document::{DocValuesType, DocumentBuilder, IndexOptions};
     use crate::index::config::IndexWriterConfig;
     use crate::index::field::text;
+    use crate::index::pipeline::terms_hash::{BufferedPostingsEnum, DecodedDoc, DecodedPostings};
     use crate::index::segment_infos;
     use crate::index::writer::IndexWriter;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
@@ -1101,11 +1103,15 @@ mod tests {
         let segment_id = [0u8; 16];
         let shared_dir = SharedDirectory::new(Box::new(MemoryDirectory::new()));
 
-        let postings: Vec<(i32, i32, &[i32])> = doc_ids
-            .iter()
-            .map(|&id| (id, 1i32, &[] as &[i32]))
-            .collect();
-        let norms = NormsLookup::no_norms();
+        let mut decoded = DecodedPostings::new();
+        for &id in doc_ids {
+            decoded.docs.push(DecodedDoc {
+                doc_id: id,
+                freq: 1,
+                pos_start: 0,
+            });
+        }
+        let norms = BufferedNormsLookup::no_norms();
 
         let term_state = {
             let mut writer = PostingsWriter::new(
@@ -1115,7 +1121,8 @@ mod tests {
                 &segment_id,
                 false,
             )?;
-            let state = writer.write_term(&postings, options, &norms)?;
+            let mut pe = BufferedPostingsEnum::new(decoded, options.has_freqs());
+            let state = writer.write_term(&mut pe, options, &norms, &mut HashSet::new())?;
             writer.finish()?;
             state
         };

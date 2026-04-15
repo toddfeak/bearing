@@ -11,7 +11,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::codecs::lucene90::compressing_stored_fields_reader::FieldsIndexReader;
+use crate::codecs::lucene90::stored_fields_reader::FieldsIndexReader;
 use crate::codecs::lucene90::term_vectors::{
     DATA_CODEC, INDEX_CODEC_IDX, INDEX_CODEC_META, INDEX_EXTENSION, META_EXTENSION,
     VECTORS_EXTENSION, VERSION,
@@ -25,7 +25,7 @@ use crate::store::{DataInput, Directory, IndexInput};
 /// Opens `.tvd` first (keeps handle),
 /// reads metadata from `.tvm`, creates chunk index from `.tvx`, validates
 /// dirty chunk invariants.
-pub struct CompressingTermVectorsReader {
+pub struct TermVectorsReader {
     /// Open handle to the `.tvd` data file.
     #[expect(dead_code)]
     vectors_stream: Box<dyn IndexInput>,
@@ -51,10 +51,10 @@ pub struct CompressingTermVectorsReader {
     num_dirty_docs: i64,
 }
 
-impl CompressingTermVectorsReader {
+impl TermVectorsReader {
     /// Opens term vectors files for the given segment.
     ///
-    /// Follows Java's `Lucene90CompressingCompressingTermVectorsReader` constructor order:
+    /// Follows Java's `Lucene90CompressingTermVectorsReader` constructor order:
     /// 1. Open `.tvd` (data) — keep handle
     /// 2. Open `.tvm` (meta) with checksum — read metadata
     /// 3. `FieldsIndexReader` opens `.tvx` internally
@@ -159,8 +159,7 @@ impl CompressingTermVectorsReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, VECTORS_EXTENSION};
-    use crate::index::index_file_names;
+    use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
@@ -173,21 +172,18 @@ mod tests {
     }
 
     /// Writes docs via the streaming API, finishes, then opens a reader.
-    fn write_and_read<F>(num_docs: i32, build_fn: F) -> CompressingTermVectorsReader
+    fn write_and_read<F>(num_docs: i32, build_fn: F) -> TermVectorsReader
     where
         F: FnOnce(&mut CompressingTermVectorsWriter),
     {
         let dir = test_directory();
-        let tvd_name = index_file_names::segment_file_name("_0", "", VECTORS_EXTENSION);
-        let tvd = {
-            let mut d = dir.lock().unwrap();
-            d.create_output(&tvd_name).unwrap()
-        };
-        let mut w = CompressingTermVectorsWriter::new(tvd, &segment_id(), "").unwrap();
-        build_fn(&mut w);
-        w.finish(&dir, "_0", "", &segment_id(), num_docs).unwrap();
+        {
+            let mut w = CompressingTermVectorsWriter::new(&dir, "_0", "", &segment_id()).unwrap();
+            build_fn(&mut w);
+            w.finish(num_docs).unwrap();
+        }
         let guard = dir.lock().unwrap();
-        CompressingTermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id()).unwrap()
+        TermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id()).unwrap()
     }
 
     #[test]

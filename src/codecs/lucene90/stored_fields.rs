@@ -149,11 +149,8 @@ pub(crate) trait StoredFieldsWriter {
     /// Called when a document and all its fields have been added.
     fn finish_document(&mut self) -> io::Result<()>;
 
-    /// Called before `close`, passing in the number of documents that were written.
+    /// Called after all documents have been written.
     fn finish(&mut self, num_docs: i32) -> io::Result<()>;
-
-    /// Closes the writer and releases resources.
-    fn close(&mut self) -> io::Result<()>;
 }
 
 // ============================================================
@@ -473,13 +470,6 @@ impl StoredFieldsWriter for Lucene90StoredFieldsWriter {
 
         assert!(self.buffered_docs.is_empty());
 
-        Ok(())
-    }
-
-    fn close(&mut self) -> io::Result<()> {
-        drop(self.fdm.take());
-        drop(self.fields_stream.take());
-        drop(self.fdx.take());
         Ok(())
     }
 }
@@ -803,7 +793,6 @@ mod tests {
         }
         let num_docs = docs.len() as i32;
         writer.finish(num_docs).unwrap();
-        writer.close().unwrap();
         Lucene90StoredFieldsWriter::file_names(segment_name, segment_suffix)
     }
 

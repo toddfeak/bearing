@@ -9,6 +9,7 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::NormsLookup;
+use crate::codecs::fields_producer::{FieldTerms, PostingsEnumProducer};
 use crate::codecs::lucene103::postings_format::{
     self, BLOCKTREE_VERSION_CURRENT, DEFAULT_MAX_BLOCK_SIZE, DEFAULT_MIN_BLOCK_SIZE,
     IntBlockTermState, TERMS_CODEC, TERMS_CODEC_NAME, TERMS_EXTENSION, TERMS_INDEX_CODEC_NAME,
@@ -17,11 +18,100 @@ use crate::codecs::lucene103::postings_format::{
 use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4};
 use crate::index::index_file_names::segment_file_name;
-use crate::index::pipeline::terms_hash::{DecodedPostings, FreqProxTermsWriterPerField, TermsHash};
+use crate::index::pipeline::terms_hash::{
+    BufferedPostingsEnum, DecodedPostings, FreqProxTermsWriterPerField, TermsHash,
+};
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::byte_block_pool::ByteBlockPool;
 
 use super::postings_writer::PostingsWriter;
+
+// ============================================================================
+// BufferedFieldTerms — FieldTerms impl over in-memory pipeline data
+// ============================================================================
+
+/// [`FieldTerms`] implementation that wraps the indexing pipeline's in-memory
+/// state. Borrows term bytes from `ByteBlockPool` (zero-copy) and decodes
+/// postings on demand from the byte pool streams.
+pub(crate) struct BufferedFieldTerms<'a> {
+    per_field: &'a FreqProxTermsWriterPerField,
+    term_byte_pool: &'a ByteBlockPool,
+    terms_hash: &'a TermsHash,
+    sorted_ids: &'a [i32],
+    num_terms: usize,
+    field_name: String,
+    field_number: u32,
+}
+
+impl<'a> BufferedFieldTerms<'a> {
+    /// Creates a new `BufferedFieldTerms` for one field.
+    pub fn new(
+        per_field: &'a FreqProxTermsWriterPerField,
+        term_byte_pool: &'a ByteBlockPool,
+        terms_hash: &'a TermsHash,
+        field_name: &str,
+        field_number: u32,
+    ) -> Self {
+        let num_terms = per_field.num_terms();
+        let sorted_ids = per_field.sorted_term_ids();
+
+        Self {
+            per_field,
+            term_byte_pool,
+            terms_hash,
+            sorted_ids,
+            num_terms,
+            field_name: field_name.to_string(),
+            field_number,
+        }
+    }
+}
+
+impl FieldTerms for BufferedFieldTerms<'_> {
+    fn term_count(&self) -> usize {
+        self.num_terms
+    }
+
+    fn term_bytes(&self, index: usize) -> &[u8] {
+        let term_id = self.sorted_ids[index] as usize;
+        self.per_field.term_bytes(self.term_byte_pool, term_id)
+    }
+
+    fn postings(&self, index: usize) -> io::Result<Box<dyn PostingsEnumProducer + '_>> {
+        let term_id = self.sorted_ids[index] as usize;
+        let mut decoded = DecodedPostings::new();
+        self.per_field
+            .decode_term_into(self.terms_hash, term_id, &mut decoded)?;
+        Ok(Box::new(BufferedPostingsEnum::new(
+            decoded,
+            self.per_field.has_freq,
+        )))
+    }
+
+    fn has_freqs(&self) -> bool {
+        self.per_field.has_freq
+    }
+
+    fn has_positions(&self) -> bool {
+        self.per_field.has_prox
+    }
+
+    fn has_offsets(&self) -> bool {
+        self.per_field.has_offsets
+    }
+
+    fn has_payloads(&self) -> bool {
+        self.per_field.saw_payloads
+    }
+
+    fn field_number(&self) -> u32 {
+        self.field_number
+    }
+
+    fn field_name(&self) -> &str {
+        &self.field_name
+    }
+}
 
 // ============================================================================
 // Block writing helper structs
@@ -139,50 +229,44 @@ impl BlockTreeTermsWriter {
         })
     }
 
-    /// Write all terms for one indexed field.
-    /// Terms must be pre-sorted by byte order.
+    /// Write all terms for one indexed field via the [`FieldTerms`] abstraction.
     pub fn write_field(
         &mut self,
-        field_ctx: &FieldWriteContext,
-        per_field: &FreqProxTermsWriterPerField,
-        term_byte_pool: &ByteBlockPool,
-        terms_hash: &TermsHash,
-        norms: &NormsLookup,
+        field_terms: &dyn FieldTerms,
+        norms: &dyn NormsLookup,
     ) -> io::Result<()> {
-        let num_terms = per_field.num_terms();
+        let num_terms = field_terms.term_count();
         if num_terms == 0 {
             return Ok(());
         }
 
-        let sorted_ids = per_field.sorted_term_ids();
+        // Derive FieldWriteContext from FieldTerms for internal use
+        let field_ctx = FieldWriteContext {
+            field_name: field_terms.field_name().to_string(),
+            field_number: field_terms.field_number(),
+            write_freqs: field_terms.has_freqs(),
+            write_positions: field_terms.has_positions(),
+        };
 
         debug!(
             "blocktree_writer: write_field name={} num_terms={}",
             field_ctx.field_name, num_terms
         );
 
-        let mut tw = TermsWriter::new(field_ctx, self.min_items_in_block, self.max_items_in_block);
+        let mut tw =
+            BlockTreeFieldWriter::new(&field_ctx, self.min_items_in_block, self.max_items_in_block);
 
         let mut docs_seen = HashSet::new();
-        let mut decoded = DecodedPostings::new();
 
-        for &sorted_id in &sorted_ids[..num_terms] {
-            let term_id = sorted_id as usize;
-            let term_bytes = per_field.term_bytes(term_byte_pool, term_id);
-
-            per_field.decode_term_into(terms_hash, term_id, &mut decoded)?;
-
-            // Accumulate unique doc IDs for doc_count
-            for (doc_id, _, _) in decoded.iter() {
-                docs_seen.insert(doc_id);
-            }
-
-            let postings_data: Vec<(i32, i32, &[i32])> = decoded.iter().collect();
+        for i in 0..num_terms {
+            let term_bytes = field_terms.term_bytes(i);
+            let mut pe = field_terms.postings(i)?;
 
             let state = self.postings_writer.write_term(
-                &postings_data,
+                &mut *pe,
                 field_ctx.index_options(),
                 norms,
+                &mut docs_seen,
             )?;
 
             tw.add_term(
@@ -190,7 +274,7 @@ impl BlockTreeTermsWriter {
                 state,
                 &mut *self.terms_out,
                 &self.postings_writer,
-                field_ctx,
+                &field_ctx,
             )?;
         }
 
@@ -200,7 +284,7 @@ impl BlockTreeTermsWriter {
             &mut *self.terms_out,
             &mut *self.index_out,
             &self.postings_writer,
-            field_ctx,
+            &field_ctx,
             &mut self.field_metas,
         )?;
 
@@ -278,7 +362,7 @@ struct PendingBlock {
 }
 
 /// Accumulates terms for a single field and builds blocks.
-struct TermsWriter<'a> {
+struct BlockTreeFieldWriter<'a> {
     write_freqs: bool,
     min_items_in_block: usize,
     max_items_in_block: usize,
@@ -294,7 +378,7 @@ struct TermsWriter<'a> {
     lz4_ht: lz4::HighCompressionHashTable,
 }
 
-impl<'a> TermsWriter<'a> {
+impl<'a> BlockTreeFieldWriter<'a> {
     fn new(
         field_ctx: &FieldWriteContext,
         min_items_in_block: usize,
@@ -1274,6 +1358,7 @@ fn choose_child_save_strategy(min_label: u8, max_label: u8, label_cnt: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::document::IndexOptions;
     use crate::store::memory::MemoryIndexOutput;
     use crate::store::{MemoryDirectory, SharedDirectory};
@@ -1328,23 +1413,9 @@ mod tests {
             self.writer.flush_pending_docs(&mut self.terms_hash);
             self.writer.sort_terms(&self.term_pool);
         }
-    }
 
-    fn freq_field_ctx(name: &str) -> FieldWriteContext {
-        FieldWriteContext {
-            field_name: name.to_string(),
-            field_number: 0,
-            write_freqs: true,
-            write_positions: false,
-        }
-    }
-
-    fn positions_field_ctx(name: &str) -> FieldWriteContext {
-        FieldWriteContext {
-            field_name: name.to_string(),
-            field_number: 0,
-            write_freqs: true,
-            write_positions: true,
+        fn field_terms(&self, name: &str) -> BufferedFieldTerms<'_> {
+            BufferedFieldTerms::new(&self.writer, &self.term_pool, &self.terms_hash, name, 0)
         }
     }
 
@@ -1545,14 +1616,8 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
-        btw.write_field(
-            &freq_field_ctx("test"),
-            &tt.writer,
-            &tt.term_pool,
-            &tt.terms_hash,
-            &NormsLookup::no_norms(),
-        )
-        .unwrap();
+        btw.write_field(&tt.field_terms("test"), &BufferedNormsLookup::no_norms())
+            .unwrap();
         let names = btw.finish().unwrap();
 
         assert_ge!(
@@ -1590,11 +1655,8 @@ mod tests {
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
         btw.write_field(
-            &positions_field_ctx("contents"),
-            &tt.writer,
-            &tt.term_pool,
-            &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &tt.field_terms("contents"),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();
@@ -1624,11 +1686,8 @@ mod tests {
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
         btw.write_field(
-            &positions_field_ctx("contents"),
-            &tt.writer,
-            &tt.term_pool,
-            &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &tt.field_terms("contents"),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();
@@ -1654,14 +1713,8 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
-        btw.write_field(
-            &freq_field_ctx("test"),
-            &tt.writer,
-            &tt.term_pool,
-            &tt.terms_hash,
-            &NormsLookup::no_norms(),
-        )
-        .unwrap();
+        btw.write_field(&tt.field_terms("test"), &BufferedNormsLookup::no_norms())
+            .unwrap();
         let names = btw.finish().unwrap();
 
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
@@ -1709,14 +1762,8 @@ mod tests {
         let id = [0u8; 16];
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
-        btw.write_field(
-            &freq_field_ctx("test"),
-            &tt.writer,
-            &tt.term_pool,
-            &tt.terms_hash,
-            &NormsLookup::no_norms(),
-        )
-        .unwrap();
+        btw.write_field(&tt.field_terms("test"), &BufferedNormsLookup::no_norms())
+            .unwrap();
         let names = btw.finish().unwrap();
 
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
@@ -1806,11 +1853,8 @@ mod tests {
         let dir = test_directory();
         let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
         btw.write_field(
-            &positions_field_ctx("contents"),
-            &tt.writer,
-            &tt.term_pool,
-            &tt.terms_hash,
-            &NormsLookup::no_norms(),
+            &tt.field_terms("contents"),
+            &BufferedNormsLookup::no_norms(),
         )
         .unwrap();
         let names = btw.finish().unwrap();

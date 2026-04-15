@@ -26,16 +26,16 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::compound_reader::CompoundDirectory;
-use crate::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
-use crate::codecs::lucene90::compressing_term_vectors_reader::CompressingTermVectorsReader;
-use crate::codecs::lucene90::doc_values_producer::DocValuesProducer;
-use crate::codecs::lucene90::norms_producer::NormsProducer;
+use crate::codecs::lucene90::doc_values_producer::DocValuesReader;
+use crate::codecs::lucene90::norms_producer::NormsReader;
 use crate::codecs::lucene90::points_reader::PointsReader;
+use crate::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
+use crate::codecs::lucene90::term_vectors_reader::TermVectorsReader;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
 use crate::codecs::lucene103::postings_reader::PostingsReader;
-use crate::index::numeric_doc_values::NumericDocValues;
+use crate::index::doc_values_iterators::NumericDocValues;
 use crate::index::terms::Terms;
 use crate::index::{FieldInfos, SegmentInfo};
 use crate::store::Directory;
@@ -52,10 +52,10 @@ pub struct SegmentReader {
     segment_name: String,
     field_infos: FieldInfos,
     max_doc: i32,
-    stored_fields_reader: Option<CompressingStoredFieldsReader>,
-    norms_reader: Option<NormsProducer>,
-    doc_values_reader: Option<DocValuesProducer>,
-    term_vectors_reader: Option<CompressingTermVectorsReader>,
+    stored_fields_reader: Option<StoredFieldsReader>,
+    norms_reader: Option<NormsReader>,
+    doc_values_reader: Option<DocValuesReader>,
+    term_vectors_reader: Option<TermVectorsReader>,
     points_reader: Option<PointsReader>,
     terms_reader: Option<BlockTreeTermsReader>,
     postings_reader: Option<PostingsReader>,
@@ -111,15 +111,11 @@ impl SegmentReader {
         let segment_id = &si.id;
         let max_doc = si.max_doc;
 
-        let stored_fields_reader = Some(CompressingStoredFieldsReader::open(
-            dir,
-            segment_name,
-            "",
-            segment_id,
-        )?);
+        let stored_fields_reader =
+            Some(StoredFieldsReader::open(dir, segment_name, "", segment_id)?);
 
         let norms_reader = if field_infos.has_norms() {
-            Some(NormsProducer::open(
+            Some(NormsReader::open(
                 dir,
                 segment_name,
                 "",
@@ -136,7 +132,7 @@ impl SegmentReader {
                 derive_suffix(&field_infos, "PerFieldDocValuesFormat").ok_or_else(|| {
                     io::Error::other("segment has doc values but no PerFieldDocValuesFormat suffix")
                 })?;
-            Some(DocValuesProducer::open(
+            Some(DocValuesReader::open(
                 dir,
                 segment_name,
                 &suffix,
@@ -148,12 +144,7 @@ impl SegmentReader {
         };
 
         let term_vectors_reader = if field_infos.has_vectors() {
-            Some(CompressingTermVectorsReader::open(
-                dir,
-                segment_name,
-                "",
-                segment_id,
-            )?)
+            Some(TermVectorsReader::open(dir, segment_name, "", segment_id)?)
         } else {
             None
         };
@@ -216,14 +207,12 @@ impl SegmentReader {
     /// Returns a mutable reference to the stored fields reader.
     ///
     /// Matches Java's `CodecReader.getFieldsReader()`.
-    pub fn get_fields_reader(&mut self) -> Option<&mut CompressingStoredFieldsReader> {
+    pub fn get_fields_reader(&mut self) -> Option<&mut StoredFieldsReader> {
         self.stored_fields_reader.as_mut()
     }
 
-    /// Returns a reference to the norms producer, or `None` if no fields have norms.
-    ///
-    /// Matches Java's `CodecReader.getNormsReader()`.
-    pub fn norms_reader(&self) -> Option<&NormsProducer> {
+    /// Returns a reference to the norms reader, or `None` if no fields have norms.
+    pub fn norms_reader(&self) -> Option<&NormsReader> {
         self.norms_reader.as_ref()
     }
 
@@ -243,12 +232,12 @@ impl SegmentReader {
     }
 
     /// Returns the doc values reader, or `None` if no fields have doc values.
-    pub fn doc_values_reader(&self) -> Option<&DocValuesProducer> {
+    pub fn doc_values_reader(&self) -> Option<&DocValuesReader> {
         self.doc_values_reader.as_ref()
     }
 
     /// Returns the term vectors reader, or `None` if no fields have term vectors.
-    pub fn term_vectors_reader(&self) -> Option<&CompressingTermVectorsReader> {
+    pub fn term_vectors_reader(&self) -> Option<&TermVectorsReader> {
         self.term_vectors_reader.as_ref()
     }
 

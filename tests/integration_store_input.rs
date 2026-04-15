@@ -427,7 +427,7 @@ fn test_compound_directory_memory() {
 
 #[test]
 fn test_stored_fields_reader_round_trip() {
-    use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
+    use bearing::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
     use bearing::document::DocumentBuilder;
     use bearing::document::StoredValue;
     use bearing::index::config::IndexWriterConfig;
@@ -462,7 +462,7 @@ fn test_stored_fields_reader_round_trip() {
     let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
 
     // Doc 0
     let fields = reader.document(0).unwrap();
@@ -497,7 +497,7 @@ fn test_stored_fields_reader_round_trip() {
 
 #[test]
 fn test_stored_fields_reader_all_types() {
-    use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
+    use bearing::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
     use bearing::document::DocumentBuilder;
     use bearing::document::StoredValue;
     use bearing::index::config::IndexWriterConfig;
@@ -530,7 +530,7 @@ fn test_stored_fields_reader_all_types() {
     let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
     let fields = reader.document(0).unwrap();
 
     assert!(
@@ -573,7 +573,7 @@ fn test_stored_fields_reader_all_types() {
 
 #[test]
 fn test_stored_fields_reader_many_docs() {
-    use bearing::codecs::lucene90::compressing_stored_fields_reader::CompressingStoredFieldsReader;
+    use bearing::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
     use bearing::document::DocumentBuilder;
     use bearing::document::StoredValue;
     use bearing::index::config::IndexWriterConfig;
@@ -604,7 +604,7 @@ fn test_stored_fields_reader_many_docs() {
     let infos = segment_infos::read(&**dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = CompressingStoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
 
     for i in 0..50 {
         let fields = reader.document(i).unwrap();

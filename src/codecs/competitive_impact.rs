@@ -7,6 +7,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
+use std::fmt;
 
 /// Per-document scoring factors: term frequency and norm factor.
 ///
@@ -124,34 +125,51 @@ impl CompetitiveImpactAccumulator {
     }
 }
 
+/// Default norm value for fields without norms (omit_norms).
+///
+/// Norms are a multiplicative scoring factor, so 1 means no boost.
+pub const NO_BOOST: i64 = 1;
+
 /// Provides norm lookups by doc ID for a single field.
 ///
-/// For fields with norms, binary-searches the sorted `norms_docs` array to find
-/// the norm value. For fields without norms (omit_norms), always returns 1.
-pub struct NormsLookup<'a> {
+/// Implementations resolve doc IDs to norm values for competitive impact
+/// computation. Returns [`NO_BOOST`] for documents without norms.
+pub trait NormsLookup: fmt::Debug {
+    /// Returns the norm for the given doc ID, or [`NO_BOOST`] if not found.
+    fn get(&self, doc_id: i32) -> i64;
+}
+
+/// In-memory norms lookup backed by sorted doc ID and value slices.
+///
+/// Binary-searches the sorted `norms_docs` array to find the norm value.
+/// For fields without norms (omit_norms), construct with [`no_norms`](Self::no_norms)
+/// which uses empty slices and always returns 1.
+#[derive(Debug)]
+pub struct BufferedNormsLookup<'a> {
     norms: &'a [i64],
     norms_docs: &'a [i32],
 }
 
-impl<'a> NormsLookup<'a> {
+impl<'a> BufferedNormsLookup<'a> {
     /// Creates a lookup for a field that has norms.
     pub fn new(norms: &'a [i64], norms_docs: &'a [i32]) -> Self {
         Self { norms, norms_docs }
     }
 
-    /// Creates a lookup that always returns 1 (for fields with omit_norms).
+    /// Creates a lookup that always returns [`NO_BOOST`] (for fields with omit_norms).
     pub fn no_norms() -> Self {
         Self {
             norms: &[],
             norms_docs: &[],
         }
     }
+}
 
-    /// Returns the norm for the given doc ID, or 1 if not found.
-    pub fn get(&self, doc_id: i32) -> i64 {
+impl NormsLookup for BufferedNormsLookup<'_> {
+    fn get(&self, doc_id: i32) -> i64 {
         match self.norms_docs.binary_search(&doc_id) {
             Ok(idx) => self.norms[idx],
-            Err(_) => 1,
+            Err(_) => NO_BOOST,
         }
     }
 }

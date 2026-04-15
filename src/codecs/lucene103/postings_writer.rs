@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Postings list writer that encodes doc IDs, frequencies, positions, and offsets.
 
+use std::collections::HashSet;
 use std::io;
 
 use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::{CompetitiveImpactAccumulator, Impact, NormsLookup};
+use crate::codecs::fields_producer::{NO_MORE_DOCS, PostingsEnumProducer};
 use crate::codecs::lucene103::postings_format::{
     self, DOC_CODEC, DOC_EXTENSION, IntBlockTermState, META_CODEC, META_EXTENSION, POS_CODEC,
     POS_EXTENSION, VERSION_CURRENT,
@@ -294,27 +296,26 @@ impl PostingsWriter {
 
     /// Write postings for one term. Returns metadata for the term dictionary.
     ///
+    /// Pulls postings data from the producer via `next_doc()` / `freq()` /
+    /// `next_position()`, matching Java's `PushPostingsWriterBase.writeTerm()`.
+    ///
     /// - Singleton (docFreq==1): docID pulsed into IntBlockTermState, nothing to .doc
     /// - Block encoding (docFreq >= 128): FOR-encoded blocks with skip data
     /// - VInt tail (docFreq < 128):
     ///   - With freqs: GroupVInt doc deltas with freq bits, then freqs for non-1
     ///   - Without freqs (DOCS only): GroupVInt doc deltas
     /// - Positions: PFOR-encoded blocks of 128 + VInt tail for remainder
-    pub fn write_term(
+    pub(crate) fn write_term(
         &mut self,
-        postings: &[(i32, i32, &[i32])], // (doc_id, freq, positions)
+        postings: &mut dyn PostingsEnumProducer,
         index_options: IndexOptions,
-        norms: &NormsLookup,
+        norms: &dyn NormsLookup,
+        docs_seen: &mut HashSet<i32>,
     ) -> io::Result<IntBlockTermState> {
-        let doc_freq = postings.len() as i32;
+        let doc_freq = postings.doc_freq();
+        let total_term_freq = postings.total_term_freq();
         let write_freqs = index_options.has_freqs();
         let write_positions = index_options.has_positions();
-
-        let total_term_freq: i64 = if write_freqs {
-            postings.iter().map(|&(_, freq, _)| freq as i64).sum()
-        } else {
-            -1
-        };
 
         let doc_start_fp = self.doc_out.file_pointer() as i64;
         let pos_start_fp = self
@@ -325,19 +326,18 @@ impl PostingsWriter {
 
         if doc_freq == 1 {
             // Singleton: pulse docID into term dictionary
-            let singleton_doc_id = postings[0].0;
-            debug!(
-                "postings_writer: singleton term, doc_id={}",
-                singleton_doc_id
-            );
+            let doc_id = postings.next_doc()?;
+            docs_seen.insert(doc_id);
+            debug!("postings_writer: singleton term, doc_id={}", doc_id);
 
             // Write positions for singleton
             let mut last_pos_block_offset = -1i64;
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
-                let (_, _, positions) = postings[0];
+                let freq = postings.freq();
                 let mut pe = PositionEncoder::new();
                 let mut last_pos = 0i32;
-                for &pos in positions {
+                for _ in 0..freq {
+                    let pos = postings.next_position()?;
                     pe.add_position(pos - last_pos, &mut **pos_out)?;
                     last_pos = pos;
                 }
@@ -351,7 +351,7 @@ impl PostingsWriter {
                 pos_start_fp,
 
                 last_pos_block_offset,
-                singleton_doc_id,
+                singleton_doc_id: doc_id,
             })
         } else if doc_freq >= BLOCK_SIZE as i32 {
             // Block encoding path for high-frequency terms
@@ -367,6 +367,7 @@ impl PostingsWriter {
                     write_positions,
                 },
                 norms,
+                docs_seen,
             )
         } else {
             // VInt block (docFreq < BLOCK_SIZE)
@@ -374,11 +375,35 @@ impl PostingsWriter {
             let mut freqs: Vec<i32> = Vec::with_capacity(doc_freq as usize);
             let mut last_doc_id = -1i32;
 
-            for &(doc_id, freq, _) in postings {
+            // First pass: collect doc deltas and freqs
+            // We need the full arrays for GroupVInt encoding before writing positions,
+            // so we buffer doc/freq data, then iterate positions in a second pass
+            // via a separate PostingsEnumProducer (the caller provides a fresh one
+            // if needed). For now, we collect positions inline.
+            //
+            // To write positions we need to pull them during the doc iteration,
+            // so we accumulate positions into a temporary buffer.
+            let mut all_positions: Vec<Vec<i32>> = Vec::new();
+
+            loop {
+                let doc_id = postings.next_doc()?;
+                if doc_id == NO_MORE_DOCS {
+                    break;
+                }
+                docs_seen.insert(doc_id);
                 let delta = doc_id - last_doc_id;
                 doc_deltas.push(delta);
+                let freq = postings.freq();
                 freqs.push(freq);
                 last_doc_id = doc_id;
+
+                if write_positions {
+                    let mut positions = Vec::with_capacity(freq as usize);
+                    for _ in 0..freq {
+                        positions.push(postings.next_position()?);
+                    }
+                    all_positions.push(positions);
+                }
             }
 
             write_vint_block(
@@ -399,7 +424,7 @@ impl PostingsWriter {
             let mut last_pos_block_offset = -1i64;
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
                 let mut pe = PositionEncoder::new();
-                for &(_, _, positions) in postings {
+                for positions in &all_positions {
                     let mut last_pos = 0i32;
                     for &pos in positions {
                         pe.add_position(pos - last_pos, &mut **pos_out)?;
@@ -424,9 +449,10 @@ impl PostingsWriter {
     /// Write a term with docFreq >= BLOCK_SIZE using block encoding with skip data.
     fn write_term_blocks(
         &mut self,
-        postings: &[(i32, i32, &[i32])],
+        postings: &mut dyn PostingsEnumProducer,
         ctx: &TermWriteContext,
-        norms: &NormsLookup,
+        norms: &dyn NormsLookup,
+        docs_seen: &mut HashSet<i32>,
     ) -> io::Result<IntBlockTermState> {
         let doc_freq = ctx.doc_freq;
         let total_term_freq = ctx.total_term_freq;
@@ -444,10 +470,17 @@ impl PostingsWriter {
         let mut last_doc_id = -1i32;
         let mut doc_count = 0usize;
 
-        for &(doc_id, freq, positions) in postings {
+        loop {
+            let doc_id = postings.next_doc()?;
+            if doc_id == NO_MORE_DOCS {
+                break;
+            }
+            docs_seen.insert(doc_id);
+
             // Buffer doc delta and freq
             let doc_delta = doc_id - last_doc_id;
             doc_delta_buffer[doc_buffer_upto] = doc_delta;
+            let freq = postings.freq();
             if write_freqs {
                 freq_buffer[doc_buffer_upto] = freq;
                 bfs.level0_accumulator.add(freq, norms.get(doc_id));
@@ -457,7 +490,8 @@ impl PostingsWriter {
             // Buffer positions
             if write_positions && let Some(ref mut pos_out) = self.pos_out {
                 let mut last_pos = 0i32;
-                for &pos in positions {
+                for _ in 0..freq {
+                    let pos = postings.next_position()?;
                     pe.add_position(pos - last_pos, &mut **pos_out)?;
                     last_pos = pos;
                 }
@@ -716,22 +750,54 @@ fn write_vint_block_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codecs::competitive_impact::BufferedNormsLookup;
+    use crate::index::pipeline::terms_hash::{BufferedPostingsEnum, DecodedDoc, DecodedPostings};
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
         SharedDirectory::new(Box::new(MemoryDirectory::new()))
     }
 
+    /// Build a `DecodedPostings` from doc_id/freq pairs with no positions.
+    fn build_postings(docs: &[(i32, i32)]) -> DecodedPostings {
+        let mut decoded = DecodedPostings::new();
+        for &(doc_id, freq) in docs {
+            decoded.docs.push(DecodedDoc {
+                doc_id,
+                freq,
+                pos_start: 0,
+            });
+        }
+        decoded
+    }
+
+    /// Build a `DecodedPostings` from doc_id/freq/positions triples.
+    fn build_postings_with_positions(docs: &[(i32, i32, &[i32])]) -> DecodedPostings {
+        let mut decoded = DecodedPostings::new();
+        for &(doc_id, freq, positions) in docs {
+            let pos_start = decoded.positions.len() as u32;
+            decoded.positions.extend_from_slice(positions);
+            decoded.docs.push(DecodedDoc {
+                doc_id,
+                freq,
+                pos_start,
+            });
+        }
+        decoded
+    }
+
     #[test]
     fn test_singleton_term() {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings = vec![(5, 1, [].as_slice())];
+        let decoded = build_postings(&[(5, 1)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -746,17 +812,15 @@ mod tests {
     fn test_multi_doc_term_with_freqs() {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings = vec![
-            (0, 1, [].as_slice()),
-            (5, 3, [].as_slice()),
-            (10, 1, [].as_slice()),
-        ];
+        let decoded = build_postings(&[(0, 1), (5, 3), (10, 1)]);
         let header_size = pw.doc_out.file_pointer();
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -772,10 +836,16 @@ mod tests {
     fn test_multi_doc_term_docs_only() {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings = vec![(7, 1, [].as_slice()), (11, 1, [].as_slice())];
+        let decoded = build_postings(&[(7, 1), (11, 1)]);
         let header_size = pw.doc_out.file_pointer();
+        let mut pe = BufferedPostingsEnum::new(decoded, false);
         let state = pw
-            .write_term(&postings, IndexOptions::Docs, &NormsLookup::no_norms())
+            .write_term(
+                &mut pe,
+                IndexOptions::Docs,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 2);
@@ -789,14 +859,14 @@ mod tests {
         // totalTermFreq < BLOCK_SIZE uses VInt tail only
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
-        let positions0 = vec![0, 5, 10];
-        let positions1 = vec![3];
-        let postings = vec![(0, 3, positions0.as_slice()), (2, 1, positions1.as_slice())];
+        let decoded = build_postings_with_positions(&[(0, 3, &[0, 5, 10]), (2, 1, &[3])]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -830,13 +900,16 @@ mod tests {
 
         // Create a single doc with exactly 128 positions (0, 1, 2, ..., 127)
         let positions: Vec<i32> = (0..postings_format::BLOCK_SIZE as i32).collect();
-        let postings = vec![(0, postings_format::BLOCK_SIZE as i32, positions.as_slice())];
+        let decoded =
+            build_postings_with_positions(&[(0, postings_format::BLOCK_SIZE as i32, &positions)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
 
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -864,16 +937,15 @@ mod tests {
         // 130 positions across 2 docs: first doc has 128 positions, second has 2
         let positions0: Vec<i32> = (0..128).collect();
         let positions1: Vec<i32> = vec![0, 5];
-        let postings = vec![
-            (0, 128, positions0.as_slice()),
-            (1, 2, positions1.as_slice()),
-        ];
+        let decoded = build_postings_with_positions(&[(0, 128, &positions0), (1, 2, &positions1)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
 
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -912,13 +984,15 @@ mod tests {
 
         // 300 positions: 2 full PFOR blocks (256) + 44 VInt tail
         let positions: Vec<i32> = (0..300).collect();
-        let postings = vec![(0, 300, positions.as_slice())];
+        let decoded = build_postings_with_positions(&[(0, 300, &positions)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
 
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -954,13 +1028,15 @@ mod tests {
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
 
         let positions: Vec<i32> = (0..256).collect();
-        let postings = vec![(0, 256, positions.as_slice())];
+        let decoded = build_postings_with_positions(&[(0, 256, &positions)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
 
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -992,16 +1068,15 @@ mod tests {
         // Crucially, last_pos resets at doc boundary: doc1's first delta is 0, not (0 - 99)
         let positions0: Vec<i32> = (0..100).collect();
         let positions1: Vec<i32> = (0..50).collect();
-        let postings = vec![
-            (0, 100, positions0.as_slice()),
-            (1, 50, positions1.as_slice()),
-        ];
+        let decoded = build_postings_with_positions(&[(0, 100, &positions0), (1, 50, &positions1)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
 
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1022,13 +1097,15 @@ mod tests {
 
         // 128 positions with gaps of 1000 each — requires ~10 bits per value
         let positions: Vec<i32> = (0..128).map(|i| i * 1000).collect();
-        let postings = vec![(0, 128, positions.as_slice())];
+        let decoded = build_postings_with_positions(&[(0, 128, &positions)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
 
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1068,13 +1145,15 @@ mod tests {
                 _ => 1 + (i % 3),
             };
         }
-        let postings = vec![(0, 256, positions.as_slice())];
+        let decoded = build_postings_with_positions(&[(0, 256, &positions)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
 
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1235,14 +1314,15 @@ mod tests {
         // Exactly 128 docs: 1 full block, no VInt tail
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
+        let decoded = build_postings(&(0..128).map(|i| (i, 1)).collect::<Vec<_>>());
         let header_size = pw.doc_out.file_pointer();
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1264,14 +1344,15 @@ mod tests {
         // 130 docs: 1 full block + 2 VInt tail docs
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..130).map(|i| (i, 1i32, [].as_slice())).collect();
+        let decoded = build_postings(&(0..130).map(|i| (i, 1)).collect::<Vec<_>>());
         let header_size = pw.doc_out.file_pointer();
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1290,14 +1371,15 @@ mod tests {
         // 256 docs: 2 full blocks, no tail
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..256).map(|i| (i, 1i32, [].as_slice())).collect();
+        let decoded = build_postings(&(0..256).map(|i| (i, 1)).collect::<Vec<_>>());
         let header_size = pw.doc_out.file_pointer();
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1313,15 +1395,17 @@ mod tests {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
         // Each doc has 2 positions [0, 1]
-        let positions = vec![0i32, 1];
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, 2i32, positions.as_slice())).collect();
+        let docs_with_pos: Vec<(i32, i32, &[i32])> =
+            (0..128).map(|i| (i, 2, [0i32, 1].as_slice())).collect();
+        let decoded = build_postings_with_positions(&docs_with_pos);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
 
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqsAndPositions,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1343,13 +1427,14 @@ mod tests {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         // doc IDs: 0, 1, 2, ..., 127 — deltas from -1 are 1, 1, 1, ... = range 128
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
+        let decoded = build_postings(&(0..128).map(|i| (i, 1)).collect::<Vec<_>>());
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1364,13 +1449,14 @@ mod tests {
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
         // doc IDs: 0, 100, 200, ..., 12700 — delta = 100 each (except first which is 1 from -1)
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i * 100, 1i32, [].as_slice())).collect();
+        let decoded = build_postings(&(0..128).map(|i| (i * 100, 1)).collect::<Vec<_>>());
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1383,10 +1469,15 @@ mod tests {
         // DOCS-only index option (no freqs) with 128 docs
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, 1i32, [].as_slice())).collect();
+        let decoded = build_postings(&(0..128).map(|i| (i, 1)).collect::<Vec<_>>());
+        let mut pe = BufferedPostingsEnum::new(decoded, false);
         let state = pw
-            .write_term(&postings, IndexOptions::Docs, &NormsLookup::no_norms())
+            .write_term(
+                &mut pe,
+                IndexOptions::Docs,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
             .unwrap();
 
         assert_eq!(state.doc_freq, 128);
@@ -1399,13 +1490,14 @@ mod tests {
         // 128 docs with varied frequencies
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, (i % 10) + 1, [].as_slice())).collect();
+        let decoded = build_postings(&(0..128).map(|i| (i, (i % 10) + 1)).collect::<Vec<_>>());
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
             .write_term(
-                &postings,
+                &mut pe,
                 IndexOptions::DocsAndFreqs,
-                &NormsLookup::no_norms(),
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
             )
             .unwrap();
 
@@ -1422,12 +1514,13 @@ mod tests {
         // (enough to produce non-zero level 0 impacts) and verifies level 1 stays 0.
         let dir = test_directory();
         let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
-        let postings: Vec<(i32, i32, &[i32])> =
-            (0..128).map(|i| (i, (i % 10) + 1, [].as_slice())).collect();
+        let decoded = build_postings(&(0..128).map(|i| (i, (i % 10) + 1)).collect::<Vec<_>>());
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
         pw.write_term(
-            &postings,
+            &mut pe,
             IndexOptions::DocsAndFreqs,
-            &NormsLookup::no_norms(),
+            &BufferedNormsLookup::no_norms(),
+            &mut HashSet::new(),
         )
         .unwrap();
 

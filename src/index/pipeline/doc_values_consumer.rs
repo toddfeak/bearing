@@ -7,9 +7,16 @@ use std::fmt;
 use std::io;
 
 use crate::analysis::Token;
-use crate::codecs::lucene90::doc_values::{self, DocValuesAccumulator, DocValuesFieldData};
+use crate::codecs::lucene90::doc_values::{
+    self, BinaryDocValue, DocValuesAccumulator, DocValuesFieldData, NumericDocValue,
+    SortedDocValue, SortedNumericDocValue, SortedSetDocValue,
+};
+use crate::codecs::lucene90::doc_values_producer::BufferedDocValuesProducer;
 use crate::document::DocValuesType;
+use crate::document::IndexOptions;
+use crate::index::FieldInfo;
 use crate::index::field::{DocValue, Field};
+use crate::index::field_infos::PointDimensionConfig;
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
 use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
 use crate::index::pipeline::segment_context::SegmentContext;
@@ -81,22 +88,37 @@ impl FieldConsumer for DocValuesConsumer {
             }
         });
 
+        // TODO: These clones could be eliminated by making FieldConsumer methods
+        // take `&mut Field`, allowing us to take ownership of DocValue data via
+        // Option::take instead of cloning. Only this consumer reads doc_value().
         if let Some(dv) = field.field_type().doc_value() {
             match (&mut state.accumulator, dv) {
                 (DocValuesAccumulator::Numeric(vals), DocValue::Numeric(v)) => {
-                    vals.push((doc_id, *v));
+                    vals.push(NumericDocValue { doc_id, value: *v });
                 }
                 (DocValuesAccumulator::Binary(vals), DocValue::Binary(b)) => {
-                    vals.push((doc_id, b.clone()));
+                    vals.push(BinaryDocValue {
+                        doc_id,
+                        value: b.clone(),
+                    });
                 }
                 (DocValuesAccumulator::Sorted(vals), DocValue::Sorted(b)) => {
-                    vals.push((doc_id, b.clone()));
+                    vals.push(SortedDocValue {
+                        doc_id,
+                        value: b.clone(),
+                    });
                 }
                 (DocValuesAccumulator::SortedSet(vals), DocValue::SortedSet(terms)) => {
-                    vals.push((doc_id, terms.clone()));
+                    vals.push(SortedSetDocValue {
+                        doc_id,
+                        values: terms.clone(),
+                    });
                 }
                 (DocValuesAccumulator::SortedNumeric(vals), DocValue::SortedNumeric(numbers)) => {
-                    vals.push((doc_id, numbers.clone()));
+                    vals.push(SortedNumericDocValue {
+                        doc_id,
+                        values: numbers.clone(),
+                    });
                 }
                 _ => {
                     return Err(io::Error::other(format!(
@@ -152,7 +174,6 @@ impl FieldConsumer for DocValuesConsumer {
             .drain()
             .map(|(field_id, state)| {
                 let dv_type = match &state.accumulator {
-                    DocValuesAccumulator::None => DocValuesType::None,
                     DocValuesAccumulator::Numeric(_) => DocValuesType::Numeric,
                     DocValuesAccumulator::Binary(_) => DocValuesType::Binary,
                     DocValuesAccumulator::Sorted(_) => DocValuesType::Sorted,
@@ -169,6 +190,26 @@ impl FieldConsumer for DocValuesConsumer {
             .collect();
         fields.sort_by_key(|f| f.number);
 
+        let producer = BufferedDocValuesProducer::new(&fields);
+
+        // Build FieldInfo objects for each doc values field, sorted by field number
+        let mut field_infos: Vec<FieldInfo> = fields
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.name.clone(),
+                    f.number,
+                    false,
+                    true, // omit_norms
+                    IndexOptions::None,
+                    f.doc_values_type,
+                    PointDimensionConfig::default(),
+                )
+            })
+            .collect();
+        field_infos.sort_by_key(|f| f.number());
+        let field_info_refs: Vec<&FieldInfo> = field_infos.iter().collect();
+
         let num_docs = self.current_doc_id + 1;
 
         // Per-field doc values use suffix "Lucene90_0" matching Java's PerFieldDocValuesFormat
@@ -178,7 +219,8 @@ impl FieldConsumer for DocValuesConsumer {
             &context.segment_name,
             segment_suffix,
             &context.segment_id,
-            &fields,
+            &field_info_refs,
+            &producer,
             num_docs,
         )
     }

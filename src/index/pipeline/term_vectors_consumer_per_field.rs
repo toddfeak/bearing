@@ -13,7 +13,7 @@ use std::fmt;
 use std::io;
 use std::mem;
 
-use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
+use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
 use crate::document::IndexOptions;
 use crate::index::pipeline::terms_hash::{
     BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
@@ -373,7 +373,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::codecs::lucene90::term_vectors::CompressingTermVectorsWriter;
+    use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
     use crate::store;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::util::byte_block_pool::ByteBlockPool;
@@ -573,12 +573,8 @@ mod tests {
     #[test]
     fn test_finish_document_self_owned() {
         let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
-        let tvd = {
-            let mut guard = dir.lock().unwrap();
-            guard.create_output("_0.tvd").unwrap()
-        };
         let segment_id = [0u8; 16];
-        let mut writer = CompressingTermVectorsWriter::new(tvd, &segment_id, "").unwrap();
+        let mut writer = CompressingTermVectorsWriter::new(&dir, "_0", "", &segment_id).unwrap();
 
         let mut term_pool = new_term_pool();
         let mut tv_th = TermsHash::new();

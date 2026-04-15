@@ -503,9 +503,9 @@ fn reverse_array_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::competitive_impact::NormsLookup;
+    use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
-    use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, FieldWriteContext};
+    use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, BufferedFieldTerms};
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
@@ -537,7 +537,7 @@ mod tests {
             Self {
                 writer: FreqProxTermsWriterPerField::new(
                     field_name.to_string(),
-                    IndexOptions::DocsAndFreqs,
+                    IndexOptions::Docs,
                 ),
                 term_pool,
                 terms_hash: TermsHash::new(),
@@ -605,14 +605,10 @@ mod tests {
             add_terms_doc_major(&mut tt, &terms);
             tt.finalize();
 
-            let ctx = FieldWriteContext {
-                field_name: "f".to_string(),
-                field_number: 0,
-                write_freqs: false,
-                write_positions: false,
-            };
-            let norms = NormsLookup::no_norms();
-            writer.write_field(&ctx, &tt.writer, &tt.term_pool, &tt.terms_hash, &norms)?;
+            let field_terms =
+                BufferedFieldTerms::new(&tt.writer, &tt.term_pool, &tt.terms_hash, "f", 0);
+            let norms = BufferedNormsLookup::no_norms();
+            writer.write_field(&field_terms, &norms)?;
 
             writer.finish()?;
         }

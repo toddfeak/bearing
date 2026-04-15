@@ -18,6 +18,7 @@ use std::fmt;
 use std::io;
 use std::mem;
 
+use crate::codecs::fields_producer::{NO_MORE_DOCS, PostingsEnumProducer};
 use crate::document::IndexOptions;
 use crate::util::byte_block_pool::{ByteBlockPool, ByteSlicePool, FIRST_LEVEL_SIZE};
 use crate::util::bytes_ref_hash::BytesRefHash;
@@ -542,16 +543,26 @@ pub(crate) trait TermsHashPerFieldTrait {
 /// Extends `TermsHashPerField` via composition. Implements the `newTerm` and
 /// `addTerm` logic that encodes doc IDs, frequencies, positions, and offsets
 /// into the byte pool streams.
+/// One document's entry in a decoded term's posting list.
+///
+/// Positions are stored in a separate flat buffer; `pos_start` and `pos_count`
+/// index into that buffer.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DecodedDoc {
+    pub doc_id: i32,
+    pub freq: i32,
+    pub pos_start: u32,
+}
+
 /// Reusable buffers for decoded term postings.
 ///
 /// Avoids per-term allocation by reusing flat buffers across calls to
-/// `decode_term_into`. Each doc entry stores `(doc_id, freq, pos_start,
-/// pos_count)` where `pos_start` and `pos_count` index into the flat
+/// `decode_term_into`. Each [`DecodedDoc`] entry indexes into the flat
 /// `positions` buffer.
 pub(crate) struct DecodedPostings {
-    /// (doc_id, freq, pos_start, pos_count) per document.
-    pub docs: Vec<(i32, i32, u32, u32)>,
-    /// Flat positions buffer; docs reference ranges via pos_start/pos_count.
+    /// Per-document metadata.
+    pub docs: Vec<DecodedDoc>,
+    /// Flat positions buffer; docs reference ranges via `pos_start`/`pos_count`.
     pub positions: Vec<i32>,
 }
 
@@ -571,8 +582,7 @@ impl DecodedPostings {
     /// Clears for reuse. Shrinks buffers that have grown beyond the threshold.
     pub fn clear(&mut self) {
         self.docs.clear();
-        if self.docs.capacity() * mem::size_of::<(i32, i32, u32, u32)>() > DECODED_SHRINK_THRESHOLD
-        {
+        if self.docs.capacity() * mem::size_of::<DecodedDoc>() > DECODED_SHRINK_THRESHOLD {
             self.docs = Vec::new();
         }
         self.positions.clear();
@@ -580,17 +590,82 @@ impl DecodedPostings {
             self.positions = Vec::new();
         }
     }
+}
 
-    /// Returns an iterator yielding `(doc_id, freq, &[i32])` slices for the
-    /// caller to consume.
-    pub fn iter(&self) -> impl Iterator<Item = (i32, i32, &[i32])> {
-        self.docs
-            .iter()
-            .map(|&(doc_id, freq, pos_start, pos_count)| {
-                let start = pos_start as usize;
-                let end = start + pos_count as usize;
-                (doc_id, freq, &self.positions[start..end])
-            })
+/// [`PostingsEnumProducer`] that owns a [`DecodedPostings`] and iterates
+/// over its contents.
+pub(crate) struct BufferedPostingsEnum {
+    decoded: DecodedPostings,
+    doc_freq: i32,
+    total_term_freq: i64,
+    doc_idx: usize,
+    pos_idx: usize,
+}
+
+impl BufferedPostingsEnum {
+    /// Creates a new enum from owned decoded postings data.
+    pub fn new(decoded: DecodedPostings, has_freqs: bool) -> Self {
+        let doc_freq = decoded.docs.len() as i32;
+        let total_term_freq = if has_freqs {
+            decoded.docs.iter().map(|d| d.freq as i64).sum()
+        } else {
+            -1
+        };
+        Self {
+            decoded,
+            doc_freq,
+            total_term_freq,
+            doc_idx: 0,
+            pos_idx: 0,
+        }
+    }
+
+    fn current_doc(&self) -> &DecodedDoc {
+        &self.decoded.docs[self.doc_idx - 1]
+    }
+}
+
+impl PostingsEnumProducer for BufferedPostingsEnum {
+    fn doc_freq(&self) -> i32 {
+        self.doc_freq
+    }
+
+    fn total_term_freq(&self) -> i64 {
+        self.total_term_freq
+    }
+
+    fn next_doc(&mut self) -> io::Result<i32> {
+        if self.doc_idx >= self.decoded.docs.len() {
+            return Ok(NO_MORE_DOCS);
+        }
+        let doc_id = self.decoded.docs[self.doc_idx].doc_id;
+        self.pos_idx = 0;
+        self.doc_idx += 1;
+        Ok(doc_id)
+    }
+
+    fn freq(&self) -> i32 {
+        self.current_doc().freq
+    }
+
+    fn next_position(&mut self) -> io::Result<i32> {
+        let doc = self.current_doc();
+        let abs_idx = doc.pos_start as usize + self.pos_idx;
+        let pos = self.decoded.positions[abs_idx];
+        self.pos_idx += 1;
+        Ok(pos)
+    }
+
+    fn start_offset(&self) -> i32 {
+        -1
+    }
+
+    fn end_offset(&self) -> i32 {
+        -1
+    }
+
+    fn payload(&self) -> Option<&[u8]> {
+        None
     }
 }
 
@@ -609,7 +684,6 @@ pub(crate) struct FreqProxTermsWriterPerField {
     /// Whether this field indexes offsets.
     pub has_offsets: bool,
     /// Whether any token had a payload in the current segment.
-    #[expect(dead_code)]
     pub saw_payloads: bool,
     /// Tracks max term frequency across all terms for the current document.
     pub max_term_frequency: i32,
@@ -811,8 +885,11 @@ impl FreqProxTermsWriterPerField {
                 }
             }
 
-            let pos_count = buf.positions.len() as u32 - pos_start;
-            buf.docs.push((doc_id, freq, pos_start, pos_count));
+            buf.docs.push(DecodedDoc {
+                doc_id,
+                freq,
+                pos_start,
+            });
         }
 
         Ok(())

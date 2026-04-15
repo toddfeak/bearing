@@ -6,6 +6,7 @@
 //! `super::points::write()`. Metadata is read eagerly from `.kdm`; tree and
 //! leaf data in `.kdi`/`.kdd` are available via retained file handles.
 
+use std::fmt;
 use std::io;
 
 use log::debug;
@@ -13,9 +14,9 @@ use log::debug;
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::points::{
     BKD_CODEC, BKD_VERSION, DATA_CODEC, DATA_EXTENSION, FORMAT_VERSION, INDEX_CODEC,
-    INDEX_EXTENSION, META_CODEC, META_EXTENSION,
+    INDEX_EXTENSION, META_CODEC, META_EXTENSION, PointsFieldData,
 };
-use crate::index::{FieldInfos, index_file_names};
+use crate::index::{FieldInfo, FieldInfos, index_file_names};
 use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{DataInput, Directory, IndexInput};
 
@@ -144,6 +145,154 @@ impl PointsReader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PointValues and PointsProducer traits
+// ---------------------------------------------------------------------------
+
+/// Per-field access to point values and dimensional metadata.
+pub trait PointValues {
+    /// Number of dimensions per point.
+    fn num_dimensions(&self) -> u32;
+
+    /// Number of index dimensions (may be less than `num_dimensions` for range fields).
+    fn num_index_dimensions(&self) -> u32;
+
+    /// Bytes per dimension value.
+    fn bytes_per_dimension(&self) -> u32;
+
+    /// Total number of indexed points.
+    fn size(&self) -> usize;
+
+    /// Returns all `(doc_id, packed_value)` pairs for this field.
+    fn points(&self) -> &[(i32, Vec<u8>)];
+}
+
+/// Produces per-field point values.
+///
+/// Both file-backed readers and in-memory buffered producers implement this trait.
+pub trait PointsProducer: fmt::Debug {
+    /// Returns a [`PointValues`] for the given field, or `None` if absent.
+    fn get_points(&self, field_info: &FieldInfo) -> io::Result<Option<Box<dyn PointValues + '_>>>;
+}
+
+// ---------------------------------------------------------------------------
+// BufferedPointsProducer — in-memory points from the indexing pipeline
+// ---------------------------------------------------------------------------
+
+/// Per-field point data stored in memory.
+#[derive(Debug)]
+struct BufferedFieldPoints {
+    dimension_count: u32,
+    index_dimension_count: u32,
+    bytes_per_dim: u32,
+    points: Vec<(i32, Vec<u8>)>,
+}
+
+/// In-memory [`PointsProducer`] wrapping indexing pipeline buffers.
+///
+/// Each call to [`get_points`](PointsProducer::get_points) returns a
+/// [`PointValues`] that borrows from the buffered data.
+#[derive(Debug)]
+pub struct BufferedPointsProducer {
+    fields: Vec<Option<BufferedFieldPoints>>,
+}
+
+impl BufferedPointsProducer {
+    /// Creates a new buffered producer from point field data.
+    pub fn new(fields_data: &[PointsFieldData]) -> Self {
+        let max_field = fields_data
+            .iter()
+            .map(|f| f.field_number as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let mut fields = Vec::with_capacity(max_field);
+        fields.resize_with(max_field, || None);
+
+        for f in fields_data {
+            fields[f.field_number as usize] = Some(BufferedFieldPoints {
+                dimension_count: f.dimension_count,
+                index_dimension_count: f.index_dimension_count,
+                bytes_per_dim: f.bytes_per_dim,
+                points: f.points.clone(),
+            });
+        }
+
+        Self { fields }
+    }
+}
+
+impl PointsProducer for BufferedPointsProducer {
+    fn get_points(&self, field_info: &FieldInfo) -> io::Result<Option<Box<dyn PointValues + '_>>> {
+        let field_data = match self.fields.get(field_info.number() as usize) {
+            Some(Some(data)) => data,
+            _ => return Ok(None),
+        };
+
+        if field_data.points.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Box::new(BufferedPointValues {
+            dimension_count: field_data.dimension_count,
+            index_dimension_count: field_data.index_dimension_count,
+            bytes_per_dim: field_data.bytes_per_dim,
+            points: &field_data.points,
+        })))
+    }
+}
+
+/// [`PointValues`] borrowing from in-memory buffered data.
+struct BufferedPointValues<'a> {
+    dimension_count: u32,
+    index_dimension_count: u32,
+    bytes_per_dim: u32,
+    points: &'a [(i32, Vec<u8>)],
+}
+
+impl PointValues for BufferedPointValues<'_> {
+    fn num_dimensions(&self) -> u32 {
+        self.dimension_count
+    }
+
+    fn num_index_dimensions(&self) -> u32 {
+        self.index_dimension_count
+    }
+
+    fn bytes_per_dimension(&self) -> u32 {
+        self.bytes_per_dim
+    }
+
+    fn size(&self) -> usize {
+        self.points.len()
+    }
+
+    fn points(&self) -> &[(i32, Vec<u8>)] {
+        self.points
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PointsProducer impl for PointsReader (stub)
+// ---------------------------------------------------------------------------
+
+impl fmt::Debug for PointsReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PointsReader")
+            .field("entries", &self.entries.len())
+            .finish()
+    }
+}
+
+impl PointsProducer for PointsReader {
+    fn get_points(&self, _field_info: &FieldInfo) -> io::Result<Option<Box<dyn PointValues + '_>>> {
+        todo!("disk-backed point value reading for merge path")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// .kdm metadata reading
+// ---------------------------------------------------------------------------
+
 /// Reads all per-field BKD metadata entries from `.kdm`.
 fn read_fields(
     meta: &mut dyn DataInput,
@@ -259,7 +408,9 @@ mod tests {
     fn write_and_read(field_infos: &FieldInfos, fields: &[PointsFieldData]) -> PointsReader {
         let segment_id = [0u8; 16];
         let dir = test_directory();
-        points::write(&dir, "_0", "", &segment_id, fields).unwrap();
+        let producer = BufferedPointsProducer::new(fields);
+        let fi_refs: Vec<&FieldInfo> = field_infos.iter().collect();
+        points::write(&dir, "_0", "", &segment_id, &fi_refs, &producer).unwrap();
         let guard = dir.lock().unwrap();
         PointsReader::open(guard.as_ref(), "_0", "", &segment_id, field_infos).unwrap()
     }
@@ -403,7 +554,9 @@ mod tests {
             4,
             vec![(0, 42i32.to_be_bytes().to_vec())],
         )];
-        points::write(&dir, "_0", "", &segment_id, &fields).unwrap();
+        let producer = BufferedPointsProducer::new(&fields);
+        let fi_refs: Vec<&FieldInfo> = field_infos.iter().collect();
+        points::write(&dir, "_0", "", &segment_id, &fi_refs, &producer).unwrap();
 
         // Truncate the .kdd file
         let mut mem_dir = MemoryDirectory::new();
