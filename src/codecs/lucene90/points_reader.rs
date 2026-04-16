@@ -6,6 +6,7 @@
 //! `super::points::write()`. Metadata is read eagerly from `.kdm`; tree and
 //! leaf data in `.kdi`/`.kdd` are available via retained file handles.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::fmt;
 use std::io;
 
@@ -324,7 +325,7 @@ fn read_fields(
 }
 
 /// Reads a single BKD metadata entry (one per point field).
-fn read_bkd_entry(meta: &mut dyn DataInput) -> io::Result<BkdEntry> {
+fn read_bkd_entry(mut meta: &mut dyn DataInput) -> io::Result<BkdEntry> {
     codec_util::check_header(meta, BKD_CODEC, BKD_VERSION, BKD_VERSION)?;
 
     let _num_dims = meta.read_vint()? as u32;

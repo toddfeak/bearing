@@ -67,7 +67,7 @@ impl DirectReader {
         self.input.seek(pos)?;
         let mut buf = [0u8; 8];
         self.input
-            .read_bytes(&mut buf[..bytes_per_value as usize])?;
+            .read_exact(&mut buf[..bytes_per_value as usize])?;
         let raw = u64::from_le_bytes(buf);
         Ok((raw & mask) as i64)
     }
@@ -82,7 +82,7 @@ impl DirectReader {
         let mut buf = [0u8; 8];
         let read_len =
             bytes_to_read.min((self.input.length() - self.input.file_pointer()) as usize);
-        self.input.read_bytes(&mut buf[..read_len])?;
+        self.input.read_exact(&mut buf[..read_len])?;
         let raw = u64::from_le_bytes(buf);
         Ok(((raw >> shift) & mask) as i64)
     }

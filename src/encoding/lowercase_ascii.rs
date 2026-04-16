@@ -12,6 +12,7 @@
 //! short (<8 bytes) or has too many exceptions (>len/32).
 
 use std::io;
+use std::io::Read;
 
 use crate::encoding::varint;
 
@@ -106,7 +107,7 @@ pub fn compress(input: &[u8], len: usize) -> Option<Vec<u8>> {
 ///
 /// `len` is the original uncompressed length. Reads compressed bytes from the
 /// reader and restores the original byte values.
-pub fn decompress_from_reader(reader: &mut impl io::Read, len: usize) -> io::Result<Vec<u8>> {
+pub fn decompress_from_reader(reader: &mut dyn Read, len: usize) -> io::Result<Vec<u8>> {
     let saved = len >> 2;
     let compressed_len = len - saved;
 

@@ -7,6 +7,7 @@
 //! headers are read during construction; posting list data is read lazily via
 //! [`BlockPostingsEnum`].
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::io;
 
 use log::debug;
@@ -22,7 +23,7 @@ use crate::index::{FieldInfos, index_file_names};
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
 use crate::search::scorer::{Impacts, ImpactsSource};
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, DataInputReader, Directory, IndexInput};
+use crate::store::{DataInput, Directory, IndexInput};
 
 /// Dummy impacts: maximum possible term frequency and lowest possible unsigned norm.
 /// Used on tail blocks that don't record impacts.
@@ -434,7 +435,7 @@ impl BlockPostingsEnum {
         if self.freq_fp != -1 {
             self.doc_in.seek(self.freq_fp as u64)?;
             let mut longs = [0i64; BLOCK_SIZE];
-            pfor::pfor_decode(&mut DataInputReader(self.doc_in.as_mut()), &mut longs)?;
+            pfor::pfor_decode(self.doc_in.as_mut(), &mut longs)?;
             for (i, &val) in longs.iter().enumerate() {
                 self.freq_buffer[i] = val as i32;
             }
@@ -449,12 +450,7 @@ impl BlockPostingsEnum {
         if bits_per_value > 0 {
             // Block is encoded as 128 packed integers (FOR delta)
             let mut arr = [0i32; BLOCK_SIZE];
-            pfor::for_delta_decode(
-                bits_per_value as u32,
-                &mut DataInputReader(input),
-                self.prev_doc_id,
-                &mut arr,
-            )?;
+            pfor::for_delta_decode(bits_per_value as u32, input, self.prev_doc_id, &mut arr)?;
             self.doc_buffer[..BLOCK_SIZE].copy_from_slice(&arr);
             self.encoding = DeltaEncoding::Packed;
         } else {
@@ -577,7 +573,7 @@ impl BlockPostingsEnum {
                 let num_impact_bytes = self.doc_in.read_le_short()? as usize;
                 if self.needs_impacts && self.level1_last_doc_id >= target {
                     if let Some(ref mut buf) = self.level1_serialized_impacts {
-                        self.doc_in.read_bytes(&mut buf[..num_impact_bytes])?;
+                        self.doc_in.read_exact(&mut buf[..num_impact_bytes])?;
                         self.level1_serialized_impacts_length = num_impact_bytes;
                     }
                 } else {
@@ -609,7 +605,7 @@ impl BlockPostingsEnum {
                 let num_impact_bytes = self.doc_in.read_vint()? as usize;
                 if self.needs_impacts {
                     if let Some(ref mut buf) = self.level0_serialized_impacts {
-                        self.doc_in.read_bytes(&mut buf[..num_impact_bytes])?;
+                        self.doc_in.read_exact(&mut buf[..num_impact_bytes])?;
                         self.level0_serialized_impacts_length = num_impact_bytes;
                     }
                 } else {
@@ -676,7 +672,7 @@ impl BlockPostingsEnum {
                         let num_impact_bytes = self.doc_in.read_vint()? as usize;
                         if self.needs_impacts && found {
                             if let Some(ref mut buf) = self.level0_serialized_impacts {
-                                self.doc_in.read_bytes(&mut buf[..num_impact_bytes])?;
+                                self.doc_in.read_exact(&mut buf[..num_impact_bytes])?;
                                 self.level0_serialized_impacts_length = num_impact_bytes;
                             }
                         } else {
@@ -873,7 +869,7 @@ impl Impacts for BlockPostingsEnum {
 // ---------------------------------------------------------------------------
 
 /// Reads a VInt15 value: a short followed optionally by a VInt for the high bits.
-fn read_vint15(input: &mut dyn DataInput) -> io::Result<i32> {
+fn read_vint15(mut input: &mut dyn DataInput) -> io::Result<i32> {
     let s = input.read_le_short()?;
     if s >= 0 {
         Ok(s as i32)
@@ -883,7 +879,7 @@ fn read_vint15(input: &mut dyn DataInput) -> io::Result<i32> {
 }
 
 /// Reads a VLong15 value: a short followed optionally by a VLong for the high bits.
-fn read_vlong15(input: &mut dyn DataInput) -> io::Result<i64> {
+fn read_vlong15(mut input: &mut dyn DataInput) -> io::Result<i64> {
     let s = input.read_le_short()?;
     if s >= 0 {
         Ok(s as i64)
@@ -1013,7 +1009,7 @@ fn next_set_bit(bits: &[u64; 64], from_index: usize) -> usize {
 }
 
 /// Skips a PFOR-encoded block of 128 values without decoding.
-fn skip_pfor(input: &mut dyn DataInput) -> io::Result<()> {
+fn skip_pfor(mut input: &mut dyn DataInput) -> io::Result<()> {
     let token = input.read_byte()? as u32;
     let bpv = token & 0x1F;
     let num_exceptions = token >> 5;
@@ -1031,7 +1027,7 @@ fn skip_pfor(input: &mut dyn DataInput) -> io::Result<()> {
 ///
 /// Matches Java's `PostingsUtil.readVIntBlock`.
 fn read_vint_block(
-    input: &mut dyn DataInput,
+    mut input: &mut dyn DataInput,
     doc_buffer: &mut [i32],
     freq_buffer: &mut [i32],
     num: usize,

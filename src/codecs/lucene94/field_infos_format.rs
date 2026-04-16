@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Field infos format (.fnm) writer and reader for per-field metadata.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
 use std::io;
 

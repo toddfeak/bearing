@@ -10,6 +10,7 @@
 //! [`super::trie_reader::TrieReader`] and scan within them to find exact terms
 //! and decode their metadata ([`IntBlockTermState`]).
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::cmp::Ordering;
 use std::io;
 
@@ -19,7 +20,7 @@ use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4, pfor, zigzag};
 use crate::index::terms::TermsEnum;
 use crate::store::slice_reader::SliceReader;
-use crate::store::{DataInput, DataInputReader, IndexInput};
+use crate::store::{DataInput, IndexInput};
 
 const COMPRESSION_NONE: u32 = 0;
 const COMPRESSION_LOWERCASE_ASCII: u32 = 1;
@@ -209,7 +210,7 @@ enum ScanResult {
 
 /// Loads and scans a single term block from the current position.
 fn scan_block(
-    input: &mut dyn DataInput,
+    mut input: &mut dyn DataInput,
     target: &[u8],
     prefix_length: usize,
     index_options: IndexOptions,
@@ -237,19 +238,19 @@ fn scan_block(
         vec![common; num_suffix_length_bytes]
     } else {
         let mut buf = vec![0u8; num_suffix_length_bytes];
-        input.read_bytes(&mut buf)?;
+        input.read_exact(&mut buf)?;
         buf
     };
 
     // Section 4: Stats
     let num_stats_bytes = input.read_vint()? as usize;
     let mut stats_bytes = vec![0u8; num_stats_bytes];
-    input.read_bytes(&mut stats_bytes)?;
+    input.read_exact(&mut stats_bytes)?;
 
     // Section 5: Metadata
     let num_meta_bytes = input.read_vint()? as usize;
     let mut meta_bytes = vec![0u8; num_meta_bytes];
-    input.read_bytes(&mut meta_bytes)?;
+    input.read_exact(&mut meta_bytes)?;
 
     // Now scan suffixes to find the target
     let target_suffix = &target[prefix_length..];
@@ -407,20 +408,14 @@ fn read_compressed(
     match compression_code {
         COMPRESSION_NONE => {
             let mut buf = vec![0u8; uncompressed_len];
-            input.read_bytes(&mut buf)?;
+            input.read_exact(&mut buf)?;
             Ok(buf)
         }
-        COMPRESSION_LZ4 => {
-            let mut reader = DataInputReader(input);
-            Ok(lz4::decompress_from_reader(&mut reader, uncompressed_len)?)
-        }
-        COMPRESSION_LOWERCASE_ASCII => {
-            let mut reader = DataInputReader(input);
-            Ok(lowercase_ascii::decompress_from_reader(
-                &mut reader,
-                uncompressed_len,
-            )?)
-        }
+        COMPRESSION_LZ4 => Ok(lz4::decompress_from_reader(input, uncompressed_len)?),
+        COMPRESSION_LOWERCASE_ASCII => Ok(lowercase_ascii::decompress_from_reader(
+            input,
+            uncompressed_len,
+        )?),
         _ => Err(io::Error::other(format!(
             "unknown compression code: {compression_code}"
         ))),

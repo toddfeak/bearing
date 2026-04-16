@@ -4,6 +4,7 @@
 //!
 //! Ported from `Lucene90CompoundReader`.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
 use std::io;
 
@@ -143,7 +144,7 @@ impl Directory for CompoundDirectory {
         let mut input = self.open_input(name)?;
         let len = input.length() as usize;
         let mut buf = vec![0u8; len];
-        input.read_bytes(&mut buf)?;
+        input.read_exact(&mut buf)?;
         Ok(buf)
     }
 }
@@ -174,7 +175,7 @@ fn read_entries(
 }
 
 /// Reads the entry mapping from the `.cfe` stream.
-fn read_mapping(input: &mut dyn DataInput) -> io::Result<HashMap<String, FileEntry>> {
+fn read_mapping(mut input: &mut dyn DataInput) -> io::Result<HashMap<String, FileEntry>> {
     let num_entries = input.read_vint()?;
     let mut mapping = HashMap::with_capacity(num_entries as usize);
 

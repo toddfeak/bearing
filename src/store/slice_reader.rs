@@ -43,17 +43,16 @@ impl<'a> SliceReader<'a> {
     }
 }
 
-impl DataInput for SliceReader<'_> {
-    fn read_byte(&mut self) -> io::Result<u8> {
-        if self.pos >= self.data.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
+impl io::Read for SliceReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
         }
-        let b = self.data[self.pos];
-        self.pos += 1;
-        Ok(b)
+        buf[0] = self.read_byte()?;
+        Ok(1)
     }
 
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         let end = self.pos + buf.len();
         if end > self.data.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
@@ -64,9 +63,23 @@ impl DataInput for SliceReader<'_> {
     }
 }
 
+impl DataInput for SliceReader<'_> {
+    fn read_byte(&mut self) -> io::Result<u8> {
+        if self.pos >= self.data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
+        }
+        let b = self.data[self.pos];
+        self.pos += 1;
+        Ok(b)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::*;
+    use crate::encoding::read_encoding::ReadEncoding;
     use crate::store::{DataOutput, VecOutput};
 
     #[test]
@@ -82,7 +95,7 @@ mod tests {
     fn test_read_bytes() {
         let mut reader = SliceReader::new(&[10, 20, 30, 40]);
         let mut buf = [0u8; 4];
-        reader.read_bytes(&mut buf).unwrap();
+        reader.read_exact(&mut buf).unwrap();
         assert_eq!(buf, [10, 20, 30, 40]);
     }
 
@@ -90,7 +103,7 @@ mod tests {
     fn test_read_bytes_past_end() {
         let mut reader = SliceReader::new(&[1, 2]);
         let mut buf = [0u8; 3];
-        assert_err!(reader.read_bytes(&mut buf));
+        assert_err!(reader.read_exact(&mut buf));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Term vectors writer producing `.tvd`, `.tvx`, `.tvm` files.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
@@ -15,7 +16,7 @@ use crate::codecs::packed_writers::{BlockPackedWriter, DirectMonotonicWriter, Di
 use crate::encoding::lz4;
 use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_bits_required};
 use crate::index::index_file_names;
-use crate::store::{self, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
 use crate::util::byte_block_pool::ByteSliceReader;
 
 // File extensions
@@ -386,9 +387,9 @@ impl CompressingTermVectorsWriter {
                 let pay_write = pay_start + total_pos;
                 grow(&mut self.payload_lengths_buf, pay_write + num_prox as usize);
                 for i in 0..num_prox as usize {
-                    let code = store::read_vint(pos_reader).unwrap();
+                    let code = pos_reader.read_vint().unwrap();
                     if (code & 1) != 0 {
-                        let payload_length = store::read_vint(pos_reader).unwrap();
+                        let payload_length = pos_reader.read_vint().unwrap();
                         self.payload_lengths_buf[pay_write + i] = payload_length;
                         for _ in 0..payload_length {
                             let mut buf = [0u8; 1];
@@ -403,7 +404,7 @@ impl CompressingTermVectorsWriter {
                 }
             } else {
                 for i in 0..num_prox as usize {
-                    let code = store::read_vint(pos_reader).unwrap();
+                    let code = pos_reader.read_vint().unwrap();
                     position += code >> 1;
                     self.positions_buf[write_start + i] = position;
                 }
@@ -418,8 +419,8 @@ impl CompressingTermVectorsWriter {
 
             let mut last_end_offset = 0i32;
             for i in 0..num_prox as usize {
-                let start_offset = last_end_offset + store::read_vint(off_reader).unwrap();
-                let end_offset = start_offset + store::read_vint(off_reader).unwrap();
+                let start_offset = last_end_offset + off_reader.read_vint().unwrap();
+                let end_offset = start_offset + off_reader.read_vint().unwrap();
                 last_end_offset = end_offset;
                 self.start_offsets_buf[write_start + i] = start_offset;
                 self.lengths_buf[write_start + i] = end_offset - start_offset;

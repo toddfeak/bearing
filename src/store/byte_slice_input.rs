@@ -2,7 +2,7 @@
 
 //! In-memory [`IndexInput`] backed by a `Vec<u8>`.
 
-use std::io;
+use std::io::{self};
 
 use crate::store::{DataInput, IndexInput, RandomAccessInput};
 
@@ -41,6 +41,27 @@ impl ByteSliceIndexInput {
     }
 }
 
+impl io::Read for ByteSliceIndexInput {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        buf[0] = self.read_byte()?;
+        Ok(1)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let abs = self.offset + self.pos;
+        let end = self.pos + buf.len();
+        if end > self.len {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
+        }
+        buf.copy_from_slice(&self.data[abs..abs + buf.len()]);
+        self.pos = end;
+        Ok(())
+    }
+}
+
 impl DataInput for ByteSliceIndexInput {
     fn skip_bytes(&mut self, num_bytes: u64) -> io::Result<()> {
         self.seek(self.file_pointer() + num_bytes)
@@ -54,17 +75,6 @@ impl DataInput for ByteSliceIndexInput {
         let b = self.data[abs];
         self.pos += 1;
         Ok(b)
-    }
-
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        let abs = self.offset + self.pos;
-        let end = self.pos + buf.len();
-        if end > self.len {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-        }
-        buf.copy_from_slice(&self.data[abs..abs + buf.len()]);
-        self.pos = end;
-        Ok(())
     }
 }
 
@@ -177,6 +187,8 @@ impl RandomAccessInput for ByteSliceIndexInput {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::*;
 
     #[test]
@@ -192,7 +204,7 @@ mod tests {
     fn test_read_bytes() {
         let mut input = ByteSliceIndexInput::new("test".into(), vec![1, 2, 3, 4]);
         let mut buf = [0u8; 4];
-        input.read_bytes(&mut buf).unwrap();
+        input.read_exact(&mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4]);
     }
 

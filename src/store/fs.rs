@@ -269,6 +269,25 @@ impl FSIndexInput {
     }
 }
 
+impl io::Read for FSIndexInput {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        buf[0] = self.read_byte()?;
+        Ok(1)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        if self.pos + buf.len() as u64 > self.len {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
+        }
+        self.reader.read_exact(buf)?;
+        self.pos += buf.len() as u64;
+        Ok(())
+    }
+}
+
 impl DataInput for FSIndexInput {
     fn read_byte(&mut self) -> io::Result<u8> {
         if self.pos >= self.len {
@@ -278,15 +297,6 @@ impl DataInput for FSIndexInput {
         self.reader.read_exact(&mut buf)?;
         self.pos += 1;
         Ok(buf[0])
-    }
-
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        if self.pos + buf.len() as u64 > self.len {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-        }
-        self.reader.read_exact(buf)?;
-        self.pos += buf.len() as u64;
-        Ok(())
     }
 
     fn skip_bytes(&mut self, num_bytes: u64) -> io::Result<()> {
@@ -422,6 +432,7 @@ mod tests {
     use std::process;
 
     use super::*;
+    use crate::encoding::read_encoding::ReadEncoding;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("rustlucene_test_fs_{name}_{}", process::id()));
@@ -592,12 +603,12 @@ mod tests {
         assert_eq!(input.length(), 11);
 
         let mut buf = [0u8; 5];
-        input.read_bytes(&mut buf).unwrap();
+        input.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"hello");
         assert_eq!(input.file_pointer(), 5);
 
         input.seek(0).unwrap();
-        input.read_bytes(&mut buf).unwrap();
+        input.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"hello");
     }
 

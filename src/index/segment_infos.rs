@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Segment infos reader and writer for the segments_N commit point file.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Read};
 use std::sync::Arc;
 
 use log::debug;
@@ -132,12 +133,12 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
 
     // Read segment infos ID (16 bytes) — we discover it here
     let mut _id = [0u8; codec_util::ID_LENGTH];
-    input.read_bytes(&mut _id)?;
+    input.read_exact(&mut _id)?;
 
     // Read and validate suffix (should match generation in base-36)
     let suffix_len = input.read_byte()? as usize;
     let mut suffix_bytes = vec![0u8; suffix_len];
-    input.read_bytes(&mut suffix_bytes)?;
+    input.read_exact(&mut suffix_bytes)?;
     let suffix = String::from_utf8(suffix_bytes).map_err(|e| io::Error::other(e.to_string()))?;
     if suffix != expected_suffix {
         return Err(io::Error::other(format!(
@@ -180,7 +181,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
         let seg_name = input.read_string()?;
 
         let mut seg_id = [0u8; codec_util::ID_LENGTH];
-        input.read_bytes(&mut seg_id)?;
+        input.read_exact(&mut seg_id)?;
 
         let codec_name = input.read_string()?;
 
@@ -193,7 +194,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
         let sci_id = match input.read_byte()? {
             1 => {
                 let mut id = [0u8; codec_util::ID_LENGTH];
-                input.read_bytes(&mut id)?;
+                input.read_exact(&mut id)?;
                 Some(id)
             }
             0 => None,

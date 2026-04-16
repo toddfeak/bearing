@@ -442,7 +442,7 @@ impl IndexedDISI {
 
             // Load rank table
             if let Some(ref mut table) = self.dense_rank_table {
-                self.slice.read_bytes(table)?;
+                self.slice.read_exact(table)?;
             }
             self.word_index = -1;
             self.number_of_ones = self.index + 1;

@@ -8,6 +8,7 @@
 use crate::encoding::varint;
 use std::collections::HashMap;
 use std::io;
+use std::io::Read;
 
 /// Writes a string as VInt-encoded byte length followed by UTF-8 bytes.
 pub fn write_string(out: &mut impl io::Write, s: &str) -> io::Result<()> {
@@ -19,7 +20,7 @@ pub fn write_string(out: &mut impl io::Write, s: &str) -> io::Result<()> {
 }
 
 /// Reads a string: VInt-encoded byte length followed by UTF-8 bytes.
-pub fn read_string(reader: &mut impl io::Read) -> io::Result<String> {
+pub fn read_string(reader: &mut dyn Read) -> io::Result<String> {
     let len = varint::read_vint(reader)?;
     let len = usize::try_from(len).map_err(|_| io::Error::other("negative string length"))?;
     let mut buf = vec![0u8; len];
@@ -39,7 +40,7 @@ pub fn write_set_of_strings(out: &mut impl io::Write, set: &[String]) -> io::Res
 }
 
 /// Reads a set of strings: VInt count followed by each string.
-pub fn read_set_of_strings(reader: &mut impl io::Read) -> io::Result<Vec<String>> {
+pub fn read_set_of_strings(reader: &mut dyn Read) -> io::Result<Vec<String>> {
     let count = varint::read_vint(reader)?;
     let count = usize::try_from(count).map_err(|_| io::Error::other("negative set count"))?;
     let mut result = Vec::with_capacity(count);
@@ -65,7 +66,7 @@ pub fn write_map_of_strings(
 }
 
 /// Reads a map of strings: VInt count followed by key-value pairs.
-pub fn read_map_of_strings(reader: &mut impl io::Read) -> io::Result<HashMap<String, String>> {
+pub fn read_map_of_strings(reader: &mut dyn Read) -> io::Result<HashMap<String, String>> {
     let count = varint::read_vint(reader)?;
     let count = usize::try_from(count).map_err(|_| io::Error::other("negative map count"))?;
     let mut result = HashMap::with_capacity(count);

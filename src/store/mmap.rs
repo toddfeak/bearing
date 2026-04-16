@@ -128,6 +128,28 @@ impl MmapIndexInput {
     }
 }
 
+impl io::Read for MmapIndexInput {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        buf[0] = self.read_byte()?;
+        Ok(1)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let end = self.pos + buf.len() as u64;
+        if end > self.len {
+            return Err(io::Error::other("read past end of MmapIndexInput"));
+        }
+        let start = self.pos as usize;
+        let data = MmapIndexInput::bytes(self);
+        buf.copy_from_slice(&data[start..start + buf.len()]);
+        self.pos = end;
+        Ok(())
+    }
+}
+
 impl DataInput for MmapIndexInput {
     fn read_byte(&mut self) -> io::Result<u8> {
         if self.pos >= self.len {
@@ -136,17 +158,6 @@ impl DataInput for MmapIndexInput {
         let b = self.bytes()[self.pos as usize];
         self.pos += 1;
         Ok(b)
-    }
-
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        let end = self.pos + buf.len() as u64;
-        if end > self.len {
-            return Err(io::Error::other("read past end of MmapIndexInput"));
-        }
-        let start = self.pos as usize;
-        buf.copy_from_slice(&self.bytes()[start..start + buf.len()]);
-        self.pos = end;
-        Ok(())
     }
 }
 
@@ -270,7 +281,7 @@ mod tests {
         let mut input = mmap_dir.open_input("test.dat").unwrap();
         assert_eq!(input.length(), 16);
         let mut buf = vec![0u8; 16];
-        input.read_bytes(&mut buf).unwrap();
+        input.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"hello mmap world");
     }
 

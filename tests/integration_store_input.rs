@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 
+use bearing::encoding::read_encoding::ReadEncoding;
 use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory, SharedDirectory};
 
 #[test]
@@ -169,7 +170,7 @@ fn test_index_writer_codec_files_have_valid_headers() {
 
         let mut input = dir.open_input(file).unwrap();
         let mut header = [0u8; 4];
-        input.read_bytes(&mut header).unwrap();
+        input.read_exact(&mut header).unwrap();
         assert_eq!(
             header, codec_magic_bytes,
             "file {file} does not start with CODEC_MAGIC"

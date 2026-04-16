@@ -9,6 +9,7 @@
 //! eagerly from `.tmd` during construction, while `.tim` and `.tip` file handles
 //! are kept open for lazy term enumeration at query time.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
@@ -305,7 +306,7 @@ impl fmt::Debug for FieldReader {
 
 /// Reads a single field's metadata from the `.tmd` stream.
 fn read_field_metadata(
-    input: &mut dyn DataInput,
+    mut input: &mut dyn DataInput,
     field_infos: &FieldInfos,
     index_in: &dyn IndexInput,
     terms_in: &dyn IndexInput,
@@ -385,13 +386,13 @@ fn read_field_metadata(
 }
 
 /// Reads a length-prefixed byte array (VInt length + raw bytes).
-fn read_bytes_ref(input: &mut dyn DataInput) -> io::Result<Box<[u8]>> {
+fn read_bytes_ref(mut input: &mut dyn DataInput) -> io::Result<Box<[u8]>> {
     let len = input.read_vint()?;
     if len < 0 {
         return Err(io::Error::other(format!("invalid bytes length: {len}")));
     }
     let mut buf = vec![0u8; len as usize];
-    input.read_bytes(&mut buf)?;
+    input.read_exact(&mut buf)?;
     Ok(buf.into_boxed_slice())
 }
 

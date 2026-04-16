@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! LZ4 block compression for stored fields and blocktree suffix data.
 
+use std::io;
+use std::io::Read;
+
 const MIN_MATCH: usize = 4;
 const LAST_LITERALS: usize = 5;
 const MEMORY_USAGE: usize = 14;
@@ -481,8 +484,6 @@ pub fn compress_high(input: &[u8], ht: &mut HighCompressionHashTable) -> Vec<u8>
     output
 }
 
-use std::io;
-
 /// LZ4 decompress a block. `dest_len` is the expected uncompressed size.
 pub fn decompress(compressed: &[u8], dest_len: usize) -> io::Result<Vec<u8>> {
     let mut output = Vec::with_capacity(dest_len);
@@ -645,7 +646,7 @@ pub fn decompress_with_prefix(
 /// Reads compressed bytes directly from the input until `dest_len` output
 /// bytes are produced. The LZ4 format is self-delimiting so no compressed
 /// length needs to be known in advance.
-pub fn decompress_from_reader(reader: &mut impl io::Read, dest_len: usize) -> io::Result<Vec<u8>> {
+pub fn decompress_from_reader(reader: &mut dyn Read, dest_len: usize) -> io::Result<Vec<u8>> {
     let mut output = Vec::with_capacity(dest_len);
 
     while output.len() < dest_len {

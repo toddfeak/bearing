@@ -251,6 +251,7 @@ impl IndexOutput for MemoryIndexOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::read_encoding::ReadEncoding;
 
     #[test]
     fn test_memory_output_write_and_checksum() {
@@ -371,7 +372,7 @@ mod tests {
         assert_eq!(input.file_pointer(), 0);
 
         let mut buf = [0u8; 5];
-        input.read_bytes(&mut buf).unwrap();
+        input.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"hello");
         assert_eq!(input.file_pointer(), 5);
     }

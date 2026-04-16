@@ -22,7 +22,7 @@ pub mod mmap;
 pub(crate) mod slice_reader;
 
 pub use checksum::CRC32;
-pub use data_input::{DataInput, DataInputReader, encode_vint, read_vint};
+pub use data_input::DataInput;
 pub use data_output::{DataOutput, DataOutputWriter, VecOutput};
 pub use fs::FSDirectory;
 pub use index_input::{IndexInput, RandomAccessInput};
@@ -104,6 +104,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::encoding::read_encoding::ReadEncoding;
     use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::index_output::align_offset;
 

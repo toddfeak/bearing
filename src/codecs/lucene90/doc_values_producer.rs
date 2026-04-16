@@ -9,6 +9,7 @@
 //! by [`super::doc_values`]. Metadata is read eagerly during construction; value
 //! data is read lazily from the `.dvd` data file on demand.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::fmt;
 use std::io;
 
@@ -401,7 +402,10 @@ fn skip_direct_monotonic_meta_blocks(
 
 /// Skips DirectMonotonic addresses metadata: offset, blockShift vint,
 /// DM meta blocks, and length.
-fn skip_direct_monotonic_addresses(meta: &mut dyn DataInput, num_values: i64) -> io::Result<()> {
+fn skip_direct_monotonic_addresses(
+    mut meta: &mut dyn DataInput,
+    num_values: i64,
+) -> io::Result<()> {
     let _addresses_offset = meta.read_le_long()?;
     let block_shift = meta.read_vint()? as u32;
     skip_direct_monotonic_meta_blocks(meta, num_values, block_shift)?;
@@ -410,7 +414,7 @@ fn skip_direct_monotonic_addresses(meta: &mut dyn DataInput, num_values: i64) ->
 }
 
 /// Skips the terms dictionary metadata written by `add_terms_dict()`.
-fn skip_terms_dict(meta: &mut dyn DataInput) -> io::Result<()> {
+fn skip_terms_dict(mut meta: &mut dyn DataInput) -> io::Result<()> {
     let num_terms = meta.read_vlong()?;
     let block_shift = meta.read_le_int()? as u32;
 

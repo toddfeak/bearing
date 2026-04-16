@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Utilities for reading and writing codec headers and footers with CRC32 integrity checks.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::io;
 
 use log::debug;
@@ -112,7 +113,7 @@ fn vint_size(mut val: u32) -> usize {
 ///   - The codec name matches `codec`
 ///   - The version is in `[min_version, max_version]`
 pub fn check_header(
-    input: &mut dyn DataInput,
+    mut input: &mut dyn DataInput,
     codec: &str,
     min_version: i32,
     max_version: i32,
@@ -153,7 +154,7 @@ pub fn check_index_header(
     let version = check_header(input, codec, min_version, max_version)?;
 
     let mut actual_id = [0u8; ID_LENGTH];
-    input.read_bytes(&mut actual_id)?;
+    input.read_exact(&mut actual_id)?;
     if actual_id != *expected_id {
         return Err(io::Error::other(format!(
             "segment ID mismatch: expected {expected_id:02x?}, got {actual_id:02x?}"
@@ -162,7 +163,7 @@ pub fn check_index_header(
 
     let suffix_len = input.read_byte()? as usize;
     let mut suffix_bytes = vec![0u8; suffix_len];
-    input.read_bytes(&mut suffix_bytes)?;
+    input.read_exact(&mut suffix_bytes)?;
     let actual_suffix =
         String::from_utf8(suffix_bytes).map_err(|e| io::Error::other(e.to_string()))?;
     if actual_suffix != expected_suffix {

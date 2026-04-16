@@ -5,6 +5,7 @@
 //! Reads `.fdt` (field data), `.fdx` (index), and `.fdm` (metadata) files
 //! produced by the Lucene90 compressing stored fields writer.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::io;
 use std::str;
 
@@ -396,7 +397,7 @@ impl StoredFieldsReader {
         // Now read all compressed data
         // Decompress dictionary
         let mut dict_compressed = vec![0u8; dict_compressed_len];
-        self.fields_stream.read_bytes(&mut dict_compressed)?;
+        self.fields_stream.read_exact(&mut dict_compressed)?;
         let dict = if dict_length > 0 {
             lz4::decompress(&dict_compressed, dict_length)?
         } else {
@@ -417,7 +418,7 @@ impl StoredFieldsReader {
         for &comp_len in &compressed_lengths[1..] {
             let block_decompressed = (decompressed_length - data_start).min(block_length);
             let mut compressed = vec![0u8; comp_len];
-            self.fields_stream.read_bytes(&mut compressed)?;
+            self.fields_stream.read_exact(&mut compressed)?;
 
             let block_data = lz4::decompress_with_prefix(&compressed, block_decompressed, &dict)?;
             result.extend_from_slice(&block_data);
@@ -475,7 +476,7 @@ fn decode_fields(data: &[u8], num_fields: usize) -> io::Result<Vec<StoredField>>
 
 /// Reads `count` integers from the input using StoredFieldsInts encoding.
 fn read_stored_fields_ints(
-    input: &mut dyn DataInput,
+    mut input: &mut dyn DataInput,
     count: usize,
     values: &mut [i64],
 ) -> io::Result<()> {

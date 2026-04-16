@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Segment info format (.si) writer and reader for segment-level metadata.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
 use std::io;
 

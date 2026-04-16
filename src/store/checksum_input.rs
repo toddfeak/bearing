@@ -3,7 +3,7 @@
 //! [`ChecksumIndexInput`] wraps an [`IndexInput`] and computes a running CRC32
 //! checksum over all bytes read.
 
-use std::io;
+use std::io::{self, Read};
 
 use crate::store::checksum::CRC32;
 use crate::store::{DataInput, IndexInput, RandomAccessInput};
@@ -32,17 +32,27 @@ impl ChecksumIndexInput {
     }
 }
 
+impl io::Read for ChecksumIndexInput {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        buf[0] = self.read_byte()?;
+        Ok(1)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        self.inner.read_exact(buf)?;
+        self.crc.update(buf);
+        Ok(())
+    }
+}
+
 impl DataInput for ChecksumIndexInput {
     fn read_byte(&mut self) -> io::Result<u8> {
         let b = self.inner.read_byte()?;
         self.crc.update_byte(b);
         Ok(b)
-    }
-
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        self.inner.read_bytes(buf)?;
-        self.crc.update(buf);
-        Ok(())
     }
 
     fn skip_bytes(&mut self, num_bytes: u64) -> io::Result<()> {
@@ -51,7 +61,7 @@ impl DataInput for ChecksumIndexInput {
         let mut skip_buf = [0u8; 1024];
         while remaining > 0 {
             let to_read = remaining.min(skip_buf.len() as u64) as usize;
-            self.read_bytes(&mut skip_buf[..to_read])?;
+            self.read_exact(&mut skip_buf[..to_read])?;
             remaining -= to_read as u64;
         }
         Ok(())
@@ -120,7 +130,7 @@ mod tests {
         let mut input = make_checksum_input(data);
 
         let mut buf = [0u8; 5];
-        input.read_bytes(&mut buf).unwrap();
+        input.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"hello");
 
         // CRC32 of "hello" = 0x3610A686
@@ -200,7 +210,7 @@ mod tests {
 
         let mut input = make_checksum_input(b"test data here");
         let mut buf = [0u8; 14];
-        input.read_bytes(&mut buf).unwrap();
+        input.read_exact(&mut buf).unwrap();
 
         assert_eq!(input.checksum(), expected_checksum);
     }

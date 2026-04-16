@@ -374,7 +374,7 @@ mod tests {
 
     use super::*;
     use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
-    use crate::store;
+    use crate::encoding::read_encoding::ReadEncoding;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::util::byte_block_pool::ByteBlockPool;
     use assertables::*;
@@ -385,7 +385,7 @@ mod tests {
 
     /// Helper to read a VInt from a byte slice reader.
     fn read_vint(reader: &mut ByteSliceReader<'_>) -> i32 {
-        store::read_vint(reader).unwrap()
+        reader.read_vint().unwrap()
     }
 
     #[test]

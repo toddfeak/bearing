@@ -8,6 +8,7 @@
 
 use crate::encoding::zigzag;
 use std::io;
+use std::io::Read;
 
 /// Writes a variable-length integer (1-5 bytes).
 ///
@@ -24,7 +25,7 @@ pub fn write_vint(out: &mut impl io::Write, i: i32) -> io::Result<()> {
 /// Reads a variable-length integer (1-5 bytes).
 ///
 /// High bit = continuation.
-pub fn read_vint(reader: &mut impl io::Read) -> io::Result<i32> {
+pub fn read_vint(reader: &mut dyn Read) -> io::Result<i32> {
     let mut buf = [0u8; 1];
     let mut result = 0i32;
     let mut shift = 0;
@@ -55,7 +56,7 @@ pub fn write_vlong(out: &mut impl io::Write, i: i64) -> io::Result<()> {
 /// Reads a variable-length long (1-9 bytes).
 ///
 /// High bit = continuation.
-pub fn read_vlong(reader: &mut impl io::Read) -> io::Result<i64> {
+pub fn read_vlong(reader: &mut dyn Read) -> io::Result<i64> {
     let mut buf = [0u8; 1];
     let mut result = 0i64;
     let mut shift = 0;
@@ -77,7 +78,7 @@ pub fn write_zint(out: &mut impl io::Write, i: i32) -> io::Result<()> {
 }
 
 /// Reads a zigzag-encoded variable-length int.
-pub fn read_zint(reader: &mut impl io::Read) -> io::Result<i32> {
+pub fn read_zint(reader: &mut dyn Read) -> io::Result<i32> {
     Ok(zigzag::decode_i32(read_vint(reader)?))
 }
 
@@ -88,7 +89,7 @@ pub fn write_zlong(out: &mut impl io::Write, i: i64) -> io::Result<()> {
 }
 
 /// Reads a zigzag-encoded variable-length long.
-pub fn read_zlong(reader: &mut impl io::Read) -> io::Result<i64> {
+pub fn read_zlong(reader: &mut dyn Read) -> io::Result<i64> {
     Ok(zigzag::decode_i64(read_signed_vlong(reader)?))
 }
 
@@ -102,7 +103,7 @@ pub fn write_signed_vlong(out: &mut impl io::Write, mut i: i64) -> io::Result<()
 }
 
 /// Reads a variable-length long that may be negative (used by [`read_zlong`]).
-pub fn read_signed_vlong(reader: &mut impl io::Read) -> io::Result<i64> {
+pub fn read_signed_vlong(reader: &mut dyn Read) -> io::Result<i64> {
     let mut buf = [0u8; 1];
     let mut result = 0i64;
     let mut shift = 0;

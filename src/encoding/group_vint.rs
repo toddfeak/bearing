@@ -8,6 +8,7 @@
 
 use crate::encoding::varint;
 use std::io;
+use std::io::Read;
 
 /// Writes integers using group-varint encoding.
 pub fn write_group_vints(out: &mut impl io::Write, values: &[i32], limit: usize) -> io::Result<()> {
@@ -46,11 +47,7 @@ pub fn write_group_vints(out: &mut impl io::Write, values: &[i32], limit: usize)
 }
 
 /// Reads integers using group-varint encoding.
-pub fn read_group_vints(
-    reader: &mut impl io::Read,
-    values: &mut [i32],
-    limit: usize,
-) -> io::Result<()> {
+pub fn read_group_vints(reader: &mut dyn Read, values: &mut [i32], limit: usize) -> io::Result<()> {
     let mut read_pos = 0;
 
     while limit - read_pos >= 4 {

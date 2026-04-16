@@ -6,6 +6,7 @@
 //! by [`super::term_vectors`]. Metadata and chunk index are read eagerly;
 //! chunk data in `.tvd` is available via the retained `vectors_stream` handle.
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::io;
 
 use log::debug;
@@ -18,7 +19,7 @@ use crate::codecs::lucene90::term_vectors::{
 };
 use crate::index::index_file_names;
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::{Directory, IndexInput};
 
 /// Reads term vectors for a segment.
 ///

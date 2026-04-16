@@ -9,7 +9,7 @@ use super::varint;
 
 pub const BLOCK_SIZE: usize = 128;
 
-fn read_le_int(r: &mut impl Read) -> io::Result<i32> {
+fn read_le_int(r: &mut dyn Read) -> io::Result<i32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)?;
     Ok(i32::from_le_bytes(buf))
@@ -19,7 +19,7 @@ fn write_le_int(w: &mut impl Write, val: i32) -> io::Result<()> {
     w.write_all(&val.to_le_bytes())
 }
 
-fn read_byte(r: &mut impl Read) -> io::Result<u8> {
+fn read_byte(r: &mut dyn Read) -> io::Result<u8> {
     let mut buf = [0u8; 1];
     r.read_exact(&mut buf)?;
     Ok(buf[0])
@@ -212,7 +212,7 @@ fn encode_ints(
 
 /// Decode 128 FOR-encoded values with the given bits per value.
 /// Reverse of [`encode`]: reads packed LE ints, unpacks bits, then expands.
-pub fn decode(bpv: u32, input: &mut impl Read, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
+pub fn decode(bpv: u32, input: &mut dyn Read, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
     if bpv == 0 {
         longs.fill(0);
         return Ok(());
@@ -435,7 +435,7 @@ pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut impl Write) -> io::R
 
 /// Decode 128 PFOR-encoded values.
 /// Reverse of [`pfor_encode`]: reads token byte, decodes base values, applies exception patches.
-pub fn pfor_decode(input: &mut impl Read, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
+pub fn pfor_decode(input: &mut dyn Read, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
     let token = read_byte(input)? as u32;
     let bpv = token & 0x1F;
     if bpv == 0 {
@@ -495,7 +495,7 @@ pub fn for_delta_encode(
 /// running sum starting from `base` (last doc ID from the previous block).
 pub fn for_delta_decode(
     bpv: u32,
-    input: &mut impl Read,
+    input: &mut dyn Read,
     base: i32,
     ints: &mut [i32; BLOCK_SIZE],
 ) -> io::Result<()> {

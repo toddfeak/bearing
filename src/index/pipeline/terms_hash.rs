@@ -14,6 +14,7 @@
 //! Implementors:
 //! - [`FreqProxTermsWriterPerField`] — doc/freq/position/offset encoding
 
+use crate::encoding::read_encoding::ReadEncoding;
 use std::fmt;
 use std::io;
 use std::mem;
@@ -827,7 +828,6 @@ impl FreqProxTermsWriterPerField {
         term_id: usize,
         buf: &mut DecodedPostings,
     ) -> io::Result<()> {
-        use crate::store;
         use crate::util::byte_block_pool::ByteSliceReader;
 
         buf.clear();
@@ -845,7 +845,7 @@ impl FreqProxTermsWriterPerField {
         let mut last_doc_id = 0;
 
         while !reader.eof() {
-            let code = store::read_vint(&mut reader)?;
+            let code = reader.read_vint()?;
             let (doc_delta, freq);
 
             if !self.has_freq {
@@ -858,7 +858,7 @@ impl FreqProxTermsWriterPerField {
                 if (code & 1) != 0 {
                     freq = 1;
                 } else {
-                    freq = store::read_vint(&mut reader)?;
+                    freq = reader.read_vint()?;
                 }
             }
 
@@ -870,7 +870,7 @@ impl FreqProxTermsWriterPerField {
             if let Some(ref mut pr) = pos_reader {
                 let mut last_pos = 0;
                 for _ in 0..freq {
-                    let prox_code = store::read_vint(pr)?;
+                    let prox_code = pr.read_vint()?;
                     // proxCode = positionDelta << 1 (no payload support)
                     let pos_delta = prox_code >> 1;
                     let pos = last_pos + pos_delta;
@@ -879,8 +879,8 @@ impl FreqProxTermsWriterPerField {
 
                     if self.has_offsets {
                         // Consume offset data
-                        store::read_vint(pr)?; // start_offset delta
-                        store::read_vint(pr)?; // length
+                        pr.read_vint()?; // start_offset delta
+                        pr.read_vint()?; // length
                     }
                 }
             }
@@ -1082,13 +1082,13 @@ impl TermPosition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store;
+
     use crate::util::byte_block_pool::ByteSliceReader;
     use assertables::*;
 
     /// Helper to read a VInt from a byte slice reader.
     fn read_vint(reader: &mut ByteSliceReader<'_>) -> i32 {
-        store::read_vint(reader).unwrap()
+        reader.read_vint().unwrap()
     }
 
     fn new_term_pool() -> ByteBlockPool {
