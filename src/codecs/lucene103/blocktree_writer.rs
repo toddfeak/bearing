@@ -1167,9 +1167,9 @@ fn save_node_recursive(
         let header: u32 = (SIGN_MULTI_CHILDREN as u32)
             | ((children_fp_bytes - 1) << 2)
             | ((if node.output.is_some() { 1u32 } else { 0 }) << 5)
-            | (((encoded_output_fp_bytes as u32) - 1) << 6)
-            | ((strategy.code() as u32) << 9)
-            | (((strategy_bytes as u32) - 1) << 11)
+            | ((encoded_output_fp_bytes - 1) << 6)
+            | (strategy.code() << 9)
+            | ((strategy_bytes - 1) << 11)
             | ((min_label as u32) << 16);
 
         write_long_n_bytes(header as i64, 3, index)?;

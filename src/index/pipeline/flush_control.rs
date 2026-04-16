@@ -8,6 +8,7 @@
 //! to flush when either is exceeded. After flushing, workers call
 //! [`FlushControl::reset_worker`] to zero their counters.
 
+use std::cmp::Reverse;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -148,7 +149,7 @@ impl FlushControl {
             .enumerate()
             .map(|(id, b)| (id, b.load(Ordering::Relaxed)))
             .collect();
-        workers.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        workers.sort_unstable_by_key(|w| Reverse(w.1));
 
         // Signal workers largest-first until projected total <= target.
         let mut bytes_to_flush: u64 = 0;

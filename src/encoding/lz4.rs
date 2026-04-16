@@ -441,7 +441,7 @@ pub fn compress_high(input: &[u8], ht: &mut HighCompressionHashTable) -> Vec<u8>
 
                 let mut r_opt = ht.previous(input, ref_pos, &mut attempts);
                 let min = if off >= MAX_DISTANCE - 1 {
-                    (off - MAX_DISTANCE + 1).max(0)
+                    off - MAX_DISTANCE + 1
                 } else {
                     0
                 };
