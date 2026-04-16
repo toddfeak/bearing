@@ -19,6 +19,7 @@ pub mod index_input;
 pub mod index_output;
 pub mod memory;
 pub mod mmap;
+pub(crate) mod slice_reader;
 
 pub use checksum::CRC32;
 pub use data_input::{DataInput, DataInputReader, encode_vint, read_vint};
@@ -103,40 +104,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::index_output::align_offset;
-
-    /// A simple DataInput over a byte slice, for testing.
-    struct ByteSliceInput<'a> {
-        data: &'a [u8],
-        pos: usize,
-    }
-
-    impl<'a> ByteSliceInput<'a> {
-        fn new(data: &'a [u8]) -> Self {
-            Self { data, pos: 0 }
-        }
-    }
-
-    impl DataInput for ByteSliceInput<'_> {
-        fn read_byte(&mut self) -> io::Result<u8> {
-            if self.pos >= self.data.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-            }
-            let b = self.data[self.pos];
-            self.pos += 1;
-            Ok(b)
-        }
-
-        fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-            let end = self.pos + buf.len();
-            if end > self.data.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-            }
-            buf.copy_from_slice(&self.data[self.pos..end]);
-            self.pos = end;
-            Ok(())
-        }
-    }
 
     // --- DataOutput tests ---
 
@@ -195,7 +164,9 @@ mod tests {
         for &val in &[0_i16, 1, -1, 0x0201, i16::MIN, i16::MAX] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_le_short(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_le_short().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_le_short()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -205,7 +176,9 @@ mod tests {
         for &val in &[0_i32, 1, -1, 0x04030201, i32::MIN, i32::MAX] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_le_int(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_le_int().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_le_int()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -215,7 +188,9 @@ mod tests {
         for &val in &[0_i64, 1, -1, 0x0807060504030201, i64::MIN, i64::MAX] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_le_long(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_le_long().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_le_long()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -225,7 +200,9 @@ mod tests {
         for &val in &[0_i32, 1, -1, 0x04030201, i32::MIN, i32::MAX] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_be_int(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_be_int().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_be_int()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -235,7 +212,9 @@ mod tests {
         for &val in &[0_i64, 1, -1, 0x0807060504030201, i64::MIN, i64::MAX] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_be_long(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_be_long().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_be_long()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -245,7 +224,9 @@ mod tests {
         for &val in &[0, 1, 127, 128, 16383, 16384, i32::MAX, -1] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_vint(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_vint().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_vint()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -255,7 +236,9 @@ mod tests {
         for &val in &[0_i64, 1, 127, 128, 16384, i64::MAX] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_vlong(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_vlong().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_vlong()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -265,7 +248,9 @@ mod tests {
         for &val in &[0, 1, -1, 127, -128, i32::MIN, i32::MAX] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_zint(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_zint().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_zint()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -275,7 +260,9 @@ mod tests {
         for &val in &[0_i64, 1, -1, 127, -128, i64::MIN, i64::MAX] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_zlong(val).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_zlong().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_zlong()
+                .unwrap();
             assert_eq!(decoded, val);
         }
     }
@@ -285,7 +272,9 @@ mod tests {
         for s in &["", "hello", "hello world", "\u{00e9}\u{00e8}"] {
             let mut buf = Vec::new();
             VecOutput(&mut buf).write_string(s).unwrap();
-            let decoded = ByteSliceInput::new(&buf).read_string().unwrap();
+            let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+                .read_string()
+                .unwrap();
             assert_eq!(&decoded, s);
         }
     }
@@ -295,7 +284,9 @@ mod tests {
         let set = vec!["hello".to_string(), "world".to_string()];
         let mut buf = Vec::new();
         VecOutput(&mut buf).write_set_of_strings(&set).unwrap();
-        let decoded = ByteSliceInput::new(&buf).read_set_of_strings().unwrap();
+        let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+            .read_set_of_strings()
+            .unwrap();
         assert_eq!(decoded, set);
     }
 
@@ -306,7 +297,9 @@ mod tests {
         map.insert("k2".to_string(), "v2".to_string());
         let mut buf = Vec::new();
         VecOutput(&mut buf).write_map_of_strings(&map).unwrap();
-        let decoded = ByteSliceInput::new(&buf).read_map_of_strings().unwrap();
+        let decoded = ByteSliceIndexInput::new("test".into(), buf.clone())
+            .read_map_of_strings()
+            .unwrap();
         assert_eq!(decoded, map);
     }
 
@@ -316,7 +309,7 @@ mod tests {
         let mut buf = Vec::new();
         VecOutput(&mut buf).write_group_vints(&values, 6).unwrap();
         let mut decoded = [0i32; 6];
-        ByteSliceInput::new(&buf)
+        ByteSliceIndexInput::new("test".into(), buf.clone())
             .read_group_vints(&mut decoded, 6)
             .unwrap();
         assert_eq!(decoded, values);
@@ -324,16 +317,14 @@ mod tests {
 
     #[test]
     fn test_skip_bytes() {
-        let data = [1u8, 2, 3, 4, 5];
-        let mut input = ByteSliceInput::new(&data);
+        let mut input = ByteSliceIndexInput::new("test".into(), vec![1u8, 2, 3, 4, 5]);
         input.skip_bytes(3).unwrap();
         assert_eq!(input.read_byte().unwrap(), 4);
     }
 
     #[test]
     fn test_read_byte_eof() {
-        let data = [];
-        let mut input = ByteSliceInput::new(&data);
+        let mut input = ByteSliceIndexInput::new("test".into(), vec![]);
         assert_err!(input.read_byte());
     }
 
@@ -346,7 +337,7 @@ mod tests {
         out.write_string("test").unwrap();
         out.write_le_long(0xDEADBEEF).unwrap();
 
-        let mut input = ByteSliceInput::new(&buf);
+        let mut input = ByteSliceIndexInput::new("test".into(), buf.clone());
         assert_eq!(input.read_be_int().unwrap(), 0x12345678);
         assert_eq!(input.read_vint().unwrap(), 42);
         assert_eq!(input.read_string().unwrap(), "test");

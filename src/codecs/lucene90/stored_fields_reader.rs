@@ -21,6 +21,7 @@ use crate::encoding::lz4;
 use crate::encoding::zigzag;
 use crate::index::index_file_names;
 use crate::store::checksum_input::ChecksumIndexInput;
+use crate::store::slice_reader::SliceReader;
 use crate::store::{DataInput, Directory, IndexInput};
 
 const STORED_FIELDS_INTS_BLOCK_SIZE: usize = 128;
@@ -630,51 +631,6 @@ fn read_zdouble(input: &mut SliceReader) -> io::Result<f64> {
         let b1 = input.read_byte()? as u64;
         let bits = ((header as u64) << 56) | (b4 << 24) | (b2 << 8) | b1;
         Ok(f64::from_bits(bits))
-    }
-}
-
-// ============================================================
-// SliceReader: DataInput over a byte slice
-// ============================================================
-
-/// A [`DataInput`] implementation that reads from a byte slice.
-struct SliceReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> SliceReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn read_slice(&mut self, len: usize) -> io::Result<&'a [u8]> {
-        if self.pos + len > self.data.len() {
-            return Err(io::Error::other("read past end of slice"));
-        }
-        let slice = &self.data[self.pos..self.pos + len];
-        self.pos += len;
-        Ok(slice)
-    }
-}
-
-impl DataInput for SliceReader<'_> {
-    fn read_byte(&mut self) -> io::Result<u8> {
-        if self.pos >= self.data.len() {
-            return Err(io::Error::other("read past end of slice"));
-        }
-        let b = self.data[self.pos];
-        self.pos += 1;
-        Ok(b)
-    }
-
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        if self.pos + buf.len() > self.data.len() {
-            return Err(io::Error::other("read past end of slice"));
-        }
-        buf.copy_from_slice(&self.data[self.pos..self.pos + buf.len()]);
-        self.pos += buf.len();
-        Ok(())
     }
 }
 

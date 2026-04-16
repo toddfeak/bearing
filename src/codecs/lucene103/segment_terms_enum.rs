@@ -18,6 +18,7 @@ use crate::codecs::lucene103::trie_reader::TrieReader;
 use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4, pfor, zigzag};
 use crate::index::terms::TermsEnum;
+use crate::store::slice_reader::SliceReader;
 use crate::store::{DataInput, DataInputReader, IndexInput};
 
 const COMPRESSION_NONE: u32 = 0;
@@ -274,7 +275,7 @@ fn scan_block(
             (len, is_sub)
         };
 
-        let suffix_start = suffix_reader.pos;
+        let suffix_start = suffix_reader.pos();
         suffix_reader.skip(suffix_len);
 
         if is_sub_block {
@@ -423,51 +424,6 @@ fn read_compressed(
         _ => Err(io::Error::other(format!(
             "unknown compression code: {compression_code}"
         ))),
-    }
-}
-
-/// Simple reader over a byte slice with VInt/VLong support.
-struct SliceReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> SliceReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    fn skip(&mut self, n: usize) {
-        self.pos += n;
-    }
-
-    fn read_vint(&mut self) -> io::Result<i32> {
-        DataInput::read_vint(self)
-    }
-
-    fn read_vlong(&mut self) -> io::Result<i64> {
-        DataInput::read_vlong(self)
-    }
-}
-
-impl DataInput for SliceReader<'_> {
-    fn read_byte(&mut self) -> io::Result<u8> {
-        if self.pos >= self.data.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-        }
-        let b = self.data[self.pos];
-        self.pos += 1;
-        Ok(b)
-    }
-
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        let end = self.pos + buf.len();
-        if end > self.data.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-        }
-        buf.copy_from_slice(&self.data[self.pos..end]);
-        self.pos = end;
-        Ok(())
     }
 }
 

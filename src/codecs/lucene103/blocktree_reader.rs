@@ -613,39 +613,6 @@ mod tests {
 
     use crate::store::{DataOutput, VecOutput};
 
-    /// Simple DataInput over a byte slice, for feeding crafted bytes.
-    struct ByteSliceInput<'a> {
-        data: &'a [u8],
-        pos: usize,
-    }
-
-    impl<'a> ByteSliceInput<'a> {
-        fn new(data: &'a [u8]) -> Self {
-            Self { data, pos: 0 }
-        }
-    }
-
-    impl DataInput for ByteSliceInput<'_> {
-        fn read_byte(&mut self) -> io::Result<u8> {
-            if self.pos >= self.data.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-            }
-            let b = self.data[self.pos];
-            self.pos += 1;
-            Ok(b)
-        }
-
-        fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-            let end = self.pos + buf.len();
-            if end > self.data.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-            }
-            buf.copy_from_slice(&self.data[self.pos..end]);
-            self.pos = end;
-            Ok(())
-        }
-    }
-
     /// Builds a valid field metadata byte stream for field 0 (DOCS-only).
     fn valid_field_metadata_bytes() -> Vec<u8> {
         let mut buf = Vec::new();
@@ -676,7 +643,7 @@ mod tests {
     fn test_valid_field_metadata_parses() {
         let data = valid_field_metadata_bytes();
         let fi = docs_field_infos();
-        let mut input = ByteSliceInput::new(&data);
+        let mut input = ByteSliceIndexInput::new("test".into(), data);
         let fr = read_field_metadata(
             &mut input,
             &fi,
@@ -699,7 +666,7 @@ mod tests {
         out.write_vlong(0).unwrap(); // num_terms = 0 (invalid)
 
         let fi = docs_field_infos();
-        let mut input = ByteSliceInput::new(&buf);
+        let mut input = ByteSliceIndexInput::new("test".into(), buf);
         let err = read_field_metadata(
             &mut input,
             &fi,
@@ -718,7 +685,7 @@ mod tests {
         out.write_vlong(1).unwrap(); // num_terms
 
         let fi = docs_field_infos();
-        let mut input = ByteSliceInput::new(&buf);
+        let mut input = ByteSliceIndexInput::new("test".into(), buf);
         let err = read_field_metadata(
             &mut input,
             &fi,
@@ -741,7 +708,7 @@ mod tests {
         out.write_vint(0).unwrap(); // max_term (empty)
 
         let fi = docs_field_infos();
-        let mut input = ByteSliceInput::new(&buf);
+        let mut input = ByteSliceIndexInput::new("test".into(), buf);
         let err = read_field_metadata(
             &mut input,
             &fi,
@@ -767,7 +734,7 @@ mod tests {
         out.write_vint(0).unwrap(); // min_term (empty)
         out.write_vint(0).unwrap(); // max_term (empty)
 
-        let mut input = ByteSliceInput::new(&buf);
+        let mut input = ByteSliceIndexInput::new("test".into(), buf);
         let err = read_field_metadata(
             &mut input,
             &fi,
