@@ -74,3 +74,59 @@ impl<T: Read> ReadEncoding for T {
         group_vint::read_group_vints(self, values, limit)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoding::write_encoding::WriteEncoding;
+    use crate::store::DataInput;
+    use crate::store::byte_slice_input::ByteSliceIndexInput;
+
+    /// Verifies the blanket impl works on a concrete type.
+    #[test]
+    fn test_vint_roundtrip_on_concrete() {
+        let mut buf = Vec::new();
+        buf.write_vint(16384).unwrap();
+        let mut cursor = &buf[..];
+        assert_eq!(cursor.read_vint().unwrap(), 16384);
+    }
+
+    /// Verifies the blanket impl works on a trait object (&mut dyn DataInput).
+    #[test]
+    fn test_vint_on_dyn_data_input() {
+        let mut buf = Vec::new();
+        buf.write_vint(42).unwrap();
+        let mut input = ByteSliceIndexInput::new("test".into(), buf);
+        let mut input: &mut dyn DataInput = &mut input;
+        assert_eq!(input.read_vint().unwrap(), 42);
+    }
+
+    /// Verifies the blanket impl works on Box<dyn DataInput>.
+    #[test]
+    fn test_vlong_on_box_dyn() {
+        let mut buf = Vec::new();
+        buf.write_vlong(0x7FFF_FFFF_FFFF_FFFF).unwrap();
+        let mut input: Box<dyn DataInput> = Box::new(ByteSliceIndexInput::new("test".into(), buf));
+        assert_eq!(input.read_vlong().unwrap(), 0x7FFF_FFFF_FFFF_FFFF);
+    }
+
+    /// Verifies string roundtrip through the blanket impl.
+    #[test]
+    fn test_string_roundtrip() {
+        let mut buf = Vec::new();
+        buf.write_string("hello world").unwrap();
+        let mut cursor = &buf[..];
+        assert_eq!(cursor.read_string().unwrap(), "hello world");
+    }
+
+    /// Verifies zigzag roundtrip.
+    #[test]
+    fn test_zigzag_roundtrip() {
+        for &val in &[0, 1, -1, 127, -128, i32::MIN, i32::MAX] {
+            let mut buf = Vec::new();
+            buf.write_zint(val).unwrap();
+            let mut cursor = &buf[..];
+            assert_eq!(cursor.read_zint().unwrap(), val);
+        }
+    }
+}

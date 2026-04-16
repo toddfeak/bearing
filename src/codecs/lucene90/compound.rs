@@ -6,6 +6,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::store::memory::MemoryIndexOutput;
 use crate::store::{DataOutput, IndexOutput, SegmentFile};
@@ -69,7 +70,7 @@ pub(crate) fn write_to(
 
         // Copy all bytes except the 16-byte footer
         let body_len = file_len - codec_util::FOOTER_LENGTH;
-        cfs_out.write_bytes(&file_bytes[..body_len])?;
+        cfs_out.write_all(&file_bytes[..body_len])?;
 
         // Extract original checksum from footer (last 8 bytes, BE long)
         let checksum = i64::from_be_bytes(file_bytes[file_len - 8..file_len].try_into().unwrap());
@@ -102,6 +103,8 @@ pub(crate) fn write_to(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     const DATA_EXTENSION: &str = "cfs";
 
     /// Writes a compound file (.cfs) and entry table (.cfe) from the given segment files,
@@ -127,7 +130,7 @@ mod tests {
     fn make_test_file(name: &str, segment_id: &[u8; 16], body: &[u8]) -> SegmentFile {
         let mut out = MemoryIndexOutput::new(name.to_string());
         codec_util::write_index_header(&mut out, "TestCodec", 1, segment_id, "").unwrap();
-        out.write_bytes(body).unwrap();
+        out.write_all(body).unwrap();
         codec_util::write_footer(&mut out).unwrap();
         out.into_inner()
     }

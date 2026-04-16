@@ -5,13 +5,15 @@
 //! Strings are encoded as a VInt byte length followed by the UTF-8 bytes.
 //! Collections (sets, maps) are encoded as a VInt count followed by each element.
 
-use crate::encoding::varint;
 use std::collections::HashMap;
 use std::io;
 use std::io::Read;
+use std::io::Write;
+
+use crate::encoding::varint;
 
 /// Writes a string as VInt-encoded byte length followed by UTF-8 bytes.
-pub fn write_string(out: &mut impl io::Write, s: &str) -> io::Result<()> {
+pub fn write_string(out: &mut dyn Write, s: &str) -> io::Result<()> {
     let bytes = s.as_bytes();
     let len = i32::try_from(bytes.len())
         .map_err(|_| io::Error::other("string length exceeds i32::MAX"))?;
@@ -29,7 +31,7 @@ pub fn read_string(reader: &mut dyn Read) -> io::Result<String> {
 }
 
 /// Writes a set of strings: VInt count followed by each string.
-pub fn write_set_of_strings(out: &mut impl io::Write, set: &[String]) -> io::Result<()> {
+pub fn write_set_of_strings(out: &mut dyn Write, set: &[String]) -> io::Result<()> {
     let count =
         i32::try_from(set.len()).map_err(|_| io::Error::other("set size exceeds i32::MAX"))?;
     varint::write_vint(out, count)?;
@@ -51,10 +53,7 @@ pub fn read_set_of_strings(reader: &mut dyn Read) -> io::Result<Vec<String>> {
 }
 
 /// Writes a map of strings: VInt count followed by key-value pairs.
-pub fn write_map_of_strings(
-    out: &mut impl io::Write,
-    map: &HashMap<String, String>,
-) -> io::Result<()> {
+pub fn write_map_of_strings(out: &mut dyn Write, map: &HashMap<String, String>) -> io::Result<()> {
     let count =
         i32::try_from(map.len()).map_err(|_| io::Error::other("map size exceeds i32::MAX"))?;
     varint::write_vint(out, count)?;

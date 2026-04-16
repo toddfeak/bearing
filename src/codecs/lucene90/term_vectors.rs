@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Term vectors writer producing `.tvd`, `.tvx`, `.tvm` files.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
@@ -15,8 +14,10 @@ use crate::codecs::codec_util;
 use crate::codecs::packed_writers::{BlockPackedWriter, DirectMonotonicWriter, DirectWriter};
 use crate::encoding::lz4;
 use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_bits_required};
+use crate::encoding::read_encoding::ReadEncoding;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
-use crate::store::{DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{IndexOutput, SharedDirectory, VecOutput};
 use crate::util::byte_block_pool::ByteSliceReader;
 
 // File extensions
@@ -522,7 +523,7 @@ impl CompressingTermVectorsWriter {
 
             // Compress term suffixes with plain LZ4 (CompressionMode.FAST)
             let compressed = lz4::compress(&self.term_suffixes);
-            self.data_stream.write_bytes(&compressed)?;
+            self.data_stream.write_all(&compressed)?;
         }
 
         // Reset
@@ -634,11 +635,7 @@ impl CompressingTermVectorsWriter {
         }
 
         let values: Vec<i64> = field_nums.iter().map(|&n| n as i64).collect();
-        packed_ints_write(
-            &mut DataOutputWriter(&mut *self.data_stream),
-            &values,
-            bits_required,
-        )?;
+        packed_ints_write(&mut *self.data_stream, &values, bits_required)?;
 
         Ok(field_nums)
     }
@@ -657,7 +654,7 @@ impl CompressingTermVectorsWriter {
         let mut scratch = Vec::new();
         writer.finish(&mut VecOutput(&mut scratch))?;
         self.data_stream.write_vlong(scratch.len() as i64)?;
-        self.data_stream.write_bytes(&scratch)
+        self.data_stream.write_all(&scratch)
     }
 
     fn flush_flags(&mut self, _total_fields: i32, field_nums: &[u32]) -> io::Result<()> {
@@ -688,7 +685,7 @@ impl CompressingTermVectorsWriter {
             }
             writer.finish(&mut VecOutput(&mut scratch))?;
             self.data_stream.write_vint(scratch.len() as i32)?;
-            self.data_stream.write_bytes(&scratch)
+            self.data_stream.write_all(&scratch)
         } else {
             self.data_stream.write_vint(1)?;
             let mut scratch = Vec::new();
@@ -700,7 +697,7 @@ impl CompressingTermVectorsWriter {
             }
             writer.finish(&mut VecOutput(&mut scratch))?;
             self.data_stream.write_vint(scratch.len() as i32)?;
-            self.data_stream.write_bytes(&scratch)
+            self.data_stream.write_all(&scratch)
         }
     }
 
@@ -723,7 +720,7 @@ impl CompressingTermVectorsWriter {
         }
         writer.finish(&mut VecOutput(&mut scratch))?;
         self.data_stream.write_vint(scratch.len() as i32)?;
-        self.data_stream.write_bytes(&scratch)
+        self.data_stream.write_all(&scratch)
     }
 
     fn flush_term_lengths(&mut self) -> io::Result<()> {

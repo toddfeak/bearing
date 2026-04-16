@@ -129,7 +129,7 @@ fn flush(
             // DENSE block
             if dense_rank_power != -1 {
                 let rank = create_rank(buffer, dense_rank_power);
-                out.write_bytes(&rank)?;
+                out.write_all(&rank)?;
             }
             for &word in buffer.iter() {
                 out.write_le_long(word)?;

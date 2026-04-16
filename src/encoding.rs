@@ -20,4 +20,5 @@ pub mod read_encoding;
 pub mod sortable_bytes;
 pub mod string;
 pub mod varint;
+pub mod write_encoding;
 pub mod zigzag;

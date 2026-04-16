@@ -10,7 +10,7 @@ use crate::encoding::packed::{
     unsigned_bits_required, write_block_packed_vlong,
 };
 use crate::encoding::zigzag;
-use crate::store::{DataOutput, DataOutputWriter, IndexOutput};
+use crate::store::{DataOutput, IndexOutput};
 
 /// Writes bit-packed integers using LSB-first (little-endian) bit ordering.
 pub struct DirectWriter {
@@ -47,7 +47,7 @@ impl DirectWriter {
             for i in 0..up_to {
                 let v = self.values[i] as u64;
                 let le = v.to_le_bytes();
-                output.write_bytes(&le[..bytes_per_value])?;
+                output.write_all(&le[..bytes_per_value])?;
             }
         } else if bpv < 8 {
             // bpv is 1, 2, or 4: pack values LSB-first into LE longs
@@ -62,7 +62,7 @@ impl DirectWriter {
                 }
                 let remaining = (up_to - i).min(values_per_long);
                 let bytes_needed = (remaining * bpv as usize).div_ceil(8);
-                output.write_bytes(&packed.to_le_bytes()[..bytes_needed])?;
+                output.write_all(&packed.to_le_bytes()[..bytes_needed])?;
                 i += values_per_long;
             }
         } else {
@@ -79,10 +79,10 @@ impl DirectWriter {
                 let merged = l1 | (l2 << bpv);
                 if bpv <= 16 {
                     let le = (merged as u32).to_le_bytes();
-                    output.write_bytes(&le[..num_bytes_for_2])?;
+                    output.write_all(&le[..num_bytes_for_2])?;
                 } else {
                     let le = merged.to_le_bytes();
-                    output.write_bytes(&le[..num_bytes_for_2])?;
+                    output.write_all(&le[..num_bytes_for_2])?;
                 }
                 i += 2;
             }
@@ -281,7 +281,7 @@ impl BlockPackedWriter {
         output.write_byte(token)?;
 
         if min != 0 {
-            write_block_packed_vlong(&mut DataOutputWriter(output), zigzag::encode_i64(min) - 1)?;
+            write_block_packed_vlong(output, zigzag::encode_i64(min) - 1)?;
         }
 
         if bpv > 0 {
@@ -295,7 +295,7 @@ impl BlockPackedWriter {
             }
 
             let packed = pack_msb(&self.values, self.off, bpv);
-            output.write_bytes(&packed)?;
+            output.write_all(&packed)?;
         }
 
         self.off = 0;

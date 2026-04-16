@@ -6,12 +6,14 @@
 //! width - 1) followed by the ints in LE with variable byte widths. Remaining
 //! values (< 4) are written as regular VInts.
 
-use crate::encoding::varint;
 use std::io;
 use std::io::Read;
+use std::io::Write;
+
+use crate::encoding::varint;
 
 /// Writes integers using group-varint encoding.
-pub fn write_group_vints(out: &mut impl io::Write, values: &[i32], limit: usize) -> io::Result<()> {
+pub fn write_group_vints(out: &mut dyn Write, values: &[i32], limit: usize) -> io::Result<()> {
     let mut read_pos = 0;
     let mut scratch = [0u8; 17]; // 1 flag + 4 * 4 bytes max
 

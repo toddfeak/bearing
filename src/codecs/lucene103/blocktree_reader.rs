@@ -9,7 +9,6 @@
 //! eagerly from `.tmd` during construction, while `.tim` and `.tip` file handles
 //! are kept open for lazy term enumeration at query time.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
@@ -21,6 +20,7 @@ use crate::codecs::lucene103::postings_format::{
     VERSION_CURRENT, VERSION_START,
 };
 use crate::document::IndexOptions;
+use crate::encoding::read_encoding::ReadEncoding;
 use crate::index::terms::{Terms, TermsEnum};
 use crate::index::{FieldInfos, index_file_names};
 use crate::store::checksum_input::ChecksumIndexInput;
@@ -402,6 +402,7 @@ mod tests {
     use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, BufferedFieldTerms};
     use crate::document::{DocValuesType, IndexOptions};
+    use crate::encoding::write_encoding::WriteEncoding;
     use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::SharedDirectory;

@@ -274,7 +274,7 @@ mod tests {
         // Write a file
         {
             let mut out = mmap_dir.create_output("test.dat").unwrap();
-            out.write_bytes(b"hello mmap world").unwrap();
+            out.write_all(b"hello mmap world").unwrap();
         }
 
         // Read it back
@@ -327,8 +327,8 @@ mod tests {
         {
             let mut out = mmap_dir.create_output("longs.bin").unwrap();
             // Write a known i64 in LE
-            out.write_bytes(&42i64.to_le_bytes()).unwrap();
-            out.write_bytes(&(-1i64).to_le_bytes()).unwrap();
+            out.write_all(&42i64.to_le_bytes()).unwrap();
+            out.write_all(&(-1i64).to_le_bytes()).unwrap();
         }
 
         let input = mmap_dir.open_input("longs.bin").unwrap();

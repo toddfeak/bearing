@@ -114,10 +114,12 @@ impl IndexInput for ChecksumIndexInput {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
+    use crate::store::IndexOutput;
     use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::memory::MemoryIndexOutput;
-    use crate::store::{DataOutput, IndexOutput};
 
     fn make_checksum_input(data: &[u8]) -> ChecksumIndexInput {
         let inner = ByteSliceIndexInput::new("test".into(), data.to_vec());
@@ -205,7 +207,7 @@ mod tests {
     #[test]
     fn test_checksum_matches_index_output() {
         let mut out = MemoryIndexOutput::new("test".into());
-        out.write_bytes(b"test data here").unwrap();
+        out.write_all(b"test data here").unwrap();
         let expected_checksum = out.checksum();
 
         let mut input = make_checksum_input(b"test data here");

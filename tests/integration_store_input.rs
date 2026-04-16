@@ -12,6 +12,7 @@ use std::process;
 use std::sync::Arc;
 
 use bearing::encoding::read_encoding::ReadEncoding;
+use bearing::encoding::write_encoding::WriteEncoding;
 use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory, SharedDirectory};
 
 #[test]
@@ -62,7 +63,7 @@ fn test_open_input_seek_and_reread() {
 
     {
         let mut out = dir.create_output("seek.bin").unwrap();
-        out.write_bytes(&[10, 20, 30, 40, 50]).unwrap();
+        out.write_all(&[10, 20, 30, 40, 50]).unwrap();
     }
 
     let mut input = dir.open_input("seek.bin").unwrap();
@@ -88,7 +89,7 @@ fn test_open_input_skip_bytes() {
 
     {
         let mut out = dir.create_output("skip.bin").unwrap();
-        out.write_bytes(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        out.write_all(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
     }
 
     let mut input = dir.open_input("skip.bin").unwrap();

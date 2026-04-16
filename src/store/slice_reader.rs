@@ -80,7 +80,8 @@ mod tests {
 
     use super::*;
     use crate::encoding::read_encoding::ReadEncoding;
-    use crate::store::{DataOutput, VecOutput};
+    use crate::encoding::write_encoding::WriteEncoding;
+    use crate::store::VecOutput;
 
     #[test]
     fn test_read_byte() {

@@ -4,6 +4,7 @@
 use std::cmp;
 use std::fmt;
 use std::io;
+use std::io::Write;
 
 use log::debug;
 
@@ -11,6 +12,7 @@ use crate::codecs::codec_util;
 use crate::codecs::packed_writers::DirectMonotonicWriter;
 use crate::document::StoredValue;
 use crate::encoding::lz4;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::encoding::zigzag;
 use crate::index::index_file_names;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
@@ -396,7 +398,7 @@ impl Lucene90StoredFieldsWriter {
             }
             StoredValue::Bytes(b) => {
                 VecOutput(&mut self.buffered_docs).write_vint(b.len() as i32)?;
-                VecOutput(&mut self.buffered_docs).write_bytes(b)?;
+                VecOutput(&mut self.buffered_docs).write_all(b)?;
             }
         }
         Ok(())
@@ -481,7 +483,7 @@ impl StoredFieldsWriter for Lucene90StoredFieldsWriter {
 /// Compress data using LZ4 with preset dictionary format, reusing an existing hash table.
 fn compress_lz4_preset_dict_reuse(
     data: &[u8],
-    out: &mut dyn DataOutput,
+    mut out: &mut dyn DataOutput,
     lz4_ht: &mut lz4::FastHashTable,
 ) -> io::Result<()> {
     let len = data.len();
@@ -521,7 +523,7 @@ fn compress_lz4_preset_dict_reuse(
     }
 
     for part in &compressed_parts {
-        out.write_bytes(part)?;
+        out.write_all(part)?;
     }
 
     Ok(())
@@ -534,7 +536,7 @@ fn compress_lz4_preset_dict_reuse(
 /// Writes integers using StoredFieldsInts encoding.
 /// For 1 value: writes a single VInt.
 /// For multiple values: uses StoredFieldsInts.writeInts format.
-fn save_ints(values: &[i32], count: usize, out: &mut dyn DataOutput) -> io::Result<()> {
+fn save_ints(values: &[i32], count: usize, mut out: &mut dyn DataOutput) -> io::Result<()> {
     if count == 1 {
         out.write_vint(values[0])?;
     } else {
@@ -546,7 +548,7 @@ fn save_ints(values: &[i32], count: usize, out: &mut dyn DataOutput) -> io::Resu
 fn write_stored_fields_ints(
     values: &[i32],
     count: usize,
-    out: &mut dyn DataOutput,
+    mut out: &mut dyn DataOutput,
 ) -> io::Result<()> {
     // Check if all values are equal
     let all_equal = values[1..count].iter().all(|&v| v == values[0]);
@@ -641,7 +643,7 @@ fn write_ints_32(values: &[i32], count: usize, out: &mut dyn DataOutput) -> io::
 // ============================================================
 
 /// Writes a long in a variable-length format optimized for timestamps.
-fn write_tlong(out: &mut dyn DataOutput, l: i64) -> io::Result<()> {
+fn write_tlong(mut out: &mut dyn DataOutput, l: i64) -> io::Result<()> {
     let mut val = l;
     let header_base: u8;
 

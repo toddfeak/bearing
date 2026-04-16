@@ -7,6 +7,7 @@
 //! MSB-first (big-endian) bit ordering.
 
 use std::io;
+use std::io::Write;
 
 /// Supported bits-per-value for DirectWriter encoding.
 pub const SUPPORTED_BITS_PER_VALUE: &[u32] = &[1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64];
@@ -103,7 +104,7 @@ pub fn pack_msb(values: &[i64], count: usize, bits_per_value: u32) -> Vec<u8> {
 /// Values are packed contiguously with high-order bits first, producing
 /// `ceil(count * bpv / 8)` bytes.
 pub fn packed_ints_write(
-    output: &mut impl io::Write,
+    output: &mut dyn Write,
     values: &[i64],
     bits_per_value: u32,
 ) -> io::Result<()> {
@@ -114,7 +115,7 @@ pub fn packed_ints_write(
 /// Writes a variable-length long that handles negative values via unsigned right shift.
 ///
 /// NOT the same as varint::write_vlong — this variant caps at 9 bytes.
-pub fn write_block_packed_vlong(output: &mut impl io::Write, value: i64) -> io::Result<()> {
+pub fn write_block_packed_vlong(output: &mut dyn Write, value: i64) -> io::Result<()> {
     let mut i = value as u64;
     let mut k = 0;
     while (i & !0x7F) != 0 && k < 8 {

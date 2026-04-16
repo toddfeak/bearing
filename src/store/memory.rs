@@ -157,16 +157,22 @@ impl Drop for MemoryDirectoryOutput {
     }
 }
 
+impl io::Write for MemoryDirectoryOutput {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(buf);
+        self.crc.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 impl DataOutput for MemoryDirectoryOutput {
     fn write_byte(&mut self, b: u8) -> io::Result<()> {
         self.buf.push(b);
         self.crc.update_byte(b);
-        Ok(())
-    }
-
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.buf.extend_from_slice(buf);
-        self.crc.update(buf);
         Ok(())
     }
 }
@@ -220,16 +226,22 @@ impl MemoryIndexOutput {
     }
 }
 
+impl io::Write for MemoryIndexOutput {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(buf);
+        self.crc.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 impl DataOutput for MemoryIndexOutput {
     fn write_byte(&mut self, b: u8) -> io::Result<()> {
         self.buf.push(b);
         self.crc.update_byte(b);
-        Ok(())
-    }
-
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.buf.extend_from_slice(buf);
-        self.crc.update(buf);
         Ok(())
     }
 }
@@ -250,13 +262,16 @@ impl IndexOutput for MemoryIndexOutput {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
     use crate::encoding::read_encoding::ReadEncoding;
+    use crate::encoding::write_encoding::WriteEncoding;
 
     #[test]
     fn test_memory_output_write_and_checksum() {
         let mut out = MemoryIndexOutput::new("test".to_string());
-        out.write_bytes(b"hello").unwrap();
+        out.write_all(b"hello").unwrap();
         assert_eq!(out.file_pointer(), 5);
         assert_eq!(out.checksum(), 0x3610A686);
         assert_eq!(out.bytes(), b"hello");
@@ -268,7 +283,7 @@ mod tests {
 
         {
             let mut out = dir.create_output("auto.bin").unwrap();
-            out.write_bytes(b"auto-persisted").unwrap();
+            out.write_all(b"auto-persisted").unwrap();
             // Output dropped here — should auto-persist
         }
 
@@ -293,7 +308,7 @@ mod tests {
     fn test_memory_directory_file_length() {
         let mut dir = MemoryDirectory::new();
         let mut out = MemoryIndexOutput::new("test.bin".to_string());
-        out.write_bytes(b"hello").unwrap();
+        out.write_all(b"hello").unwrap();
         dir.insert_output(out);
 
         assert_eq!(dir.file_length("test.bin").unwrap(), 5);
@@ -313,7 +328,7 @@ mod tests {
     fn test_memory_directory_rename() {
         let mut dir = MemoryDirectory::new();
         let mut out = MemoryIndexOutput::new("old.bin".to_string());
-        out.write_bytes(b"data").unwrap();
+        out.write_all(b"data").unwrap();
         dir.insert_output(out);
 
         dir.rename("old.bin", "new.bin").unwrap();
@@ -325,7 +340,7 @@ mod tests {
     fn test_memory_directory_read_file() {
         let mut dir = MemoryDirectory::new();
         let mut out = MemoryIndexOutput::new("test.bin".to_string());
-        out.write_bytes(b"hello world").unwrap();
+        out.write_all(b"hello world").unwrap();
         dir.insert_output(out);
 
         assert_eq!(dir.read_file("test.bin").unwrap(), b"hello world");

@@ -4,33 +4,7 @@ Outstanding problems and optimization gaps in the indexing pipeline.
 
 ---
 
-## ~~1. Flush Stall Control~~ — RESOLVED
-
-`FlushControl` now includes `Condvar`-based stall control. Workers block before pulling new documents when total RAM exceeds 2x the buffer limit. Stall releases when RAM drops below the 80% flush target after flushes complete. Matches Java's `DocumentsWriterStallControl` pattern.
-
----
-
-## 2. StandardTokenizer UAX#29 Compliance — PARTIALLY RESOLVED
-
-**Status:** `UnicodeAnalyzer` available as an opt-in alternative via `IndexWriterConfig::analyzer_factory()`. Matches Java Lucene's token output for all categories except emoji sequences (0.09% token count gap on gutenberg-large-500). `StandardAnalyzer` remains the fast default (212 MB/s) but does not handle CJK, numeric grouping, or URLs correctly.
-
-**Remaining gap:** Emoji tokenization (😀, 👍🏽, 🇺🇸) — `unicode-segmentation` does not classify emoji as word segments. ~280K tokens on gutenberg-large-500.
-
----
-
-## ~~3. StandardAnalyzer Buffers All Tokens~~ — RESOLVED
-
-Both `StandardAnalyzer` and `UnicodeAnalyzer` stream input in ~8 KB UTF-8 chunks via `utf8-zero`. Peak RSS: ~2 MB for tokenization regardless of document size.
-
----
-
-## ~~4. Zero-Copy Tokenization with Sliding Window~~ — RESOLVED
-
-Analyzer owns its reader via `set_reader()`. Tokens are zero-copy `&str` borrows from the analyzer's internal chunk buffer. Pluggable via `AnalyzerFactory` trait on `IndexWriterConfig`.
-
----
-
-## 5. Dual Document/Field Models for Write vs Read
+## 1. Dual Document/Field Models for Write vs Read
 
 **Severity:** Architecture — two parallel representations for the same concept
 
@@ -44,7 +18,7 @@ In Lucene's Java model, `Document` and `Field` serve both read and write — a `
 
 ---
 
-## 6. Dual Directory Traits
+## 2. Dual Directory Traits
 
 **Severity:** Architecture — `store::Directory` uses `&mut self` for writes, preventing concurrent access without a `Mutex` wrapper (`SharedDirectory`)
 
@@ -56,7 +30,7 @@ The write path wraps `store::Directory` in `SharedDirectory` (a `Mutex`) for all
 
 ---
 
-## 7. Level1 Skip Data for Write Path
+## 3. Level1 Skip Data for Write Path
 
 **Severity:** Correctness — posting lists with >4096 docs cannot be written
 
@@ -68,39 +42,13 @@ The read path (`PostingsReader`) already handles level1 skip data — the `level
 
 ---
 
-## 8. Memory Fragmentation and Peak RSS
+## 4. Peak RSS Higher Than Java
 
-**Severity:** High — Rust peak RSS is 10x+ Java for the same workload
+**Severity:** Medium — Rust peak RSS is higher than Java for the same workload
 
-On gutenberg-large-500 (12 threads, 64 MB buffer): Java peak RSS is ~103 MB, Rust peak RSS is ~1,174 MB. Heap peak (measured by heaptrack) is only ~422 MB, and reported RAM in `FlushControl` never exceeds ~130 MB. The gap between logical heap usage and OS RSS is caused by memory fragmentation — glibc malloc does not return freed pages to the OS when many small/medium allocations are freed in a pattern that leaves holes.
+Rust peak RSS during indexing is larger than Java's. Two known contributing factors:
 
-**Root cause:** Each segment worker allocates hundreds of individual heap objects (32 KB byte pool blocks, 32 KB int pool blocks, growing postings arrays, hash tables) during indexing. When the worker flushes and drops, these are all freed individually. The allocator cannot coalesce them because they are interleaved with allocations from other threads. Over 227 segment flushes, this creates severe fragmentation.
+1. **Memory fragmentation** — partially addressed by switching to jemalloc, which returns freed pages to the OS more aggressively than glibc malloc.
+2. **Higher default RAM buffer** — Rust defaults to 64 MB vs Java's 16 MB. Lowering the Rust default would reduce peak RSS but dramatically increases segment count because Rust does not yet merge segments during indexing.
 
-**Profiling data** (heaptrack, gutenberg-large-500, 12 threads):
-- 510M total allocation calls, 306M temporary
-- Term vectors account for 157 MB of 166 MB peak heap (**94.6%**)
-- Top TV allocation sites:
-  - `TermVectorChunkWriter::finish_term` — 15.4M calls, 32.4 MB peak (Vec growth per term)
-  - `TermVectorChunkWriter::add_prox` — 46.3M calls, ~30.7 MB peak (Vec growth per position/offset)
-  - `TermVectorsConsumer::finish_document` — 15.4M calls, 10.75 MB peak (reserve/resize)
-- Postings: 296.7M calls but 0 B peak (inline writes to pre-allocated pools)
-
-**Proposed fix:** Use `bumpalo` as a bump allocator for per-segment (and potentially per-document) memory. A `Bump` arena allocates contiguously and frees everything at once when dropped or reset — no fragmentation, no syscalls per deallocation.
-
-The `Bump` would live in `worker_thread_loop`, outliving the `SegmentWorker`. On flush, the worker drops (releasing all bump references), then `bump.reset()` reclaims the arena cheaply for the next segment. This avoids the alloc/free churn that fragments the heap.
-
-**Primary target:** Term vectors — responsible for 94.6% of peak heap. The `TermVectorChunkWriter` uses standard `Vec<T>` collections that grow incrementally via `push()`. Replacing these with `bumpalo::collections::Vec` eliminates per-element reallocation.
-
-**Design note:** Lucene solves this with `ByteBlockPool` / `IntBlockPool` — fixed-size block arenas that are recycled. Bumpalo is a simpler approach that achieves the same goal (contiguous allocation, bulk deallocation) without requiring custom pool management. The two approaches are not mutually exclusive — existing pools can remain for postings while bumpalo handles term vectors.
-
-**Implementation cost:** `bumpalo::collections::Vec<'bump, T>` carries a lifetime tied to the arena. This requires a `'bump` parameter on `ByteBlockPool`, `TermsHash`, the TV consumer, and `SegmentWorker`. The lifetime is contained within the pipeline module — it does not propagate to `IndexCoordinator`, `IndexWriter`, or the public API. Works on stable Rust (no `allocator_api` needed).
-
----
-
-## 9. DataInput/DataOutput Adapter Wrappers
-
-**Severity:** Unnecessary complexity
-
-`DataInputReader<'a, T>` and `DataOutputWriter<'a, T>` are newtype wrappers that bridge `DataInput` to `io::Read` and `DataOutput` to `io::Write`. Every default method on these traits (e.g., `read_vint`, `write_vint`) wraps `self` in the adapter before calling encoding functions that accept `impl Read` / `impl Write`.
-
-**Fix:** Make `io::Read` a supertrait of `DataInput` and `io::Write` a supertrait of `DataOutput`. Each implementor already provides the equivalent of `read`/`read_exact`/`write`/`flush` — making it explicit removes the adapter structs entirely. Default methods can then pass `self` directly to encoding functions without wrapping.
+**Next steps:** Implement segment merging during indexing (matching Java's `IndexWriter` merge policy). Once merging is in place, reduce the default RAM buffer to match Java's 16 MB. Then remeasure and profile for additional memory optimization opportunities.

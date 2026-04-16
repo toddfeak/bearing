@@ -24,7 +24,7 @@ pub trait IndexOutput: DataOutput + Send {
         let padding = (aligned - pos) as usize;
         if padding > 0 {
             const ZEROS: [u8; 16] = [0u8; 16];
-            self.write_bytes(&ZEROS[..padding])?;
+            self.write_all(&ZEROS[..padding])?;
         }
         Ok(aligned)
     }

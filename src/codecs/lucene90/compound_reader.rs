@@ -4,11 +4,11 @@
 //!
 //! Ported from `Lucene90CompoundReader`.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
 use std::io;
 
 use crate::codecs::codec_util;
+use crate::encoding::read_encoding::ReadEncoding;
 use crate::index::index_file_names;
 use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{DataInput, Directory, IndexInput, IndexOutput};
@@ -199,16 +199,18 @@ fn read_mapping(mut input: &mut dyn DataInput) -> io::Result<HashMap<String, Fil
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
     use crate::codecs::lucene90::compound;
     use crate::store::memory::MemoryIndexOutput;
-    use crate::store::{DataOutput, MemoryDirectory, SegmentFile};
+    use crate::store::{MemoryDirectory, SegmentFile};
     use assertables::*;
 
     fn make_test_file(name: &str, segment_id: &[u8; 16], body: &[u8]) -> SegmentFile {
         let mut out = MemoryIndexOutput::new(name.to_string());
         codec_util::write_index_header(&mut out, "TestCodec", 1, segment_id, "").unwrap();
-        out.write_bytes(body).unwrap();
+        out.write_all(body).unwrap();
         codec_util::write_footer(&mut out).unwrap();
         out.into_inner()
     }

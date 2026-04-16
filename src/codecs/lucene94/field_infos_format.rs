@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Field infos format (.fnm) writer and reader for per-field metadata.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
 use std::io;
 
@@ -9,6 +8,8 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::document::{DocValuesType, IndexOptions};
+use crate::encoding::read_encoding::ReadEncoding;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig, SegmentInfo};
 use crate::store::checksum_input::ChecksumIndexInput;

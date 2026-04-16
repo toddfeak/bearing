@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Segment info format (.si) writer and reader for segment-level metadata.
 
-use crate::encoding::read_encoding::ReadEncoding;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::encoding::read_encoding::ReadEncoding;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
 use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{DataInput, Directory, SharedDirectory};
-use std::collections::HashSet;
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
 const VERSION_CURRENT: i32 = 0;

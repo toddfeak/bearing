@@ -209,18 +209,28 @@ impl Drop for FSIndexOutput {
     }
 }
 
+impl io::Write for FSIndexOutput {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.writer().write_all(buf)?;
+        self.crc.update(buf);
+        self.position += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(ref mut writer) = self.writer {
+            writer.flush()
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl DataOutput for FSIndexOutput {
     fn write_byte(&mut self, b: u8) -> io::Result<()> {
         self.writer().write_all(&[b])?;
         self.crc.update_byte(b);
         self.position += 1;
-        Ok(())
-    }
-
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.writer().write_all(buf)?;
-        self.crc.update(buf);
-        self.position += buf.len() as u64;
         Ok(())
     }
 }
@@ -431,8 +441,11 @@ mod tests {
     use std::env;
     use std::process;
 
+    use std::io::Write;
+
     use super::*;
     use crate::encoding::read_encoding::ReadEncoding;
+    use crate::encoding::write_encoding::WriteEncoding;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("rustlucene_test_fs_{name}_{}", process::id()));
@@ -496,7 +509,7 @@ mod tests {
 
         {
             let mut out = dir.create_output("test.bin").unwrap();
-            out.write_bytes(b"hello").unwrap();
+            out.write_all(b"hello").unwrap();
             assert_eq!(out.file_pointer(), 5);
             assert_eq!(out.name(), "test.bin");
             // CRC32 of "hello" = 0x3610A686
@@ -517,7 +530,7 @@ mod tests {
         let file = File::create(dir_path.join("into_inner.bin")).unwrap();
         let writer = BufWriter::new(file);
         let mut fs_out = FSIndexOutput::new("into_inner.bin".to_string(), writer);
-        fs_out.write_bytes(b"test data").unwrap();
+        fs_out.write_all(b"test data").unwrap();
         let file = fs_out.into_inner().unwrap();
         drop(file);
 
@@ -582,7 +595,7 @@ mod tests {
         let _cleanup = DirCleanup(&dir_path);
 
         let mut out = dir.create_output("checksum.bin").unwrap();
-        out.write_bytes(b"test").unwrap();
+        out.write_all(b"test").unwrap();
 
         // Verify checksum matches manually computed CRC32
         let mut crc = CRC32::new();

@@ -15,9 +15,10 @@ use crate::codecs::lucene103::postings_format::{
 };
 use crate::document::IndexOptions;
 use crate::encoding::pfor::{self, BLOCK_SIZE};
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::encoding::zigzag;
 use crate::index::index_file_names::segment_file_name;
-use crate::store::{DataOutput, DataOutputWriter, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
 
 /// Buffers position deltas and PFOR-encodes them in blocks of 128.
 /// Extracts the repeated pattern from singleton, VInt, and block encoding paths.
@@ -47,7 +48,7 @@ impl PositionEncoder {
             for (i, &val) in self.buffer.iter().enumerate().take(BLOCK_SIZE) {
                 longs[i] = val as i64;
             }
-            pfor::pfor_encode(&mut longs, &mut DataOutputWriter(pos_out))?;
+            pfor::pfor_encode(&mut longs, pos_out)?;
             self.buffer_upto = 0;
         }
         Ok(())
@@ -56,7 +57,7 @@ impl PositionEncoder {
     /// Write VInt tail for remaining buffered deltas and compute last_pos_block_offset.
     fn finish(
         &self,
-        pos_out: &mut dyn IndexOutput,
+        mut pos_out: &mut dyn IndexOutput,
         total_term_freq: i64,
         pos_start_fp: i64,
     ) -> io::Result<i64> {
@@ -536,7 +537,7 @@ impl PostingsWriter {
             doc_count,
             postings_format::LEVEL1_NUM_DOCS,
         );
-        self.doc_out.write_bytes(&bfs.level1_buf)?;
+        self.doc_out.write_all(&bfs.level1_buf)?;
 
         // Write remaining position VInt tail
         let mut last_pos_block_offset = -1i64;
@@ -662,7 +663,7 @@ fn write_vint_block(
 }
 
 /// Special vints encoded on 2 bytes if they require 15 bits or less.
-fn write_vlong15(out: &mut dyn DataOutput, v: i64) -> io::Result<()> {
+fn write_vlong15(mut out: &mut dyn DataOutput, v: i64) -> io::Result<()> {
     debug_assert!(v >= 0);
     if (v & !0x7FFF_i64) == 0 {
         out.write_le_short(v as i16)?;
@@ -725,7 +726,7 @@ fn write_vint_block_to_buf(
 
 /// Shared VInt block implementation that works with any DataOutput.
 fn write_vint_block_impl(
-    out: &mut dyn DataOutput,
+    mut out: &mut dyn DataOutput,
     doc_deltas: &mut [i32],
     freqs: &[i32],
     num: usize,

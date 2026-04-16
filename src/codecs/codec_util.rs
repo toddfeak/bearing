@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Utilities for reading and writing codec headers and footers with CRC32 integrity checks.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::io;
 
 use log::debug;
 
+use crate::encoding::read_encoding::ReadEncoding;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{DataInput, DataOutput, IndexInput, IndexOutput};
 
@@ -30,7 +31,7 @@ pub const ID_LENGTH: usize = 16;
 ///   - 4 bytes: version (BE int)
 ///
 /// Returns the number of bytes written (= 9 + codec.len()).
-pub fn write_header(out: &mut dyn DataOutput, codec: &str, version: i32) -> io::Result<usize> {
+pub fn write_header(mut out: &mut dyn DataOutput, codec: &str, version: i32) -> io::Result<usize> {
     validate_codec_name(codec)?;
     out.write_be_int(CODEC_MAGIC)?;
     out.write_string(codec)?;
@@ -55,7 +56,7 @@ pub fn write_index_header(
     suffix: &str,
 ) -> io::Result<usize> {
     write_header(out, codec, version)?;
-    out.write_bytes(id)?;
+    out.write_all(id)?;
     let suffix_bytes = suffix.as_bytes();
     if suffix_bytes.len() > 255 {
         return Err(io::Error::new(
@@ -64,7 +65,7 @@ pub fn write_index_header(
         ));
     }
     out.write_byte(suffix_bytes.len() as u8)?;
-    out.write_bytes(suffix_bytes)?;
+    out.write_all(suffix_bytes)?;
     debug!(
         "write_index_header: codec={codec:?}, version={version}, suffix={suffix:?}, id={id:02x?}"
     );
@@ -316,6 +317,8 @@ fn validate_codec_name(codec: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
     use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::memory::MemoryIndexOutput;
@@ -379,7 +382,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".to_string());
 
         // Write some data first
-        out.write_bytes(b"hello").unwrap();
+        out.write_all(b"hello").unwrap();
 
         write_footer(&mut out).unwrap();
         let bytes = out.bytes();
@@ -536,7 +539,7 @@ mod tests {
     fn test_check_footer_roundtrip() {
         let mut out = MemoryIndexOutput::new("test".to_string());
         write_header(&mut out, "Test", 1).unwrap();
-        out.write_bytes(b"payload data").unwrap();
+        out.write_all(b"payload data").unwrap();
         write_footer(&mut out).unwrap();
         let bytes = out.bytes().to_vec();
 
@@ -552,7 +555,7 @@ mod tests {
     fn test_check_footer_corrupted_crc() {
         let mut out = MemoryIndexOutput::new("test".to_string());
         write_header(&mut out, "Test", 1).unwrap();
-        out.write_bytes(b"payload data").unwrap();
+        out.write_all(b"payload data").unwrap();
         write_footer(&mut out).unwrap();
         let mut bytes = out.bytes().to_vec();
 
@@ -569,7 +572,7 @@ mod tests {
     #[test]
     fn test_checksum_entire_file() {
         let mut out = MemoryIndexOutput::new("test".to_string());
-        out.write_bytes(b"hello world").unwrap();
+        out.write_all(b"hello world").unwrap();
         let expected = out.checksum();
         let bytes = out.bytes().to_vec();
 
@@ -615,7 +618,7 @@ mod tests {
     fn make_valid_file() -> Vec<u8> {
         let mut out = MemoryIndexOutput::new("test".to_string());
         write_index_header(&mut out, "TestCodec", 1, &[0u8; 16], "").unwrap();
-        out.write_bytes(b"payload").unwrap();
+        out.write_all(b"payload").unwrap();
         write_footer(&mut out).unwrap();
         out.into_inner().data
     }

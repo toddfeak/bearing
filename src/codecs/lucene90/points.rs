@@ -8,6 +8,7 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::points_reader::PointsProducer;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::FieldInfo;
 use crate::index::index_file_names;
 use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
@@ -164,7 +165,7 @@ pub(crate) fn write(
 fn write_bkd_field(
     data: &mut dyn IndexOutput,
     index: &mut dyn IndexOutput,
-    meta: &mut dyn DataOutput,
+    mut meta: &mut dyn DataOutput,
     points: &[(i32, Vec<u8>)],
     num_dims: u32,
     num_index_dims: u32,
@@ -223,7 +224,7 @@ fn write_bkd_field(
 
     // Record index start position and write packed index to .kdi
     let index_start_fp = index.file_pointer();
-    index.write_bytes(&packed_index)?;
+    index.write_all(&packed_index)?;
 
     // Write BKD metadata to .kdm
     // Simple header (NOT index header!)
@@ -233,8 +234,8 @@ fn write_bkd_field(
     meta.write_vint(MAX_POINTS_IN_LEAF)?;
     meta.write_vint(bytes_per_dim as i32)?;
     meta.write_vint(num_leaves as i32)?;
-    meta.write_bytes(&min_packed)?;
-    meta.write_bytes(&max_packed)?;
+    meta.write_all(&min_packed)?;
+    meta.write_all(&max_packed)?;
     meta.write_vlong(count as i64)?; // pointCount
     meta.write_vint(count as i32)?; // docsSeen (all unique in MVP)
     meta.write_vint(packed_index.len() as i32)?;
@@ -250,7 +251,7 @@ fn write_bkd_field(
 }
 
 /// Writes doc IDs for a leaf block.
-fn write_leaf_block_docs(data: &mut dyn DataOutput, doc_ids: &[i32]) -> io::Result<()> {
+fn write_leaf_block_docs(mut data: &mut dyn DataOutput, doc_ids: &[i32]) -> io::Result<()> {
     let count = doc_ids.len();
     data.write_vint(count as i32)?;
 
@@ -295,7 +296,7 @@ fn write_leaf_block_docs(data: &mut dyn DataOutput, doc_ids: &[i32]) -> io::Resu
 
 /// Writes doc IDs as a bitset.
 fn write_ids_as_bitset(
-    data: &mut dyn DataOutput,
+    mut data: &mut dyn DataOutput,
     doc_ids: &[i32],
     min: i32,
     max: i32,
@@ -324,7 +325,7 @@ fn write_ids_as_bitset(
 }
 
 /// Writes doc IDs using 16-bit delta encoding.
-fn write_delta_bpv16(data: &mut dyn DataOutput, doc_ids: &[i32], min: i32) -> io::Result<()> {
+fn write_delta_bpv16(mut data: &mut dyn DataOutput, doc_ids: &[i32], min: i32) -> io::Result<()> {
     data.write_byte(DELTA_BPV_16)?;
     data.write_vint(min)?;
 
@@ -350,7 +351,7 @@ fn write_delta_bpv16(data: &mut dyn DataOutput, doc_ids: &[i32], min: i32) -> io
 
 /// Writes the common prefix bytes for each dimension.
 fn write_common_prefixes(
-    data: &mut dyn DataOutput,
+    mut data: &mut dyn DataOutput,
     first_value: &[u8],
     common_prefix_len: usize,
     bytes_per_dim: u32,
@@ -368,7 +369,7 @@ fn write_common_prefixes(
             common_prefix_len.min(bpd)
         };
         data.write_vint(prefix_len as i32)?;
-        data.write_bytes(&first_value[dim_offset..dim_offset + prefix_len])?;
+        data.write_all(&first_value[dim_offset..dim_offset + prefix_len])?;
     }
     Ok(())
 }
@@ -493,7 +494,7 @@ fn select_sorted_dim(
 
 /// Writes low cardinality encoding: marker -2, then unique values with run lengths.
 fn write_low_cardinality_leaf_block(
-    data: &mut dyn DataOutput,
+    mut data: &mut dyn DataOutput,
     sorted_points: &[(i32, Vec<u8>)],
     prefix_lengths: &[usize],
     bpd: usize,
@@ -524,7 +525,7 @@ fn write_low_cardinality_leaf_block(
         for (dim, &prefix_len) in prefix_lengths.iter().enumerate() {
             let start = dim * bpd + prefix_len;
             let end = (dim + 1) * bpd;
-            data.write_bytes(&sorted_points[i].1[start..end])?;
+            data.write_all(&sorted_points[i].1[start..end])?;
         }
         data.write_vint(run as i32)?;
         i += run;
@@ -569,7 +570,7 @@ fn write_high_cardinality_leaf_block(
                 let start = dim * bpd + adj_prefix;
                 let end = (dim + 1) * bpd;
                 if start < end {
-                    data.write_bytes(&point.1[start..end])?;
+                    data.write_all(&point.1[start..end])?;
                 }
             }
         }
@@ -604,8 +605,8 @@ fn write_actual_bounds(
                     max_suffix = suffix;
                 }
             }
-            data.write_bytes(min_suffix)?;
-            data.write_bytes(max_suffix)?;
+            data.write_all(min_suffix)?;
+            data.write_all(max_suffix)?;
         }
     }
     Ok(())

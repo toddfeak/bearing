@@ -6,14 +6,16 @@
 //! Small values encode in fewer bytes, making them space-efficient for
 //! fields that are typically small (e.g., string lengths, doc deltas).
 
-use crate::encoding::zigzag;
 use std::io;
 use std::io::Read;
+use std::io::Write;
+
+use crate::encoding::zigzag;
 
 /// Writes a variable-length integer (1-5 bytes).
 ///
 /// Uses 7 bits per byte. High bit = continuation.
-pub fn write_vint(out: &mut impl io::Write, i: i32) -> io::Result<()> {
+pub fn write_vint(out: &mut dyn Write, i: i32) -> io::Result<()> {
     let mut val = i as u32;
     while (val & !0x7F) != 0 {
         out.write_all(&[((val & 0x7F) | 0x80) as u8])?;
@@ -44,7 +46,7 @@ pub fn read_vint(reader: &mut dyn Read) -> io::Result<i32> {
 /// Writes a variable-length long (1-9 bytes).
 ///
 /// Uses 7 bits per byte. High bit = continuation.
-pub fn write_vlong(out: &mut impl io::Write, i: i64) -> io::Result<()> {
+pub fn write_vlong(out: &mut dyn Write, i: i64) -> io::Result<()> {
     let mut val = i as u64;
     while (val & !0x7F) != 0 {
         out.write_all(&[((val & 0x7F) | 0x80) as u8])?;
@@ -73,7 +75,7 @@ pub fn read_vlong(reader: &mut dyn Read) -> io::Result<i64> {
 }
 
 /// Writes a zigzag-encoded variable-length int.
-pub fn write_zint(out: &mut impl io::Write, i: i32) -> io::Result<()> {
+pub fn write_zint(out: &mut dyn Write, i: i32) -> io::Result<()> {
     write_vint(out, zigzag::encode_i32(i))
 }
 
@@ -83,7 +85,7 @@ pub fn read_zint(reader: &mut dyn Read) -> io::Result<i32> {
 }
 
 /// Writes a zigzag-encoded variable-length long.
-pub fn write_zlong(out: &mut impl io::Write, i: i64) -> io::Result<()> {
+pub fn write_zlong(out: &mut dyn Write, i: i64) -> io::Result<()> {
     let encoded = zigzag::encode_i64(i);
     write_signed_vlong(out, encoded)
 }
@@ -94,7 +96,7 @@ pub fn read_zlong(reader: &mut dyn Read) -> io::Result<i64> {
 }
 
 /// Writes a variable-length long that may be negative (used by [`write_zlong`]).
-pub fn write_signed_vlong(out: &mut impl io::Write, mut i: i64) -> io::Result<()> {
+pub fn write_signed_vlong(out: &mut dyn Write, mut i: i64) -> io::Result<()> {
     while (i & !0x7Fi64) != 0 {
         out.write_all(&[((i & 0x7F) | 0x80) as u8])?;
         i = ((i as u64) >> 7) as i64;

@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::io;
+use std::io::Write;
 use std::str;
 
 use log::debug;
@@ -16,6 +17,7 @@ use crate::codecs::lucene103::postings_format::{
     TERMS_INDEX_EXTENSION, TERMS_META_CODEC_NAME, TERMS_META_EXTENSION, VERSION_CURRENT,
 };
 use crate::document::IndexOptions;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::encoding::{lowercase_ascii, lz4};
 use crate::index::index_file_names::segment_file_name;
 use crate::index::pipeline::terms_hash::{
@@ -299,7 +301,7 @@ impl BlockTreeTermsWriter {
         // Write .tmd field count + field metas
         self.meta_out.write_vint(self.field_metas.len() as i32)?;
         for field_meta in &self.field_metas {
-            self.meta_out.write_bytes(field_meta)?;
+            self.meta_out.write_all(field_meta)?;
         }
 
         // Write .tip footer
@@ -720,7 +722,7 @@ struct BlockWriteInput<'a, 'b> {
 fn write_block_to_output(
     input: &BlockWriteInput<'_, '_>,
     spec: &BlockSpec,
-    terms_out: &mut dyn IndexOutput,
+    mut terms_out: &mut dyn IndexOutput,
     postings_writer: &PostingsWriter,
     field_ctx: &FieldWriteContext,
     lz4_ht: &mut lz4::HighCompressionHashTable,
@@ -855,9 +857,9 @@ fn write_block_to_output(
     token |= compression_code;
     terms_out.write_vlong(token)?;
     if let Some(ref data) = compressed_bytes {
-        terms_out.write_bytes(data)?;
+        terms_out.write_all(data)?;
     } else {
-        terms_out.write_bytes(&suffix_bytes)?;
+        terms_out.write_all(&suffix_bytes)?;
     }
 
     // Write suffix lengths
@@ -867,16 +869,16 @@ fn write_block_to_output(
         terms_out.write_byte(suffix_lengths_bytes[0])?;
     } else {
         terms_out.write_vint((num_suffix_bytes << 1) as i32)?;
-        terms_out.write_bytes(&suffix_lengths_bytes)?;
+        terms_out.write_all(&suffix_lengths_bytes)?;
     }
 
     // Write stats
     terms_out.write_vint(stats_bytes.len() as i32)?;
-    terms_out.write_bytes(&stats_bytes)?;
+    terms_out.write_all(&stats_bytes)?;
 
     // Write metadata
     terms_out.write_vint(meta_bytes.len() as i32)?;
-    terms_out.write_bytes(&meta_bytes)?;
+    terms_out.write_all(&meta_bytes)?;
 
     if has_floor_lead_label {
         prefix.push(spec.floor_lead_label as u8);
@@ -903,7 +905,7 @@ fn all_equal(bytes: &[u8], value: u8) -> bool {
 
 fn write_bytes_ref(out: &mut VecOutput, bytes: &[u8]) -> io::Result<()> {
     out.write_vint(bytes.len() as i32)?;
-    out.write_bytes(bytes)?;
+    out.write_all(bytes)?;
     Ok(())
 }
 
@@ -1051,7 +1053,11 @@ impl TrieBuilder {
     }
 
     /// Save the trie to .tmd (meta) and .tip (index) outputs.
-    pub fn save(&self, meta: &mut dyn DataOutput, index: &mut dyn IndexOutput) -> io::Result<()> {
+    pub fn save(
+        &self,
+        mut meta: &mut dyn DataOutput,
+        index: &mut dyn IndexOutput,
+    ) -> io::Result<()> {
         meta.write_vlong(index.file_pointer() as i64)?; // indexStartFP
         let root_fp = self.save_nodes(index)?;
         meta.write_vlong(root_fp)?; // rootCode (offset of root node in .tip)
@@ -1106,7 +1112,7 @@ fn save_node_recursive(
             index.write_byte(header)?;
             write_long_n_bytes(output.fp, output_fp_bytes, index)?;
             if let Some(ref floor_data) = output.floor_data {
-                index.write_bytes(floor_data.as_slice())?;
+                index.write_all(floor_data.as_slice())?;
             }
         }
     } else if children_num == 1 {
@@ -1139,7 +1145,7 @@ fn save_node_recursive(
             let encoded_fp = encode_fp(output);
             write_long_n_bytes(encoded_fp, encoded_output_fp_bytes, index)?;
             if let Some(ref floor_data) = output.floor_data {
-                index.write_bytes(floor_data.as_slice())?;
+                index.write_all(floor_data.as_slice())?;
             }
         }
     } else {
@@ -1188,7 +1194,7 @@ fn save_node_recursive(
         if let Some(ref output) = node.output
             && let Some(ref floor_data) = output.floor_data
         {
-            index.write_bytes(floor_data.as_slice())?;
+            index.write_all(floor_data.as_slice())?;
         }
     }
 
@@ -1212,7 +1218,7 @@ fn bytes_required_vlong(v: i64) -> u32 {
 }
 
 fn write_long_n_bytes(v: i64, n: u32, out: &mut dyn DataOutput) -> io::Result<()> {
-    out.write_bytes(&(v as u64).to_le_bytes()[..n as usize])
+    out.write_all(&(v as u64).to_le_bytes()[..n as usize])
 }
 
 /// Merge nodes from `other` into `this` at the given depth.

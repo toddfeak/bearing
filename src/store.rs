@@ -23,7 +23,7 @@ pub(crate) mod slice_reader;
 
 pub use checksum::CRC32;
 pub use data_input::DataInput;
-pub use data_output::{DataOutput, DataOutputWriter, VecOutput};
+pub use data_output::{DataOutput, VecOutput};
 pub use fs::FSDirectory;
 pub use index_input::{IndexInput, RandomAccessInput};
 pub use index_output::IndexOutput;
@@ -83,7 +83,7 @@ pub trait Directory: Send {
     /// Default implementation uses `create_output` + `write_bytes`.
     fn write_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
         let mut out = self.create_output(name)?;
-        out.write_bytes(data)?;
+        out.write_all(data)?;
         Ok(())
     }
 
@@ -105,6 +105,8 @@ mod tests {
 
     use super::*;
     use crate::encoding::read_encoding::ReadEncoding;
+    use crate::encoding::write_encoding::WriteEncoding;
+
     use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::index_output::align_offset;
 

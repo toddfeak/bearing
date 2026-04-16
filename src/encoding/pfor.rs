@@ -15,7 +15,7 @@ fn read_le_int(r: &mut dyn Read) -> io::Result<i32> {
     Ok(i32::from_le_bytes(buf))
 }
 
-fn write_le_int(w: &mut impl Write, val: i32) -> io::Result<()> {
+fn write_le_int(w: &mut dyn Write, val: i32) -> io::Result<()> {
     w.write_all(&val.to_le_bytes())
 }
 
@@ -112,7 +112,7 @@ fn expand16(ints: &mut [i32; BLOCK_SIZE]) {
 
 /// Encode 128 longs with the given bits per value using FOR bit packing.
 /// Uses ForUtil thresholds: bpv<=8 → collapse8, <=16 → collapse16, else → no collapse.
-pub fn encode(longs: &[i64; BLOCK_SIZE], bpv: u32, out: &mut impl Write) -> io::Result<()> {
+pub fn encode(longs: &[i64; BLOCK_SIZE], bpv: u32, out: &mut dyn Write) -> io::Result<()> {
     if bpv == 0 {
         return Ok(());
     }
@@ -137,7 +137,7 @@ fn encode_ints(
     ints: &[i32; BLOCK_SIZE],
     bpv: u32,
     primitive_size: u32,
-    out: &mut impl Write,
+    out: &mut dyn Write,
 ) -> io::Result<()> {
     let num_ints = (BLOCK_SIZE as u32) * primitive_size / 32;
     let num_ints_per_shift = bpv * 4;
@@ -344,7 +344,7 @@ pub const MAX_EXCEPTIONS: usize = 7;
 /// Uses a min-heap to find the top MAX_EXCEPTIONS+1 values. The heap minimum
 /// determines the patched bpv. Exceptions (values exceeding the patched mask)
 /// are stored as (index, highBits) byte pairs after the FOR-encoded base values.
-pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut impl Write) -> io::Result<()> {
+pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut dyn Write) -> io::Result<()> {
     // Find the top MAX_EXCEPTIONS+1 values using a min-heap approach.
     // We maintain a sorted array of size MAX_EXCEPTIONS+1 with the minimum at [0].
     let mut top = [0u64; MAX_EXCEPTIONS + 1];
@@ -473,7 +473,7 @@ pub fn for_delta_bits_required(deltas: &[i32; BLOCK_SIZE]) -> u32 {
 pub fn for_delta_encode(
     bpv: u32,
     deltas: &[i32; BLOCK_SIZE],
-    out: &mut impl Write,
+    out: &mut dyn Write,
 ) -> io::Result<()> {
     let mut ints = [0i32; BLOCK_SIZE];
     ints.copy_from_slice(deltas);
@@ -590,7 +590,7 @@ mod tests {
     }
 
     /// Encode doc ID deltas with the given bits per value.
-    fn encode_deltas(bpv: u32, longs: &[i64; BLOCK_SIZE], out: &mut impl Write) -> io::Result<()> {
+    fn encode_deltas(bpv: u32, longs: &[i64; BLOCK_SIZE], out: &mut dyn Write) -> io::Result<()> {
         let mut deltas = [0i64; BLOCK_SIZE];
         let mut prev = 0i64;
         for (i, &v) in longs.iter().enumerate() {

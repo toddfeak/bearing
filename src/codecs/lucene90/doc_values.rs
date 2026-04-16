@@ -14,6 +14,7 @@ use crate::codecs::packed_writers::{DirectMonotonicWriter, DirectWriter};
 use crate::document::DocValuesType;
 use crate::encoding::lz4::{self, FastHashTable};
 use crate::encoding::packed::unsigned_bits_required;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::FieldInfo;
 use crate::index::index_file_names;
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
@@ -296,7 +297,7 @@ fn add_numeric_field(
 
 /// Adds a BINARY field.
 fn add_binary_field(
-    meta: &mut dyn IndexOutput,
+    mut meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
     vals: &[BinaryDocValue],
     num_docs: i32,
@@ -312,7 +313,7 @@ fn add_binary_field(
         let len = entry.value.len() as i32;
         min_length = min_length.min(len);
         max_length = max_length.max(len);
-        data.write_bytes(&entry.value)?;
+        data.write_all(&entry.value)?;
     }
 
     let num_docs_with_field = vals.len() as i32;
@@ -366,7 +367,7 @@ fn add_binary_field(
         dm_writer.add(cumulative); // final entry for total length
 
         dm_writer.finish(meta, &mut address_buffer)?;
-        data.write_bytes(address_buffer.bytes())?;
+        data.write_all(address_buffer.bytes())?;
 
         meta.write_le_long(data.file_pointer() as i64 - addresses_start)?;
     }
@@ -435,7 +436,7 @@ fn add_sorted_field(
 
 /// Adds a SORTED_NUMERIC field.
 fn add_sorted_numeric_field(
-    meta: &mut dyn IndexOutput,
+    mut meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
     vals: &[SortedNumericDocValue],
     num_docs: i32,
@@ -491,7 +492,7 @@ fn add_sorted_numeric_field(
         dm_writer.add(cumulative);
 
         dm_writer.finish(meta, &mut address_buffer)?;
-        data.write_bytes(address_buffer.bytes())?;
+        data.write_all(address_buffer.bytes())?;
 
         meta.write_le_long(data.file_pointer() as i64 - addresses_start)?;
     }
@@ -506,7 +507,7 @@ fn add_sorted_numeric_field(
 /// Multi-valued: uses the SORTED_NUMERIC reader path (writeByte(1), writeValues,
 /// numDocsWithField, address table, termDict).
 fn add_sorted_set_field(
-    meta: &mut dyn IndexOutput,
+    mut meta: &mut dyn IndexOutput,
     data: &mut dyn IndexOutput,
     producer: &dyn DocValuesProducer,
     field_info: &FieldInfo,
@@ -611,7 +612,7 @@ fn add_sorted_set_field(
             dm_writer.add(cumulative);
 
             dm_writer.finish(meta, &mut address_buffer)?;
-            data.write_bytes(address_buffer.bytes())?;
+            data.write_all(address_buffer.bytes())?;
 
             meta.write_le_long(data.file_pointer() as i64 - addresses_start)?;
         }
@@ -821,8 +822,8 @@ fn gcd_compute(a: i64, b: i64) -> i64 {
 
 /// Writes the terms dictionary for SORTED/SORTED_SET doc values.
 fn add_terms_dict(
-    meta: &mut dyn IndexOutput,
-    data: &mut dyn IndexOutput,
+    mut meta: &mut dyn IndexOutput,
+    mut data: &mut dyn IndexOutput,
     sorted_terms: &[&[u8]],
 ) -> io::Result<()> {
     let size = sorted_terms.len() as i64;
@@ -862,7 +863,7 @@ fn add_terms_dict(
 
             // Write first term of block directly to data
             data.write_vint(term.len() as i32)?;
-            data.write_bytes(term)?;
+            data.write_all(term)?;
 
             // Save first term as dictionary for LZ4 compression
             dict_bytes = term.to_vec();
@@ -909,7 +910,7 @@ fn add_terms_dict(
 
     // Write address buffer to data
     let addr_start = data.file_pointer() as i64;
-    data.write_bytes(address_buffer.bytes())?;
+    data.write_all(address_buffer.bytes())?;
     meta.write_le_long(addr_start)?;
     meta.write_le_long(data.file_pointer() as i64 - addr_start)?;
 
@@ -922,7 +923,7 @@ fn add_terms_dict(
 /// Compress suffix buffer with dict_bytes as LZ4 dictionary and write to data.
 /// Returns the uncompressed length (of suffix data only).
 fn compress_and_write_terms_block(
-    data: &mut dyn DataOutput,
+    mut data: &mut dyn DataOutput,
     dict_bytes: &[u8],
     suffix_buffer: &[u8],
     ht: &mut FastHashTable,
@@ -936,7 +937,7 @@ fn compress_and_write_terms_block(
     combined.extend_from_slice(suffix_buffer);
 
     let compressed = lz4::compress_with_dictionary_reuse(&combined, dict_bytes.len(), ht);
-    data.write_bytes(&compressed)?;
+    data.write_all(&compressed)?;
 
     Ok(uncompressed_length)
 }
@@ -966,7 +967,7 @@ fn write_terms_index(
                 string_helper::sort_key_length(previous.unwrap(), term)
             };
             offset += sort_key_len as i64;
-            data.write_bytes(&term[..sort_key_len])?;
+            data.write_all(&term[..sort_key_len])?;
         }
         // Track previous for the term just before the next boundary
         if (ord & TERMS_DICT_REVERSE_INDEX_MASK) == TERMS_DICT_REVERSE_INDEX_MASK {
@@ -982,7 +983,7 @@ fn write_terms_index(
     meta.write_le_long(data.file_pointer() as i64 - start)?;
 
     let addr_start = data.file_pointer() as i64;
-    data.write_bytes(address_buffer.bytes())?;
+    data.write_all(address_buffer.bytes())?;
     meta.write_le_long(addr_start)?;
     meta.write_le_long(data.file_pointer() as i64 - addr_start)?;
 

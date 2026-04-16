@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Segment infos reader and writer for the segments_N commit point file.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::sync::Arc;
@@ -9,6 +8,8 @@ use std::sync::Arc;
 use log::debug;
 
 use crate::codecs::codec_util;
+use crate::encoding::read_encoding::ReadEncoding;
+use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::segment::FlushedSegment;
 use crate::store::checksum_input::ChecksumIndexInput;
@@ -312,7 +313,7 @@ fn write_flushed_segments(
         output.write_string(&seg.segment_id.name)?;
 
         // Segment ID (16 bytes)
-        output.write_bytes(&seg.segment_id.id)?;
+        output.write_all(&seg.segment_id.id)?;
 
         // Codec name
         output.write_string(SEGMENT_CODEC_NAME)?;
@@ -335,7 +336,7 @@ fn write_flushed_segments(
         // SCI ID: present (1) + 16 random bytes
         let sci_id = string_helper::random_id();
         output.write_byte(1)?;
-        output.write_bytes(&sci_id)?;
+        output.write_all(&sci_id)?;
 
         // Field infos files (empty set)
         output.write_set_of_strings(&[])?;
