@@ -17,9 +17,9 @@ use log::error;
 
 use bearing::prelude::{
     Document, DocumentBuilder, FSDirectory, IndexWriter, IndexWriterConfig, TermVectorOptions,
-    binary_dv, double_field, double_range, feature, float_field, float_range, int_field, int_range,
-    keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv, sorted_numeric_dv,
-    sorted_set_dv, stored, string, text,
+    TokenizedIndexOptions, binary_dv, double_field, double_range, feature, float_field,
+    float_range, int_field, int_range, keyword, lat_lon, long_field, long_range, numeric_dv,
+    sorted_dv, sorted_numeric_dv, sorted_set_dv, stored, string, text,
 };
 
 struct CliArgs {
@@ -238,6 +238,7 @@ fn make_document(path: &Path) -> Document {
         .unwrap_or(0);
 
     let contents_field = text("contents")
+        .with_index_options(TokenizedIndexOptions::PositionsAndOffsets)
         .with_term_vectors(TermVectorOptions::PositionsAndOffsets)
         .value(path.to_path_buf());
 

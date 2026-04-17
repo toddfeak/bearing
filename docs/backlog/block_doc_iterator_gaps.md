@@ -18,3 +18,12 @@ Deferred features from the initial BlockDocIterator implementation.
   (< 4096 docs per term). Matches the writer's current `assert!` limitation.
   When the writer adds level1 support, the reader must handle the level1
   skip wrapper that groups 32 level0 blocks.
+
+## Offset decoding not implemented
+
+- **No offset values returned at query time**: `BlockPostingsEnum` does not
+  open the `.pay` file, decode PFOR offset blocks, or return offset values.
+  The reader correctly skips over offset metadata in `.psm`, term state, and
+  skip data (no errors), but callers requesting offsets get nothing. Needed
+  for highlighter support. The write path is complete — PFOR offset blocks
+  in `.pay` and VInt offset tail in `.pos` are written correctly.

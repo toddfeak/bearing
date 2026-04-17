@@ -51,7 +51,7 @@
         {
           "name": "contents",
           "number": 2,
-          "indexOptions": "DOCS_AND_FREQS_AND_POSITIONS",
+          "indexOptions": "DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS",
           "hasNorms": true,
           "storeTermVector": true,
           "hasPayloads": false,

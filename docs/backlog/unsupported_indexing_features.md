@@ -54,9 +54,7 @@ Remaining field types (KNN vectors, shape fields) are deferred — see below.
 
 **Java feature:** Fields indexed with `IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS` store character start/end offsets per position in the postings (`.pos` file). Used for highlighting to map positions back to character ranges without re-analyzing the text.
 
-**Rust status:** Not implemented. The `IndexOptions::DocsAndFreqsAndPositionsAndOffsets` enum variant exists but no built-in field type uses it, and the `PostingsArray` offset encoding path is gated by a `todo!()`. Per-term `last_end_offsets` tracking was removed to save memory; re-adding offset support would require an `Option<Vec<i32>>` or similar sparse storage.
-
-**Priority:** Low — no current field types produce offset postings. Needed eventually for highlighter support.
+**Rust status:** Implemented. `TextFieldBuilder::with_index_options(TokenizedIndexOptions::PositionsAndOffsets)` enables offset indexing. The `PostingsWriter` encodes offsets to the `.pay` file (PFOR blocks) and `.pos` file (VInt tail), with skip data tracking.
 
 ## 7. Index-Time Sorting
 

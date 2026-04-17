@@ -101,6 +101,9 @@ impl PostingsReader {
         let _expected_doc_file_length = meta_in.read_le_long()?;
         if field_infos.has_prox() {
             let _expected_pos_file_length = meta_in.read_le_long()?;
+            if field_infos.has_payloads() || field_infos.has_offsets() {
+                let _expected_pay_file_length = meta_in.read_le_long()?;
+            }
         }
 
         codec_util::check_footer(&mut meta_in)?;

@@ -319,7 +319,6 @@ fn decode_term_state(
     let mut stats_reader = SliceReader::new(stats_bytes);
     let mut meta_reader = SliceReader::new(meta_bytes);
     let has_freqs = index_options.has_freqs();
-    let has_positions = index_options.has_positions();
 
     let mut state = IntBlockTermState::new();
     let mut last_state = IntBlockTermState::new();
@@ -352,7 +351,7 @@ fn decode_term_state(
         // Metadata decoding (reverse of PostingsWriter::encode_term)
         let empty_state = IntBlockTermState::new();
         let ref_state = if ord == 0 { &empty_state } else { &last_state };
-        decode_term_meta(&mut meta_reader, &mut state, ref_state, has_positions)?;
+        decode_term_meta(&mut meta_reader, &mut state, ref_state, index_options)?;
 
         if ord < target_ord {
             last_state = state;
@@ -367,7 +366,7 @@ fn decode_term_meta(
     reader: &mut SliceReader,
     state: &mut IntBlockTermState,
     last_state: &IntBlockTermState,
-    has_positions: bool,
+    index_options: IndexOptions,
 ) -> io::Result<()> {
     let code = reader.read_vlong()?;
     if (code & 1) != 0 {
@@ -387,8 +386,11 @@ fn decode_term_meta(
         }
     }
 
-    if has_positions {
+    if index_options.has_positions() {
         state.pos_start_fp = last_state.pos_start_fp + reader.read_vlong()?;
+        if index_options.has_offsets() {
+            state.pay_start_fp = last_state.pay_start_fp + reader.read_vlong()?;
+        }
         if state.total_term_freq > pfor::BLOCK_SIZE as i64 {
             state.last_pos_block_offset = reader.read_vlong()?;
         } else {

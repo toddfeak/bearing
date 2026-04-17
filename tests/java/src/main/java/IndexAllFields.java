@@ -48,11 +48,11 @@ import org.apache.lucene.store.FSDirectory;
  */
 public class IndexAllFields {
 
-    /** FieldType matching Rust's text_field_with_term_vectors: indexed with positions, term vectors with positions and offsets. */
+    /** FieldType matching Rust's text_field_with_term_vectors: indexed with positions and offsets, term vectors with positions and offsets. */
     private static final FieldType TV_TYPE;
     static {
         TV_TYPE = new FieldType();
-        TV_TYPE.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS);
+        TV_TYPE.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS);
         TV_TYPE.setTokenized(true);
         TV_TYPE.setStoreTermVectors(true);
         TV_TYPE.setStoreTermVectorPositions(true);

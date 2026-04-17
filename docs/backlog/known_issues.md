@@ -36,15 +36,15 @@ Additionally, `intToByte4` silently returns 0 on negative input instead of panic
 
 ---
 
-## 3. No Offset or Payload Support in Write Path
+## 3. No Payload Support in Write Path
 
-**Severity:** Feature gap — fields with offsets or payloads cannot be indexed
+**Severity:** Feature gap — fields with payloads cannot be indexed
 
-The postings writer (`PostingsWriter`) does not support writing offsets or payloads. There is no `pay_out` file handle, no offset/payload buffering, and no encoding logic for the `.pay` file. The read path (`PostingsReader`) already handles `has_offsets_or_payloads` in its skip data parsing and postings iteration.
+The postings writer (`PostingsWriter`) does not support writing payloads. There is no payload length buffering, payload byte accumulation, or payload encoding in the `.pay` file. Offset support was added but payload branches remain unimplemented. The `payloadByteUpto` field in skip data is hardcoded to 0.
 
-This affects `IndexOptions::DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS` and any field that uses payloads (e.g., `TermVectorOptions` with payloads).
+This affects any field that uses payloads (e.g., `TermVectorOptions` with payloads).
 
-**Fix:** Port the offset/payload branches from Java's `Lucene103PostingsWriter` — `payOut` file creation, `offsetStartDeltaBuffer`/`offsetLengthBuffer`/`payloadLengthBuffer` buffering, payload byte accumulation, and the `.pay` encoding in `flushDocBlock`/`addPosition`/`finishTerm`. Port corresponding skip data fields for level0 and level1.
+**Fix:** Port the payload branches from Java's `Lucene103PostingsWriter` — `payloadLengthBuffer` buffering, payload byte accumulation, and the `.pay` payload encoding in `addPosition`/`finishTerm`. The `.pay` file infrastructure and skip data plumbing are already in place from offset support.
 
 ---
 
