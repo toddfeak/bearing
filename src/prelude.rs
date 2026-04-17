@@ -20,9 +20,9 @@ pub use crate::analysis::{AnalyzerFactory, StandardAnalyzerFactory, UnicodeAnaly
 pub use crate::document::{Document, DocumentBuilder};
 pub use crate::index::config::IndexWriterConfig;
 pub use crate::index::field::{
-    TermVectorOptions, binary_dv, double_field, double_range, feature, float_field, float_range,
-    int_field, int_range, keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv,
-    sorted_numeric_dv, sorted_set_dv, stored, string, text,
+    TermVectorOptions, TokenizedIndexOptions, binary_dv, double_field, double_range, feature,
+    float_field, float_range, int_field, int_range, keyword, lat_lon, long_field, long_range,
+    numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored, string, text,
 };
 pub use crate::index::writer::IndexWriter;
 pub use crate::store::{Directory, FSDirectory, MemoryDirectory, SharedDirectory};

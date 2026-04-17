@@ -35,6 +35,11 @@ impl IndexOptions {
     pub fn has_positions(self) -> bool {
         self >= IndexOptions::DocsAndFreqsAndPositions
     }
+
+    /// Returns true if this option includes offsets.
+    pub fn has_offsets(self) -> bool {
+        self >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets
+    }
 }
 
 /// Specifies the type of doc values stored for a field.

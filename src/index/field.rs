@@ -148,6 +148,30 @@ impl TermVectorOptions {
     }
 }
 
+/// Controls the inverted index level for a tokenized field.
+///
+/// A tokenized field always indexes docs, frequencies, and positions.
+/// This enum controls whether character offsets are also indexed.
+/// The two axes (inverted index options and term vector options) are
+/// fully independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenizedIndexOptions {
+    /// Index docs, frequencies, and positions.
+    Positions,
+    /// Index docs, frequencies, positions, and character offsets.
+    PositionsAndOffsets,
+}
+
+impl TokenizedIndexOptions {
+    /// Maps to the corresponding [`IndexOptions`] value.
+    pub fn index_options(self) -> IndexOptions {
+        match self {
+            Self::Positions => IndexOptions::DocsAndFreqsAndPositions,
+            Self::PositionsAndOffsets => IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+        }
+    }
+}
+
 /// How a field enters the inverted index (postings).
 ///
 /// Determines the [`IndexOptions`] level (docs, freqs, positions) and whether
@@ -272,6 +296,7 @@ impl fmt::Debug for PointsValue {
 pub struct FieldType {
     stored: Option<StoredValue>,
     invertable: Option<InvertableValue>,
+    index_options: IndexOptions,
     doc: Option<DocValue>,
     points: Option<PointsValue>,
 }
@@ -298,15 +323,9 @@ impl FieldType {
         self.points.as_ref()
     }
 
-    /// Returns the index options for this field, derived from the invertable
-    /// value.
+    /// Returns the index options for this field.
     pub fn index_options(&self) -> IndexOptions {
-        match &self.invertable {
-            None => IndexOptions::None,
-            Some(InvertableValue::Tokenized(_, _)) => IndexOptions::DocsAndFreqsAndPositions,
-            Some(InvertableValue::ExactMatch(_)) => IndexOptions::Docs,
-            Some(InvertableValue::Feature(_, _)) => IndexOptions::DocsAndFreqs,
-        }
+        self.index_options
     }
 
     /// Whether this field is tokenized (run through an analyzer).
@@ -385,7 +404,8 @@ impl Field {
 /// Creates a [`TextFieldBuilder`] for a tokenized text field.
 ///
 /// Text fields are run through an analyzer to produce a token stream with
-/// docs, freqs, and positions. They support optional storage.
+/// docs, freqs, and positions. They support optional storage, term vectors,
+/// and character offset indexing.
 ///
 /// # Examples
 ///
@@ -393,10 +413,14 @@ impl Field {
 /// let f = text("body").value("hello world");          // not stored
 /// let f = text("body").stored().value("hello world");  // stored
 /// let f = text("body").value(PathBuf::from("file.txt")); // file-backed, not stored
+/// let f = text("body")                                // with offsets
+///     .with_index_options(TokenizedIndexOptions::PositionsAndOffsets)
+///     .value("hello world");
 /// ```
 pub fn text(name: &str) -> TextFieldBuilder {
     TextFieldBuilder {
         name: name.to_string(),
+        index_options: TokenizedIndexOptions::Positions,
         term_vectors: None,
     }
 }
@@ -410,13 +434,25 @@ pub fn text(name: &str) -> TextFieldBuilder {
 ///   [`StoredTextFieldBuilder`] that only accepts string values
 ///
 /// Optionally chain [`.with_term_vectors()`](TextFieldBuilder::with_term_vectors)
-/// before the terminal method to enable per-document term vector storage.
+/// or [`.with_index_options()`](TextFieldBuilder::with_index_options)
+/// before the terminal method.
 pub struct TextFieldBuilder {
     name: String,
+    index_options: TokenizedIndexOptions,
     term_vectors: Option<TermVectorOptions>,
 }
 
 impl TextFieldBuilder {
+    /// Sets the inverted index level for this field.
+    ///
+    /// Defaults to [`TokenizedIndexOptions::Positions`]. Use
+    /// [`PositionsAndOffsets`](TokenizedIndexOptions::PositionsAndOffsets)
+    /// to also index character offsets.
+    pub fn with_index_options(mut self, options: TokenizedIndexOptions) -> Self {
+        self.index_options = options;
+        self
+    }
+
     /// Enables term vector storage with the given options.
     pub fn with_term_vectors(mut self, options: TermVectorOptions) -> Self {
         self.term_vectors = Some(options);
@@ -430,6 +466,7 @@ impl TextFieldBuilder {
     pub fn stored(self) -> StoredTextFieldBuilder {
         StoredTextFieldBuilder {
             name: self.name,
+            index_options: self.index_options,
             term_vectors: self.term_vectors,
         }
     }
@@ -444,6 +481,7 @@ impl TextFieldBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: Some(InvertableValue::Tokenized(v.into(), self.term_vectors)),
+                index_options: self.index_options.index_options(),
                 doc: None,
                 points: None,
             },
@@ -458,6 +496,7 @@ impl TextFieldBuilder {
 /// independently of the tokenizer.
 pub struct StoredTextFieldBuilder {
     name: String,
+    index_options: TokenizedIndexOptions,
     term_vectors: Option<TermVectorOptions>,
 }
 
@@ -481,6 +520,7 @@ impl StoredTextFieldBuilder {
             field_type: FieldType {
                 stored: Some(StoredValue::String(text)),
                 invertable: Some(InvertableValue::Tokenized(provider, self.term_vectors)),
+                index_options: self.index_options.index_options(),
                 doc: None,
                 points: None,
             },
@@ -532,6 +572,7 @@ impl KeywordFieldBuilder {
                     None
                 },
                 invertable: Some(InvertableValue::ExactMatch(s.clone())),
+                index_options: IndexOptions::Docs,
                 doc: Some(DocValue::SortedSet(vec![s.into_bytes()])),
                 points: None,
             },
@@ -574,6 +615,7 @@ impl FeatureFieldBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: Some(InvertableValue::Feature(feature_name.into(), feature_value)),
+                index_options: IndexOptions::DocsAndFreqs,
                 doc: None,
                 points: None,
             },
@@ -625,6 +667,7 @@ impl IntFieldBuilder {
                     None
                 },
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::SortedNumeric(vec![v as i64])),
                 points: Some(PointsValue::Single {
                     bytes_per_dim: 4,
@@ -675,6 +718,7 @@ impl LongFieldBuilder {
                     None
                 },
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::SortedNumeric(vec![v])),
                 points: Some(PointsValue::Single {
                     bytes_per_dim: 8,
@@ -725,6 +769,7 @@ impl FloatFieldBuilder {
                     None
                 },
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::SortedNumeric(vec![
                     sortable_bytes::float_to_int(v) as i64,
                 ])),
@@ -777,6 +822,7 @@ impl DoubleFieldBuilder {
                     None
                 },
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::SortedNumeric(vec![
                     sortable_bytes::double_to_long(v),
                 ])),
@@ -825,6 +871,7 @@ impl LatLonBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: Some(PointsValue::Single {
                     bytes_per_dim: 4,
@@ -870,6 +917,7 @@ impl IntRangeBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: Some(PointsValue::Range {
                     dims: mins.len(),
@@ -916,6 +964,7 @@ impl LongRangeBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: Some(PointsValue::Range {
                     dims: mins.len(),
@@ -962,6 +1011,7 @@ impl FloatRangeBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: Some(PointsValue::Range {
                     dims: mins.len(),
@@ -1008,6 +1058,7 @@ impl DoubleRangeBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: Some(PointsValue::Range {
                     dims: mins.len(),
@@ -1049,6 +1100,7 @@ impl NumericDvBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::Numeric(v)),
                 points: None,
             },
@@ -1082,6 +1134,7 @@ impl BinaryDvBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::Binary(v)),
                 points: None,
             },
@@ -1115,6 +1168,7 @@ impl SortedDvBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::Sorted(v)),
                 points: None,
             },
@@ -1148,6 +1202,7 @@ impl SortedSetDvBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::SortedSet(values)),
                 points: None,
             },
@@ -1181,6 +1236,7 @@ impl SortedNumericDvBuilder {
             field_type: FieldType {
                 stored: None,
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: Some(DocValue::SortedNumeric(values)),
                 points: None,
             },
@@ -1222,6 +1278,7 @@ impl StoredFieldBuilder {
             field_type: FieldType {
                 stored: Some(StoredValue::String(v.into())),
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: None,
             },
@@ -1235,6 +1292,7 @@ impl StoredFieldBuilder {
             field_type: FieldType {
                 stored: Some(StoredValue::Bytes(v)),
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: None,
             },
@@ -1248,6 +1306,7 @@ impl StoredFieldBuilder {
             field_type: FieldType {
                 stored: Some(StoredValue::Int(v)),
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: None,
             },
@@ -1261,6 +1320,7 @@ impl StoredFieldBuilder {
             field_type: FieldType {
                 stored: Some(StoredValue::Long(v)),
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: None,
             },
@@ -1274,6 +1334,7 @@ impl StoredFieldBuilder {
             field_type: FieldType {
                 stored: Some(StoredValue::Float(v)),
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: None,
             },
@@ -1287,6 +1348,7 @@ impl StoredFieldBuilder {
             field_type: FieldType {
                 stored: Some(StoredValue::Double(v)),
                 invertable: None,
+                index_options: IndexOptions::None,
                 doc: None,
                 points: None,
             },
@@ -1340,6 +1402,7 @@ impl StringFieldBuilder {
                     None
                 },
                 invertable: Some(InvertableValue::ExactMatch(s)),
+                index_options: IndexOptions::Docs,
                 doc: None,
                 points: None,
             },
@@ -1436,6 +1499,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn text_field_default_index_options() {
+        let field = text("body").value("hello");
+        assert_eq!(
+            field.field_type().index_options(),
+            IndexOptions::DocsAndFreqsAndPositions
+        );
+    }
+
+    #[test]
+    fn text_field_with_index_offsets() {
+        let field = text("body")
+            .with_index_options(TokenizedIndexOptions::PositionsAndOffsets)
+            .value("hello");
+        assert_eq!(
+            field.field_type().index_options(),
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets
+        );
+    }
+
+    #[test]
+    fn text_field_stored_default_index_options() {
+        let field = text("body").stored().value("hello");
+        assert_eq!(
+            field.field_type().index_options(),
+            IndexOptions::DocsAndFreqsAndPositions
+        );
+    }
+
+    #[test]
+    fn text_field_stored_with_index_offsets() {
+        let field = text("body")
+            .with_index_options(TokenizedIndexOptions::PositionsAndOffsets)
+            .stored()
+            .value("hello");
+        assert_eq!(
+            field.field_type().index_options(),
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets
+        );
+    }
+
     // -----------------------------------------------------------------------
     // FieldType derived property tests
     // -----------------------------------------------------------------------
@@ -1445,6 +1549,7 @@ mod tests {
         let ft = FieldType {
             stored: None,
             invertable: None,
+            index_options: IndexOptions::None,
             doc: None,
             points: None,
         };
@@ -1459,6 +1564,7 @@ mod tests {
         let ft = FieldType {
             stored: None,
             invertable: Some(InvertableValue::ExactMatch("term".to_string())),
+            index_options: IndexOptions::Docs,
             doc: None,
             points: None,
         };
@@ -1472,6 +1578,7 @@ mod tests {
         let ft = FieldType {
             stored: None,
             invertable: Some(InvertableValue::Feature("score".to_string(), 0.5)),
+            index_options: IndexOptions::DocsAndFreqs,
             doc: None,
             points: None,
         };
@@ -1485,6 +1592,7 @@ mod tests {
         let ft = FieldType {
             stored: None,
             invertable: None,
+            index_options: IndexOptions::None,
             doc: Some(DocValue::Numeric(42)),
             points: None,
         };
@@ -1496,6 +1604,7 @@ mod tests {
         let ft = FieldType {
             stored: None,
             invertable: None,
+            index_options: IndexOptions::None,
             doc: Some(DocValue::Binary(vec![1, 2, 3])),
             points: None,
         };
@@ -1507,6 +1616,7 @@ mod tests {
         let ft = FieldType {
             stored: None,
             invertable: None,
+            index_options: IndexOptions::None,
             doc: Some(DocValue::Sorted(b"alpha".to_vec())),
             points: None,
         };
@@ -1518,6 +1628,7 @@ mod tests {
         let ft = FieldType {
             stored: None,
             invertable: None,
+            index_options: IndexOptions::None,
             doc: Some(DocValue::SortedSet(vec![b"a".to_vec(), b"b".to_vec()])),
             points: None,
         };
@@ -1529,6 +1640,7 @@ mod tests {
         let ft = FieldType {
             stored: None,
             invertable: None,
+            index_options: IndexOptions::None,
             doc: Some(DocValue::SortedNumeric(vec![10, 20])),
             points: None,
         };
