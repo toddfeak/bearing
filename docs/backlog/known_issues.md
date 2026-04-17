@@ -45,3 +45,22 @@ The postings writer (`PostingsWriter`) does not support writing offsets or paylo
 This affects `IndexOptions::DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS` and any field that uses payloads (e.g., `TermVectorOptions` with payloads).
 
 **Fix:** Port the offset/payload branches from Java's `Lucene103PostingsWriter` — `payOut` file creation, `offsetStartDeltaBuffer`/`offsetLengthBuffer`/`payloadLengthBuffer` buffering, payload byte accumulation, and the `.pay` encoding in `flushDocBlock`/`addPosition`/`finishTerm`. Port corresponding skip data fields for level0 and level1.
+
+---
+
+## 4. Decomposed IndexOptions Booleans
+
+**Severity:** Low — code clarity, no functional impact
+
+Several structs store decomposed `IndexOptions` as individual booleans (`has_freq`, `has_prox`, `has_offsets`, `write_freqs`, `write_positions`) instead of a single `IndexOptions` enum. This allows invalid states (e.g., offsets without positions) and requires adding a new boolean parameter each time a new indexing tier is supported.
+
+Known locations:
+
+- `BlockFlushState` (`postings_writer.rs`) — `write_freqs`, `write_positions`
+- `encode_term` (`postings_writer.rs`) — `write_positions`, `write_offsets` parameters
+- `FreqProxPostingsArray::new` (`terms_hash.rs`) — `write_freqs`, `write_offsets` parameters
+- `FreqProxTermsWriterPerField` (`terms_hash.rs`) — `has_freq`, `has_prox`, `has_offsets` (cached derivations alongside `index_options` field)
+- `FieldInfoGlobal` (`field_infos.rs`) — `has_freq`, `has_prox`, `has_offsets`
+- `StatsWriter` (`blocktree_writer.rs`) — `write_freqs`
+
+**Fix:** Replace boolean fields/parameters with `IndexOptions` and use `has_freqs()`/`has_positions()`/`has_offsets()` at call sites. Hot-path code may cache derived booleans in local variables or function parameters, but not in struct fields — struct fields add storage overhead and duplicate state.

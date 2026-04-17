@@ -14,48 +14,88 @@ use crate::codecs::lucene103::postings_format::{
     self, DOC_CODEC, DOC_EXTENSION, IntBlockTermState, META_CODEC, META_EXTENSION, PAY_CODEC,
     PAY_EXTENSION, POS_CODEC, POS_EXTENSION, VERSION_CURRENT,
 };
-use crate::document::IndexOptions;
+use crate::document::{IndexOptions, TermOffset};
 use crate::encoding::pfor::{self, BLOCK_SIZE};
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::encoding::zigzag;
 use crate::index::index_file_names::segment_file_name;
 use crate::store::{DataOutput, Directory, IndexOutput, VecOutput};
 
-/// Buffers position deltas and PFOR-encodes them in blocks of 128.
-/// Extracts the repeated pattern from singleton, VInt, and block encoding paths.
+/// Buffers position deltas (and optionally offset deltas) and PFOR-encodes
+/// them in blocks of 128.
 struct PositionEncoder {
-    buffer: [i32; BLOCK_SIZE],
-    buffer_upto: usize,
+    pos_delta_buffer: [i32; BLOCK_SIZE],
+    offset_buffer: [TermOffset; BLOCK_SIZE],
+    pos_buffer_upto: usize,
+    last_start_offset: i32,
+    write_offsets: bool,
 }
 
 impl PositionEncoder {
-    fn new() -> Self {
+    fn new(write_offsets: bool) -> Self {
         Self {
-            buffer: [0i32; BLOCK_SIZE],
-            buffer_upto: 0,
+            pos_delta_buffer: [0i32; BLOCK_SIZE],
+            offset_buffer: [TermOffset::default(); BLOCK_SIZE],
+            pos_buffer_upto: 0,
+            last_start_offset: 0,
+            write_offsets,
         }
     }
 
-    fn buffer_upto(&self) -> usize {
-        self.buffer_upto
+    fn pos_buffer_upto(&self) -> usize {
+        self.pos_buffer_upto
     }
 
-    /// Buffer a position delta, flushing a PFOR block when full.
-    fn add_position(&mut self, pos_delta: i32, pos_out: &mut dyn DataOutput) -> io::Result<()> {
-        self.buffer[self.buffer_upto] = pos_delta;
-        self.buffer_upto += 1;
-        if self.buffer_upto == BLOCK_SIZE {
+    /// Reset per-document state. Must be called before each document's positions.
+    fn reset_doc(&mut self) {
+        self.last_start_offset = 0;
+    }
+
+    /// Buffer a position delta (and optional offset), flushing a PFOR block when full.
+    fn add_position(
+        &mut self,
+        pos_delta: i32,
+        offset: Option<TermOffset>,
+        pos_out: &mut dyn DataOutput,
+        pay_out: Option<&mut dyn DataOutput>,
+    ) -> io::Result<()> {
+        self.pos_delta_buffer[self.pos_buffer_upto] = pos_delta;
+        if self.write_offsets {
+            let offset = offset.expect("offset required when write_offsets is true");
+            let start_delta = offset.start as i32 - self.last_start_offset;
+            self.offset_buffer[self.pos_buffer_upto] = TermOffset {
+                start: start_delta as u32,
+                length: offset.length,
+            };
+            self.last_start_offset = offset.start as i32;
+        }
+        self.pos_buffer_upto += 1;
+        if self.pos_buffer_upto == BLOCK_SIZE {
             let mut longs = [0i64; BLOCK_SIZE];
-            for (i, &val) in self.buffer.iter().enumerate().take(BLOCK_SIZE) {
+            for (i, &val) in self.pos_delta_buffer.iter().enumerate().take(BLOCK_SIZE) {
                 longs[i] = val as i64;
             }
             pfor::pfor_encode(&mut longs, pos_out)?;
-            self.buffer_upto = 0;
+            if self.write_offsets {
+                let pay_out = pay_out.expect("pay_out required when write_offsets is true");
+                let mut longs = [0i64; BLOCK_SIZE];
+                for (i, offset) in self.offset_buffer.iter().enumerate().take(BLOCK_SIZE) {
+                    longs[i] = offset.start as i64;
+                }
+                pfor::pfor_encode(&mut longs, pay_out)?;
+                let mut longs = [0i64; BLOCK_SIZE];
+                for (i, offset) in self.offset_buffer.iter().enumerate().take(BLOCK_SIZE) {
+                    longs[i] = offset.length as i64;
+                }
+                pfor::pfor_encode(&mut longs, pay_out)?;
+            }
+            self.pos_buffer_upto = 0;
         }
         Ok(())
     }
 
-    /// Write VInt tail for remaining buffered deltas and compute last_pos_block_offset.
+    /// Write VInt tail for remaining buffered positions/offsets and compute
+    /// last_pos_block_offset.
     fn finish(
         &self,
         mut pos_out: &mut dyn IndexOutput,
@@ -67,8 +107,25 @@ impl PositionEncoder {
         } else {
             -1
         };
-        for &delta in &self.buffer[..self.buffer_upto] {
-            pos_out.write_vint(delta)?;
+        // VInt encode remaining positions and offsets to .pos file
+        let mut last_offset_length = u16::MAX; // force first length to be written
+        for i in 0..self.pos_buffer_upto {
+            let pos_delta = self.pos_delta_buffer[i];
+            // No payload support: write plain position delta
+            pos_out.write_vint(pos_delta)?;
+
+            if self.write_offsets {
+                let offset = &self.offset_buffer[i];
+                let delta = offset.start as i32;
+                let length = offset.length;
+                if length == last_offset_length {
+                    pos_out.write_vint(delta << 1)?;
+                } else {
+                    pos_out.write_vint(delta << 1 | 1)?;
+                    pos_out.write_vint(length as i32)?;
+                    last_offset_length = length;
+                }
+            }
         }
         Ok(last_pos_block_offset)
     }
@@ -84,10 +141,13 @@ struct BlockFlushState {
     bitset_buf: [u64; BLOCK_SIZE / 2],
     level0_last_doc_id: i32,
     level0_last_pos_fp: i64,
+    level0_last_pay_fp: i64,
     level1_last_doc_id: i32,
     level1_last_pos_fp: i64,
+    level1_last_pay_fp: i64,
     write_freqs: bool,
     write_positions: bool,
+    write_offsets: bool,
     max_num_impacts_at_level0: i32,
     max_impact_num_bytes_at_level0: i32,
     max_num_impacts_at_level1: i32,
@@ -99,7 +159,7 @@ struct BlockFlushState {
 }
 
 impl BlockFlushState {
-    fn new(pos_start_fp: i64, write_freqs: bool, write_positions: bool) -> Self {
+    fn new(pos_start_fp: i64, pay_start_fp: i64, index_options: IndexOptions) -> Self {
         Self {
             level0_buf: Vec::new(),
             level1_buf: Vec::new(),
@@ -107,10 +167,13 @@ impl BlockFlushState {
             bitset_buf: [0u64; BLOCK_SIZE / 2],
             level0_last_doc_id: -1,
             level0_last_pos_fp: pos_start_fp,
+            level0_last_pay_fp: pay_start_fp,
             level1_last_doc_id: -1,
             level1_last_pos_fp: pos_start_fp,
-            write_freqs,
-            write_positions,
+            level1_last_pay_fp: pay_start_fp,
+            write_freqs: index_options.has_freqs(),
+            write_positions: index_options.has_positions(),
+            write_offsets: index_options.has_offsets(),
             max_num_impacts_at_level0: 0,
             max_impact_num_bytes_at_level0: 0,
             max_num_impacts_at_level1: 0,
@@ -128,6 +191,7 @@ impl BlockFlushState {
         last_doc_id: i32,
         pos_buffer_upto: usize,
         pos_fp: i64,
+        pay_fp: i64,
     ) -> io::Result<()> {
         self.level0_buf.clear();
         self.scratch_buf.clear();
@@ -159,6 +223,14 @@ impl BlockFlushState {
                 let mut enc = VecOutput(&mut self.level0_buf);
                 enc.write_vlong(pos_fp - self.level0_last_pos_fp)?;
                 enc.write_byte(pos_buffer_upto as u8)?;
+                self.level0_last_pos_fp = pos_fp;
+
+                if self.write_offsets {
+                    let mut enc = VecOutput(&mut self.level0_buf);
+                    enc.write_vlong(pay_fp - self.level0_last_pay_fp)?;
+                    enc.write_vint(0)?; // payloadByteUpto = 0 (no payloads)
+                    self.level0_last_pay_fp = pay_fp;
+                }
             }
         }
 
@@ -225,7 +297,6 @@ impl BlockFlushState {
 
         // Update tracking state for next block
         self.level0_last_doc_id = last_doc_id;
-        self.level0_last_pos_fp = pos_fp;
         if self.write_freqs {
             self.level1_accumulator.add_all(&self.level0_accumulator);
         }
@@ -245,6 +316,7 @@ impl BlockFlushState {
         last_doc_id: i32,
         pos_buffer_upto: usize,
         pos_fp: i64,
+        pay_fp: i64,
     ) -> io::Result<()> {
         doc_out.write_vint(last_doc_id - self.level1_last_doc_id)?;
 
@@ -263,7 +335,12 @@ impl BlockFlushState {
                 enc.write_vlong(pos_fp - self.level1_last_pos_fp)?;
                 enc.write_byte(pos_buffer_upto as u8)?;
                 self.level1_last_pos_fp = pos_fp;
-                // Offset/payload branches not yet supported (known_issues #4)
+                if self.write_offsets {
+                    let mut enc = VecOutput(&mut self.scratch_buf);
+                    enc.write_vlong(pay_fp - self.level1_last_pay_fp)?;
+                    enc.write_vint(0)?; // payloadByteUpto = 0 (no payloads)
+                    self.level1_last_pay_fp = pay_fp;
+                }
             }
             let level1_len =
                 2 * mem::size_of::<i16>() + self.scratch_buf.len() + self.level1_buf.len();
@@ -384,6 +461,11 @@ impl PostingsWriter {
             .as_ref()
             .map(|p| p.file_pointer() as i64)
             .unwrap_or(0);
+        let pay_start_fp = self
+            .pay_out
+            .as_ref()
+            .map(|p| p.file_pointer() as i64)
+            .unwrap_or(0);
 
         if doc_freq == 1 {
             // Singleton: pulse docID into term dictionary
@@ -397,11 +479,20 @@ impl PostingsWriter {
                 && let Some(ref mut pos_out) = self.pos_out
             {
                 let freq = postings.freq();
-                let mut pe = PositionEncoder::new();
+                let mut pe = PositionEncoder::new(index_options.has_offsets());
+                pe.reset_doc();
                 let mut last_pos = 0i32;
                 for _ in 0..freq {
                     let pos = postings.next_position()?;
-                    pe.add_position(pos - last_pos, &mut **pos_out)?;
+                    let offset = postings.offset();
+                    pe.add_position(
+                        pos - last_pos,
+                        offset,
+                        &mut **pos_out,
+                        self.pay_out
+                            .as_deref_mut()
+                            .map(|p| p as &mut dyn DataOutput),
+                    )?;
                     last_pos = pos;
                 }
                 last_pos_block_offset = pe.finish(&mut **pos_out, total_term_freq, pos_start_fp)?;
@@ -412,7 +503,7 @@ impl PostingsWriter {
                 total_term_freq,
                 doc_start_fp,
                 pos_start_fp,
-                pay_start_fp: 0,
+                pay_start_fp,
                 last_pos_block_offset,
                 singleton_doc_id: doc_id,
             })
@@ -446,6 +537,7 @@ impl PostingsWriter {
             // To write positions we need to pull them during the doc iteration,
             // so we accumulate positions into a temporary buffer.
             let mut all_positions: Vec<Vec<i32>> = Vec::new();
+            let mut all_offsets: Vec<Vec<Option<TermOffset>>> = Vec::new();
 
             loop {
                 let doc_id = postings.next_doc()?;
@@ -461,10 +553,13 @@ impl PostingsWriter {
 
                 if index_options.has_positions() {
                     let mut positions = Vec::with_capacity(freq as usize);
+                    let mut offsets = Vec::with_capacity(freq as usize);
                     for _ in 0..freq {
                         positions.push(postings.next_position()?);
+                        offsets.push(postings.offset());
                     }
                     all_positions.push(positions);
+                    all_offsets.push(offsets);
                 }
             }
 
@@ -487,11 +582,19 @@ impl PostingsWriter {
             if index_options.has_positions()
                 && let Some(ref mut pos_out) = self.pos_out
             {
-                let mut pe = PositionEncoder::new();
-                for positions in &all_positions {
+                let mut pe = PositionEncoder::new(index_options.has_offsets());
+                for (positions, offsets) in all_positions.iter().zip(all_offsets.iter()) {
+                    pe.reset_doc();
                     let mut last_pos = 0i32;
-                    for &pos in positions {
-                        pe.add_position(pos - last_pos, &mut **pos_out)?;
+                    for (i, &pos) in positions.iter().enumerate() {
+                        pe.add_position(
+                            pos - last_pos,
+                            offsets[i],
+                            &mut **pos_out,
+                            self.pay_out
+                                .as_deref_mut()
+                                .map(|p| p as &mut dyn DataOutput),
+                        )?;
                         last_pos = pos;
                     }
                 }
@@ -503,7 +606,7 @@ impl PostingsWriter {
                 total_term_freq,
                 doc_start_fp,
                 pos_start_fp,
-                pay_start_fp: 0,
+                pay_start_fp,
                 last_pos_block_offset,
                 singleton_doc_id: -1,
             })
@@ -527,12 +630,13 @@ impl PostingsWriter {
         let mut freq_buffer = [0i32; BLOCK_SIZE];
         let mut doc_buffer_upto = 0usize;
 
-        let mut pe = PositionEncoder::new();
-        let mut bfs = BlockFlushState::new(
-            pos_start_fp,
-            index_options.has_freqs(),
-            index_options.has_positions(),
-        );
+        let pay_start_fp = self
+            .pay_out
+            .as_ref()
+            .map(|p| p.file_pointer() as i64)
+            .unwrap_or(0);
+        let mut pe = PositionEncoder::new(index_options.has_offsets());
+        let mut bfs = BlockFlushState::new(pos_start_fp, pay_start_fp, index_options);
 
         let mut last_doc_id = -1i32;
         let mut doc_count = 0usize;
@@ -558,10 +662,19 @@ impl PostingsWriter {
             if index_options.has_positions()
                 && let Some(ref mut pos_out) = self.pos_out
             {
+                pe.reset_doc();
                 let mut last_pos = 0i32;
                 for _ in 0..freq {
                     let pos = postings.next_position()?;
-                    pe.add_position(pos - last_pos, &mut **pos_out)?;
+                    let offset = postings.offset();
+                    pe.add_position(
+                        pos - last_pos,
+                        offset,
+                        &mut **pos_out,
+                        self.pay_out
+                            .as_deref_mut()
+                            .map(|p| p as &mut dyn DataOutput),
+                    )?;
                     last_pos = pos;
                 }
             }
@@ -576,12 +689,18 @@ impl PostingsWriter {
                     .as_ref()
                     .map(|p| p.file_pointer() as i64)
                     .unwrap_or(0);
+                let pay_fp = self
+                    .pay_out
+                    .as_ref()
+                    .map(|p| p.file_pointer() as i64)
+                    .unwrap_or(0);
                 bfs.flush_doc_block(
                     &doc_delta_buffer,
                     &mut freq_buffer,
                     doc_id,
-                    pe.buffer_upto(),
+                    pe.pos_buffer_upto(),
                     pos_fp,
+                    pay_fp,
                 )?;
                 doc_buffer_upto = 0;
 
@@ -589,8 +708,9 @@ impl PostingsWriter {
                     bfs.write_level1_skip_data(
                         &mut *self.doc_out,
                         doc_id,
-                        pe.buffer_upto(),
+                        pe.pos_buffer_upto(),
                         pos_fp,
+                        pay_fp,
                     )?;
                 }
             }
@@ -619,11 +739,6 @@ impl PostingsWriter {
             last_pos_block_offset = pe.finish(&mut **pos_out, total_term_freq, pos_start_fp)?;
         }
 
-        // Note: level 1 impact metadata (max_num_impacts_at_level1,
-        // max_impact_num_bytes_at_level1) is only updated inside writeLevel1SkipData(),
-        // which triggers every LEVEL1_NUM_DOCS (4096) docs. For terms below that
-        // threshold, these fields correctly stay at 0 — matching Java's behavior.
-
         // Copy impact metadata back from BlockFlushState
         self.max_num_impacts_at_level0 = self
             .max_num_impacts_at_level0
@@ -643,7 +758,7 @@ impl PostingsWriter {
             total_term_freq,
             doc_start_fp,
             pos_start_fp,
-            pay_start_fp: 0,
+            pay_start_fp,
             last_pos_block_offset,
             singleton_doc_id: -1,
         })
@@ -868,6 +983,22 @@ mod tests {
         for &(doc_id, freq, positions) in docs {
             let pos_start = decoded.positions.len() as u32;
             decoded.positions.extend_from_slice(positions);
+            decoded.docs.push(DecodedDoc {
+                doc_id,
+                freq,
+                pos_start,
+            });
+        }
+        decoded
+    }
+
+    /// Build a `DecodedPostings` from doc_id/freq/positions/offsets.
+    fn build_postings_with_offsets(docs: &[(i32, i32, &[i32], &[TermOffset])]) -> DecodedPostings {
+        let mut decoded = DecodedPostings::new();
+        for &(doc_id, freq, positions, offsets) in docs {
+            let pos_start = decoded.positions.len() as u32;
+            decoded.positions.extend_from_slice(positions);
+            decoded.offsets.extend_from_slice(offsets);
             decoded.docs.push(DecodedDoc {
                 doc_id,
                 freq,
@@ -1864,5 +1995,177 @@ mod tests {
             0,
             "level 1 impact bytes should be > 0 for 5000-doc term"
         );
+    }
+
+    // --- Offset encoding tests ---
+
+    #[test]
+    fn test_singleton_with_offsets() {
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+        )
+        .unwrap();
+        let offsets = [TermOffset {
+            start: 0,
+            length: 5,
+        }];
+        let decoded = build_postings_with_offsets(&[(0, 1, &[0], &offsets)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        let state = pw
+            .write_term(
+                &mut pe,
+                IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
+            .unwrap();
+
+        assert_eq!(state.doc_freq, 1);
+        assert_eq!(state.singleton_doc_id, 0);
+        assert_ge!(state.pay_start_fp, 0);
+    }
+
+    #[test]
+    fn test_vint_tail_with_offsets() {
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+        )
+        .unwrap();
+        let offsets0 = [
+            TermOffset {
+                start: 0,
+                length: 5,
+            },
+            TermOffset {
+                start: 6,
+                length: 5,
+            },
+            TermOffset {
+                start: 12,
+                length: 5,
+            },
+        ];
+        let offsets1 = [TermOffset {
+            start: 0,
+            length: 3,
+        }];
+        let decoded =
+            build_postings_with_offsets(&[(0, 3, &[0, 5, 10], &offsets0), (2, 1, &[3], &offsets1)]);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        let state = pw
+            .write_term(
+                &mut pe,
+                IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
+            .unwrap();
+
+        assert_eq!(state.doc_freq, 2);
+        assert_eq!(state.total_term_freq, 4);
+        // VInt tail: last_pos_block_offset = -1 (< BLOCK_SIZE positions)
+        assert_eq!(state.last_pos_block_offset, -1);
+
+        // Verify .pos file has offset data (more bytes than positions alone)
+        let names = pw.finish().unwrap();
+        let pos_name = names.iter().find(|n| n.ends_with(".pos")).unwrap();
+        let pos_data = dir.read_file(pos_name).unwrap();
+        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let footer_size = codec_util::FOOTER_LENGTH;
+        let pos_bytes = &pos_data[pos_header_size..pos_data.len() - footer_size];
+        // 4 positions + offset VInts: must be > 4 bytes (positions alone would be 4)
+        assert_gt!(
+            pos_bytes.len(),
+            4,
+            "offset VInt data should increase .pos size beyond position-only"
+        );
+    }
+
+    #[test]
+    fn test_block_encoding_with_offsets() {
+        // 128 docs each with 2 positions and offsets — exercises PFOR offset blocks in .pay
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+        )
+        .unwrap();
+        let positions = [0i32, 1];
+        let offsets = [
+            TermOffset {
+                start: 0,
+                length: 5,
+            },
+            TermOffset {
+                start: 6,
+                length: 5,
+            },
+        ];
+        let docs: Vec<(i32, i32, &[i32], &[TermOffset])> = (0..128)
+            .map(|i| (i, 2, positions.as_slice(), offsets.as_slice()))
+            .collect();
+        let decoded = build_postings_with_offsets(&docs);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        let state = pw
+            .write_term(
+                &mut pe,
+                IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
+            .unwrap();
+
+        assert_eq!(state.doc_freq, 128);
+        assert_eq!(state.total_term_freq, 256);
+        assert_ne!(state.last_pos_block_offset, -1);
+
+        let names = pw.finish().unwrap();
+        // Must have .pay file
+        let pay_name = names.iter().find(|n| n.ends_with(".pay"));
+        assert_some!(&pay_name);
+        let pay_data = dir.read_file(pay_name.unwrap()).unwrap();
+        let pay_header_size = codec_util::index_header_length(PAY_CODEC, "");
+        let footer_size = codec_util::FOOTER_LENGTH;
+        let pay_bytes = &pay_data[pay_header_size..pay_data.len() - footer_size];
+        // PFOR offset blocks should have produced data
+        assert_gt!(
+            pay_bytes.len(),
+            0,
+            "PFOR offset blocks should produce .pay data"
+        );
+    }
+
+    #[test]
+    fn test_finish_produces_pay_file() {
+        let dir = test_directory();
+        let pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+        )
+        .unwrap();
+        let names = pw.finish().unwrap();
+
+        // Should produce .doc, .pos, .pay, .psm files
+        assert_len_eq_x!(&names, 4);
+        assert_ends_with!(names[0], ".doc");
+        assert_ends_with!(names[1], ".pos");
+        assert_ends_with!(names[2], ".pay");
+        assert_ends_with!(names[3], ".psm");
     }
 }
