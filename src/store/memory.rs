@@ -5,39 +5,39 @@
 use std::collections::HashMap;
 use std::io;
 use std::mem;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crate::store::byte_slice_input::ByteSliceIndexInput;
 use crate::store::checksum::CRC32;
-use crate::store::{DataOutput, Directory, IndexInput, IndexOutput, SegmentFile};
+use crate::store::{DataOutput, Directory, IndexInput, IndexOutput, SegmentFile, SharedDirectory};
 
 /// In-memory directory backed by a shared HashMap of byte vectors.
 ///
-/// Uses `Arc<Mutex<HashMap>>` for interior mutability so that outputs created
+/// Uses `Arc<RwLock<HashMap>>` for interior mutability so that outputs created
 /// by [`create_output`](Directory::create_output) can auto-persist their bytes
 /// back into the directory on drop, without requiring the caller to hold a
-/// mutable reference to the directory.
+/// mutable reference to the directory. The `RwLock` allows concurrent reads.
 pub struct MemoryDirectory {
-    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-}
-
-impl Default for MemoryDirectory {
-    fn default() -> Self {
-        Self::new()
-    }
+    files: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 impl MemoryDirectory {
     /// Creates a new empty in-memory directory.
-    pub fn new() -> Self {
-        Self {
-            files: Arc::new(Mutex::new(HashMap::new())),
-        }
+    pub fn create() -> SharedDirectory {
+        Arc::new(Self {
+            files: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    /// Inserts a completed [`MemoryIndexOutput`]'s bytes into this directory.
+    pub fn insert_output(&self, output: MemoryIndexOutput) {
+        let mut files = self.files.write().unwrap();
+        files.insert(output.name, output.buf);
     }
 }
 
 impl Directory for MemoryDirectory {
-    fn create_output(&mut self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
+    fn create_output(&self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
         Ok(Box::new(MemoryDirectoryOutput::new(
             name.to_string(),
             Arc::clone(&self.files),
@@ -45,7 +45,7 @@ impl Directory for MemoryDirectory {
     }
 
     fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>> {
-        let files = self.files.lock().unwrap();
+        let files = self.files.read().unwrap();
         match files.get(name) {
             Some(data) => Ok(Box::new(ByteSliceIndexInput::new(
                 name.to_string(),
@@ -59,14 +59,14 @@ impl Directory for MemoryDirectory {
     }
 
     fn list_all(&self) -> io::Result<Vec<String>> {
-        let files = self.files.lock().unwrap();
+        let files = self.files.read().unwrap();
         let mut names: Vec<String> = files.keys().cloned().collect();
         names.sort();
         Ok(names)
     }
 
     fn file_length(&self, name: &str) -> io::Result<u64> {
-        let files = self.files.lock().unwrap();
+        let files = self.files.read().unwrap();
         match files.get(name) {
             Some(data) => Ok(data.len() as u64),
             None => Err(io::Error::new(
@@ -76,8 +76,8 @@ impl Directory for MemoryDirectory {
         }
     }
 
-    fn delete_file(&mut self, name: &str) -> io::Result<()> {
-        let mut files = self.files.lock().unwrap();
+    fn delete_file(&self, name: &str) -> io::Result<()> {
+        let mut files = self.files.write().unwrap();
         match files.remove(name) {
             Some(_) => Ok(()),
             None => Err(io::Error::new(
@@ -87,8 +87,8 @@ impl Directory for MemoryDirectory {
         }
     }
 
-    fn rename(&mut self, source: &str, dest: &str) -> io::Result<()> {
-        let mut files = self.files.lock().unwrap();
+    fn rename(&self, source: &str, dest: &str) -> io::Result<()> {
+        let mut files = self.files.write().unwrap();
         match files.remove(source) {
             Some(data) => {
                 files.insert(dest.to_string(), data);
@@ -102,7 +102,7 @@ impl Directory for MemoryDirectory {
     }
 
     fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
-        let files = self.files.lock().unwrap();
+        let files = self.files.read().unwrap();
         match files.get(name) {
             Some(data) => Ok(data.clone()),
             None => Err(io::Error::new(
@@ -112,18 +112,10 @@ impl Directory for MemoryDirectory {
         }
     }
 
-    fn write_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
-        let mut files = self.files.lock().unwrap();
+    fn write_file(&self, name: &str, data: &[u8]) -> io::Result<()> {
+        let mut files = self.files.write().unwrap();
         files.insert(name.to_string(), data.to_vec());
         Ok(())
-    }
-}
-
-impl MemoryDirectory {
-    /// Inserts a completed [`MemoryIndexOutput`]'s bytes into this directory.
-    pub fn insert_output(&mut self, output: MemoryIndexOutput) {
-        let mut files = self.files.lock().unwrap();
-        files.insert(output.name, output.buf);
     }
 }
 
@@ -135,11 +127,11 @@ struct MemoryDirectoryOutput {
     name: String,
     buf: Vec<u8>,
     crc: CRC32,
-    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    files: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 impl MemoryDirectoryOutput {
-    fn new(name: String, files: Arc<Mutex<HashMap<String, Vec<u8>>>>) -> Self {
+    fn new(name: String, files: Arc<RwLock<HashMap<String, Vec<u8>>>>) -> Self {
         Self {
             name,
             buf: Vec::new(),
@@ -153,7 +145,7 @@ impl Drop for MemoryDirectoryOutput {
     fn drop(&mut self) {
         let buf = mem::take(&mut self.buf);
         let name = mem::take(&mut self.name);
-        self.files.lock().unwrap().insert(name, buf);
+        self.files.write().unwrap().insert(name, buf);
     }
 }
 
@@ -279,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_memory_directory_create_output_auto_persists() {
-        let mut dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
 
         {
             let mut out = dir.create_output("auto.bin").unwrap();
@@ -293,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_memory_directory_create_and_list() {
-        let mut dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
 
         {
             let _out = dir.create_output("file1.txt").unwrap();
@@ -306,19 +298,16 @@ mod tests {
 
     #[test]
     fn test_memory_directory_file_length() {
-        let mut dir = MemoryDirectory::new();
-        let mut out = MemoryIndexOutput::new("test.bin".to_string());
-        out.write_all(b"hello").unwrap();
-        dir.insert_output(out);
+        let dir = MemoryDirectory::create();
+        dir.write_file("test.bin", b"hello").unwrap();
 
         assert_eq!(dir.file_length("test.bin").unwrap(), 5);
     }
 
     #[test]
     fn test_memory_directory_delete_file() {
-        let mut dir = MemoryDirectory::new();
-        let out = MemoryIndexOutput::new("test.bin".to_string());
-        dir.insert_output(out);
+        let dir = MemoryDirectory::create();
+        dir.write_file("test.bin", b"").unwrap();
 
         assert_ok!(dir.delete_file("test.bin"));
         assert_err!(dir.delete_file("test.bin"));
@@ -326,10 +315,8 @@ mod tests {
 
     #[test]
     fn test_memory_directory_rename() {
-        let mut dir = MemoryDirectory::new();
-        let mut out = MemoryIndexOutput::new("old.bin".to_string());
-        out.write_all(b"data").unwrap();
-        dir.insert_output(out);
+        let dir = MemoryDirectory::create();
+        dir.write_file("old.bin", b"data").unwrap();
 
         dir.rename("old.bin", "new.bin").unwrap();
         assert_err!(dir.file_length("old.bin"));
@@ -338,18 +325,10 @@ mod tests {
 
     #[test]
     fn test_memory_directory_read_file() {
-        let mut dir = MemoryDirectory::new();
-        let mut out = MemoryIndexOutput::new("test.bin".to_string());
-        out.write_all(b"hello world").unwrap();
-        dir.insert_output(out);
+        let dir = MemoryDirectory::create();
+        dir.write_file("test.bin", b"hello world").unwrap();
 
         assert_eq!(dir.read_file("test.bin").unwrap(), b"hello world");
-    }
-
-    #[test]
-    fn test_memory_directory_default() {
-        let dir = MemoryDirectory::default();
-        assert_is_empty!(dir.list_all().unwrap());
     }
 
     #[test]
@@ -360,25 +339,25 @@ mod tests {
 
     #[test]
     fn test_memory_directory_rename_missing() {
-        let mut dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         assert_err!(dir.rename("nonexistent", "dest"));
     }
 
     #[test]
     fn test_memory_directory_read_missing() {
-        let dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         assert_err!(dir.read_file("nonexistent"));
     }
 
     #[test]
     fn test_memory_directory_file_length_missing() {
-        let dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         assert_err!(dir.file_length("nonexistent"));
     }
 
     #[test]
     fn test_memory_directory_open_input() {
-        let mut dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         dir.write_file("test.bin", b"hello world").unwrap();
 
         let mut input = dir.open_input("test.bin").unwrap();
@@ -394,13 +373,13 @@ mod tests {
 
     #[test]
     fn test_memory_directory_open_input_missing() {
-        let dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         assert!(dir.open_input("nonexistent").is_err());
     }
 
     #[test]
     fn test_memory_directory_open_input_roundtrip() {
-        let mut dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         {
             let mut out = dir.create_output("roundtrip.bin").unwrap();
             out.write_le_int(0x04030201).unwrap();

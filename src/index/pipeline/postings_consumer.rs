@@ -247,7 +247,7 @@ impl FieldConsumer for PostingsConsumer {
         let per_field_suffix = "Lucene103_0";
 
         let mut writer = BlockTreeTermsWriter::new(
-            &context.directory,
+            &*context.directory,
             &context.segment_name,
             per_field_suffix,
             &context.segment_id,
@@ -288,13 +288,12 @@ impl FieldConsumer for PostingsConsumer {
 mod tests {
     use super::*;
     use crate::index::field::{feature, stored, string, text};
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::store::MemoryDirectory;
     use assertables::*;
-    use std::sync::Arc;
 
     fn test_context() -> SegmentContext {
         SegmentContext {
-            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            directory: MemoryDirectory::create(),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }

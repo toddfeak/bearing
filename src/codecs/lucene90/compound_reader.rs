@@ -90,7 +90,7 @@ impl CompoundDirectory {
 }
 
 impl Directory for CompoundDirectory {
-    fn create_output(&mut self, _name: &str) -> io::Result<Box<dyn IndexOutput>> {
+    fn create_output(&self, _name: &str) -> io::Result<Box<dyn IndexOutput>> {
         Err(io::Error::other(
             "CompoundDirectory is read-only: cannot create output",
         ))
@@ -128,13 +128,13 @@ impl Directory for CompoundDirectory {
         Ok(entry.length)
     }
 
-    fn delete_file(&mut self, _name: &str) -> io::Result<()> {
+    fn delete_file(&self, _name: &str) -> io::Result<()> {
         Err(io::Error::other(
             "CompoundDirectory is read-only: cannot delete",
         ))
     }
 
-    fn rename(&mut self, _source: &str, _dest: &str) -> io::Result<()> {
+    fn rename(&self, _source: &str, _dest: &str) -> io::Result<()> {
         Err(io::Error::other(
             "CompoundDirectory is read-only: cannot rename",
         ))
@@ -203,6 +203,7 @@ mod tests {
 
     use super::*;
     use crate::codecs::lucene90::compound;
+    use crate::store::SharedDirectory;
     use crate::store::memory::MemoryIndexOutput;
     use crate::store::{MemoryDirectory, SegmentFile};
     use assertables::*;
@@ -230,9 +231,9 @@ mod tests {
         segment_name: &str,
         segment_id: &[u8; 16],
         files: &[SegmentFile],
-    ) -> (MemoryDirectory, CompoundDirectory) {
+    ) -> (SharedDirectory, CompoundDirectory) {
         let (cfs, cfe) = write_compound(segment_name, segment_id, files);
-        let mut dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         dir.write_file(&cfs.name, &cfs.data).unwrap();
         dir.write_file(&cfe.name, &cfe.data).unwrap();
         let compound_dir = CompoundDirectory::open(&dir, segment_name, segment_id).unwrap();
@@ -306,7 +307,7 @@ mod tests {
     fn test_read_only_operations() {
         let seg_id = [0xABu8; 16];
         let files = vec![make_test_file("_0.fnm", &seg_id, b"data")];
-        let (_dir, mut compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
 
         assert!(compound_dir.create_output("test").is_err());
         assert!(compound_dir.delete_file("test").is_err());
@@ -351,7 +352,7 @@ mod tests {
         let files = vec![make_test_file("_0.fnm", &seg_id, b"data")];
         let (cfs, cfe) = write_compound("_0", &seg_id, &files);
 
-        let mut dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         // Truncate the .cfs file
         let truncated = &cfs.data[..cfs.data.len() - 4];
         dir.write_file(&cfs.name, truncated).unwrap();

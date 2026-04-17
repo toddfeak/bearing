@@ -133,7 +133,7 @@ impl FieldConsumer for NormsConsumer {
         let field_info_refs: Vec<&FieldInfo> = field_infos.iter().collect();
 
         norms::write(
-            &context.directory,
+            &*context.directory,
             &context.segment_name,
             "",
             &context.segment_id,
@@ -147,17 +147,16 @@ impl FieldConsumer for NormsConsumer {
 #[cfg(test)]
 mod tests {
     use std::mem;
-    use std::sync::Arc;
 
     use assertables::*;
 
     use super::*;
     use crate::index::field::{stored, text};
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::store::MemoryDirectory;
 
     fn test_context() -> SegmentContext {
         SegmentContext {
-            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            directory: MemoryDirectory::create(),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }

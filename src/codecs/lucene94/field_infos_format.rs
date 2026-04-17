@@ -13,7 +13,7 @@ use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig, SegmentInfo};
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, SharedDirectory};
+use crate::store::{DataInput, Directory};
 
 const CODEC_NAME: &str = "Lucene94FieldInfos";
 const FORMAT_CURRENT: i32 = 2; // FORMAT_DOCVALUE_SKIPPER
@@ -51,14 +51,14 @@ pub(crate) struct FieldInfosFieldData {
 
 /// Writes the .fnm file for a segment. Returns the file name written.
 pub(crate) fn write(
-    directory: &SharedDirectory,
+    directory: &dyn Directory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
     fields: &[FieldInfosFieldData],
 ) -> io::Result<String> {
     let file_name = index_file_names::segment_file_name(segment_name, segment_suffix, EXTENSION);
-    let mut output = directory.lock().unwrap().create_output(&file_name)?;
+    let mut output = directory.create_output(&file_name)?;
 
     codec_util::write_index_header(
         &mut *output,
@@ -303,7 +303,7 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     fn index_options_byte(opts: IndexOptions) -> u8 {
@@ -368,7 +368,7 @@ mod tests {
         let name = write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
         assert_eq!(name, "_0.fnm");
 
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        let data = dir.read_file(&name).unwrap();
         // Header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
         // Footer magic
@@ -385,7 +385,7 @@ mod tests {
         let fields = vec![stored_only("title", 0), stored_only("body", 1)];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
 
         // Header = 4(magic) + 1+18(codec "Lucene94FieldInfos") + 4(version) + 16(id) + 1(suffix) = 44
         let offset = 44;
@@ -407,7 +407,7 @@ mod tests {
         let fields = vec![stored_only("f", 0)];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
 
         // Header(44) + field_count(1) + name_len(1) + "f"(1) + field_number(1) = 48
         let bits_offset = 48;
@@ -428,7 +428,7 @@ mod tests {
         let fields = vec![indexed_with_norms("body", 0)];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
 
         // Header(44) + field_count(1) + name_len(1) + "body"(4) + field_number(1) = 51
         let bits_offset = 51;
@@ -446,7 +446,7 @@ mod tests {
         let fields = vec![indexed_with_norms("body", 0)];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
         let content = String::from_utf8_lossy(&data);
 
         assert!(content.contains("PerFieldPostingsFormat.format"));
@@ -460,7 +460,7 @@ mod tests {
         let fields = vec![stored_only("title", 0)];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
         let content = String::from_utf8_lossy(&data);
 
         assert!(!content.contains("PerFieldPostingsFormat"));
@@ -482,7 +482,7 @@ mod tests {
         }];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
 
         // Header(44) + field_count(1) + name_len(1) + "count"(5) + field_number(1) = 52
         let bits_offset = 52;
@@ -511,7 +511,7 @@ mod tests {
         }];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
 
         // Header(44) + field_count(1) + name_len(1) + "tags"(4) + field_number(1) = 51
         let bits_offset = 51;
@@ -536,7 +536,7 @@ mod tests {
         }];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
 
         // Header(44) + field_count(1) + name_len(1) + "vals"(4) + field_number(1) = 51
         let bits_offset = 51;
@@ -561,7 +561,7 @@ mod tests {
         }];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
         let content = String::from_utf8_lossy(&data);
 
         assert!(content.contains("PerFieldDocValuesFormat.format"));
@@ -577,7 +577,7 @@ mod tests {
         let fields = vec![stored_only("title", 0)];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.fnm").unwrap();
+        let data = dir.read_file("_0.fnm").unwrap();
         let content = String::from_utf8_lossy(&data);
 
         assert!(!content.contains("PerFieldDocValuesFormat"));
@@ -627,8 +627,7 @@ mod tests {
         }];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let dir_guard = dir.lock().unwrap();
-        let read_fis = read(&**dir_guard, &si, "").unwrap();
+        let read_fis = read(&dir, &si, "").unwrap();
 
         assert_eq!(read_fis.len(), 1);
         let f = &read_fis.iter().next().unwrap();
@@ -682,8 +681,7 @@ mod tests {
         ];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let dir_guard = dir.lock().unwrap();
-        let read_fis = read(&**dir_guard, &si, "").unwrap();
+        let read_fis = read(&dir, &si, "").unwrap();
 
         assert_eq!(read_fis.len(), 3);
         let read_fields: Vec<_> = read_fis.iter().collect();
@@ -722,8 +720,7 @@ mod tests {
         }];
         write(&dir, SEGMENT_NAME, "", &SEGMENT_ID, &fields).unwrap();
 
-        let dir_guard = dir.lock().unwrap();
-        let read_fis = read(&**dir_guard, &si, "").unwrap();
+        let read_fis = read(&dir, &si, "").unwrap();
         let f = read_fis.iter().next().unwrap();
         assert_eq!(
             f.get_attribute("PerFieldPostingsFormat.format").unwrap(),

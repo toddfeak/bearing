@@ -1058,8 +1058,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::codecs::competitive_impact::BufferedNormsLookup;
+    use crate::codecs::lucene94::field_infos_format;
+    use crate::codecs::lucene99::segment_info_format;
     use crate::codecs::lucene103::postings_writer::PostingsWriter;
-    use crate::codecs::{lucene94, lucene99};
     use crate::document::{DocValuesType, DocumentBuilder, IndexOptions};
     use crate::index::config::IndexWriterConfig;
     use crate::index::field::text;
@@ -1086,18 +1087,18 @@ mod tests {
     /// Write postings for a single DOCS-only term and return the term state + directory.
     fn write_single_term(
         doc_ids: &[i32],
-    ) -> io::Result<(postings_format::IntBlockTermState, Box<dyn Directory>)> {
+    ) -> io::Result<(postings_format::IntBlockTermState, SharedDirectory)> {
         write_single_term_with_options(doc_ids, IndexOptions::Docs)
     }
 
     fn write_single_term_with_options(
         doc_ids: &[i32],
         options: IndexOptions,
-    ) -> io::Result<(postings_format::IntBlockTermState, Box<dyn Directory>)> {
+    ) -> io::Result<(postings_format::IntBlockTermState, SharedDirectory)> {
         let segment_name = "_0";
         let segment_suffix = "";
         let segment_id = [0u8; 16];
-        let shared_dir = SharedDirectory::new(Box::new(MemoryDirectory::new()));
+        let shared_dir = MemoryDirectory::create();
 
         let mut decoded = DecodedPostings::new();
         for &id in doc_ids {
@@ -1123,8 +1124,7 @@ mod tests {
             state
         };
 
-        let dir = shared_dir.into_inner().unwrap();
-        Ok((term_state, dir))
+        Ok((term_state, shared_dir))
     }
 
     /// Open PostingsReader from a directory written by `write_single_term`.
@@ -1161,7 +1161,7 @@ mod tests {
     #[test]
     fn test_open_postings_reader() {
         let config = IndexWriterConfig::default();
-        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
         writer
@@ -1173,15 +1173,15 @@ mod tests {
             .unwrap();
 
         writer.commit().unwrap();
-        let dir = directory.lock().unwrap();
+        let dir = &*directory;
 
         let files = dir.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = segment_infos::read(&**dir, segments_file).unwrap();
+        let infos = segment_infos::read(dir, segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let si = lucene99::segment_info_format::read(&**dir, &seg.name, &seg.id).unwrap();
-        let field_infos = lucene94::field_infos_format::read(&**dir, &si, "").unwrap();
+        let si = segment_info_format::read(dir, &seg.name, &seg.id).unwrap();
+        let field_infos = field_infos_format::read(dir, &si, "").unwrap();
 
         let suffix = field_infos
             .iter()
@@ -1192,8 +1192,7 @@ mod tests {
             })
             .unwrap();
 
-        let reader =
-            PostingsReader::open(&**dir, &seg.name, &suffix, &seg.id, &field_infos).unwrap();
+        let reader = PostingsReader::open(dir, &seg.name, &suffix, &seg.id, &field_infos).unwrap();
 
         let stats = reader.impact_stats();
         assert_ge!(stats.max_num_impacts_at_level0, 0);
@@ -1208,7 +1207,7 @@ mod tests {
         assert_eq!(state.doc_freq, 1);
         assert_eq!(state.singleton_doc_id, 42);
 
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, vec![42]);
@@ -1221,7 +1220,7 @@ mod tests {
         assert_eq!(state.doc_freq, 10);
         assert_eq!(state.singleton_doc_id, -1);
 
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
@@ -1233,7 +1232,7 @@ mod tests {
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         assert_eq!(state.doc_freq, 7);
 
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
@@ -1246,7 +1245,7 @@ mod tests {
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         assert_eq!(state.doc_freq, 128);
 
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
@@ -1259,7 +1258,7 @@ mod tests {
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         assert_eq!(state.doc_freq, 200);
 
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
@@ -1272,7 +1271,7 @@ mod tests {
         let (state, dir) = write_single_term(&doc_ids).unwrap();
         assert_eq!(state.doc_freq, 300);
 
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
@@ -1281,7 +1280,7 @@ mod tests {
     #[test]
     fn test_exhausted_returns_no_more_docs() {
         let (state, dir) = write_single_term(&[7]).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.next_doc().unwrap(), 7);
@@ -1292,7 +1291,7 @@ mod tests {
     #[test]
     fn test_advance_singleton() {
         let (state, dir) = write_single_term(&[42]).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(42).unwrap(), 42);
@@ -1302,7 +1301,7 @@ mod tests {
     #[test]
     fn test_advance_past_end() {
         let (state, dir) = write_single_term(&[42]).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(100).unwrap(), NO_MORE_DOCS);
@@ -1312,7 +1311,7 @@ mod tests {
     fn test_advance_vint_tail() {
         let doc_ids: Vec<i32> = (0..10).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(5).unwrap(), 5);
@@ -1325,7 +1324,7 @@ mod tests {
     fn test_advance_full_block() {
         let doc_ids: Vec<i32> = (0..128).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(64).unwrap(), 64);
@@ -1337,7 +1336,7 @@ mod tests {
     fn test_advance_across_blocks() {
         let doc_ids: Vec<i32> = (0..300).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         // Advance into second block
@@ -1351,7 +1350,7 @@ mod tests {
     fn test_advance_sparse() {
         let doc_ids = vec![0, 100, 200, 300, 400, 500, 600, 700, 800, 900];
         let (state, dir) = write_single_term(&doc_ids).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(250).unwrap(), 300);
@@ -1363,7 +1362,7 @@ mod tests {
     fn test_cost() {
         let doc_ids: Vec<i32> = (0..50).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         assert_eq!(iter.cost(), 50);
     }
@@ -1417,7 +1416,7 @@ mod tests {
         // 2000 docs to exercise multiple level 0 blocks (under LEVEL1_NUM_DOCS limit)
         let doc_ids: Vec<i32> = (0..2000).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
 
         assert_eq!(iter.advance(1500).unwrap(), 1500);
@@ -1431,7 +1430,7 @@ mod tests {
         // Verify impacts() returns a BlockPostingsEnum that works
         let doc_ids: Vec<i32> = (0..300).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.impacts(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
@@ -1442,7 +1441,7 @@ mod tests {
         // Verify sequential next_doc covers every doc
         let doc_ids: Vec<i32> = (0..500).collect();
         let (state, dir) = write_single_term(&doc_ids).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, NO_FEATURES, false).unwrap();
         let docs = collect_docs(&mut iter).unwrap();
         assert_eq!(docs, doc_ids);
@@ -1457,7 +1456,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..200).collect();
         let (state, dir) =
             write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, FREQ_FEATURES, true).unwrap();
 
         // Advance to doc 100, which is bit index 100 in the UNARY block (word_index=1,
@@ -1477,7 +1476,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..5).collect();
         let (state, dir) =
             write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, FREQ_FEATURES, false).unwrap();
 
         assert_eq!(iter.next_doc().unwrap(), 0);
@@ -1493,7 +1492,7 @@ mod tests {
         let doc_ids: Vec<i32> = (0..200).collect();
         let (state, dir) =
             write_single_term_with_options(&doc_ids, IndexOptions::DocsAndFreqs).unwrap();
-        let reader = open_reader(dir.as_ref()).unwrap();
+        let reader = open_reader(&dir).unwrap();
         let mut iter = reader.postings(&state, FREQ_FEATURES, false).unwrap();
 
         // Read into the packed block

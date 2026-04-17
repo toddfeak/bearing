@@ -22,7 +22,7 @@ use crate::store::SharedDirectory;
 
 /// Creates workers with the standard set of field consumers.
 pub struct DefaultWorkerFactory {
-    directory: Arc<SharedDirectory>,
+    directory: SharedDirectory,
     analyzer_factory: Arc<dyn AnalyzerFactory>,
 }
 
@@ -35,10 +35,7 @@ impl fmt::Debug for DefaultWorkerFactory {
 
 impl DefaultWorkerFactory {
     /// Creates a new factory backed by the given directory and analyzer factory.
-    pub fn new(
-        directory: Arc<SharedDirectory>,
-        analyzer_factory: Arc<dyn AnalyzerFactory>,
-    ) -> Self {
+    pub fn new(directory: SharedDirectory, analyzer_factory: Arc<dyn AnalyzerFactory>) -> Self {
         Self {
             directory,
             analyzer_factory,

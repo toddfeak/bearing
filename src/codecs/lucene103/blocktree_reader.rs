@@ -405,7 +405,6 @@ mod tests {
     use crate::encoding::write_encoding::WriteEncoding;
     use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
-    use crate::store::SharedDirectory;
     use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::memory::MemoryDirectory;
     use crate::util::byte_block_pool::ByteBlockPool;
@@ -490,7 +489,7 @@ mod tests {
 
         let has_positions = fields_data.iter().any(|(_, opts, _)| opts.has_positions());
 
-        let shared_dir = SharedDirectory::new(Box::new(MemoryDirectory::new()));
+        let shared_dir = MemoryDirectory::create();
 
         {
             let mut writer = BlockTreeTermsWriter::new(
@@ -521,9 +520,8 @@ mod tests {
             writer.finish()?;
         }
 
-        let dir = shared_dir.into_inner().unwrap();
         BlockTreeTermsReader::open(
-            dir.as_ref(),
+            &shared_dir,
             segment_name,
             segment_suffix,
             &segment_id,
@@ -749,7 +747,7 @@ mod tests {
 
     #[test]
     fn test_open_missing_file_returns_error() {
-        let dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         let fi = docs_field_infos();
         let result = BlockTreeTermsReader::open(&dir, "_0", "", &[0u8; 16], &fi);
         assert!(result.is_err());

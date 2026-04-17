@@ -34,7 +34,7 @@ pub use mmap::MmapDirectory;
 pub use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 
 use std::io;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 /// A named in-memory file produced by codec writers during indexing.
 #[derive(Clone, Debug)]
@@ -43,23 +43,27 @@ pub(crate) struct SegmentFile {
     pub(crate) data: Vec<u8>,
 }
 
-/// A [`Directory`] behind a [`Mutex`] for shared concurrent access.
+/// A shared, thread-safe [`Directory`] reference.
 ///
-/// Wrap in `Arc<SharedDirectory>` for multi-threaded use with [`IndexWriter`](crate::index::writer::IndexWriter):
+/// Functions that need shared ownership of a directory (struct fields,
+/// cross-thread handoffs) take `SharedDirectory`. Functions that just
+/// borrow a directory for the duration of a call take `&dyn Directory`.
 ///
 /// ```no_run
-/// use std::sync::Arc;
-/// use bearing::store::{FSDirectory, SharedDirectory};
+/// use bearing::store::FSDirectory;
 ///
-/// let fs_dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
-/// let directory = Arc::new(SharedDirectory::new(Box::new(fs_dir)));
+/// let directory = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
 /// ```
-pub type SharedDirectory = Mutex<Box<dyn Directory>>;
+pub type SharedDirectory = Arc<dyn Directory>;
 
 /// Trait for a directory that can create and manage index files.
-pub trait Directory: Send {
+///
+/// All methods take `&self`. Implementations use interior mutability where
+/// needed (e.g., `RwLock` for in-memory directories). Filesystem-backed
+/// directories delegate to OS calls that are inherently thread-safe.
+pub trait Directory: Send + Sync {
     /// Creates a new output file with the given name.
-    fn create_output(&mut self, name: &str) -> io::Result<Box<dyn IndexOutput>>;
+    fn create_output(&self, name: &str) -> io::Result<Box<dyn IndexOutput>>;
 
     /// Opens an existing file for reading.
     fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>>;
@@ -71,17 +75,17 @@ pub trait Directory: Send {
     fn file_length(&self, name: &str) -> io::Result<u64>;
 
     /// Deletes a file.
-    fn delete_file(&mut self, name: &str) -> io::Result<()>;
+    fn delete_file(&self, name: &str) -> io::Result<()>;
 
     /// Renames a file. Used for atomic commit of segments_N.
-    fn rename(&mut self, source: &str, dest: &str) -> io::Result<()>;
+    fn rename(&self, source: &str, dest: &str) -> io::Result<()>;
 
     /// Reads the raw bytes of a file into memory.
     fn read_file(&self, name: &str) -> io::Result<Vec<u8>>;
 
     /// Writes complete byte contents to a file in this directory.
     /// Default implementation uses `create_output` + `write_bytes`.
-    fn write_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+    fn write_file(&self, name: &str, data: &[u8]) -> io::Result<()> {
         let mut out = self.create_output(name)?;
         out.write_all(data)?;
         Ok(())
@@ -96,6 +100,41 @@ pub trait Directory: Send {
     /// Ensures that directory metadata (e.g., new file entries) is persisted.
     fn sync_meta_data(&self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Blanket impl so `&SharedDirectory` (`&Arc<dyn Directory>`) can be used
+/// anywhere `&dyn Directory` is expected, without manual `&*` deref.
+impl Directory for Arc<dyn Directory> {
+    fn create_output(&self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
+        (**self).create_output(name)
+    }
+    fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>> {
+        (**self).open_input(name)
+    }
+    fn list_all(&self) -> io::Result<Vec<String>> {
+        (**self).list_all()
+    }
+    fn file_length(&self, name: &str) -> io::Result<u64> {
+        (**self).file_length(name)
+    }
+    fn delete_file(&self, name: &str) -> io::Result<()> {
+        (**self).delete_file(name)
+    }
+    fn rename(&self, source: &str, dest: &str) -> io::Result<()> {
+        (**self).rename(source, dest)
+    }
+    fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
+        (**self).read_file(name)
+    }
+    fn write_file(&self, name: &str, data: &[u8]) -> io::Result<()> {
+        (**self).write_file(name, data)
+    }
+    fn sync(&self, names: &[&str]) -> io::Result<()> {
+        (**self).sync(names)
+    }
+    fn sync_meta_data(&self) -> io::Result<()> {
+        (**self).sync_meta_data()
     }
 }
 

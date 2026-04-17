@@ -4,33 +4,7 @@ Outstanding problems and optimization gaps in the indexing pipeline.
 
 ---
 
-## 1. Dual Document/Field Models for Write vs Read
-
-**Severity:** Architecture — two parallel representations for the same concept
-
-The write path uses `document::Document` / `index::field::Field` (the builder DSL with `text()`, `keyword()`, `stored()`, etc.). The read path uses `StoredField { field_number, StoredValue }` from `StoredFieldsReader` and `FieldInfo`/`FieldInfos` for metadata.
-
-In Lucene's Java model, `Document` and `Field` serve both read and write — a `Document` is what you index AND what you get back from `IndexReader.document()`. In Rust, these are completely separate types.
-
-**Current state:** Both models work, no bugs. But having two separate document representations means code that reads an index and re-indexes (e.g., merging) would need to convert between them.
-
-**Fix:** Consider whether `Document`/`Field` should be unified across read and write, or whether the separation is actually a feature (write-side fields are richer with builders and streaming readers, read-side fields are simpler). This is a design decision, not a bug.
-
----
-
-## 2. Dual Directory Traits
-
-**Severity:** Architecture — `store::Directory` uses `&mut self` for writes, preventing concurrent access without a `Mutex` wrapper (`SharedDirectory`)
-
-The write path wraps `store::Directory` in `SharedDirectory` (a `Mutex`) for all file I/O. The original newindex design introduced a separate `Directory` trait with `&self` methods and `Send + Sync` bounds, but this was never adopted by the codec writers — they all use `SharedDirectory` directly.
-
-**Current state:** The newindex `Directory` trait and its `DirectoryAdapter` have been deleted. Everything uses `store::Directory` through `SharedDirectory`. This works but means all file I/O is serialized through a single mutex.
-
-**Fix:** Consider whether `store::Directory` should adopt `&self` semantics (with interior mutability in implementations) to enable concurrent file creation. This would eliminate the `SharedDirectory` wrapper. Lower priority — the mutex is not a bottleneck since file I/O is infrequent relative to in-memory indexing work.
-
----
-
-## 3. Level1 Skip Data for Write Path
+## 1. Level1 Skip Data for Write Path
 
 **Severity:** Correctness — posting lists with >4096 docs cannot be written
 
@@ -42,7 +16,7 @@ The read path (`PostingsReader`) already handles level1 skip data — the `level
 
 ---
 
-## 4. Peak RSS Higher Than Java
+## 2. Peak RSS Higher Than Java
 
 **Severity:** Medium — Rust peak RSS is higher than Java for the same workload
 
@@ -52,3 +26,22 @@ Rust peak RSS during indexing is larger than Java's. Two known contributing fact
 2. **Higher default RAM buffer** — Rust defaults to 64 MB vs Java's 16 MB. Lowering the Rust default would reduce peak RSS but dramatically increases segment count because Rust does not yet merge segments during indexing.
 
 **Next steps:** Implement segment merging during indexing (matching Java's `IndexWriter` merge policy). Once merging is in place, reduce the default RAM buffer to match Java's 16 MB. Then remeasure and profile for additional memory optimization opportunities.
+
+---
+
+## 3. Incomplete SmallFloat Port
+
+**Severity:** Low — missing methods not yet needed
+
+`src/util/small_float.rs` is a partial port of `o.a.l.util.SmallFloat`. The integer encoding methods (`longToInt4`, `int4ToLong`, `intToByte4`, `byte4ToInt`) are ported and working. Four float encoding methods are missing:
+
+- `floatToByte(float, numMantissaBits, zeroExp)` — generic float-to-byte encoder using IEEE 754 bit manipulation
+- `byteToFloat(byte, numMantissaBits, zeroExp)` — the reverse
+- `floatToByte315(float)` — specialization with mantissa=3, zeroExp=15
+- `byte315ToFloat(byte)` — the reverse
+
+Additionally, `intToByte4` silently returns 0 on negative input instead of panicking (Java throws `IllegalArgumentException`).
+
+**When this matters:** The missing float methods are used by the similarity/scoring layer (e.g., `BM25Similarity`) to encode and decode norm values as floats. They will be needed when porting similarity implementations for query-time scoring. The integer methods used by norms during indexing are already correct.
+
+**Fix:** Complete the port following porting rules. Port the corresponding tests from `o.a.l.util.TestSmallFloat`.

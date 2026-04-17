@@ -12,7 +12,7 @@ use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, SharedDirectory};
+use crate::store::{DataInput, Directory};
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
 const VERSION_CURRENT: i32 = 0;
@@ -46,12 +46,12 @@ pub(crate) struct SegmentInfoFieldData {
 
 /// Writes the .si file for a segment. Returns the file name written.
 pub(crate) fn write(
-    directory: &SharedDirectory,
+    directory: &dyn Directory,
     segment_info: &SegmentInfoFieldData,
     files: &[String],
 ) -> io::Result<String> {
     let file_name = index_file_names::segment_file_name(&segment_info.name, "", EXTENSION);
-    let mut output = directory.lock().unwrap().create_output(&file_name)?;
+    let mut output = directory.create_output(&file_name)?;
 
     debug!(
         "segment_info: segment={:?}, maxDoc={}, compound={}, files={}",
@@ -214,7 +214,7 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     const SEGMENT_NAME: &str = "_0";
@@ -244,7 +244,7 @@ mod tests {
         let name = write(&dir, &si, &files).unwrap();
         assert_eq!(name, "_0.si");
 
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        let data = dir.read_file(&name).unwrap();
 
         // Header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -263,7 +263,7 @@ mod tests {
         let si = make_segment_info();
         write(&dir, &si, &[]).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.si").unwrap();
+        let data = dir.read_file("_0.si").unwrap();
 
         // After index header: codec="Lucene90SegmentInfo"(19 chars), version=0
         // Header = 4(magic) + 1+19(codec) + 4(version) + 16(id) + 1(suffix len) = 45
@@ -298,7 +298,7 @@ mod tests {
         si.is_compound_file = true;
         write(&dir, &si, &[]).unwrap();
 
-        let data = dir.lock().unwrap().read_file("_0.si").unwrap();
+        let data = dir.read_file("_0.si").unwrap();
 
         // After header (45) + version (12) + hasMinVersion(1) + minVersion(12) + maxDoc(4) = 74
         let flag_offset = 74;
@@ -319,8 +319,7 @@ mod tests {
         let files = vec!["_0.cfs".to_string(), "_0.cfe".to_string()];
         write(&dir, &si, &files).unwrap();
 
-        let dir_guard = dir.lock().unwrap();
-        let read_si = read(&**dir_guard, SEGMENT_NAME, &SEGMENT_ID).unwrap();
+        let read_si = read(&dir, SEGMENT_NAME, &SEGMENT_ID).unwrap();
 
         assert_eq!(read_si.name, si.name);
         assert_eq!(read_si.max_doc, si.max_doc);
@@ -342,8 +341,7 @@ mod tests {
         let files = vec!["_0.cfs".to_string(), "_0.cfe".to_string()];
         write(&dir, &si, &files).unwrap();
 
-        let dir_guard = dir.lock().unwrap();
-        let read_si = read(&**dir_guard, SEGMENT_NAME, &SEGMENT_ID).unwrap();
+        let read_si = read(&dir, SEGMENT_NAME, &SEGMENT_ID).unwrap();
 
         assert!(read_si.is_compound_file);
         assert_eq!(read_si.max_doc, 3);
@@ -356,8 +354,7 @@ mod tests {
         let files = vec!["_0.fnm".to_string(), "_0.fdt".to_string()];
         write(&dir, &si, &files).unwrap();
 
-        let dir_guard = dir.lock().unwrap();
-        let read_si = read(&**dir_guard, SEGMENT_NAME, &SEGMENT_ID).unwrap();
+        let read_si = read(&dir, SEGMENT_NAME, &SEGMENT_ID).unwrap();
 
         assert!(!read_si.is_compound_file);
         assert_eq!(read_si.max_doc, 3);
@@ -371,8 +368,7 @@ mod tests {
             .insert("custom_key".to_string(), "custom_val".to_string());
         write(&dir, &si, &[]).unwrap();
 
-        let dir_guard = dir.lock().unwrap();
-        let read_si = read(&**dir_guard, SEGMENT_NAME, &SEGMENT_ID).unwrap();
+        let read_si = read(&dir, SEGMENT_NAME, &SEGMENT_ID).unwrap();
 
         assert_eq!(read_si.attributes.get("custom_key").unwrap(), "custom_val");
     }
@@ -384,7 +380,6 @@ mod tests {
         write(&dir, &si, &[]).unwrap();
 
         let wrong_id = [0xFFu8; 16];
-        let dir_guard = dir.lock().unwrap();
-        assert_err!(read(&**dir_guard, SEGMENT_NAME, &wrong_id));
+        assert_err!(read(&dir, SEGMENT_NAME, &wrong_id));
     }
 }

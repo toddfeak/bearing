@@ -18,7 +18,7 @@ use crate::encoding::pfor::{self, BLOCK_SIZE};
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::encoding::zigzag;
 use crate::index::index_file_names::segment_file_name;
-use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutput, Directory, IndexOutput, VecOutput};
 
 /// Buffers position deltas and PFOR-encodes them in blocks of 128.
 /// Extracts the repeated pattern from singleton, VInt, and block encoding paths.
@@ -255,7 +255,7 @@ pub struct PostingsWriter {
 impl PostingsWriter {
     /// Creates a new PostingsWriter that streams to outputs from the directory.
     pub fn new(
-        directory: &SharedDirectory,
+        directory: &dyn Directory,
         segment: &str,
         suffix: &str,
         id: &[u8; 16],
@@ -264,17 +264,13 @@ impl PostingsWriter {
         let doc_name = segment_file_name(segment, suffix, DOC_EXTENSION);
         let meta_name = segment_file_name(segment, suffix, META_EXTENSION);
 
-        let (mut doc_out, mut meta_out, mut pos_out) = {
-            let mut dir = directory.lock().unwrap();
-            let doc_out = dir.create_output(&doc_name)?;
-            let meta_out = dir.create_output(&meta_name)?;
-            let pos_out = if has_positions {
-                let pos_name = segment_file_name(segment, suffix, POS_EXTENSION);
-                Some(dir.create_output(&pos_name)?)
-            } else {
-                None
-            };
-            (doc_out, meta_out, pos_out)
+        let mut doc_out = directory.create_output(&doc_name)?;
+        let mut meta_out = directory.create_output(&meta_name)?;
+        let mut pos_out = if has_positions {
+            let pos_name = segment_file_name(segment, suffix, POS_EXTENSION);
+            Some(directory.create_output(&pos_name)?)
+        } else {
+            None
         };
 
         codec_util::write_index_header(&mut *doc_out, DOC_CODEC, VERSION_CURRENT, id, suffix)?;
@@ -756,7 +752,7 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     /// Build a `DecodedPostings` from doc_id/freq pairs with no positions.
@@ -880,7 +876,7 @@ mod tests {
         // Finish writing to flush output to directory
         let names = pw.finish().unwrap();
         let pos_name = names.iter().find(|n| n.ends_with(".pos")).unwrap();
-        let pos_data = dir.lock().unwrap().read_file(pos_name).unwrap();
+        let pos_data = dir.read_file(pos_name).unwrap();
         let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
         let footer_size = codec_util::FOOTER_LENGTH;
         let pos_bytes = &pos_data[pos_header_size..pos_data.len() - footer_size];
@@ -1214,7 +1210,7 @@ mod tests {
 
         // Each file should have at least header + footer
         for name in &names {
-            let data = dir.lock().unwrap().read_file(name).unwrap();
+            let data = dir.read_file(name).unwrap();
             assert_ge!(
                 data.len(),
                 codec_util::FOOTER_LENGTH,
@@ -1527,7 +1523,7 @@ mod tests {
 
         let names = pw.finish().unwrap();
         let psm_name = names.iter().find(|n| n.ends_with(".psm")).unwrap();
-        let psm_data = dir.lock().unwrap().read_file(psm_name).unwrap();
+        let psm_data = dir.read_file(psm_name).unwrap();
 
         // Parse the 4 LE i32 metadata fields after the codec header
         let header_size = codec_util::index_header_length(META_CODEC, "");

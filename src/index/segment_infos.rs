@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read};
-use std::sync::Arc;
 
 use log::debug;
 
@@ -13,7 +12,7 @@ use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::segment::FlushedSegment;
 use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, SharedDirectory};
+use crate::store::{DataInput, Directory};
 use crate::util::string_helper;
 
 /// Codec name for the segments_N file header.
@@ -251,7 +250,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
 ///
 /// Returns the filename written (e.g., "segments_1").
 fn write_flushed_segments(
-    directory: &SharedDirectory,
+    directory: &dyn Directory,
     segments: &[FlushedSegment],
     generation: u64,
 ) -> io::Result<String> {
@@ -278,7 +277,7 @@ fn write_flushed_segments(
         "segment_infos: writing {final_name}, version={version}, counter={counter}, num_segments={num_segments}"
     );
 
-    let mut output = directory.lock().unwrap().create_output(&pending_name)?;
+    let mut output = directory.create_output(&pending_name)?;
 
     // Index header
     codec_util::write_index_header(&mut *output, CODEC_NAME, VERSION_CURRENT, &id, &gen_suffix)?;
@@ -355,14 +354,8 @@ fn write_flushed_segments(
     drop(output);
 
     // Sync and rename
-    {
-        let dir = directory.lock().unwrap();
-        dir.sync(&[&pending_name])?;
-    }
-    {
-        let mut dir = directory.lock().unwrap();
-        dir.rename(&pending_name, &final_name)?;
-    }
+    directory.sync(&[&pending_name])?;
+    directory.rename(&pending_name, &final_name)?;
 
     Ok(final_name)
 }
@@ -394,7 +387,7 @@ impl SegmentInfos {
     /// Writes `segments_N` to the directory and increments the generation.
     ///
     /// The file is written to a pending name, synced, and atomically renamed.
-    pub fn commit(&mut self, directory: &Arc<SharedDirectory>) -> io::Result<String> {
+    pub fn commit(&mut self, directory: &dyn Directory) -> io::Result<String> {
         self.generation += 1;
         write_flushed_segments(directory, &self.segments, self.generation)
     }
@@ -413,7 +406,7 @@ impl SegmentInfos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::MemoryDirectory;
+    use crate::store::{MemoryDirectory, SharedDirectory};
 
     // --- Read round-trip tests ---
 
@@ -422,8 +415,8 @@ mod tests {
         let dir = test_shared_directory();
         let name = write_flushed_segments(&dir, &[], 1).unwrap();
 
-        let guard = dir.lock().unwrap();
-        let result = read(&**guard, &name).unwrap();
+        let guard = &*dir;
+        let result = read(guard, &name).unwrap();
         assert_is_empty!(&result.segments);
         assert_eq!(result.version, 1);
         assert_eq!(result.counter, 0);
@@ -436,8 +429,8 @@ mod tests {
         let segments = vec![make_flushed_segment("_0", 3)];
         let name = write_flushed_segments(&dir, &segments, 1).unwrap();
 
-        let guard = dir.lock().unwrap();
-        let result = read(&**guard, &name).unwrap();
+        let guard = &*dir;
+        let result = read(guard, &name).unwrap();
 
         assert_len_eq_x!(&result.segments, 1);
         assert_eq!(result.segments[0].name, "_0");
@@ -556,8 +549,8 @@ mod tests {
 
     use crate::index::segment::SegmentId;
 
-    fn test_shared_directory() -> Arc<SharedDirectory> {
-        Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())))
+    fn test_shared_directory() -> SharedDirectory {
+        MemoryDirectory::create()
     }
 
     fn make_flushed_segment(name: &str, doc_count: i32) -> FlushedSegment {
@@ -577,7 +570,7 @@ mod tests {
         let name = write_flushed_segments(&dir, &[], 1).unwrap();
         assert_eq!(name, "segments_1");
 
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        let data = dir.read_file(&name).unwrap();
         // Header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
         // Footer magic
@@ -595,7 +588,7 @@ mod tests {
         let name = write_flushed_segments(&dir, &segments, 1).unwrap();
         assert_eq!(name, "segments_1");
 
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        let data = dir.read_file(&name).unwrap();
 
         // Header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -642,7 +635,7 @@ mod tests {
         assert_eq!(name, "segments_1");
         assert_eq!(si.generation(), 1);
 
-        let data = dir.lock().unwrap().read_file(&name).unwrap();
+        let data = dir.read_file(&name).unwrap();
         // Header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
     }

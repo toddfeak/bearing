@@ -584,13 +584,13 @@ mod tests {
     /// Write terms and return (directory, field_infos, segment_id).
     fn write_terms(
         terms: Vec<(&str, &[i32])>,
-    ) -> io::Result<(Box<dyn Directory>, FieldInfos, [u8; 16])> {
+    ) -> io::Result<(SharedDirectory, FieldInfos, [u8; 16])> {
         let field_infos = FieldInfos::new(vec![make_field_info("f", 0)]);
         let segment_name = "_0";
         let segment_suffix = "";
         let segment_id = [0u8; 16];
 
-        let shared_dir = SharedDirectory::new(Box::new(MemoryDirectory::new()));
+        let shared_dir = MemoryDirectory::create();
 
         {
             let mut writer = BlockTreeTermsWriter::new(
@@ -613,8 +613,7 @@ mod tests {
             writer.finish()?;
         }
 
-        let dir = shared_dir.into_inner().unwrap();
-        Ok((dir, field_infos, segment_id))
+        Ok((shared_dir, field_infos, segment_id))
     }
 
     /// Open a trie reader from the .tip file for field 0.
@@ -636,7 +635,7 @@ mod tests {
             ("gamma", &[0, 2]),
         ];
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // Root should have an output (the root block FP)
         assert!(trie.root().has_output());
@@ -647,7 +646,7 @@ mod tests {
         // Few terms → single block → root has output, no children needed
         let terms = vec![("alpha", &[0][..]), ("beta", &[1]), ("gamma", &[2])];
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // Any term should find the root block
         let result = trie.seek_to_block(b"alpha").unwrap();
@@ -674,7 +673,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // Both prefixes should find blocks
         let a_result = trie.seek_to_block(b"aaa0025").unwrap();
@@ -696,7 +695,7 @@ mod tests {
     fn test_trie_seek_nonexistent_prefix() {
         let terms = vec![("alpha", &[0][..]), ("beta", &[1])];
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // Empty target should still find the root block (empty prefix)
         let result = trie.seek_to_block(b"").unwrap();
@@ -718,7 +717,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         let root = trie.root();
         // Root has a single child (all terms start with 'p')
@@ -751,7 +750,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // Verify we can navigate to a term in the block
         let result = trie.seek_to_block(b"aa0025").unwrap();
@@ -776,7 +775,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // Root should be multi-children with children for 'a', 'b', 'c'
         let root = trie.root();
@@ -820,7 +819,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         let root = trie.root();
         assert_eq!(root.sign, SIGN_MULTI_CHILDREN);
@@ -852,7 +851,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // The node with children 'a','b','c','d' may be root or one level down
         // depending on how the blocktree groups things. Let's just verify
@@ -904,7 +903,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         let root = trie.root();
         assert_eq!(root.sign, SIGN_MULTI_CHILDREN);
@@ -941,7 +940,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // Should traverse deep into the trie
         let alpha = trie.seek_to_block(b"category/alpha/item_025").unwrap();
@@ -974,7 +973,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         let root = trie.root();
         let mut child = Node::new();
@@ -1003,7 +1002,7 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(dir.as_ref(), &fi, &id).unwrap();
+        let trie = open_trie(&dir, &fi, &id).unwrap();
 
         // "by0000" has prefix "by" where 'y' is beyond the BITS range
         let result = trie.seek_to_block(b"by0000").unwrap();

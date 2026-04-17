@@ -122,7 +122,7 @@ impl FieldConsumer for FieldInfosConsumer {
         let mut fields: Vec<FieldInfosFieldData> = self.fields.values().cloned().collect();
         fields.sort_by_key(|f| f.number);
         let name = field_infos_format::write(
-            &context.directory,
+            &*context.directory,
             &context.segment_name,
             "",
             &context.segment_id,
@@ -135,15 +135,14 @@ impl FieldConsumer for FieldInfosConsumer {
 #[cfg(test)]
 mod tests {
     use std::mem;
-    use std::sync::Arc;
 
     use super::*;
     use crate::index::field::{int_range, lat_lon, stored};
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::store::MemoryDirectory;
 
     fn test_context() -> SegmentContext {
         SegmentContext {
-            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            directory: MemoryDirectory::create(),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }
@@ -187,7 +186,7 @@ mod tests {
         assert_eq!(names, vec!["_0.fnm"]);
 
         // Verify file has content
-        let guard = context.directory.lock().unwrap();
+        let guard = &*context.directory;
         let data = guard.read_file("_0.fnm").unwrap();
 
         // Header magic

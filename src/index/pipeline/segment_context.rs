@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt;
-use std::sync::Arc;
 
 use crate::store::SharedDirectory;
 
@@ -12,7 +11,7 @@ use crate::store::SharedDirectory;
 /// storing this context themselves.
 pub struct SegmentContext {
     /// Shared directory for creating output files.
-    pub directory: Arc<SharedDirectory>,
+    pub directory: SharedDirectory,
     /// Segment name used as file name prefix (e.g., "_0").
     pub segment_name: String,
     /// Random 16-byte identifier written into codec file headers.

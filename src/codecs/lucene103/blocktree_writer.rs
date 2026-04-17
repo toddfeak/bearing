@@ -23,7 +23,7 @@ use crate::index::index_file_names::segment_file_name;
 use crate::index::pipeline::terms_hash::{
     BufferedPostingsEnum, DecodedPostings, FreqProxTermsWriterPerField, TermsHash,
 };
-use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutput, Directory, IndexOutput, VecOutput};
 use crate::util::byte_block_pool::ByteBlockPool;
 
 use super::postings_writer::PostingsWriter;
@@ -169,7 +169,7 @@ pub(crate) struct BlockTreeTermsWriter {
 impl BlockTreeTermsWriter {
     /// Creates a new BlockTreeTermsWriter that streams to outputs from the directory.
     pub fn new(
-        directory: &SharedDirectory,
+        directory: &dyn Directory,
         segment: &str,
         suffix: &str,
         id: &[u8; 16],
@@ -180,14 +180,9 @@ impl BlockTreeTermsWriter {
         let tip_name = segment_file_name(segment, suffix, TERMS_INDEX_EXTENSION);
         let tmd_name = segment_file_name(segment, suffix, TERMS_META_EXTENSION);
 
-        let (mut terms_out, mut index_out, mut meta_out) = {
-            let mut dir = directory.lock().unwrap();
-            (
-                dir.create_output(&tim_name)?,
-                dir.create_output(&tip_name)?,
-                dir.create_output(&tmd_name)?,
-            )
-        };
+        let mut terms_out = directory.create_output(&tim_name)?;
+        let mut index_out = directory.create_output(&tip_name)?;
+        let mut meta_out = directory.create_output(&tmd_name)?;
 
         codec_util::write_index_header(
             &mut *terms_out,
@@ -1371,7 +1366,7 @@ mod tests {
     use crate::util::byte_block_pool::ByteBlockPool;
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     /// Test helper: builds terms and postings using FreqProxTermsWriterPerField.
@@ -1641,7 +1636,7 @@ mod tests {
         }
 
         for name in &names {
-            let data = dir.lock().unwrap().read_file(name).unwrap();
+            let data = dir.read_file(name).unwrap();
             assert_not_empty!(data, "file {name} is empty");
         }
     }
@@ -1724,7 +1719,7 @@ mod tests {
         let names = btw.finish().unwrap();
 
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
-        let tmd_bytes = dir.lock().unwrap().read_file(tmd_name).unwrap();
+        let tmd_bytes = dir.read_file(tmd_name).unwrap();
 
         let meta_hdr_len = codec_util::index_header_length(TERMS_META_CODEC_NAME, "");
         let terms_hdr_len = codec_util::index_header_length(TERMS_CODEC, "");
@@ -1773,7 +1768,7 @@ mod tests {
         let names = btw.finish().unwrap();
 
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
-        let tmd_bytes = dir.lock().unwrap().read_file(tmd_name).unwrap();
+        let tmd_bytes = dir.read_file(tmd_name).unwrap();
 
         let meta_hdr_len = codec_util::index_header_length(TERMS_META_CODEC_NAME, "");
         let terms_hdr_len = codec_util::index_header_length(TERMS_CODEC, "");

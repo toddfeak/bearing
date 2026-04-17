@@ -3,7 +3,7 @@
 //! Filesystem-backed [`Directory`] implementations.
 //!
 //! [`FSDirectory`] uses file handles for reads (like Java's `NIOFSDirectory`).
-//! [`MmapDirectory`](super::mmap::MmapDirectory) uses memory-mapped I/O
+//! [`MmapDirectory`] uses memory-mapped I/O
 //! (like Java's `MMapDirectory`) and is preferred for read-heavy workloads.
 //! `FSDirectory::open()` returns an `MmapDirectory`.
 
@@ -11,7 +11,9 @@ use std::fs;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use super::mmap::MmapDirectory;
 use crate::store::checksum::CRC32;
 use crate::store::{DataInput, DataOutput, Directory, IndexInput, IndexOutput, RandomAccessInput};
 
@@ -85,7 +87,7 @@ pub(crate) fn fs_sync_meta_data(dir_path: &Path) -> io::Result<()> {
 /// Filesystem directory using file handles for reads.
 ///
 /// For read-heavy workloads (queries), prefer
-/// [`MmapDirectory`](super::mmap::MmapDirectory) which avoids syscalls.
+/// [`MmapDirectory`] which avoids syscalls.
 /// `FSDirectory::open()` returns an `MmapDirectory` by default, matching
 /// Java's `FSDirectory.open()` behavior.
 pub struct FSDirectory {
@@ -95,21 +97,21 @@ pub struct FSDirectory {
 impl FSDirectory {
     /// Opens (or creates) a filesystem directory at the given path.
     ///
-    /// Returns an [`MmapDirectory`](super::mmap::MmapDirectory), matching
+    /// Returns an [`MmapDirectory`], matching
     /// Java where `FSDirectory.open()` returns `MMapDirectory` on 64-bit.
-    pub fn open(path: &Path) -> io::Result<super::mmap::MmapDirectory> {
-        super::mmap::MmapDirectory::new(path)
+    pub fn open(path: &Path) -> io::Result<super::SharedDirectory> {
+        MmapDirectory::create(path)
     }
 
     /// Opens a filesystem directory with file-handle-based reads.
     ///
     /// Use this only when mmap is not desired. For most read workloads,
     /// prefer `FSDirectory::open()` which returns an `MmapDirectory`.
-    pub fn open_with_file_handles(path: &Path) -> io::Result<Self> {
+    pub fn open_with_file_handles(path: &Path) -> io::Result<super::SharedDirectory> {
         fs::create_dir_all(path)?;
-        Ok(Self {
+        Ok(Arc::new(Self {
             path: path.to_path_buf(),
-        })
+        }))
     }
 
     /// Returns the filesystem path of this directory.
@@ -119,7 +121,7 @@ impl FSDirectory {
 }
 
 impl Directory for FSDirectory {
-    fn create_output(&mut self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
+    fn create_output(&self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
         fs_create_output(&self.path, name)
     }
 
@@ -144,11 +146,11 @@ impl Directory for FSDirectory {
         fs_file_length(&self.path, name)
     }
 
-    fn delete_file(&mut self, name: &str) -> io::Result<()> {
+    fn delete_file(&self, name: &str) -> io::Result<()> {
         fs_delete_file(&self.path, name)
     }
 
-    fn rename(&mut self, source: &str, dest: &str) -> io::Result<()> {
+    fn rename(&self, source: &str, dest: &str) -> io::Result<()> {
         fs_rename(&self.path, source, dest)
     }
 
@@ -156,7 +158,7 @@ impl Directory for FSDirectory {
         fs_read_file(&self.path, name)
     }
 
-    fn write_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+    fn write_file(&self, name: &str, data: &[u8]) -> io::Result<()> {
         fs_write_file(&self.path, name, data)
     }
 
@@ -457,7 +459,7 @@ mod tests {
     #[test]
     fn test_fs_directory_write_and_list() {
         let dir_path = temp_dir("write_and_list");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("beta.bin", b"hello").unwrap();
@@ -470,7 +472,7 @@ mod tests {
     #[test]
     fn test_fs_directory_file_length() {
         let dir_path = temp_dir("file_length");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", b"hello world").unwrap();
@@ -480,7 +482,7 @@ mod tests {
     #[test]
     fn test_fs_directory_delete_file() {
         let dir_path = temp_dir("delete_file");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", b"data").unwrap();
@@ -491,7 +493,7 @@ mod tests {
     #[test]
     fn test_fs_directory_rename() {
         let dir_path = temp_dir("rename");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("old.bin", b"data").unwrap();
@@ -504,7 +506,7 @@ mod tests {
     #[test]
     fn test_fs_directory_create_output() {
         let dir_path = temp_dir("create_output");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         {
@@ -542,7 +544,7 @@ mod tests {
     #[test]
     fn test_fs_directory_read_file() {
         let dir_path = temp_dir("read_file");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", b"hello world").unwrap();
@@ -555,7 +557,7 @@ mod tests {
     #[test]
     fn test_fs_directory_sync() {
         let dir_path = temp_dir("sync");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("sync_test.bin", b"data").unwrap();
@@ -574,7 +576,7 @@ mod tests {
     #[test]
     fn test_fs_output_write_byte() {
         let dir_path = temp_dir("write_byte");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         {
@@ -591,7 +593,7 @@ mod tests {
     #[test]
     fn test_fs_output_checksum() {
         let dir_path = temp_dir("checksum");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         let mut out = dir.create_output("checksum.bin").unwrap();
@@ -606,7 +608,7 @@ mod tests {
     #[test]
     fn test_fs_directory_open_input() {
         let dir_path = temp_dir("open_input");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", b"hello world").unwrap();
@@ -637,7 +639,7 @@ mod tests {
     #[test]
     fn test_fs_directory_open_input_roundtrip() {
         let dir_path = temp_dir("open_input_roundtrip");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         {
@@ -656,7 +658,7 @@ mod tests {
     #[test]
     fn test_fs_index_input_slice() {
         let dir_path = temp_dir("slice");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
@@ -677,7 +679,7 @@ mod tests {
     #[test]
     fn test_fs_index_input_slice_seek() {
         let dir_path = temp_dir("slice_seek");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", &[10, 20, 30, 40, 50]).unwrap();
@@ -697,7 +699,7 @@ mod tests {
     #[test]
     fn test_fs_index_input_slice_of_slice() {
         let dir_path = temp_dir("slice_of_slice");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
@@ -717,7 +719,7 @@ mod tests {
     #[test]
     fn test_fs_random_access_on_slice_preserves_offset() {
         let dir_path = temp_dir("ra_slice_offset");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
@@ -738,7 +740,7 @@ mod tests {
     #[test]
     fn test_fs_random_access_on_nested_slice_preserves_offset() {
         let dir_path = temp_dir("ra_nested_offset");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
@@ -757,7 +759,7 @@ mod tests {
     #[test]
     fn test_fs_index_input_slice_out_of_bounds() {
         let dir_path = temp_dir("slice_oob");
-        let mut dir = FSDirectory::open(&dir_path).unwrap();
+        let dir = FSDirectory::open(&dir_path).unwrap();
         let _cleanup = DirCleanup(&dir_path);
 
         dir.write_file("test.bin", &[1, 2, 3]).unwrap();

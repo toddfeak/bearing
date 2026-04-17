@@ -611,7 +611,7 @@ mod tests {
     }
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     /// Writes norms using the production path and opens a reader.
@@ -642,8 +642,7 @@ mod tests {
 
         norms::write(&dir, "_0", "", &segment_id, &info_refs, &producer, num_docs).unwrap();
 
-        let guard = dir.lock().unwrap();
-        NormsReader::open(guard.as_ref(), "_0", "", &segment_id, field_infos, num_docs).unwrap()
+        NormsReader::open(&dir, "_0", "", &segment_id, field_infos, num_docs).unwrap()
     }
 
     /// Helper: get a single norm value using get_norms + advance_exact + long_value.

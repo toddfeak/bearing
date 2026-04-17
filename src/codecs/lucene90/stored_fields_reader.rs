@@ -651,35 +651,32 @@ mod tests {
     use assertables::*;
 
     /// Write a simple index and read stored fields back via StoredFieldsReader.
-    fn write_and_read_stored(docs: Vec<Document>) -> (Arc<SharedDirectory>, Vec<Vec<StoredField>>) {
+    fn write_and_read_stored(docs: Vec<Document>) -> (SharedDirectory, Vec<Vec<StoredField>>) {
         let num_docs = docs.len();
         let config = IndexWriterConfig::default();
-        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
             writer.add_document(doc).unwrap();
         }
         writer.commit().unwrap();
 
-        let dir = directory.lock().unwrap();
-
         // Find the segment info to get segment name and ID
-        let files = dir.list_all().unwrap();
+        let files = directory.list_all().unwrap();
         let segments_file = files
             .iter()
             .find(|f| f.starts_with("segments_"))
             .expect("no segments file");
-        let infos = segment_infos::read(&**dir, segments_file).unwrap();
+        let infos = segment_infos::read(&*directory, segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+        let mut reader = StoredFieldsReader::open(&*directory, &seg.name, "", &seg.id).unwrap();
 
         let mut results = Vec::new();
         for doc_id in 0..num_docs {
             results.push(reader.document(doc_id as u32).unwrap());
         }
 
-        drop(dir);
         (directory, results)
     }
 
@@ -1046,20 +1043,19 @@ mod tests {
         }
 
         let config = IndexWriterConfig::default();
-        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
             writer.add_document(doc).unwrap();
         }
         writer.commit().unwrap();
 
-        let dir = directory.lock().unwrap();
-        let files = dir.list_all().unwrap();
+        let files = directory.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = segment_infos::read(&**dir, segments_file).unwrap();
+        let infos = segment_infos::read(&*directory, segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+        let mut reader = StoredFieldsReader::open(&*directory, &seg.name, "", &seg.id).unwrap();
 
         // First read loads the block
         let fields0 = reader.document(0).unwrap();
@@ -1096,20 +1092,19 @@ mod tests {
         }
 
         let config = IndexWriterConfig::default();
-        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
             writer.add_document(doc).unwrap();
         }
         writer.commit().unwrap();
 
-        let dir = directory.lock().unwrap();
-        let files = dir.list_all().unwrap();
+        let files = directory.list_all().unwrap();
         let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-        let infos = segment_infos::read(&**dir, segments_file).unwrap();
+        let infos = segment_infos::read(&*directory, segments_file).unwrap();
         let seg = &infos.segments[0];
 
-        let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+        let mut reader = StoredFieldsReader::open(&*directory, &seg.name, "", &seg.id).unwrap();
 
         // Read all docs and verify values — this exercises cache invalidation
         // as docs should span multiple blocks

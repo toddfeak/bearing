@@ -11,7 +11,7 @@ use crate::codecs::lucene90::norms_producer::NormsProducer;
 use crate::index::FieldInfo;
 use crate::index::index_file_names;
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
-use crate::store::{DataOutput, IndexOutput, SharedDirectory};
+use crate::store::{DataOutput, Directory, IndexOutput};
 
 // File extensions
 pub(crate) const DATA_EXTENSION: &str = "nvd";
@@ -42,7 +42,7 @@ fn num_bytes_per_value(min: i64, max: i64) -> u8 {
 /// `field_infos` must be sorted by field number.
 /// Returns the names of the files written, or an empty vec if no fields provided.
 pub(crate) fn write(
-    directory: &SharedDirectory,
+    directory: &dyn Directory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
@@ -59,10 +59,8 @@ pub(crate) fn write(
     let nvd_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
 
-    let (mut nvm, mut nvd) = {
-        let mut dir = directory.lock().unwrap();
-        (dir.create_output(&nvm_name)?, dir.create_output(&nvd_name)?)
-    };
+    let mut nvm = directory.create_output(&nvm_name)?;
+    let mut nvd = directory.create_output(&nvd_name)?;
 
     codec_util::write_index_header(&mut *nvm, META_CODEC, VERSION, segment_id, segment_suffix)?;
     codec_util::write_index_header(&mut *nvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
@@ -229,7 +227,7 @@ mod tests {
     use assertables::*;
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     fn make_field_info(name: &str, number: u32) -> FieldInfo {
@@ -245,7 +243,7 @@ mod tests {
     }
 
     fn write_norms(
-        dir: &SharedDirectory,
+        dir: &dyn Directory,
         fields: &[(&str, u32, &[i64], &[i32])],
         num_docs: i32,
     ) -> io::Result<Vec<String>> {
@@ -297,8 +295,8 @@ mod tests {
         assert_eq!(names[0], "_0.nvm");
         assert_eq!(names[1], "_0.nvd");
 
-        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
-        let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let nvm = dir.read_file(&names[0]).unwrap();
+        let nvd = dir.read_file(&names[1]).unwrap();
 
         // Both files should start with codec magic
         assert_eq!(&nvm[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -354,7 +352,7 @@ mod tests {
         let dir = test_directory();
         let names = write_norms(&dir, &[("contents", 0, &[], &[])], 3).unwrap();
 
-        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let nvm = dir.read_file(&names[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         let entry = &nvm[meta_header_len..];
 
@@ -370,8 +368,8 @@ mod tests {
         let dir = test_directory();
         let names = write_norms(&dir, &[("contents", 1, &[12, 12, 12], &[0, 1, 2])], 3).unwrap();
 
-        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
-        let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let nvm = dir.read_file(&names[0]).unwrap();
+        let nvd = dir.read_file(&names[1]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         let entry = &nvm[meta_header_len..];
 
@@ -402,8 +400,8 @@ mod tests {
         )
         .unwrap();
 
-        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
-        let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let nvm = dir.read_file(&names[0]).unwrap();
+        let nvd = dir.read_file(&names[1]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
 
         // First entry: "alpha" (field 0), constant norms
@@ -436,8 +434,8 @@ mod tests {
         // 2 docs with norms out of 5 total
         let names = write_norms(&dir, &[("contents", 0, &[12, 8], &[1, 3])], 5).unwrap();
 
-        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
-        let nvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let nvm = dir.read_file(&names[0]).unwrap();
+        let nvd = dir.read_file(&names[1]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         let mut reader = TestDataReader::new(&nvm[meta_header_len..], 0);
 
@@ -477,7 +475,7 @@ mod tests {
         // 3 docs with identical norms out of 5 total
         let names = write_norms(&dir, &[("title", 0, &[42, 42, 42], &[0, 2, 4])], 5).unwrap();
 
-        let nvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let nvm = dir.read_file(&names[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         let mut reader = TestDataReader::new(&nvm[meta_header_len..], 0);
 

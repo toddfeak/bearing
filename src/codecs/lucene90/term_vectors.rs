@@ -17,7 +17,7 @@ use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_
 use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
-use crate::store::{IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{Directory, IndexOutput, VecOutput};
 use crate::util::byte_block_pool::ByteSliceReader;
 
 // File extensions
@@ -281,21 +281,16 @@ impl CompressingTermVectorsWriter {
     /// Creates a new writer. Opens `.tvd`, `.tvx`, and `.tvm` files and writes
     /// their headers immediately.
     pub(crate) fn new(
-        directory: &SharedDirectory,
+        directory: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
         segment_id: &[u8; 16],
     ) -> io::Result<Self> {
         let names = Self::file_names(segment_name, segment_suffix);
 
-        let (mut data_stream, mut index_stream, mut meta_stream) = {
-            let mut dir = directory.lock().unwrap();
-            (
-                dir.create_output(&names[0])?,
-                dir.create_output(&names[1])?,
-                dir.create_output(&names[2])?,
-            )
-        };
+        let mut data_stream = directory.create_output(&names[0])?;
+        let mut index_stream = directory.create_output(&names[1])?;
+        let mut meta_stream = directory.create_output(&names[2])?;
 
         codec_util::write_index_header(
             &mut *data_stream,
@@ -1024,15 +1019,14 @@ fn shared_prefix_length(a: &[u8], b: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use assertables::*;
 
     use super::*;
+    use crate::store::SharedDirectory;
     use crate::store::memory::MemoryDirectory;
 
     fn make_directory() -> SharedDirectory {
-        Mutex::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     fn make_segment_id() -> [u8; 16] {
@@ -1040,7 +1034,7 @@ mod tests {
     }
 
     /// Creates a writer, calls `build_fn` to populate it, then finishes.
-    fn write_with<F>(dir: &SharedDirectory, num_docs: i32, build_fn: F) -> Vec<String>
+    fn write_with<F>(dir: &dyn Directory, num_docs: i32, build_fn: F) -> Vec<String>
     where
         F: FnOnce(&mut CompressingTermVectorsWriter),
     {
@@ -1083,7 +1077,7 @@ mod tests {
         });
         assert_len_eq_x!(&files, 3);
 
-        let dir_guard = dir.lock().unwrap();
+        let dir_guard = &dir;
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
         assert_gt!(tvd_len, 40);
     }
@@ -1168,7 +1162,7 @@ mod tests {
         });
         assert_len_eq_x!(&files, 3);
 
-        let dir_guard = dir.lock().unwrap();
+        let dir_guard = &dir;
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
         assert_gt!(tvd_len, 40, "tvd should have substantial content");
     }
@@ -1190,7 +1184,7 @@ mod tests {
         });
         assert_len_eq_x!(&files, 3);
 
-        let dir_guard = dir.lock().unwrap();
+        let dir_guard = &dir;
         let tvm_bytes = dir_guard.read_file(&files[2]).unwrap();
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
         assert_gt!(
@@ -1218,7 +1212,7 @@ mod tests {
         });
         assert_len_eq_x!(&files, 3);
 
-        let dir_guard = dir.lock().unwrap();
+        let dir_guard = &dir;
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
         assert_gt!(
             tvd_len,
@@ -1380,7 +1374,7 @@ mod tests {
         });
         assert_len_eq_x!(&files, 3);
 
-        let dir_guard = dir.lock().unwrap();
+        let dir_guard = &dir;
         let tvd_len = dir_guard.file_length(&files[0]).unwrap();
         assert_gt!(tvd_len, 40);
     }

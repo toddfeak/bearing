@@ -370,12 +370,11 @@ impl TermVectorsPostingsArray {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use super::*;
     use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
     use crate::encoding::read_encoding::ReadEncoding;
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::store::MemoryDirectory;
     use crate::util::byte_block_pool::ByteBlockPool;
     use assertables::*;
 
@@ -572,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_finish_document_self_owned() {
-        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let dir = MemoryDirectory::create();
         let segment_id = [0u8; 16];
         let mut writer = CompressingTermVectorsWriter::new(&dir, "_0", "", &segment_id).unwrap();
 

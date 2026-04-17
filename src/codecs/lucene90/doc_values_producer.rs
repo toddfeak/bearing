@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     fn make_dv_numeric(
@@ -1157,8 +1157,7 @@ mod tests {
             num_docs,
         )
         .unwrap();
-        let guard = dir.lock().unwrap();
-        DocValuesReader::open(guard.as_ref(), "_0", suffix, &segment_id, field_infos).unwrap()
+        DocValuesReader::open(&dir, "_0", suffix, &segment_id, field_infos).unwrap()
     }
 
     #[test]

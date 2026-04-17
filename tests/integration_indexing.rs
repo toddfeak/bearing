@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use assertables::*;
 use bearing::prelude::{
@@ -18,8 +17,8 @@ use bearing::prelude::{
     string, text,
 };
 
-fn shared_memory_dir() -> Arc<SharedDirectory> {
-    Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())))
+fn shared_memory_dir() -> SharedDirectory {
+    MemoryDirectory::create()
 }
 
 fn add_stored_docs(writer: &IndexWriter, count: usize) {

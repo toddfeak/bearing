@@ -165,7 +165,7 @@ mod tests {
     use assertables::*;
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     fn segment_id() -> [u8; 16] {
@@ -183,8 +183,7 @@ mod tests {
             build_fn(&mut w);
             w.finish(num_docs).unwrap();
         }
-        let guard = dir.lock().unwrap();
-        TermVectorsReader::open(guard.as_ref(), "_0", "", &segment_id()).unwrap()
+        TermVectorsReader::open(&dir, "_0", "", &segment_id()).unwrap()
     }
 
     #[test]

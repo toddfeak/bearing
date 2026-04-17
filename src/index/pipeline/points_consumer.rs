@@ -198,7 +198,7 @@ impl FieldConsumer for PointsConsumer {
         let field_info_refs: Vec<&FieldInfo> = field_infos.iter().collect();
 
         points::write(
-            &context.directory,
+            &*context.directory,
             &context.segment_name,
             "",
             &context.segment_id,
@@ -212,13 +212,12 @@ impl FieldConsumer for PointsConsumer {
 mod tests {
     use super::*;
     use crate::index::field::{int_field, lat_lon, long_field};
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::store::MemoryDirectory;
     use assertables::*;
-    use std::sync::Arc;
 
     fn test_context() -> SegmentContext {
         SegmentContext {
-            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            directory: MemoryDirectory::create(),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }

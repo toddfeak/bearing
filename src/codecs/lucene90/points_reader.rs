@@ -363,7 +363,7 @@ mod tests {
     use assertables::*;
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     fn make_point_field(
@@ -412,8 +412,7 @@ mod tests {
         let producer = BufferedPointsProducer::new(fields);
         let fi_refs: Vec<&FieldInfo> = field_infos.iter().collect();
         points::write(&dir, "_0", "", &segment_id, &fi_refs, &producer).unwrap();
-        let guard = dir.lock().unwrap();
-        PointsReader::open(guard.as_ref(), "_0", "", &segment_id, field_infos).unwrap()
+        PointsReader::open(&dir, "_0", "", &segment_id, field_infos).unwrap()
     }
 
     #[test]
@@ -560,10 +559,9 @@ mod tests {
         points::write(&dir, "_0", "", &segment_id, &fi_refs, &producer).unwrap();
 
         // Truncate the .kdd file
-        let mut mem_dir = MemoryDirectory::new();
-        let guard = dir.lock().unwrap();
-        for name in guard.list_all().unwrap() {
-            let data = guard.read_file(&name).unwrap();
+        let mem_dir = MemoryDirectory::create();
+        for name in dir.list_all().unwrap() {
+            let data = dir.read_file(&name).unwrap();
             if name.ends_with(".kdd") {
                 mem_dir.write_file(&name, &data[..data.len() - 4]).unwrap();
             } else {

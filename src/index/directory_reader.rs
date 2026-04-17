@@ -147,9 +147,9 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
-    fn write_index(_name: &str, num_docs: usize, compound: bool) -> Arc<SharedDirectory> {
+    fn write_index(_name: &str, num_docs: usize, compound: bool) -> SharedDirectory {
         let config = IndexWriterConfig::default().use_compound_file(compound);
-        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
         for i in 0..num_docs {
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_open_single_segment() {
         let directory = write_index("single", 5, false);
-        let reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
+        let reader = DirectoryReader::open(&*directory).unwrap();
 
         assert_eq!(reader.max_doc(), 5);
         assert_eq!(reader.num_docs(), 5);
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn test_open_compound() {
         let directory = write_index("compound", 3, true);
-        let reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
+        let reader = DirectoryReader::open(&*directory).unwrap();
 
         assert_eq!(reader.max_doc(), 3);
         assert_eq!(reader.leaves().len(), 1);
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn test_multi_segment() {
         let config = IndexWriterConfig::default().max_buffered_docs(2);
-        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
         for i in 0..5 {
@@ -203,7 +203,7 @@ mod tests {
 
         writer.commit().unwrap();
 
-        let reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
+        let reader = DirectoryReader::open(&*directory).unwrap();
 
         // With max_buffered_docs=2, 5 docs should create multiple segments
         assert_eq!(reader.max_doc(), 5);
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn test_leaf_reader_access() {
         let config = IndexWriterConfig::default();
-        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
         let doc = DocumentBuilder::new()
@@ -232,7 +232,7 @@ mod tests {
 
         writer.commit().unwrap();
 
-        let mut reader = DirectoryReader::open(&**directory.lock().unwrap()).unwrap();
+        let mut reader = DirectoryReader::open(&*directory).unwrap();
 
         // Access stored fields through the hierarchy
         let leaf = &mut reader.segments[0];
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_empty_directory_fails() {
-        let dir = MemoryDirectory::new();
+        let dir = MemoryDirectory::create();
         let result = DirectoryReader::open(&dir);
         assert_err!(result);
     }

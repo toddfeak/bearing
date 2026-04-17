@@ -22,13 +22,12 @@ use crate::store::SharedDirectory;
 ///    the `segments_N` commit point.
 ///
 /// ```no_run
-/// use std::sync::Arc;
 /// use bearing::prelude::{
 ///     DocumentBuilder, IndexWriter, IndexWriterConfig,
-///     MemoryDirectory, SharedDirectory, text,
+///     MemoryDirectory, text,
 /// };
 ///
-/// let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+/// let dir = MemoryDirectory::create();
 /// let writer = IndexWriter::new(IndexWriterConfig::default(), dir);
 ///
 /// let doc = DocumentBuilder::new()
@@ -40,7 +39,7 @@ use crate::store::SharedDirectory;
 /// ```
 pub struct IndexWriter {
     coordinator: IndexCoordinator,
-    directory: Arc<SharedDirectory>,
+    directory: SharedDirectory,
 }
 
 impl IndexWriter {
@@ -48,7 +47,7 @@ impl IndexWriter {
     ///
     /// The caller retains shared access to the directory via `Arc`, matching
     /// Lucene's model where the `Directory` is shared between writer and reader.
-    pub fn new(config: IndexWriterConfig, directory: Arc<SharedDirectory>) -> Self {
+    pub fn new(config: IndexWriterConfig, directory: SharedDirectory) -> Self {
         let factory = Arc::new(DefaultWorkerFactory::new(
             Arc::clone(&directory),
             Arc::clone(config.get_analyzer_factory()),
@@ -66,7 +65,7 @@ impl IndexWriter {
     }
 
     /// Returns the directory this writer is writing to.
-    pub fn directory(&self) -> &Arc<SharedDirectory> {
+    pub fn directory(&self) -> &SharedDirectory {
         &self.directory
     }
 

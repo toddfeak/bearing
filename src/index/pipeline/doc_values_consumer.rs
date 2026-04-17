@@ -215,7 +215,7 @@ impl FieldConsumer for DocValuesConsumer {
         // Per-field doc values use suffix "Lucene90_0" matching Java's PerFieldDocValuesFormat
         let segment_suffix = "Lucene90_0";
         doc_values::write(
-            &context.directory,
+            &*context.directory,
             &context.segment_name,
             segment_suffix,
             &context.segment_id,
@@ -228,17 +228,16 @@ impl FieldConsumer for DocValuesConsumer {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use super::*;
     use crate::index::field::{
         binary_dv, numeric_dv, sorted_dv, sorted_numeric_dv, sorted_set_dv, stored,
     };
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::store::MemoryDirectory;
 
     fn test_context() -> SegmentContext {
         SegmentContext {
-            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            directory: MemoryDirectory::create(),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }
@@ -361,7 +360,7 @@ mod tests {
         let names = consumer.flush(&context, &acc).unwrap();
         assert_eq!(names.len(), 2);
 
-        let guard = context.directory.lock().unwrap();
+        let guard = &*context.directory;
         for name in &names {
             let data = guard.read_file(name).unwrap();
             assert!(!data.is_empty());

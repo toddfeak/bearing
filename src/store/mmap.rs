@@ -32,11 +32,11 @@ pub struct MmapDirectory {
 
 impl MmapDirectory {
     /// Opens (or creates) a memory-mapped directory at the given path.
-    pub fn new(path: &Path) -> io::Result<Self> {
+    pub fn create(path: &Path) -> io::Result<super::SharedDirectory> {
         fs::create_dir_all(path)?;
-        Ok(Self {
+        Ok(Arc::new(Self {
             path: path.to_path_buf(),
-        })
+        }))
     }
 
     /// Returns the filesystem path of this directory.
@@ -46,7 +46,7 @@ impl MmapDirectory {
 }
 
 impl Directory for MmapDirectory {
-    fn create_output(&mut self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
+    fn create_output(&self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
         fs_create_output(&self.path, name)
     }
 
@@ -71,11 +71,11 @@ impl Directory for MmapDirectory {
         fs_file_length(&self.path, name)
     }
 
-    fn delete_file(&mut self, name: &str) -> io::Result<()> {
+    fn delete_file(&self, name: &str) -> io::Result<()> {
         fs_delete_file(&self.path, name)
     }
 
-    fn rename(&mut self, source: &str, dest: &str) -> io::Result<()> {
+    fn rename(&self, source: &str, dest: &str) -> io::Result<()> {
         fs_rename(&self.path, source, dest)
     }
 
@@ -83,7 +83,7 @@ impl Directory for MmapDirectory {
         fs_read_file(&self.path, name)
     }
 
-    fn write_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+    fn write_file(&self, name: &str, data: &[u8]) -> io::Result<()> {
         fs_write_file(&self.path, name, data)
     }
 
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn test_mmap_directory_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mmap_dir = MmapDirectory::new(dir.path()).unwrap();
+        let mmap_dir = MmapDirectory::create(dir.path()).unwrap();
 
         // Write a file
         {
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn test_mmap_slice_and_random_access() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mmap_dir = MmapDirectory::new(dir.path()).unwrap();
+        let mmap_dir = MmapDirectory::create(dir.path()).unwrap();
 
         // Write test data
         {
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn test_mmap_random_access_le_long() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mmap_dir = MmapDirectory::new(dir.path()).unwrap();
+        let mmap_dir = MmapDirectory::create(dir.path()).unwrap();
 
         {
             let mut out = mmap_dir.create_output("longs.bin").unwrap();

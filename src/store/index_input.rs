@@ -7,7 +7,7 @@ use std::io;
 use crate::store::DataInput;
 
 /// Trait for index file input with position tracking and random access.
-pub trait IndexInput: DataInput + Send {
+pub trait IndexInput: DataInput + Send + Sync {
     /// Returns the name of this input (the file name).
     fn name(&self) -> &str;
 

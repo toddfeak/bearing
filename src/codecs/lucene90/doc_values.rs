@@ -19,7 +19,7 @@ use crate::index::FieldInfo;
 use crate::index::index_file_names;
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
 use crate::store::memory::MemoryIndexOutput;
-use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutput, Directory, IndexOutput, VecOutput};
 use crate::util::string_helper;
 
 /// A single numeric doc value entry.
@@ -105,7 +105,7 @@ pub(crate) const DIRECT_MONOTONIC_BLOCK_SHIFT: u32 = 16;
 ///
 /// `field_infos` must be sorted by field number.
 pub(crate) fn write(
-    directory: &SharedDirectory,
+    directory: &dyn Directory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
@@ -118,10 +118,8 @@ pub(crate) fn write(
     let dvd_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
 
-    let (mut meta, mut data) = {
-        let mut dir = directory.lock().unwrap();
-        (dir.create_output(&dvm_name)?, dir.create_output(&dvd_name)?)
-    };
+    let mut meta = directory.create_output(&dvm_name)?;
+    let mut data = directory.create_output(&dvd_name)?;
 
     codec_util::write_index_header(&mut *meta, META_CODEC, VERSION, segment_id, segment_suffix)?;
     codec_util::write_index_header(&mut *data, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
@@ -1007,12 +1005,12 @@ mod tests {
     }
 
     fn make_test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     /// Test helper: wraps fields in a BufferedDocValuesProducer and calls write().
     fn test_write(
-        directory: &SharedDirectory,
+        directory: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
         segment_id: &[u8; 16],
@@ -1175,7 +1173,7 @@ mod tests {
         assert_eq!(result[0], "_0_Lucene90_0.dvm");
         assert_eq!(result[1], "_0_Lucene90_0.dvd");
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
 
         // Verify codec magic
         assert_eq!(&dvm[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);
@@ -1229,8 +1227,8 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
-        let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
+        let dvd = directory.read_file(&result[1]).unwrap();
 
         // Should succeed and produce valid output
         assert_not_empty!(dvm);
@@ -1273,8 +1271,8 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
-        let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
+        let dvd = directory.read_file(&result[1]).unwrap();
 
         assert_not_empty!(dvm);
         assert_not_empty!(dvd);
@@ -1315,7 +1313,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "", &segment_id, &fields, 1).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
 
         // EOF marker is 4 bytes before footer
         let eof_pos = dvm.len() - FOOTER_LENGTH - 4;
@@ -1364,7 +1362,7 @@ mod tests {
         assert_eq!(result[0], "_0_Lucene90_0.dvm");
         assert_eq!(result[1], "_0_Lucene90_0.dvd");
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
 
         // Parse: after header, first field (path=0, SORTED_SET)
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1523,7 +1521,7 @@ mod tests {
         let segment_id = [0u8; 16];
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
 
         // Parse the .dvm like Java's Lucene90DocValuesProducer.readFields()
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
@@ -1602,7 +1600,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let entry = &dvm[meta_header_len..];
 
@@ -1634,8 +1632,8 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
-        let dvd = directory.lock().unwrap().read_file(&result[1]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
+        let dvd = directory.read_file(&result[1]).unwrap();
         assert_not_empty!(dvm);
         assert_not_empty!(dvd);
     }
@@ -1653,7 +1651,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -1688,7 +1686,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let entry = &dvm[meta_header_len..];
 
@@ -1711,7 +1709,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -1741,7 +1739,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let entry = &dvm[meta_header_len..];
 
@@ -1765,7 +1763,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -1791,7 +1789,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -1843,7 +1841,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -1895,7 +1893,7 @@ mod tests {
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -1927,7 +1925,7 @@ mod tests {
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
         // The .dvm metadata should have numValues=6 (total across all docs)
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let entry = &dvm[meta_header_len..];
 
@@ -1965,7 +1963,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -2002,7 +2000,7 @@ mod tests {
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -2032,7 +2030,7 @@ mod tests {
         assert_len_eq_x!(&result, 2);
 
         // Verify MetaReader can parse the full metadata
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -2072,7 +2070,7 @@ mod tests {
         let directory = make_test_directory();
         let result = test_write(&directory, "_0", "Lucene90_0", &segment_id, &fields, 3).unwrap();
 
-        let dvm = directory.lock().unwrap().read_file(&result[0]).unwrap();
+        let dvm = directory.read_file(&result[0]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
         let mut reader = DvmReader::new(&dvm, meta_header_len);
 
@@ -2103,8 +2101,8 @@ mod tests {
         let dir = make_test_directory();
         let names = test_write(&dir, "_0", "", &segment_id, &fields, 10).unwrap();
 
-        let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
-        let dvd = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let dvm = dir.read_file(&names[0]).unwrap();
+        let dvd = dir.read_file(&names[1]).unwrap();
 
         let meta_header_len = index_header_length(META_CODEC, "");
         let mut reader = TestDataReader::new(&dvm[meta_header_len..], 0);
@@ -2159,7 +2157,7 @@ mod tests {
         let dir = make_test_directory();
         let names = test_write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
-        let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let dvm = dir.read_file(&names[0]).unwrap();
 
         let meta_header_len = index_header_length(META_CODEC, "");
         let mut reader = TestDataReader::new(&dvm[meta_header_len..], 0);
@@ -2202,7 +2200,7 @@ mod tests {
         let dir = make_test_directory();
         let names = test_write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
-        let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let dvm = dir.read_file(&names[0]).unwrap();
 
         let meta_header_len = index_header_length(META_CODEC, "");
         let mut reader = TestDataReader::new(&dvm[meta_header_len..], 0);
@@ -2237,7 +2235,7 @@ mod tests {
         let dir = make_test_directory();
         let names = test_write(&dir, "_0", "", &segment_id, &fields, 5).unwrap();
 
-        let dvm = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let dvm = dir.read_file(&names[0]).unwrap();
 
         let meta_header_len = index_header_length(META_CODEC, "");
         let mut reader = TestDataReader::new(&dvm[meta_header_len..], 0);

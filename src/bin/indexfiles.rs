@@ -11,16 +11,15 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
 use log::error;
 
 use bearing::prelude::{
-    Document, DocumentBuilder, FSDirectory, IndexWriter, IndexWriterConfig, SharedDirectory,
-    TermVectorOptions, binary_dv, double_field, double_range, feature, float_field, float_range,
-    int_field, int_range, keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv,
-    sorted_numeric_dv, sorted_set_dv, stored, string, text,
+    Document, DocumentBuilder, FSDirectory, IndexWriter, IndexWriterConfig, TermVectorOptions,
+    binary_dv, double_field, double_range, feature, float_field, float_range, int_field, int_range,
+    keyword, lat_lon, long_field, long_range, numeric_dv, sorted_dv, sorted_numeric_dv,
+    sorted_set_dv, stored, string, text,
 };
 
 struct CliArgs {
@@ -179,8 +178,7 @@ fn main() {
         config = config.ram_buffer_size_mb(args.ram_buffer_size_mb);
     }
 
-    let fs_dir = FSDirectory::open_with_file_handles(index_dir).unwrap();
-    let directory = Arc::new(SharedDirectory::new(Box::new(fs_dir)));
+    let directory = FSDirectory::open_with_file_handles(index_dir).unwrap();
     let writer = IndexWriter::new(config, directory);
 
     // Threading is handled internally by IndexWriter via num_threads config.

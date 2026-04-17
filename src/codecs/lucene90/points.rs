@@ -11,7 +11,7 @@ use crate::codecs::lucene90::points_reader::PointsProducer;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::FieldInfo;
 use crate::index::index_file_names;
-use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutput, Directory, IndexOutput, VecOutput};
 
 // File extensions
 pub(crate) const DATA_EXTENSION: &str = "kdd";
@@ -59,7 +59,7 @@ pub struct PointsFieldData {
 /// `field_infos` must be sorted by field number.
 /// Returns a list of file names written, or an empty vec if no fields provided.
 pub(crate) fn write(
-    directory: &SharedDirectory,
+    directory: &dyn Directory,
     segment_name: &str,
     segment_suffix: &str,
     segment_id: &[u8; 16],
@@ -77,14 +77,9 @@ pub(crate) fn write(
     let kdm_name =
         index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
 
-    let (mut data, mut index, mut meta) = {
-        let mut dir = directory.lock().unwrap();
-        (
-            dir.create_output(&kdd_name)?,
-            dir.create_output(&kdi_name)?,
-            dir.create_output(&kdm_name)?,
-        )
-    };
+    let mut data = directory.create_output(&kdd_name)?;
+    let mut index = directory.create_output(&kdi_name)?;
+    let mut meta = directory.create_output(&kdm_name)?;
 
     // Write index headers to all 3 files
     codec_util::write_index_header(
@@ -925,7 +920,7 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn make_test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     /// Helper to create sortable bytes for a long value (same as long_to_sortable_bytes).
@@ -973,7 +968,7 @@ mod tests {
     }
 
     fn write_points(
-        dir: &SharedDirectory,
+        dir: &dyn Directory,
         segment_suffix: &str,
         segment_id: &[u8; 16],
         fields: &[PointsFieldData],
@@ -1115,7 +1110,7 @@ mod tests {
         let names = write_points(&dir, "Lucene90_0", &segment_id, &fields).unwrap();
 
         assert_len_eq_x!(&names, 3);
-        let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
+        let kdm = dir.read_file(&names[2]).unwrap();
 
         let meta_header_len = index_header_length(META_CODEC, "Lucene90_0");
 
@@ -1213,10 +1208,7 @@ mod tests {
         assert_eq!(names[1], "_0_Lucene90_0.kdi");
         assert_eq!(names[2], "_0_Lucene90_0.kdm");
 
-        let files: Vec<Vec<u8>> = names
-            .iter()
-            .map(|n| dir.lock().unwrap().read_file(n).unwrap())
-            .collect();
+        let files: Vec<Vec<u8>> = names.iter().map(|n| dir.read_file(n).unwrap()).collect();
 
         // All 3 files should start with codec magic
         for (name, data) in names.iter().zip(files.iter()) {
@@ -1275,7 +1267,7 @@ mod tests {
         assert_len_eq_x!(&names, 3);
 
         // Verify the .kdd leaf block contains correctly sorted data
-        let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
+        let kdd = dir.read_file(&names[0]).unwrap();
         let data_header_len = index_header_length(DATA_CODEC, "");
 
         // After header: VInt(3)=03, CONTINUOUS_IDS=FE, VInt(0)=00
@@ -1316,9 +1308,9 @@ mod tests {
         let dir = make_test_directory();
         let names = write_points(&dir, "", &segment_id, &fields).unwrap();
 
-        let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
-        let kdi = dir.lock().unwrap().read_file(&names[1]).unwrap();
-        let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
+        let kdd = dir.read_file(&names[0]).unwrap();
+        let kdi = dir.read_file(&names[1]).unwrap();
+        let kdm = dir.read_file(&names[2]).unwrap();
 
         // The last 16 bytes before the footer in .kdm are:
         // writeLong(indexFilePointer) + writeLong(dataFilePointer)
@@ -1363,7 +1355,7 @@ mod tests {
         assert_len_eq_x!(&names, 3);
 
         // In the .kdm, the first field number should be 1 (modified), not 0 (contents)
-        let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
+        let kdm = dir.read_file(&names[2]).unwrap();
         let meta_header_len = index_header_length(META_CODEC, "");
         assert_eq!(
             &kdm[meta_header_len..meta_header_len + 4],
@@ -1448,9 +1440,9 @@ mod tests {
         let segment_id = [0u8; 16];
         let dir = make_test_directory();
         let names = write_points(&dir, "", &segment_id, &fields).unwrap();
-        let kdd = dir.lock().unwrap().read_file(&names[0]).unwrap();
-        let kdi = dir.lock().unwrap().read_file(&names[1]).unwrap();
-        let kdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
+        let kdd = dir.read_file(&names[0]).unwrap();
+        let kdi = dir.read_file(&names[1]).unwrap();
+        let kdm = dir.read_file(&names[2]).unwrap();
         (kdd, kdi, kdm)
     }
 

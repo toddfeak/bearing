@@ -9,14 +9,12 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use std::sync::Arc;
 //! use bearing::prelude::{
 //!     DocumentBuilder, FSDirectory, IndexWriter, IndexWriterConfig,
-//!     SharedDirectory, keyword, text,
+//!     keyword, text,
 //! };
 //!
-//! let fs_dir = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
-//! let directory = Arc::new(SharedDirectory::new(Box::new(fs_dir)));
+//! let directory = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
 //! let writer = IndexWriter::new(IndexWriterConfig::default(), directory);
 //!
 //! let doc = DocumentBuilder::new()

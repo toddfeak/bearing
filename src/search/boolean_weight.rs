@@ -605,9 +605,9 @@ mod tests {
     use crate::search::term_query::TermQuery;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
-    fn build_test_index() -> (Arc<SharedDirectory>, DirectoryReader) {
+    fn build_test_index() -> (SharedDirectory, DirectoryReader) {
         let config = IndexWriterConfig::default();
-        let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
         writer
@@ -635,9 +635,7 @@ mod tests {
             .unwrap();
 
         writer.commit().unwrap();
-        let dir = directory.lock().unwrap();
-        let reader = DirectoryReader::open(&**dir).unwrap();
-        drop(dir);
+        let reader = DirectoryReader::open(&*directory).unwrap();
         (directory, reader)
     }
 

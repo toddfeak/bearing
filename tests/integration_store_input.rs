@@ -17,7 +17,7 @@ use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory,
 
 #[test]
 fn test_memory_directory_write_then_read() {
-    let mut dir = MemoryDirectory::new();
+    let dir = MemoryDirectory::create();
 
     // Write via create_output
     {
@@ -41,7 +41,7 @@ fn test_memory_directory_write_then_read() {
 #[test]
 fn test_fs_directory_write_then_read() {
     let dir_path = temp_dir("integration_store_input");
-    let mut dir = FSDirectory::open(&dir_path).unwrap();
+    let dir = FSDirectory::open(&dir_path).unwrap();
     let _cleanup = DirCleanup(&dir_path);
 
     {
@@ -59,7 +59,7 @@ fn test_fs_directory_write_then_read() {
 
 #[test]
 fn test_open_input_seek_and_reread() {
-    let mut dir = MemoryDirectory::new();
+    let dir = MemoryDirectory::create();
 
     {
         let mut out = dir.create_output("seek.bin").unwrap();
@@ -85,7 +85,7 @@ fn test_open_input_seek_and_reread() {
 
 #[test]
 fn test_open_input_skip_bytes() {
-    let mut dir = MemoryDirectory::new();
+    let dir = MemoryDirectory::create();
 
     {
         let mut out = dir.create_output("skip.bin").unwrap();
@@ -120,7 +120,7 @@ fn test_index_writer_files_readable() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -131,7 +131,7 @@ fn test_index_writer_files_readable() {
     writer.commit().unwrap();
 
     // Every file should be openable and have non-zero length
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     assert_not_empty!(files);
 
@@ -149,7 +149,7 @@ fn test_index_writer_codec_files_have_valid_headers() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -161,7 +161,7 @@ fn test_index_writer_codec_files_have_valid_headers() {
 
     // Codec files (not segments_N) start with CODEC_MAGIC (0x3FD76C17 BE)
     let codec_magic_bytes: [u8; 4] = [0x3F, 0xD7, 0x6C, 0x17];
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
 
     for file in &files {
@@ -192,7 +192,7 @@ fn test_read_segments_from_index_writer() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -203,12 +203,12 @@ fn test_read_segments_from_index_writer() {
     writer.commit().unwrap();
 
     // Find the segments_N file
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
 
     // Read segments_N
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
 
     // Should have exactly 1 segment
     assert_eq!(infos.segments.len(), 1);
@@ -226,7 +226,7 @@ fn test_read_segments_multiple_docs() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     for i in 0..5 {
@@ -240,10 +240,10 @@ fn test_read_segments_multiple_docs() {
 
     writer.commit().unwrap();
 
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
 
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
@@ -259,7 +259,7 @@ fn test_read_segments_memory_directory() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -269,10 +269,10 @@ fn test_read_segments_memory_directory() {
     writer.add_document(doc).unwrap();
     writer.commit().unwrap();
 
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
 
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
@@ -289,7 +289,7 @@ fn test_read_segments_compound_mode() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default().use_compound_file(true);
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -300,10 +300,10 @@ fn test_read_segments_compound_mode() {
     writer.commit().unwrap();
 
     // segments_N should be readable even in compound mode
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
 
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
@@ -322,7 +322,7 @@ fn test_compound_directory_list_files() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default().use_compound_file(true);
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -333,14 +333,14 @@ fn test_compound_directory_list_files() {
     writer.commit().unwrap();
 
     // Read segments to get segment ID
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
     // Open compound directory
-    let compound_dir = CompoundDirectory::open(&**dir, &seg.name, &seg.id).unwrap();
+    let compound_dir = CompoundDirectory::open(dir, &seg.name, &seg.id).unwrap();
     let compound_files = compound_dir.list_all().unwrap();
 
     // Should contain segment files like .fnm, .fdt, .fdm, etc.
@@ -357,7 +357,7 @@ fn test_compound_directory_read_embedded_file() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default().use_compound_file(true);
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -367,13 +367,13 @@ fn test_compound_directory_read_embedded_file() {
     writer.add_document(doc).unwrap();
     writer.commit().unwrap();
 
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let compound_dir = CompoundDirectory::open(&**dir, &seg.name, &seg.id).unwrap();
+    let compound_dir = CompoundDirectory::open(dir, &seg.name, &seg.id).unwrap();
 
     // Read a .fnm file from compound — should start with codec magic
     let mut input = compound_dir.open_input(".fnm").unwrap();
@@ -397,7 +397,7 @@ fn test_compound_directory_memory() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default().use_compound_file(true);
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -407,13 +407,13 @@ fn test_compound_directory_memory() {
     writer.add_document(doc).unwrap();
     writer.commit().unwrap();
 
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let compound_dir = CompoundDirectory::open(&**dir, &seg.name, &seg.id).unwrap();
+    let compound_dir = CompoundDirectory::open(dir, &seg.name, &seg.id).unwrap();
     let compound_files = compound_dir.list_all().unwrap();
     assert_not_empty!(compound_files);
 
@@ -438,7 +438,7 @@ fn test_stored_fields_reader_round_trip() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -455,16 +455,16 @@ fn test_stored_fields_reader_round_trip() {
 
     writer.commit().unwrap();
 
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files
         .iter()
         .find(|f| f.starts_with("segments_"))
         .expect("no segments file");
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = StoredFieldsReader::open(dir, &seg.name, "", &seg.id).unwrap();
 
     // Doc 0
     let fields = reader.document(0).unwrap();
@@ -508,7 +508,7 @@ fn test_stored_fields_reader_all_types() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     let doc = DocumentBuilder::new()
@@ -523,16 +523,16 @@ fn test_stored_fields_reader_all_types() {
 
     writer.commit().unwrap();
 
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files
         .iter()
         .find(|f| f.starts_with("segments_"))
         .expect("no segments file");
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = StoredFieldsReader::open(dir, &seg.name, "", &seg.id).unwrap();
     let fields = reader.document(0).unwrap();
 
     assert!(
@@ -584,7 +584,7 @@ fn test_stored_fields_reader_many_docs() {
     use bearing::index::writer::IndexWriter;
 
     let config = IndexWriterConfig::default();
-    let directory = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+    let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
     for i in 0..50 {
@@ -597,16 +597,16 @@ fn test_stored_fields_reader_many_docs() {
 
     writer.commit().unwrap();
 
-    let dir = directory.lock().unwrap();
+    let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files
         .iter()
         .find(|f| f.starts_with("segments_"))
         .expect("no segments file");
-    let infos = segment_infos::read(&**dir, segments_file).unwrap();
+    let infos = segment_infos::read(dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    let mut reader = StoredFieldsReader::open(&**dir, &seg.name, "", &seg.id).unwrap();
+    let mut reader = StoredFieldsReader::open(dir, &seg.name, "", &seg.id).unwrap();
 
     for i in 0..50 {
         let fields = reader.document(i).unwrap();

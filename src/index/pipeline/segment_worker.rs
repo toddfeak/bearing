@@ -232,7 +232,7 @@ impl SegmentWorker {
             attributes,
             has_blocks: false,
         };
-        let si_name = segment_info_format::write(&context.directory, &si, &file_names)?;
+        let si_name = segment_info_format::write(&*context.directory, &si, &file_names)?;
         file_names.push(si_name);
 
         Ok(FlushedSegment {
@@ -246,7 +246,6 @@ impl SegmentWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use crate::analysis::StandardAnalyzer;
     use crate::analysis::Token;
@@ -254,7 +253,7 @@ mod tests {
     use crate::index::field::{Field, text};
     use crate::index::pipeline::consumer::FieldConsumer;
     use crate::index::segment::SegmentId;
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::store::MemoryDirectory;
 
     /// No-op consumer that returns an empty file list.
     struct NoOpConsumer;
@@ -317,7 +316,7 @@ mod tests {
 
     fn test_context() -> SegmentContext {
         SegmentContext {
-            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            directory: MemoryDirectory::create(),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }
@@ -342,7 +341,7 @@ mod tests {
         assert!(flushed.file_names.contains(&"_0.si".to_string()));
 
         // Verify the file exists in the directory
-        let guard = context.directory.lock().unwrap();
+        let guard = &*context.directory;
         let data = guard.read_file("_0.si").unwrap();
         // Header magic
         assert_eq!(&data[0..4], &[0x3f, 0xd7, 0x6c, 0x17]);

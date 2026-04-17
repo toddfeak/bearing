@@ -15,7 +15,7 @@ use crate::encoding::lz4;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::encoding::zigzag;
 use crate::index::index_file_names;
-use crate::store::{DataOutput, IndexOutput, SharedDirectory, VecOutput};
+use crate::store::{DataOutput, Directory, IndexOutput, VecOutput};
 
 // File extensions
 pub(crate) const FIELDS_EXTENSION: &str = "fdt";
@@ -204,7 +204,7 @@ impl Lucene90StoredFieldsWriter {
     ///
     /// Opens the .fdt, .fdx, and .fdm output files and writes their headers.
     pub(crate) fn new(
-        directory: &SharedDirectory,
+        directory: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
         segment_id: &[u8; 16],
@@ -221,14 +221,9 @@ impl Lucene90StoredFieldsWriter {
              for segment={segment_name:?}"
         );
 
-        let (mut fields_stream, mut fdx, mut fdm) = {
-            let mut dir = directory.lock().unwrap();
-            (
-                dir.create_output(&fdt_name)?,
-                dir.create_output(&fdx_name)?,
-                dir.create_output(&fdm_name)?,
-            )
-        };
+        let mut fields_stream = directory.create_output(&fdt_name)?;
+        let mut fdx = directory.create_output(&fdx_name)?;
+        let mut fdm = directory.create_output(&fdm_name)?;
 
         codec_util::write_index_header(
             &mut *fields_stream,
@@ -773,12 +768,12 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn test_directory() -> SharedDirectory {
-        SharedDirectory::new(Box::new(MemoryDirectory::new()))
+        MemoryDirectory::create()
     }
 
     /// Helper: write stored fields using the streaming writer.
     fn write_with_streaming(
-        dir: &SharedDirectory,
+        dir: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
         segment_id: &[u8; 16],
@@ -817,9 +812,9 @@ mod tests {
         assert_eq!(names[1], "_0.fdx");
         assert_eq!(names[2], "_0.fdm");
 
-        let fdt_data = dir.lock().unwrap().read_file(&names[0]).unwrap();
-        let fdx_data = dir.lock().unwrap().read_file(&names[1]).unwrap();
-        let fdm_data = dir.lock().unwrap().read_file(&names[2]).unwrap();
+        let fdt_data = dir.read_file(&names[0]).unwrap();
+        let fdx_data = dir.read_file(&names[1]).unwrap();
+        let fdm_data = dir.read_file(&names[2]).unwrap();
 
         assert_not_empty!(fdt_data);
         assert_not_empty!(fdx_data);
@@ -845,9 +840,8 @@ mod tests {
         let names = write_with_streaming(&dir, "_0", "", &segment_id, &[]);
         assert_len_eq_x!(&names, 3);
 
-        let locked = dir.lock().unwrap();
         for name in &names {
-            assert_not_empty!(locked.read_file(name).unwrap());
+            assert_not_empty!(dir.read_file(name).unwrap());
         }
     }
 
@@ -879,9 +873,8 @@ mod tests {
         let dir = test_directory();
         let names = write_with_streaming(&dir, "_0", "", &segment_id, &docs);
         assert_len_eq_x!(&names, 3);
-        let locked = dir.lock().unwrap();
         for name in &names {
-            assert_not_empty!(locked.read_file(name).unwrap());
+            assert_not_empty!(dir.read_file(name).unwrap());
         }
     }
 
@@ -897,8 +890,8 @@ mod tests {
         let segment_id = [0u8; 16];
         let dir = test_directory();
         let names = write_with_streaming(&dir, "_0", "", &segment_id, &docs);
-        let fdm = dir.lock().unwrap().read_file(&names[2]).unwrap();
-        let fdx = dir.lock().unwrap().read_file(&names[1]).unwrap();
+        let fdm = dir.read_file(&names[2]).unwrap();
+        let fdx = dir.read_file(&names[1]).unwrap();
 
         let hdr_len = codec_util::index_header_length(INDEX_CODEC_NAME_META, "");
         let mut pos = hdr_len;

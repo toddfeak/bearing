@@ -197,7 +197,7 @@ impl FieldConsumer for TermVectorsConsumer {
         // Lazy-create the writer
         if self.writer.is_none() {
             self.writer = Some(CompressingTermVectorsWriter::new(
-                &context.directory,
+                &*context.directory,
                 &context.segment_name,
                 "",
                 &context.segment_id,
@@ -264,19 +264,18 @@ impl FieldConsumer for TermVectorsConsumer {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use assertables::*;
 
     use super::*;
     use crate::index::field::{TermVectorOptions, text};
-    use crate::store::{MemoryDirectory, SharedDirectory};
+    use crate::store::MemoryDirectory;
 
     use crate::util::bytes_ref_hash::BytesRefHash;
 
     fn test_context() -> SegmentContext {
         SegmentContext {
-            directory: Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new()))),
+            directory: MemoryDirectory::create(),
             segment_name: "_0".to_string(),
             segment_id: [0u8; 16],
         }
@@ -396,7 +395,7 @@ mod tests {
         assert!(!files.is_empty());
 
         // Verify files exist in the directory
-        let guard = context.directory.lock().unwrap();
+        let guard = &*context.directory;
         for name in &files {
             let data = guard.read_file(name).unwrap();
             assert_not_empty!(data);

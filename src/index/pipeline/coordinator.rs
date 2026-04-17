@@ -8,7 +8,7 @@ use std::thread;
 
 use log::debug;
 
-use crate::codecs::lucene90;
+use crate::codecs::lucene90::compound;
 use crate::codecs::lucene99::segment_info_format;
 use crate::codecs::lucene99::segment_info_format::SegmentInfoFieldData;
 use crate::document::Document;
@@ -21,7 +21,8 @@ use crate::index::pipeline::segment_context::SegmentContext;
 use crate::index::pipeline::segment_worker::SegmentWorker;
 use crate::index::segment::{FlushedSegment, SegmentId};
 use crate::index::segment_infos::SegmentInfos;
-use crate::store::{self, SharedDirectory};
+use crate::store::memory::MemoryIndexOutput;
+use crate::store::{Directory, SegmentFile, SharedDirectory};
 
 /// Creates [`SegmentWorker`] instances for worker threads.
 ///
@@ -130,7 +131,7 @@ fn worker_thread_loop(
 /// deletes the originals, and updates the segment's file list.
 fn package_compound_segment(
     segment: &mut FlushedSegment,
-    directory: &Arc<SharedDirectory>,
+    directory: &dyn Directory,
 ) -> io::Result<()> {
     let seg_name = &segment.segment_id.name;
     let si_name = index_file_names::segment_file_name(seg_name, "", "si");
@@ -144,36 +145,27 @@ fn package_compound_segment(
         .filter(|f| !f.ends_with(".si"))
         .collect();
 
-    {
-        let mut dir = directory.lock().unwrap();
-
-        // Read sub-files into SegmentFile structs
-        let sub_files: Vec<store::SegmentFile> = sub_file_names
-            .iter()
-            .map(|name| {
-                let data = dir.read_file(name)?;
-                Ok(store::SegmentFile {
-                    name: (*name).clone(),
-                    data,
-                })
+    // Read sub-files into SegmentFile structs
+    let sub_files: Vec<SegmentFile> = sub_file_names
+        .iter()
+        .map(|name| {
+            let data = directory.read_file(name)?;
+            Ok(SegmentFile {
+                name: (*name).clone(),
+                data,
             })
-            .collect::<io::Result<Vec<_>>>()?;
+        })
+        .collect::<io::Result<Vec<_>>>()?;
 
-        // Build compound file
-        let mut cfs_out = store::memory::MemoryIndexOutput::new(cfs_name.clone());
-        let cfe = lucene90::compound::write_to(
-            seg_name,
-            &segment.segment_id.id,
-            &sub_files,
-            &mut cfs_out,
-        )?;
-        dir.write_file(&cfs_name, cfs_out.bytes())?;
-        dir.write_file(&cfe.name, &cfe.data)?;
+    // Build compound file
+    let mut cfs_out = MemoryIndexOutput::new(cfs_name.clone());
+    let cfe = compound::write_to(seg_name, &segment.segment_id.id, &sub_files, &mut cfs_out)?;
+    directory.write_file(&cfs_name, cfs_out.bytes())?;
+    directory.write_file(&cfe.name, &cfe.data)?;
 
-        // Delete original sub-files
-        for name in &sub_file_names {
-            dir.delete_file(name)?;
-        }
+    // Delete original sub-files
+    for name in &sub_file_names {
+        directory.delete_file(name)?;
     }
 
     // Rewrite .si with is_compound_file = true
@@ -201,7 +193,7 @@ fn package_compound_segment(
     };
 
     // Delete old .si before rewriting
-    directory.lock().unwrap().delete_file(&si_name)?;
+    directory.delete_file(&si_name)?;
     segment_info_format::write(directory, &si, &compound_files)?;
 
     debug!(
@@ -261,7 +253,7 @@ pub struct IndexCoordinator {
     /// Whether to package segment files into compound format (.cfs/.cfe).
     use_compound_file: bool,
     /// Shared directory for writing segment infos at commit time.
-    directory: Arc<SharedDirectory>,
+    directory: SharedDirectory,
     /// Tracks committed segments and writes `segments_N`.
     segment_infos: SegmentInfos,
 }
@@ -271,7 +263,7 @@ impl IndexCoordinator {
     pub fn new(
         config: &IndexWriterConfig,
         id_generator: Box<dyn IdGenerator>,
-        directory: Arc<SharedDirectory>,
+        directory: SharedDirectory,
         worker_factory: Arc<dyn WorkerFactory>,
     ) -> Self {
         let queue_capacity = config.get_num_threads();
@@ -330,7 +322,7 @@ impl IndexCoordinator {
         // Package segments into compound files if configured
         if self.use_compound_file {
             for segment in &mut all_segments {
-                package_compound_segment(segment, &self.directory)?;
+                package_compound_segment(segment, &*self.directory)?;
             }
         }
 
@@ -339,7 +331,7 @@ impl IndexCoordinator {
             for segment in &all_segments {
                 self.segment_infos.add(segment.clone());
             }
-            self.segment_infos.commit(&self.directory)?;
+            self.segment_infos.commit(&*self.directory)?;
         }
 
         Ok(all_segments)
@@ -438,7 +430,7 @@ mod tests {
 
     /// Factory that creates workers with a no-op consumer.
     struct NoOpWorkerFactory {
-        directory: Arc<SharedDirectory>,
+        directory: SharedDirectory,
     }
 
     impl WorkerFactory for NoOpWorkerFactory {
@@ -460,7 +452,7 @@ mod tests {
     /// Factory that creates workers with real stored fields + field infos
     /// consumers, producing actual files for compound packaging tests.
     struct StoredFieldsWorkerFactory {
-        directory: Arc<SharedDirectory>,
+        directory: SharedDirectory,
     }
 
     impl WorkerFactory for StoredFieldsWorkerFactory {
@@ -487,7 +479,7 @@ mod tests {
 
     #[test]
     fn worker_source_creates_sequential_segment_names() {
-        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let dir: SharedDirectory = MemoryDirectory::create();
         let factory = Arc::new(NoOpWorkerFactory {
             directory: Arc::clone(&dir),
         });
@@ -504,7 +496,7 @@ mod tests {
 
     #[test]
     fn worker_source_creates_unique_segment_ids() {
-        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let dir: SharedDirectory = MemoryDirectory::create();
         let factory = Arc::new(NoOpWorkerFactory {
             directory: Arc::clone(&dir),
         });
@@ -528,7 +520,7 @@ mod tests {
 
     #[test]
     fn thread_loop_flushes_on_channel_close() {
-        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let dir: SharedDirectory = MemoryDirectory::create();
         let factory: Arc<dyn WorkerFactory> = Arc::new(NoOpWorkerFactory {
             directory: Arc::clone(&dir),
         });
@@ -549,7 +541,7 @@ mod tests {
 
     #[test]
     fn thread_loop_mid_flush_creates_replacement() {
-        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let dir: SharedDirectory = MemoryDirectory::create();
         let factory: Arc<dyn WorkerFactory> = Arc::new(NoOpWorkerFactory {
             directory: Arc::clone(&dir),
         });
@@ -579,7 +571,7 @@ mod tests {
 
     #[test]
     fn thread_loop_empty_channel_produces_no_segments() {
-        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let dir: SharedDirectory = MemoryDirectory::create();
         let factory: Arc<dyn WorkerFactory> = Arc::new(NoOpWorkerFactory {
             directory: Arc::clone(&dir),
         });
@@ -598,7 +590,7 @@ mod tests {
 
     #[test]
     fn compound_packaging_creates_cfs_cfe() {
-        let dir = Arc::new(SharedDirectory::new(Box::new(MemoryDirectory::new())));
+        let dir: SharedDirectory = MemoryDirectory::create();
         let factory: Arc<dyn WorkerFactory> = Arc::new(StoredFieldsWorkerFactory {
             directory: Arc::clone(&dir),
         });
@@ -618,7 +610,7 @@ mod tests {
         let pre_files = segments[0].file_names.clone();
         assert_ge!(pre_files.len(), 5);
 
-        package_compound_segment(&mut segments[0], &dir).unwrap();
+        package_compound_segment(&mut segments[0], &*dir).unwrap();
 
         // After packaging: .si, .cfs, .cfe
         assert_eq!(segments[0].file_names.len(), 3);
@@ -630,7 +622,7 @@ mod tests {
             .ends_with(".cfe"));
 
         // Original sub-files (except .si) should be deleted
-        let guard = dir.lock().unwrap();
+        let guard = &*dir;
         for f in &pre_files {
             if !f.ends_with(".si") {
                 assert!(
