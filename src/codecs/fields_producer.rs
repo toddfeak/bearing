@@ -9,6 +9,8 @@
 
 use std::io;
 
+use crate::document::TermOffset;
+
 /// Sentinel value returned by [`PostingsEnumProducer::next_doc`] when iteration
 /// is exhausted.
 pub const NO_MORE_DOCS: i32 = i32::MAX;
@@ -107,7 +109,7 @@ pub trait FieldTerms {
 ///
 /// Call pattern: `next_doc()` in a loop, for each doc optionally call `freq()`,
 /// then `next_position()` x freq times, each optionally followed by
-/// `start_offset()`, `end_offset()`, `payload()`.
+/// `offset()`, `payload()`.
 pub trait PostingsEnumProducer {
     /// Number of documents containing this term.
     ///
@@ -130,11 +132,9 @@ pub trait PostingsEnumProducer {
     /// Returns the position.
     fn next_position(&mut self) -> io::Result<i32>;
 
-    /// Returns the start character offset of the current position.
-    fn start_offset(&self) -> i32;
-
-    /// Returns the end character offset of the current position.
-    fn end_offset(&self) -> i32;
+    /// Returns the character offset of the current position, or `None`
+    /// if offsets were not indexed.
+    fn offset(&self) -> Option<TermOffset>;
 
     /// Returns the payload at the current position, if any.
     fn payload(&self) -> Option<&[u8]>;

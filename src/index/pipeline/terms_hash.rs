@@ -20,7 +20,7 @@ use std::io;
 use std::mem;
 
 use crate::codecs::fields_producer::{NO_MORE_DOCS, PostingsEnumProducer};
-use crate::document::IndexOptions;
+use crate::document::{IndexOptions, TermOffset};
 use crate::util::byte_block_pool::{ByteBlockPool, ByteSlicePool, FIRST_LEVEL_SIZE};
 use crate::util::bytes_ref_hash::BytesRefHash;
 
@@ -657,12 +657,8 @@ impl PostingsEnumProducer for BufferedPostingsEnum {
         Ok(pos)
     }
 
-    fn start_offset(&self) -> i32 {
-        -1
-    }
-
-    fn end_offset(&self) -> i32 {
-        -1
+    fn offset(&self) -> Option<TermOffset> {
+        None
     }
 
     fn payload(&self) -> Option<&[u8]> {
@@ -692,8 +688,7 @@ pub(crate) struct FreqProxTermsWriterPerField {
     pub unique_term_count: i32,
     // Current token state — set before calling trait add(), read by new_term/add_term.
     pub(crate) current_position: i32,
-    pub(crate) current_start_offset: i32,
-    pub(crate) current_offset_length: u16,
+    pub(crate) current_offset: TermOffset,
 }
 
 impl FreqProxTermsWriterPerField {
@@ -719,8 +714,7 @@ impl FreqProxTermsWriterPerField {
             max_term_frequency: 0,
             unique_term_count: 0,
             current_position: 0,
-            current_start_offset: 0,
-            current_offset_length: 0,
+            current_offset: TermOffset::default(),
         }
     }
 
@@ -753,8 +747,7 @@ impl FreqProxTermsWriterPerField {
         pos: TermPosition,
     ) -> io::Result<usize> {
         self.current_position = pos.position;
-        self.current_start_offset = pos.start_offset;
-        self.current_offset_length = pos.offset_length;
+        self.current_offset = pos.offset;
         self.add(term_byte_pool, terms_hash, term_bytes, doc_id)
     }
 
@@ -961,8 +954,8 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
 
     fn new_term(&mut self, terms_hash: &mut TermsHash, term_id: usize, doc_id: i32) {
         let position = self.current_position;
-        let start_offset = self.current_start_offset;
-        let offset_length = self.current_offset_length;
+        let start_offset = self.current_offset.start as i32;
+        let offset_length = self.current_offset.length;
 
         let postings = &mut self.postings_array;
 
@@ -992,8 +985,8 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
 
     fn add_term(&mut self, terms_hash: &mut TermsHash, term_id: usize, doc_id: i32) {
         let position = self.current_position;
-        let start_offset = self.current_start_offset;
-        let offset_length = self.current_offset_length;
+        let start_offset = self.current_offset.start as i32;
+        let offset_length = self.current_offset.length;
 
         let postings = &mut self.postings_array;
 
@@ -1060,21 +1053,19 @@ impl TermsHashPerFieldTrait for FreqProxTermsWriterPerField {
     }
 }
 
-/// Position, start offset, and offset length for a term occurrence.
+/// Position and character offset for a term occurrence.
 #[cfg(test)]
 pub(crate) struct TermPosition {
     position: i32,
-    start_offset: i32,
-    offset_length: u16,
+    offset: TermOffset,
 }
 
 #[cfg(test)]
 impl TermPosition {
-    fn new(position: i32, start_offset: i32, offset_length: u16) -> Self {
+    fn new(position: i32, start: u32, length: u16) -> Self {
         Self {
             position,
-            start_offset,
-            offset_length,
+            offset: TermOffset { start, length },
         }
     }
 }

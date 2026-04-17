@@ -6,6 +6,7 @@ use std::io::{self, Read};
 
 use crate::analysis::chunk_reader::Utf8ChunkReader;
 use crate::analysis::{Analyzer, AnalyzerFactory, Token};
+use crate::document::TermOffset;
 
 /// Maximum token length. Tokens longer than this are split.
 /// Matches Java: StandardAnalyzer.DEFAULT_MAX_TOKEN_LENGTH = 255
@@ -293,16 +294,20 @@ impl Analyzer for StandardAnalyzer {
         if spanning {
             Ok(Some(Token {
                 text: &self.boundary_buf,
-                start_offset: token_start_byte as i32,
-                offset_length: self.boundary_buf.len() as u16,
+                offset: TermOffset {
+                    start: token_start_byte as u32,
+                    length: self.boundary_buf.len() as u16,
+                },
                 position_increment: 1,
             }))
         } else {
             let token_len = (self.bytes_consumed + self.pos) - token_start_byte;
             Ok(Some(Token {
                 text: &self.current[scan_start..self.pos],
-                start_offset: token_start_byte as i32,
-                offset_length: token_len as u16,
+                offset: TermOffset {
+                    start: token_start_byte as u32,
+                    length: token_len as u16,
+                },
                 position_increment: 1,
             }))
         }
@@ -329,11 +334,11 @@ mod tests {
 
     // --- Tokenizer tests (exercise the real StandardAnalyzer) ---
 
-    /// Helper: tokenize via the real StandardAnalyzer, return (text, start, end).
-    fn tokenize(text: &str) -> Vec<(String, usize, usize)> {
+    /// Helper: tokenize via the real StandardAnalyzer, return (text, offset).
+    fn tokenize(text: &str) -> Vec<(String, TermOffset)> {
         collect_tokens(text)
             .into_iter()
-            .map(|(t, s, e, _)| (t, s as usize, e as usize))
+            .map(|(t, offset, _)| (t, offset))
             .collect()
     }
 
@@ -341,8 +346,26 @@ mod tests {
     fn test_standard_tokenizer_simple() {
         let tokens = tokenize("hello world");
         assert_len_eq_x!(&tokens, 2);
-        assert_eq!(tokens[0], ("hello".to_string(), 0, 5));
-        assert_eq!(tokens[1], ("world".to_string(), 6, 11));
+        assert_eq!(
+            tokens[0],
+            (
+                "hello".to_string(),
+                TermOffset {
+                    start: 0,
+                    length: 5
+                }
+            )
+        );
+        assert_eq!(
+            tokens[1],
+            (
+                "world".to_string(),
+                TermOffset {
+                    start: 6,
+                    length: 5
+                }
+            )
+        );
     }
 
     #[test]
@@ -416,7 +439,7 @@ mod tests {
 
     // --- StandardAnalyzer (pull-based) tests ---
 
-    fn collect_tokens(text: &str) -> Vec<(String, i32, i32, i32)> {
+    fn collect_tokens(text: &str) -> Vec<(String, TermOffset, i32)> {
         let mut analyzer = StandardAnalyzer::default();
         analyzer.set_reader(Box::new(io::Cursor::new(text.as_bytes().to_vec())));
         let mut result = Vec::new();
@@ -424,8 +447,7 @@ mod tests {
         while let Some(token) = analyzer.next_token().unwrap() {
             result.push((
                 token.text.to_string(),
-                token.start_offset,
-                token.start_offset + token.offset_length as i32,
+                token.offset,
                 token.position_increment,
             ));
         }
@@ -446,7 +468,7 @@ mod tests {
         let texts: Vec<&str> = tokens.iter().map(|t| t.0.as_str()).collect();
         assert_eq!(texts, vec!["the", "quick", "and", "brown", "fox"]);
         for t in &tokens {
-            assert_eq!(t.3, 1);
+            assert_eq!(t.2, 1);
         }
     }
 
@@ -473,17 +495,27 @@ mod tests {
     #[test]
     fn test_offsets_are_correct() {
         let tokens = collect_tokens("hello world");
-        assert_eq!(tokens[0].1, 0); // start_offset
-        assert_eq!(tokens[0].2, 5); // offset_length
-        assert_eq!(tokens[1].1, 6);
-        assert_eq!(tokens[1].2, 11);
+        assert_eq!(
+            tokens[0].1,
+            TermOffset {
+                start: 0,
+                length: 5
+            }
+        );
+        assert_eq!(
+            tokens[1].1,
+            TermOffset {
+                start: 6,
+                length: 5
+            }
+        );
     }
 
     #[test]
     fn test_position_increments_are_one() {
         let tokens = collect_tokens("one two three");
         for t in &tokens {
-            assert_eq!(t.3, 1);
+            assert_eq!(t.2, 1);
         }
     }
 
@@ -507,15 +539,14 @@ mod tests {
 
     // --- Chunk boundary tests (small capacity to force boundaries) ---
 
-    fn collect_tokens_chunked(text: &str, capacity: usize) -> Vec<(String, i32, i32, i32)> {
+    fn collect_tokens_chunked(text: &str, capacity: usize) -> Vec<(String, TermOffset, i32)> {
         let reader: Box<dyn Read + Send> = Box::new(io::Cursor::new(text.as_bytes().to_vec()));
         let mut analyzer = StandardAnalyzer::with_capacity(capacity, reader);
         let mut result = Vec::new();
         while let Some(token) = analyzer.next_token().unwrap() {
             result.push((
                 token.text.to_string(),
-                token.start_offset,
-                token.start_offset + token.offset_length as i32,
+                token.offset,
                 token.position_increment,
             ));
         }
@@ -594,10 +625,20 @@ mod tests {
     #[test]
     fn test_offsets_correct_across_chunks() {
         let tokens = collect_tokens_chunked("hello world", 4);
-        assert_eq!(tokens[0].1, 0);
-        assert_eq!(tokens[0].2, 5);
-        assert_eq!(tokens[1].1, 6);
-        assert_eq!(tokens[1].2, 11);
+        assert_eq!(
+            tokens[0].1,
+            TermOffset {
+                start: 0,
+                length: 5
+            }
+        );
+        assert_eq!(
+            tokens[1].1,
+            TermOffset {
+                start: 6,
+                length: 5
+            }
+        );
     }
 
     #[test]

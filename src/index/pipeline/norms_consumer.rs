@@ -151,6 +151,7 @@ mod tests {
     use assertables::*;
 
     use super::*;
+    use crate::document::TermOffset;
     use crate::index::field::{stored, text};
     use crate::store::MemoryDirectory;
 
@@ -178,8 +179,10 @@ mod tests {
             buf.push_str("token");
             let token = Token {
                 text: &buf,
-                start_offset: 0,
-                offset_length: 5,
+                offset: TermOffset {
+                    start: 0,
+                    length: 5,
+                },
                 position_increment: 1,
             };
             consumer.add_token(field_id, field, &token, acc).unwrap();

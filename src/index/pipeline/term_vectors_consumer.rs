@@ -155,8 +155,7 @@ impl FieldConsumer for TermVectorsConsumer {
         state.current_position += token.position_increment;
 
         state.tv_pf.current_position = state.current_position;
-        state.tv_pf.current_start_offset = token.start_offset;
-        state.tv_pf.current_offset_length = token.offset_length;
+        state.tv_pf.current_offset = token.offset;
 
         // Read the text_start hint set by PostingsConsumer for this token
         let text_start = accumulator.take_text_start_hint();
@@ -268,6 +267,7 @@ mod tests {
     use assertables::*;
 
     use super::*;
+    use crate::document::TermOffset;
     use crate::index::field::{TermVectorOptions, text};
     use crate::store::MemoryDirectory;
 
@@ -368,8 +368,10 @@ mod tests {
         let token1 = Token {
             text: "hello",
             position_increment: 1,
-            start_offset: 0,
-            offset_length: 5,
+            offset: TermOffset {
+                start: 0,
+                length: 5,
+            },
         };
         set_hint_for_token(&mut accum, &mut hash, b"hello");
         consumer.add_token(0, &field, &token1, &mut accum).unwrap();
@@ -377,8 +379,10 @@ mod tests {
         let token2 = Token {
             text: "world",
             position_increment: 1,
-            start_offset: 6,
-            offset_length: 5,
+            offset: TermOffset {
+                start: 6,
+                length: 5,
+            },
         };
         set_hint_for_token(&mut accum, &mut hash, b"world");
         consumer.add_token(0, &field, &token2, &mut accum).unwrap();
@@ -427,8 +431,10 @@ mod tests {
         let token = Token {
             text: "hello",
             position_increment: 1,
-            start_offset: 0,
-            offset_length: 5,
+            offset: TermOffset {
+                start: 0,
+                length: 5,
+            },
         };
         set_hint_for_token(&mut accum, &mut hash, b"hello");
         consumer.add_token(0, &field, &token, &mut accum).unwrap();
@@ -470,8 +476,10 @@ mod tests {
         let t1 = Token {
             text: "alpha",
             position_increment: 1,
-            start_offset: 0,
-            offset_length: 5,
+            offset: TermOffset {
+                start: 0,
+                length: 5,
+            },
         };
         set_hint_for_token(&mut accum, &mut hash, b"alpha");
         consumer.add_token(5, &field_a, &t1, &mut accum).unwrap();
@@ -481,8 +489,10 @@ mod tests {
         let t2 = Token {
             text: "beta",
             position_increment: 1,
-            start_offset: 0,
-            offset_length: 4,
+            offset: TermOffset {
+                start: 0,
+                length: 4,
+            },
         };
         set_hint_for_token(&mut accum, &mut hash, b"beta");
         consumer.add_token(2, &field_b, &t2, &mut accum).unwrap();

@@ -8,9 +8,10 @@ extern crate assertables;
 use std::io::Cursor;
 
 use bearing::analysis::{Analyzer, StandardAnalyzer};
+use bearing::document::TermOffset;
 
-/// Collects all tokens from an analyzer into (text, start, end, pos_inc) tuples.
-fn collect_tokens(text: &str) -> Vec<(String, i32, i32, i32)> {
+/// Collects all tokens from an analyzer into (text, offset, pos_inc) tuples.
+fn collect_tokens(text: &str) -> Vec<(String, TermOffset, i32)> {
     let mut analyzer = StandardAnalyzer::new();
     analyzer.set_reader(Box::new(Cursor::new(text.as_bytes().to_vec())));
     let mut result = Vec::new();
@@ -18,8 +19,7 @@ fn collect_tokens(text: &str) -> Vec<(String, i32, i32, i32)> {
     while let Some(token) = analyzer.next_token().unwrap() {
         result.push((
             token.text.to_string(),
-            token.start_offset,
-            token.start_offset + token.offset_length as i32,
+            token.offset,
             token.position_increment,
         ));
     }
@@ -68,17 +68,27 @@ fn standard_analyzer_punctuation_splitting() {
 #[test]
 fn standard_analyzer_offsets() {
     let tokens = collect_tokens("hello world");
-    assert_eq!(tokens[0].1, 0); // start
-    assert_eq!(tokens[0].2, 5); // end
-    assert_eq!(tokens[1].1, 6);
-    assert_eq!(tokens[1].2, 11);
+    assert_eq!(
+        tokens[0].1,
+        TermOffset {
+            start: 0,
+            length: 5
+        }
+    );
+    assert_eq!(
+        tokens[1].1,
+        TermOffset {
+            start: 6,
+            length: 5
+        }
+    );
 }
 
 #[test]
 fn standard_analyzer_position_increments() {
     let tokens = collect_tokens("one two three");
     for token in &tokens {
-        assert_eq!(token.3, 1);
+        assert_eq!(token.2, 1);
     }
 }
 

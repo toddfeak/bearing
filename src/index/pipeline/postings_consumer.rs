@@ -11,7 +11,7 @@ use std::mem;
 use crate::analysis::Token;
 use crate::codecs::competitive_impact::BufferedNormsLookup;
 use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, BufferedFieldTerms};
-use crate::document::IndexOptions;
+use crate::document::{IndexOptions, TermOffset};
 use crate::index::field::{Field, InvertableValue};
 use crate::index::pipeline::consumer::{FieldConsumer, TokenInterest};
 use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
@@ -124,8 +124,7 @@ impl FieldConsumer for PostingsConsumer {
         // Non-tokenized indexed fields: record the exact value as a single term
         if let Some(InvertableValue::ExactMatch(value)) = field.field_type().invertable() {
             state.writer.current_position = 0;
-            state.writer.current_start_offset = 0;
-            state.writer.current_offset_length = 0;
+            state.writer.current_offset = TermOffset::default();
             state.writer.add(
                 accumulator.term_byte_pool_mut(),
                 &mut self.terms_hash,
@@ -142,8 +141,7 @@ impl FieldConsumer for PostingsConsumer {
             // The FreqProx encoding handles this: after add(), the pending
             // doc has freq=1. We need to override it.
             state.writer.current_position = 0;
-            state.writer.current_start_offset = 0;
-            state.writer.current_offset_length = 0;
+            state.writer.current_offset = TermOffset::default();
             let tid = state.writer.add(
                 accumulator.term_byte_pool_mut(),
                 &mut self.terms_hash,
@@ -176,8 +174,7 @@ impl FieldConsumer for PostingsConsumer {
             .expect("start_field must precede add_token");
 
         state.writer.current_position = position;
-        state.writer.current_start_offset = token.start_offset;
-        state.writer.current_offset_length = token.offset_length;
+        state.writer.current_offset = token.offset;
         let term_id = state.writer.add(
             accumulator.term_byte_pool_mut(),
             &mut self.terms_hash,
@@ -302,8 +299,10 @@ mod tests {
     fn make_token(text: &str) -> Token<'_> {
         Token {
             text,
-            start_offset: 0,
-            offset_length: text.len() as u16,
+            offset: TermOffset {
+                start: 0,
+                length: text.len() as u16,
+            },
             position_increment: 1,
         }
     }

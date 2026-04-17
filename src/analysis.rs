@@ -9,6 +9,8 @@
 use std::fmt::Debug;
 use std::io::{self, Read};
 
+use crate::document::TermOffset;
+
 pub(crate) mod chunk_reader;
 pub mod standard;
 pub mod unicode;
@@ -21,10 +23,8 @@ pub use unicode::{UnicodeAnalyzer, UnicodeAnalyzerFactory};
 pub struct Token<'a> {
     /// The token text, borrowed from the analyzer's buffer.
     pub text: &'a str,
-    /// Start character offset in the original input.
-    pub start_offset: i32,
-    /// Length of this token in characters (end_offset - start_offset).
-    pub offset_length: u16,
+    /// Character offset of this token in the original input.
+    pub offset: TermOffset,
     /// Position increment (distance from previous token). Usually 1.
     pub position_increment: i32,
 }

@@ -13,6 +13,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::analysis::chunk_reader::Utf8ChunkReader;
 use crate::analysis::{Analyzer, AnalyzerFactory, Token};
+use crate::document::TermOffset;
 
 /// Unicode-aware text analyzer using UAX#29 word boundary rules.
 ///
@@ -118,8 +119,10 @@ impl Analyzer for UnicodeAnalyzer {
                 let token_len = (self.bytes_consumed + end) - token_start_byte;
                 return Ok(Some(Token {
                     text: &self.buf[start..end],
-                    start_offset: token_start_byte as i32,
-                    offset_length: token_len as u16,
+                    offset: TermOffset {
+                        start: token_start_byte as u32,
+                        length: token_len as u16,
+                    },
                     position_increment: 1,
                 }));
             }
@@ -167,37 +170,35 @@ mod tests {
     use super::*;
     use assertables::*;
 
-    fn collect_tokens(text: &str) -> Vec<(String, i32, i32, i32)> {
+    fn collect_tokens(text: &str) -> Vec<(String, TermOffset, i32)> {
         let mut analyzer = UnicodeAnalyzer::default();
         analyzer.set_reader(Box::new(io::Cursor::new(text.as_bytes().to_vec())));
         let mut result = Vec::new();
         while let Some(token) = analyzer.next_token().unwrap() {
             result.push((
                 token.text.to_string(),
-                token.start_offset,
-                token.start_offset + token.offset_length as i32,
+                token.offset,
                 token.position_increment,
             ));
         }
         result
     }
 
-    fn collect_tokens_chunked(text: &str, capacity: usize) -> Vec<(String, i32, i32, i32)> {
+    fn collect_tokens_chunked(text: &str, capacity: usize) -> Vec<(String, TermOffset, i32)> {
         let reader: Box<dyn Read + Send> = Box::new(io::Cursor::new(text.as_bytes().to_vec()));
         let mut analyzer = UnicodeAnalyzer::with_capacity(capacity, reader);
         let mut result = Vec::new();
         while let Some(token) = analyzer.next_token().unwrap() {
             result.push((
                 token.text.to_string(),
-                token.start_offset,
-                token.start_offset + token.offset_length as i32,
+                token.offset,
                 token.position_increment,
             ));
         }
         result
     }
 
-    fn texts(tokens: &[(String, i32, i32, i32)]) -> Vec<&str> {
+    fn texts(tokens: &[(String, TermOffset, i32)]) -> Vec<&str> {
         tokens.iter().map(|t| t.0.as_str()).collect()
     }
 
@@ -226,7 +227,7 @@ mod tests {
     fn test_position_increments() {
         let tokens = collect_tokens("one two three");
         for t in &tokens {
-            assert_eq!(t.3, 1);
+            assert_eq!(t.2, 1);
         }
     }
 

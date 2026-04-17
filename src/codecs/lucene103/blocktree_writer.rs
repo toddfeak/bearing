@@ -1360,7 +1360,7 @@ fn choose_child_save_strategy(min_label: u8, max_label: u8, label_cnt: usize) ->
 mod tests {
     use super::*;
     use crate::codecs::competitive_impact::BufferedNormsLookup;
-    use crate::document::IndexOptions;
+    use crate::document::{IndexOptions, TermOffset};
     use crate::store::memory::MemoryIndexOutput;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use crate::util::byte_block_pool::ByteBlockPool;
@@ -1398,8 +1398,7 @@ mod tests {
         /// Add a single term occurrence at the given doc/position.
         fn add(&mut self, term: &str, doc_id: i32, position: i32) {
             self.writer.current_position = position;
-            self.writer.current_start_offset = 0;
-            self.writer.current_offset_length = 0;
+            self.writer.current_offset = TermOffset::default();
             self.writer
                 .add(
                     &mut self.term_pool,

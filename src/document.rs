@@ -42,6 +42,18 @@ impl IndexOptions {
     }
 }
 
+/// Character-level offset of a term occurrence within a document.
+///
+/// Represents where a token appears in the original text as a start
+/// character position and a length in characters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TermOffset {
+    /// Start character position in the document (absolute, zero-based).
+    pub start: u32,
+    /// Length of the token in characters.
+    pub length: u16,
+}
+
 /// Specifies the type of doc values stored for a field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, MemSize)]
 #[mem_size_flat]

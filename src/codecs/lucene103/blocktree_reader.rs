@@ -401,7 +401,7 @@ mod tests {
     use super::*;
     use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, BufferedFieldTerms};
-    use crate::document::{DocValuesType, IndexOptions};
+    use crate::document::{DocValuesType, IndexOptions, TermOffset};
     use crate::encoding::write_encoding::WriteEncoding;
     use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
@@ -441,8 +441,7 @@ mod tests {
 
         fn add(&mut self, term: &str, doc_id: i32, position: i32) {
             self.writer.current_position = position;
-            self.writer.current_start_offset = 0;
-            self.writer.current_offset_length = 0;
+            self.writer.current_offset = TermOffset::default();
             self.writer
                 .add(
                     &mut self.term_pool,

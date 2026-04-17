@@ -14,7 +14,7 @@ use std::io;
 use std::mem;
 
 use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
-use crate::document::IndexOptions;
+use crate::document::{IndexOptions, TermOffset};
 use crate::index::pipeline::terms_hash::{
     BYTES_PER_POSTING, ParallelPostingsArray, TermsHash, TermsHashPerField, TermsHashPerFieldTrait,
     oversize,
@@ -49,8 +49,7 @@ pub(crate) struct TermVectorsConsumerPerField {
     pub(crate) has_payloads: bool,
     // Current token state — set by FreqProx's add() before calling add_by_text_start.
     pub(crate) current_position: i32,
-    pub(crate) current_start_offset: i32,
-    pub(crate) current_offset_length: u16,
+    pub(crate) current_offset: TermOffset,
 }
 
 impl TermVectorsConsumerPerField {
@@ -70,8 +69,7 @@ impl TermVectorsConsumerPerField {
             do_vector_payloads: false,
             has_payloads: false,
             current_position: 0,
-            current_start_offset: 0,
-            current_offset_length: 0,
+            current_offset: TermOffset::default(),
         }
     }
 
@@ -240,8 +238,8 @@ impl TermVectorsConsumerPerField {
     fn write_prox(&mut self, terms_hash: &mut TermsHash, term_id: usize) {
         if self.do_vector_offsets {
             let last_offset = self.postings_array.last_offsets[term_id];
-            let start_offset = self.current_start_offset;
-            let offset_length = self.current_offset_length;
+            let start_offset = self.current_offset.start as i32;
+            let offset_length = self.current_offset.length;
             self.base
                 .write_v_int(terms_hash, 1, start_offset - last_offset);
             self.base.write_v_int(terms_hash, 1, offset_length as i32);
@@ -395,8 +393,10 @@ mod tests {
         tv.do_vector_positions = true;
 
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         assert_eq!(tv.num_terms(), 1);
@@ -419,13 +419,17 @@ mod tests {
 
         // Same term at positions 0 and 3
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         tv.current_position = 3;
-        tv.current_start_offset = 18;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 18,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         assert_eq!(tv.num_terms(), 1);
@@ -448,13 +452,17 @@ mod tests {
         tv.do_vector_offsets = true;
 
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         tv.current_position = 1;
-        tv.current_start_offset = 10;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 10,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         assert_eq!(tv.num_terms(), 1);
@@ -483,18 +491,24 @@ mod tests {
         tv.do_vector_positions = true;
 
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         tv.current_position = 1;
-        tv.current_start_offset = 6;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 6,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 200, 0);
 
         tv.current_position = 2;
-        tv.current_start_offset = 12;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 12,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         assert_eq!(tv.num_terms(), 2);
@@ -510,8 +524,10 @@ mod tests {
         tv.do_vector_positions = true;
 
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
         assert_eq!(tv.num_terms(), 1);
 
@@ -519,8 +535,10 @@ mod tests {
         assert_eq!(tv.num_terms(), 0);
 
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 200, 1);
         assert_eq!(tv.num_terms(), 1);
     }
@@ -555,8 +573,10 @@ mod tests {
         tv.do_vector_positions = true;
 
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
         assert!(tv.has_data());
     }
@@ -584,13 +604,17 @@ mod tests {
 
         // Add two terms
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add(&mut tv, &mut term_pool, &mut tv_th, b"hello", 0);
 
         tv.current_position = 1;
-        tv.current_start_offset = 6;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 6,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add(&mut tv, &mut term_pool, &mut tv_th, b"world", 0);
 
         // Flush via finish_document_self_owned
@@ -614,14 +638,18 @@ mod tests {
 
         // Term at position 0 with offsets [0, 5)
         tv.current_position = 0;
-        tv.current_start_offset = 0;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 0,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         // Same term at position 2 with offsets [10, 15)
         tv.current_position = 2;
-        tv.current_start_offset = 10;
-        tv.current_offset_length = 5;
+        tv.current_offset = TermOffset {
+            start: 10,
+            length: 5,
+        };
         TermsHashPerFieldTrait::add_by_text_start(&mut tv, &mut tv_th, 100, 0);
 
         assert_eq!(tv.postings_array.freqs[0], 2);
