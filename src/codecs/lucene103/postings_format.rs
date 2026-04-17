@@ -6,6 +6,7 @@
 pub const BLOCK_SIZE: usize = 128;
 pub const LEVEL1_FACTOR: usize = 32;
 pub const LEVEL1_NUM_DOCS: usize = LEVEL1_FACTOR * BLOCK_SIZE;
+pub const LEVEL1_MASK: usize = LEVEL1_NUM_DOCS - 1;
 
 pub const VERSION_START: i32 = 0;
 pub const VERSION_CURRENT: i32 = VERSION_START;

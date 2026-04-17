@@ -10,9 +10,10 @@
 #   3. Re-index same directory (idempotency check)
 #   4. Index with --compound → verify .cfs/.cfe exist
 #   5. Run VerifyIndex on Rust index
-#   6. Run VerifyImpacts on Rust index
-#   7. Multi-segment, multi-thread, and compound variants with VerifyIndex
-#   8. Golden summary test
+#   6. Run Lucene CheckIndex on Rust index
+#   7. Run VerifyImpacts on Rust index
+#   8. Multi-segment, multi-thread, and compound variants with VerifyIndex
+#   9. Golden summary test
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -121,7 +122,15 @@ else
     fail "VerifyIndex failed" "VerifyIndex"
 fi
 
-# --- 5. VerifyImpacts ---
+# --- 5. CheckIndex ---
+run_test "Lucene CheckIndex on Rust index"
+if $GRADLE runJava -PmainClass=CheckIndex -Pargs="$INDEX_DIR" 2>&1; then
+    pass
+else
+    fail "CheckIndex failed" "CheckIndex"
+fi
+
+# --- 6. VerifyImpacts ---
 run_test "Java VerifyImpacts on Rust index"
 if $GRADLE verifyImpacts -PindexDir="$INDEX_DIR" 2>&1; then
     pass
@@ -129,7 +138,7 @@ else
     fail "VerifyImpacts failed" "VerifyImpacts"
 fi
 
-# --- 6. Configuration variants with VerifyIndex ---
+# --- 7. Configuration variants with VerifyIndex ---
 run_variant() {
     local name="$1"
     shift
@@ -162,7 +171,7 @@ run_variant "Multi-thread" --threads 2
 run_variant "Multi-thread + multi-segment" --threads 2 --max-buffered-docs 10
 run_variant "Compound + multi-segment" --max-buffered-docs 10 --compound
 
-# --- 7. Golden Summary ---
+# --- 8. Golden Summary ---
 run_test "Golden index summary"
 if "$SCRIPT_DIR/e2e_golden.sh" 2>&1; then
     pass

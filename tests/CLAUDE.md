@@ -8,8 +8,9 @@ Single unified script that builds the Rust `indexfiles` binary, indexes `testdat
 2. Re-index over existing index (idempotency)
 3. Index with `--compound` → verify `.cfs`/`.cfe` exist
 4. Java `VerifyIndex` on Rust index (stored fields, terms, points, doc values, term vectors, features, ranges)
-5. Java `VerifyImpacts` on Rust index (competitive impact data in skip blocks)
-6. Configuration variants with VerifyIndex (multi-segment, multi-thread, compound + multi-segment)
+5. Lucene `CheckIndex` on Rust index (structural integrity validation)
+6. Java `VerifyImpacts` on Rust index (competitive impact data in skip blocks)
+7. Configuration variants with VerifyIndex (multi-segment, multi-thread, compound + multi-segment)
 
 ```bash
 ./tests/e2e_all.sh
@@ -43,6 +44,7 @@ python3 testdata/gen_golden_docs.py
 | Utility | Purpose |
 |---|---|
 | `VerifyIndex` | Validates index structure, stored fields, term counts, queries, points, doc values, term vectors, features, and ranges |
+| `CheckIndex` | Runs Lucene's built-in `CheckIndex` for structural integrity validation |
 | `VerifyImpacts` | Checks competitive impact data in `.doc` skip blocks for proper norms |
 | `IndexAllFields` | Indexes documents with all field types (baseline for cross-validation) |
 | `GenerateIndexSummary` | Reads an index and emits a JSON summary of structure and aggregate statistics |

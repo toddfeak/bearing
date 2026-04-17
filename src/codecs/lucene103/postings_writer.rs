@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::io;
+use std::mem;
 
 use log::debug;
 
@@ -83,6 +84,8 @@ struct BlockFlushState {
     bitset_buf: [u64; BLOCK_SIZE / 2],
     level0_last_doc_id: i32,
     level0_last_pos_fp: i64,
+    level1_last_doc_id: i32,
+    level1_last_pos_fp: i64,
     write_freqs: bool,
     write_positions: bool,
     max_num_impacts_at_level0: i32,
@@ -104,6 +107,8 @@ impl BlockFlushState {
             bitset_buf: [0u64; BLOCK_SIZE / 2],
             level0_last_doc_id: -1,
             level0_last_pos_fp: pos_start_fp,
+            level1_last_doc_id: -1,
+            level1_last_pos_fp: pos_start_fp,
             write_freqs,
             write_positions,
             max_num_impacts_at_level0: 0,
@@ -225,6 +230,58 @@ impl BlockFlushState {
             self.level1_accumulator.add_all(&self.level0_accumulator);
         }
         self.level0_accumulator.clear();
+
+        Ok(())
+    }
+
+    /// Write level1 skip metadata and flush accumulated level0 blocks to `doc_out`.
+    ///
+    /// Called every `LEVEL1_NUM_DOCS` (4096) documents. Writes impact data and
+    /// position file pointers for the level1 block, then copies the accumulated
+    /// level0 blocks from `level1_buf`.
+    fn write_level1_skip_data(
+        &mut self,
+        mut doc_out: &mut dyn DataOutput,
+        last_doc_id: i32,
+        pos_buffer_upto: usize,
+        pos_fp: i64,
+    ) -> io::Result<()> {
+        doc_out.write_vint(last_doc_id - self.level1_last_doc_id)?;
+
+        if self.write_freqs {
+            let impacts = self.level1_accumulator.get_competitive_freq_norm_pairs();
+            if impacts.len() as i32 > self.max_num_impacts_at_level1 {
+                self.max_num_impacts_at_level1 = impacts.len() as i32;
+            }
+            self.scratch_buf.clear();
+            let num_impact_bytes = write_impacts(&impacts, &mut self.scratch_buf)?;
+            if num_impact_bytes as i32 > self.max_impact_num_bytes_at_level1 {
+                self.max_impact_num_bytes_at_level1 = num_impact_bytes as i32;
+            }
+            if self.write_positions {
+                let mut enc = VecOutput(&mut self.scratch_buf);
+                enc.write_vlong(pos_fp - self.level1_last_pos_fp)?;
+                enc.write_byte(pos_buffer_upto as u8)?;
+                self.level1_last_pos_fp = pos_fp;
+                // Offset/payload branches not yet supported (known_issues #4)
+            }
+            let level1_len =
+                2 * mem::size_of::<i16>() + self.scratch_buf.len() + self.level1_buf.len();
+            doc_out.write_vlong(level1_len as i64)?;
+            debug_assert!(num_impact_bytes <= i16::MAX as usize);
+            debug_assert!(self.scratch_buf.len() + mem::size_of::<i16>() <= i16::MAX as usize);
+            doc_out.write_le_short((self.scratch_buf.len() + mem::size_of::<i16>()) as i16)?;
+            doc_out.write_le_short(num_impact_bytes as i16)?;
+            doc_out.write_all(&self.scratch_buf)?;
+            self.scratch_buf.clear();
+        } else {
+            doc_out.write_vlong(self.level1_buf.len() as i64)?;
+        }
+        doc_out.write_all(&self.level1_buf)?;
+        self.level1_buf.clear();
+
+        self.level1_last_doc_id = last_doc_id;
+        self.level1_accumulator.clear();
 
         Ok(())
     }
@@ -499,17 +556,28 @@ impl PostingsWriter {
 
             // Flush a full doc block
             if doc_buffer_upto == BLOCK_SIZE {
+                let pos_fp = self
+                    .pos_out
+                    .as_ref()
+                    .map(|p| p.file_pointer() as i64)
+                    .unwrap_or(0);
                 bfs.flush_doc_block(
                     &doc_delta_buffer,
                     &mut freq_buffer,
                     doc_id,
                     pe.buffer_upto(),
-                    self.pos_out
-                        .as_ref()
-                        .map(|p| p.file_pointer() as i64)
-                        .unwrap_or(0),
+                    pos_fp,
                 )?;
                 doc_buffer_upto = 0;
+
+                if doc_count & postings_format::LEVEL1_MASK == 0 {
+                    bfs.write_level1_skip_data(
+                        &mut *self.doc_out,
+                        doc_id,
+                        pe.buffer_upto(),
+                        pos_fp,
+                    )?;
+                }
             }
         }
 
@@ -525,14 +593,7 @@ impl PostingsWriter {
             )?;
         }
 
-        // Copy level1_buf to doc_out
-        // For MVP we assert doc_count <= LEVEL1_NUM_DOCS (no level1 skip needed)
-        assert!(
-            doc_count <= postings_format::LEVEL1_NUM_DOCS,
-            "doc_count {} exceeds LEVEL1_NUM_DOCS {} — level1 skip not yet implemented",
-            doc_count,
-            postings_format::LEVEL1_NUM_DOCS,
-        );
+        // Flush remaining level1_buf to doc_out
         self.doc_out.write_all(&bfs.level1_buf)?;
 
         // Write remaining position VInt tail
@@ -1553,6 +1614,143 @@ mod tests {
         assert_eq!(
             max_impact_bytes_l1, 0,
             "level 1 impact bytes should be 0, got {max_impact_bytes_l1}"
+        );
+    }
+
+    // --- Tests for level1 skip data (docFreq > 4096) ---
+
+    #[test]
+    fn test_level1_skip_data_with_freqs() {
+        // 5000 docs crosses one level1 boundary (4096).
+        // Verifies write_level1_skip_data fires and produces valid output.
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let decoded = build_postings(&(0..5000).map(|i| (i, (i % 10) + 1)).collect::<Vec<_>>());
+        let header_size = pw.doc_out.file_pointer();
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        let state = pw
+            .write_term(
+                &mut pe,
+                IndexOptions::DocsAndFreqs,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
+            .unwrap();
+
+        assert_eq!(state.doc_freq, 5000);
+        assert_eq!(state.singleton_doc_id, -1);
+        let expected_ttf: i64 = (0..5000).map(|i: i64| (i % 10) + 1).sum();
+        assert_eq!(state.total_term_freq, expected_ttf);
+        // Data was written to .doc
+        assert_gt!(pw.doc_out.file_pointer(), header_size);
+    }
+
+    #[test]
+    fn test_level1_skip_data_docs_only() {
+        // 5000 docs with DOCS-only (no freqs) — exercises the !write_freqs branch
+        // in write_level1_skip_data.
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let decoded = build_postings(&(0..5000).map(|i| (i, 1)).collect::<Vec<_>>());
+        let header_size = pw.doc_out.file_pointer();
+        let mut pe = BufferedPostingsEnum::new(decoded, false);
+        let state = pw
+            .write_term(
+                &mut pe,
+                IndexOptions::Docs,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
+            .unwrap();
+
+        assert_eq!(state.doc_freq, 5000);
+        assert_eq!(state.total_term_freq, -1);
+        assert_eq!(state.singleton_doc_id, -1);
+        assert_gt!(pw.doc_out.file_pointer(), header_size);
+    }
+
+    #[test]
+    fn test_level1_skip_data_with_positions() {
+        // 5000 docs with positions — exercises the write_positions branch
+        // in write_level1_skip_data (pos FP delta + pos_buffer_upto).
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let docs_with_pos: Vec<(i32, i32, &[i32])> =
+            (0..5000).map(|i| (i, 2, [0i32, 1].as_slice())).collect();
+        let decoded = build_postings_with_positions(&docs_with_pos);
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        let state = pw
+            .write_term(
+                &mut pe,
+                IndexOptions::DocsAndFreqsAndPositions,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
+            .unwrap();
+
+        assert_eq!(state.doc_freq, 5000);
+        assert_eq!(state.total_term_freq, 10000);
+        assert_ne!(state.last_pos_block_offset, -1);
+    }
+
+    #[test]
+    fn test_level1_skip_data_exactly_4096() {
+        // Exactly 4096 docs — triggers level1 skip data once, with no remainder.
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let decoded = build_postings(
+            &(0..postings_format::LEVEL1_NUM_DOCS as i32)
+                .map(|i| (i, (i % 5) + 1))
+                .collect::<Vec<_>>(),
+        );
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        let state = pw
+            .write_term(
+                &mut pe,
+                IndexOptions::DocsAndFreqs,
+                &BufferedNormsLookup::no_norms(),
+                &mut HashSet::new(),
+            )
+            .unwrap();
+
+        assert_eq!(state.doc_freq, postings_format::LEVEL1_NUM_DOCS as i32);
+        assert_eq!(state.singleton_doc_id, -1);
+    }
+
+    #[test]
+    fn test_psm_level1_impact_metadata_nonzero_above_threshold() {
+        // With 5000 docs and varied freqs, level1 skip data fires and
+        // level1 impact metadata in .psm must be non-zero.
+        let dir = test_directory();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let decoded = build_postings(&(0..5000).map(|i| (i, (i % 10) + 1)).collect::<Vec<_>>());
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        pw.write_term(
+            &mut pe,
+            IndexOptions::DocsAndFreqs,
+            &BufferedNormsLookup::no_norms(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+
+        let names = pw.finish().unwrap();
+        let psm_name = names.iter().find(|n| n.ends_with(".psm")).unwrap();
+        let psm_data = dir.read_file(psm_name).unwrap();
+
+        let header_size = codec_util::index_header_length(META_CODEC, "");
+        let meta = &psm_data[header_size..];
+        let max_num_impacts_l1 = i32::from_le_bytes(meta[8..12].try_into().unwrap());
+        let max_impact_bytes_l1 = i32::from_le_bytes(meta[12..16].try_into().unwrap());
+
+        assert_gt!(
+            max_num_impacts_l1,
+            0,
+            "level 1 impact count should be > 0 for 5000-doc term"
+        );
+        assert_gt!(
+            max_impact_bytes_l1,
+            0,
+            "level 1 impact bytes should be > 0 for 5000-doc term"
         );
     }
 }

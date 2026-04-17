@@ -4,19 +4,7 @@ Outstanding problems and optimization gaps in the indexing pipeline.
 
 ---
 
-## 1. Level1 Skip Data for Write Path
-
-**Severity:** Correctness — posting lists with >4096 docs cannot be written
-
-The postings writer (`PostingsWriter`) currently panics if a term has more than `LEVEL1_NUM_DOCS` (4096) documents. Level1 skip data is required for terms that span multiple level0 blocks (each block = 128 docs × 32 blocks = 4096 docs). Without it, the writer cannot produce valid postings for high-frequency terms in large indexes.
-
-The read path (`PostingsReader`) already handles level1 skip data — the `level1_last_doc_id`, `level1_doc_end_fp`, and `level1_doc_count_upto` fields are in place, and the `next_doc`/`advance` methods have level1 branching logic. The gap is the write side.
-
-**Fix:** In `PostingsWriter::write_term`, when `doc_count` reaches `LEVEL1_NUM_DOCS`, emit level1 skip metadata (aggregate doc count, file pointers, impact data) and reset the level0 block counter. Match Java's `Lucene103PostingsWriter.encodeTerm` level1 encoding.
-
----
-
-## 2. Peak RSS Higher Than Java
+## 1. Peak RSS Higher Than Java
 
 **Severity:** Medium — Rust peak RSS is higher than Java for the same workload
 
@@ -29,7 +17,7 @@ Rust peak RSS during indexing is larger than Java's. Two known contributing fact
 
 ---
 
-## 3. Incomplete SmallFloat Port
+## 2. Incomplete SmallFloat Port
 
 **Severity:** Low — missing methods not yet needed
 
@@ -45,3 +33,15 @@ Additionally, `intToByte4` silently returns 0 on negative input instead of panic
 **When this matters:** The missing float methods are used by the similarity/scoring layer (e.g., `BM25Similarity`) to encode and decode norm values as floats. They will be needed when porting similarity implementations for query-time scoring. The integer methods used by norms during indexing are already correct.
 
 **Fix:** Complete the port following porting rules. Port the corresponding tests from `o.a.l.util.TestSmallFloat`.
+
+---
+
+## 3. No Offset or Payload Support in Write Path
+
+**Severity:** Feature gap — fields with offsets or payloads cannot be indexed
+
+The postings writer (`PostingsWriter`) does not support writing offsets or payloads. There is no `pay_out` file handle, no offset/payload buffering, and no encoding logic for the `.pay` file. The read path (`PostingsReader`) already handles `has_offsets_or_payloads` in its skip data parsing and postings iteration.
+
+This affects `IndexOptions::DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS` and any field that uses payloads (e.g., `TermVectorOptions` with payloads).
+
+**Fix:** Port the offset/payload branches from Java's `Lucene103PostingsWriter` — `payOut` file creation, `offsetStartDeltaBuffer`/`offsetLengthBuffer`/`payloadLengthBuffer` buffering, payload byte accumulation, and the `.pay` encoding in `flushDocBlock`/`addPosition`/`finishTerm`. Port corresponding skip data fields for level0 and level1.

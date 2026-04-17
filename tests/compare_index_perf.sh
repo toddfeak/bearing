@@ -236,6 +236,11 @@ if [[ -n "$VERIFY" ]]; then
         $GRADLE verifyIndex --quiet -PindexDir="$dir" -PdocCount="$DOC_COUNT" 2>&1
         echo ""
         echo "========================================"
+        echo "  CheckIndex on $label index"
+        echo "========================================"
+        $GRADLE runJava --quiet -PmainClass=CheckIndex -Pargs="$dir" 2>&1
+        echo ""
+        echo "========================================"
         echo "  VerifyImpacts on $label index"
         echo "========================================"
         $GRADLE verifyImpacts --quiet -PindexDir="$dir" 2>&1
