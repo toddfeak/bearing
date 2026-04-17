@@ -9,7 +9,7 @@
 
 use std::io;
 
-use crate::document::TermOffset;
+use crate::document::{IndexOptions, TermOffset};
 
 /// Sentinel value returned by [`PostingsEnumProducer::next_doc`] when iteration
 /// is exhausted.
@@ -84,14 +84,8 @@ pub trait FieldTerms {
     /// Returns a postings producer for the term at the given sorted index.
     fn postings(&self, index: usize) -> io::Result<Box<dyn PostingsEnumProducer + '_>>;
 
-    /// Whether this field indexes term frequencies.
-    fn has_freqs(&self) -> bool;
-
-    /// Whether this field indexes positions.
-    fn has_positions(&self) -> bool;
-
-    /// Whether this field indexes offsets.
-    fn has_offsets(&self) -> bool;
+    /// Returns what information is indexed for this field.
+    fn index_options(&self) -> IndexOptions;
 
     /// Whether any token in this field had a payload.
     fn has_payloads(&self) -> bool;

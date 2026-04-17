@@ -597,7 +597,7 @@ mod tests {
                 segment_name,
                 segment_suffix,
                 &segment_id,
-                false,
+                IndexOptions::DocsAndFreqs,
             )?;
 
             let mut tt = TestTerms::new("f");

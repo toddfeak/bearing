@@ -1116,7 +1116,7 @@ mod tests {
                 segment_name,
                 segment_suffix,
                 &segment_id,
-                false,
+                options,
             )?;
             let mut pe = BufferedPostingsEnum::new(decoded, options.has_freqs());
             let state = writer.write_term(&mut pe, options, &norms, &mut HashSet::new())?;

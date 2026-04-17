@@ -513,13 +513,12 @@ mod tests {
         let shared_dir = MemoryDirectory::create();
 
         {
-            let has_positions = index_options.has_positions();
             let mut writer = BlockTreeTermsWriter::new(
                 &shared_dir,
                 segment_name,
                 segment_suffix,
                 &segment_id,
-                has_positions,
+                index_options,
             )?;
 
             let mut tt = TestTerms::new("f", index_options);

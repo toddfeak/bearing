@@ -15,11 +15,13 @@ pub const VERSION_CURRENT: i32 = VERSION_START;
 pub const META_EXTENSION: &str = "psm";
 pub const DOC_EXTENSION: &str = "doc";
 pub const POS_EXTENSION: &str = "pos";
+pub const PAY_EXTENSION: &str = "pay";
 // Postings codec names
 pub const TERMS_CODEC: &str = "Lucene103PostingsWriterTerms";
 pub const META_CODEC: &str = "Lucene103PostingsWriterMeta";
 pub const DOC_CODEC: &str = "Lucene103PostingsWriterDoc";
 pub const POS_CODEC: &str = "Lucene103PostingsWriterPos";
+pub const PAY_CODEC: &str = "Lucene103PostingsWriterPay";
 
 // BlockTree terms dict constants
 pub const TERMS_EXTENSION: &str = "tim";
@@ -45,6 +47,7 @@ pub struct IntBlockTermState {
     // Lucene103-specific fields
     pub doc_start_fp: i64,
     pub pos_start_fp: i64,
+    pub pay_start_fp: i64,
     pub last_pos_block_offset: i64,
     pub singleton_doc_id: i32,
 }
@@ -56,6 +59,7 @@ impl IntBlockTermState {
             total_term_freq: 0,
             doc_start_fp: 0,
             pos_start_fp: 0,
+            pay_start_fp: 0,
             last_pos_block_offset: -1,
             singleton_doc_id: -1,
         }

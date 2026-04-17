@@ -11,8 +11,8 @@ use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::{CompetitiveImpactAccumulator, Impact, NormsLookup};
 use crate::codecs::fields_producer::{NO_MORE_DOCS, PostingsEnumProducer};
 use crate::codecs::lucene103::postings_format::{
-    self, DOC_CODEC, DOC_EXTENSION, IntBlockTermState, META_CODEC, META_EXTENSION, POS_CODEC,
-    POS_EXTENSION, VERSION_CURRENT,
+    self, DOC_CODEC, DOC_EXTENSION, IntBlockTermState, META_CODEC, META_EXTENSION, PAY_CODEC,
+    PAY_EXTENSION, POS_CODEC, POS_EXTENSION, VERSION_CURRENT,
 };
 use crate::document::IndexOptions;
 use crate::encoding::pfor::{self, BLOCK_SIZE};
@@ -293,16 +293,15 @@ struct TermWriteContext {
     total_term_freq: i64,
     doc_start_fp: i64,
     pos_start_fp: i64,
-    write_freqs: bool,
-    write_positions: bool,
+    index_options: IndexOptions,
 }
 
-/// Writes postings (.doc, .pos, .psm) files.
+/// Writes postings (.doc, .pos, .pay, .psm) files.
 pub struct PostingsWriter {
     doc_out: Box<dyn IndexOutput>,
     pos_out: Option<Box<dyn IndexOutput>>,
+    pay_out: Option<Box<dyn IndexOutput>>,
     meta_out: Box<dyn IndexOutput>,
-    // Track impact metadata (minimal for MVP)
     max_num_impacts_at_level0: i32,
     max_impact_num_bytes_at_level0: i32,
     max_num_impacts_at_level1: i32,
@@ -316,16 +315,23 @@ impl PostingsWriter {
         segment: &str,
         suffix: &str,
         id: &[u8; 16],
-        has_positions: bool,
+        max_index_options: IndexOptions,
     ) -> io::Result<Self> {
         let doc_name = segment_file_name(segment, suffix, DOC_EXTENSION);
         let meta_name = segment_file_name(segment, suffix, META_EXTENSION);
 
         let mut doc_out = directory.create_output(&doc_name)?;
         let mut meta_out = directory.create_output(&meta_name)?;
-        let mut pos_out = if has_positions {
+        let mut pos_out = if max_index_options.has_positions() {
             let pos_name = segment_file_name(segment, suffix, POS_EXTENSION);
             Some(directory.create_output(&pos_name)?)
+        } else {
+            None
+        };
+
+        let mut pay_out = if max_index_options.has_offsets() {
+            let pay_name = segment_file_name(segment, suffix, PAY_EXTENSION);
+            Some(directory.create_output(&pay_name)?)
         } else {
             None
         };
@@ -336,10 +342,14 @@ impl PostingsWriter {
         if let Some(ref mut pos_out) = pos_out {
             codec_util::write_index_header(&mut **pos_out, POS_CODEC, VERSION_CURRENT, id, suffix)?;
         }
+        if let Some(ref mut pay_out) = pay_out {
+            codec_util::write_index_header(&mut **pay_out, PAY_CODEC, VERSION_CURRENT, id, suffix)?;
+        }
 
         Ok(Self {
             doc_out,
             pos_out,
+            pay_out,
             meta_out,
             max_num_impacts_at_level0: 0,
             max_impact_num_bytes_at_level0: 0,
@@ -368,9 +378,6 @@ impl PostingsWriter {
     ) -> io::Result<IntBlockTermState> {
         let doc_freq = postings.doc_freq();
         let total_term_freq = postings.total_term_freq();
-        let write_freqs = index_options.has_freqs();
-        let write_positions = index_options.has_positions();
-
         let doc_start_fp = self.doc_out.file_pointer() as i64;
         let pos_start_fp = self
             .pos_out
@@ -386,7 +393,9 @@ impl PostingsWriter {
 
             // Write positions for singleton
             let mut last_pos_block_offset = -1i64;
-            if write_positions && let Some(ref mut pos_out) = self.pos_out {
+            if index_options.has_positions()
+                && let Some(ref mut pos_out) = self.pos_out
+            {
                 let freq = postings.freq();
                 let mut pe = PositionEncoder::new();
                 let mut last_pos = 0i32;
@@ -403,7 +412,7 @@ impl PostingsWriter {
                 total_term_freq,
                 doc_start_fp,
                 pos_start_fp,
-
+                pay_start_fp: 0,
                 last_pos_block_offset,
                 singleton_doc_id: doc_id,
             })
@@ -417,8 +426,7 @@ impl PostingsWriter {
                     total_term_freq,
                     doc_start_fp,
                     pos_start_fp,
-                    write_freqs,
-                    write_positions,
+                    index_options,
                 },
                 norms,
                 docs_seen,
@@ -451,7 +459,7 @@ impl PostingsWriter {
                 freqs.push(freq);
                 last_doc_id = doc_id;
 
-                if write_positions {
+                if index_options.has_positions() {
                     let mut positions = Vec::with_capacity(freq as usize);
                     for _ in 0..freq {
                         positions.push(postings.next_position()?);
@@ -465,7 +473,7 @@ impl PostingsWriter {
                 &mut doc_deltas,
                 &freqs,
                 doc_freq as usize,
-                write_freqs,
+                index_options.has_freqs(),
             )?;
 
             debug!(
@@ -476,7 +484,9 @@ impl PostingsWriter {
 
             // Write positions
             let mut last_pos_block_offset = -1i64;
-            if write_positions && let Some(ref mut pos_out) = self.pos_out {
+            if index_options.has_positions()
+                && let Some(ref mut pos_out) = self.pos_out
+            {
                 let mut pe = PositionEncoder::new();
                 for positions in &all_positions {
                     let mut last_pos = 0i32;
@@ -493,7 +503,7 @@ impl PostingsWriter {
                 total_term_freq,
                 doc_start_fp,
                 pos_start_fp,
-
+                pay_start_fp: 0,
                 last_pos_block_offset,
                 singleton_doc_id: -1,
             })
@@ -512,14 +522,17 @@ impl PostingsWriter {
         let total_term_freq = ctx.total_term_freq;
         let doc_start_fp = ctx.doc_start_fp;
         let pos_start_fp = ctx.pos_start_fp;
-        let write_freqs = ctx.write_freqs;
-        let write_positions = ctx.write_positions;
+        let index_options = ctx.index_options;
         let mut doc_delta_buffer = [0i32; BLOCK_SIZE];
         let mut freq_buffer = [0i32; BLOCK_SIZE];
         let mut doc_buffer_upto = 0usize;
 
         let mut pe = PositionEncoder::new();
-        let mut bfs = BlockFlushState::new(pos_start_fp, write_freqs, write_positions);
+        let mut bfs = BlockFlushState::new(
+            pos_start_fp,
+            index_options.has_freqs(),
+            index_options.has_positions(),
+        );
 
         let mut last_doc_id = -1i32;
         let mut doc_count = 0usize;
@@ -535,14 +548,16 @@ impl PostingsWriter {
             let doc_delta = doc_id - last_doc_id;
             doc_delta_buffer[doc_buffer_upto] = doc_delta;
             let freq = postings.freq();
-            if write_freqs {
+            if index_options.has_freqs() {
                 freq_buffer[doc_buffer_upto] = freq;
                 bfs.level0_accumulator.add(freq, norms.get(doc_id));
             }
             last_doc_id = doc_id;
 
             // Buffer positions
-            if write_positions && let Some(ref mut pos_out) = self.pos_out {
+            if index_options.has_positions()
+                && let Some(ref mut pos_out) = self.pos_out
+            {
                 let mut last_pos = 0i32;
                 for _ in 0..freq {
                     let pos = postings.next_position()?;
@@ -589,7 +604,7 @@ impl PostingsWriter {
                 &mut tail_deltas,
                 &freq_buffer[..doc_buffer_upto],
                 doc_buffer_upto,
-                write_freqs,
+                index_options.has_freqs(),
             )?;
         }
 
@@ -598,7 +613,9 @@ impl PostingsWriter {
 
         // Write remaining position VInt tail
         let mut last_pos_block_offset = -1i64;
-        if write_positions && let Some(ref mut pos_out) = self.pos_out {
+        if index_options.has_positions()
+            && let Some(ref mut pos_out) = self.pos_out
+        {
             last_pos_block_offset = pe.finish(&mut **pos_out, total_term_freq, pos_start_fp)?;
         }
 
@@ -626,6 +643,7 @@ impl PostingsWriter {
             total_term_freq,
             doc_start_fp,
             pos_start_fp,
+            pay_start_fp: 0,
             last_pos_block_offset,
             singleton_doc_id: -1,
         })
@@ -640,6 +658,7 @@ impl PostingsWriter {
         state: &IntBlockTermState,
         last_state: &IntBlockTermState,
         write_positions: bool,
+        write_offsets: bool,
     ) -> io::Result<()> {
         let mut buf = VecOutput(out);
 
@@ -661,6 +680,9 @@ impl PostingsWriter {
 
         if write_positions {
             buf.write_vlong(state.pos_start_fp - last_state.pos_start_fp)?;
+            if write_offsets {
+                buf.write_vlong(state.pay_start_fp - last_state.pay_start_fp)?;
+            }
         }
 
         if write_positions && state.last_pos_block_offset != -1 {
@@ -683,6 +705,11 @@ impl PostingsWriter {
             codec_util::write_footer(&mut **pos_out)?;
         }
 
+        // Write .pay footer if present
+        if let Some(ref mut pay_out) = self.pay_out {
+            codec_util::write_footer(&mut **pay_out)?;
+        }
+
         // Write .psm metadata: impact stats + file lengths + footer
         self.meta_out.write_le_int(self.max_num_impacts_at_level0)?;
         self.meta_out
@@ -694,12 +721,18 @@ impl PostingsWriter {
             .write_le_long(self.doc_out.file_pointer() as i64)?;
         if let Some(ref pos_out) = self.pos_out {
             self.meta_out.write_le_long(pos_out.file_pointer() as i64)?;
+            if let Some(ref pay_out) = self.pay_out {
+                self.meta_out.write_le_long(pay_out.file_pointer() as i64)?;
+            }
         }
         codec_util::write_footer(&mut *self.meta_out)?;
 
         names.push(self.doc_out.name().to_string());
         if let Some(ref pos_out) = self.pos_out {
             names.push(pos_out.name().to_string());
+        }
+        if let Some(ref pay_out) = self.pay_out {
+            names.push(pay_out.name().to_string());
         }
         names.push(self.meta_out.name().to_string());
 
@@ -847,7 +880,7 @@ mod tests {
     #[test]
     fn test_singleton_term() {
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&[(5, 1)]);
         let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
@@ -869,7 +902,7 @@ mod tests {
     #[test]
     fn test_multi_doc_term_with_freqs() {
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&[(0, 1), (5, 3), (10, 1)]);
         let header_size = pw.doc_out.file_pointer();
         let mut pe = BufferedPostingsEnum::new(decoded, true);
@@ -893,7 +926,7 @@ mod tests {
     #[test]
     fn test_multi_doc_term_docs_only() {
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&[(7, 1), (11, 1)]);
         let header_size = pw.doc_out.file_pointer();
         let mut pe = BufferedPostingsEnum::new(decoded, false);
@@ -916,7 +949,14 @@ mod tests {
     fn test_term_with_positions_vint_tail() {
         // totalTermFreq < BLOCK_SIZE uses VInt tail only
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
         let decoded = build_postings_with_positions(&[(0, 3, &[0, 5, 10]), (2, 1, &[3])]);
         let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
@@ -954,7 +994,14 @@ mod tests {
     fn test_term_with_positions_pfor_one_block() {
         // Ported from Lucene103PostingsWriter: exactly BLOCK_SIZE positions = one PFOR block, no tail
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
 
         // Create a single doc with exactly 128 positions (0, 1, 2, ..., 127)
         let positions: Vec<i32> = (0..postings_format::BLOCK_SIZE as i32).collect();
@@ -990,7 +1037,14 @@ mod tests {
     fn test_term_with_positions_pfor_plus_tail() {
         // Ported from Lucene103PostingsWriter: totalTermFreq > BLOCK_SIZE = PFOR blocks + VInt tail
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
 
         // 130 positions across 2 docs: first doc has 128 positions, second has 2
         let positions0: Vec<i32> = (0..128).collect();
@@ -1038,7 +1092,14 @@ mod tests {
     fn test_term_with_positions_pfor_multiple_blocks() {
         // Ported from Lucene103PostingsWriter: multiple PFOR blocks + tail
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
 
         // 300 positions: 2 full PFOR blocks (256) + 44 VInt tail
         let positions: Vec<i32> = (0..300).collect();
@@ -1083,7 +1144,14 @@ mod tests {
     fn test_term_with_positions_exactly_two_blocks() {
         // Ported from Lucene103PostingsWriter: exactly 2*BLOCK_SIZE positions = 2 PFOR blocks, no tail
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
 
         let positions: Vec<i32> = (0..256).collect();
         let decoded = build_postings_with_positions(&[(0, 256, &positions)]);
@@ -1119,7 +1187,14 @@ mod tests {
     fn test_term_with_positions_multi_doc_block_boundary() {
         // Verify position deltas reset per document when spanning a PFOR block boundary
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
 
         // Doc 0: 100 positions (0..100), Doc 1: 50 positions (0..50)
         // Total = 150 > BLOCK_SIZE, so we get 1 PFOR block + 22 VInt tail
@@ -1151,7 +1226,14 @@ mod tests {
     fn test_term_with_positions_large_deltas() {
         // Ported from TestPForUtil: positions with large gaps need more bits per value
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
 
         // 128 positions with gaps of 1000 each — requires ~10 bits per value
         let positions: Vec<i32> = (0..128).map(|i| i * 1000).collect();
@@ -1188,7 +1270,14 @@ mod tests {
     fn test_term_with_positions_pfor_compresses_real_data() {
         // Verify PFOR is more compact than VInt for realistic position data
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
 
         // 256 positions with varied gaps (simulating real text positions)
         // Mix of common deltas (1-5) with occasional larger gaps
@@ -1236,7 +1325,7 @@ mod tests {
     #[test]
     fn test_encode_term_singleton() {
         let dir = test_directory();
-        let pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
 
         let empty = IntBlockTermState::new();
         let state = IntBlockTermState {
@@ -1244,12 +1333,14 @@ mod tests {
             total_term_freq: 1,
             doc_start_fp: 0,
             pos_start_fp: 0,
+            pay_start_fp: 0,
             last_pos_block_offset: -1,
             singleton_doc_id: 5,
         };
 
         let mut buf = Vec::new();
-        pw.encode_term(&mut buf, &state, &empty, false).unwrap();
+        pw.encode_term(&mut buf, &state, &empty, false, false)
+            .unwrap();
 
         // First VLong: (doc_start_fp_delta << 1) = (0 << 1) = 0
         assert_eq!(buf[0], 0);
@@ -1260,7 +1351,14 @@ mod tests {
     #[test]
     fn test_finish_produces_files() {
         let dir = test_directory();
-        let pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
         let names = pw.finish().unwrap();
 
         // Should produce .doc, .pos, .psm files
@@ -1371,7 +1469,7 @@ mod tests {
     fn test_block_encoding_128_docs() {
         // Exactly 128 docs: 1 full block, no VInt tail
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..128).map(|i| (i, 1)).collect::<Vec<_>>());
         let header_size = pw.doc_out.file_pointer();
         let mut pe = BufferedPostingsEnum::new(decoded, true);
@@ -1401,7 +1499,7 @@ mod tests {
     fn test_block_encoding_130_docs() {
         // 130 docs: 1 full block + 2 VInt tail docs
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..130).map(|i| (i, 1)).collect::<Vec<_>>());
         let header_size = pw.doc_out.file_pointer();
         let mut pe = BufferedPostingsEnum::new(decoded, true);
@@ -1428,7 +1526,7 @@ mod tests {
     fn test_block_encoding_256_docs() {
         // 256 docs: 2 full blocks, no tail
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..256).map(|i| (i, 1)).collect::<Vec<_>>());
         let header_size = pw.doc_out.file_pointer();
         let mut pe = BufferedPostingsEnum::new(decoded, true);
@@ -1451,7 +1549,14 @@ mod tests {
     fn test_block_encoding_with_positions() {
         // 128+ docs with positions: verify pos skip data is present
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
         // Each doc has 2 positions [0, 1]
         let docs_with_pos: Vec<(i32, i32, &[i32])> =
             (0..128).map(|i| (i, 2, [0i32, 1].as_slice())).collect();
@@ -1483,7 +1588,7 @@ mod tests {
         // Docs 0..127 with deltas all = 1 → doc_range == 128 == BLOCK_SIZE
         // This should use the byte(0) consecutive encoding
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         // doc IDs: 0, 1, 2, ..., 127 — deltas from -1 are 1, 1, 1, ... = range 128
         let decoded = build_postings(&(0..128).map(|i| (i, 1)).collect::<Vec<_>>());
         let mut pe = BufferedPostingsEnum::new(decoded, true);
@@ -1505,7 +1610,7 @@ mod tests {
     fn test_block_encoding_sparse_docs() {
         // Sparse doc IDs with large deltas → uses FOR encoding
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         // doc IDs: 0, 100, 200, ..., 12700 — delta = 100 each (except first which is 1 from -1)
         let decoded = build_postings(&(0..128).map(|i| (i * 100, 1)).collect::<Vec<_>>());
         let mut pe = BufferedPostingsEnum::new(decoded, true);
@@ -1526,7 +1631,7 @@ mod tests {
     fn test_block_encoding_docs_only() {
         // DOCS-only index option (no freqs) with 128 docs
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..128).map(|i| (i, 1)).collect::<Vec<_>>());
         let mut pe = BufferedPostingsEnum::new(decoded, false);
         let state = pw
@@ -1547,7 +1652,7 @@ mod tests {
     fn test_block_encoding_varied_freqs() {
         // 128 docs with varied frequencies
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..128).map(|i| (i, (i % 10) + 1)).collect::<Vec<_>>());
         let mut pe = BufferedPostingsEnum::new(decoded, true);
         let state = pw
@@ -1571,7 +1676,7 @@ mod tests {
         // level 1 fields must be 0. This test writes 128 docs with varied freqs
         // (enough to produce non-zero level 0 impacts) and verifies level 1 stays 0.
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..128).map(|i| (i, (i % 10) + 1)).collect::<Vec<_>>());
         let mut pe = BufferedPostingsEnum::new(decoded, true);
         pw.write_term(
@@ -1624,7 +1729,7 @@ mod tests {
         // 5000 docs crosses one level1 boundary (4096).
         // Verifies write_level1_skip_data fires and produces valid output.
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..5000).map(|i| (i, (i % 10) + 1)).collect::<Vec<_>>());
         let header_size = pw.doc_out.file_pointer();
         let mut pe = BufferedPostingsEnum::new(decoded, true);
@@ -1650,7 +1755,7 @@ mod tests {
         // 5000 docs with DOCS-only (no freqs) — exercises the !write_freqs branch
         // in write_level1_skip_data.
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..5000).map(|i| (i, 1)).collect::<Vec<_>>());
         let header_size = pw.doc_out.file_pointer();
         let mut pe = BufferedPostingsEnum::new(decoded, false);
@@ -1674,7 +1779,14 @@ mod tests {
         // 5000 docs with positions — exercises the write_positions branch
         // in write_level1_skip_data (pos FP delta + pos_buffer_upto).
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], true).unwrap();
+        let mut pw = PostingsWriter::new(
+            &dir,
+            "_0",
+            "",
+            &[0u8; 16],
+            IndexOptions::DocsAndFreqsAndPositions,
+        )
+        .unwrap();
         let docs_with_pos: Vec<(i32, i32, &[i32])> =
             (0..5000).map(|i| (i, 2, [0i32, 1].as_slice())).collect();
         let decoded = build_postings_with_positions(&docs_with_pos);
@@ -1697,7 +1809,7 @@ mod tests {
     fn test_level1_skip_data_exactly_4096() {
         // Exactly 4096 docs — triggers level1 skip data once, with no remainder.
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(
             &(0..postings_format::LEVEL1_NUM_DOCS as i32)
                 .map(|i| (i, (i % 5) + 1))
@@ -1722,7 +1834,7 @@ mod tests {
         // With 5000 docs and varied freqs, level1 skip data fires and
         // level1 impact metadata in .psm must be non-zero.
         let dir = test_directory();
-        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], false).unwrap();
+        let mut pw = PostingsWriter::new(&dir, "_0", "", &[0u8; 16], IndexOptions::Docs).unwrap();
         let decoded = build_postings(&(0..5000).map(|i| (i, (i % 10) + 1)).collect::<Vec<_>>());
         let mut pe = BufferedPostingsEnum::new(decoded, true);
         pw.write_term(

@@ -90,16 +90,8 @@ impl FieldTerms for BufferedFieldTerms<'_> {
         )))
     }
 
-    fn has_freqs(&self) -> bool {
-        self.per_field.has_freq
-    }
-
-    fn has_positions(&self) -> bool {
-        self.per_field.has_prox
-    }
-
-    fn has_offsets(&self) -> bool {
-        self.per_field.has_offsets
+    fn index_options(&self) -> IndexOptions {
+        self.per_field.index_options
     }
 
     fn has_payloads(&self) -> bool {
@@ -134,21 +126,7 @@ struct BlockSpec {
 pub(crate) struct FieldWriteContext {
     pub field_name: String,
     pub field_number: u32,
-    pub write_freqs: bool,
-    pub write_positions: bool,
-}
-
-impl FieldWriteContext {
-    /// Derives `IndexOptions` from the write_freqs/write_positions flags.
-    fn index_options(&self) -> IndexOptions {
-        if self.write_positions {
-            IndexOptions::DocsAndFreqsAndPositions
-        } else if self.write_freqs {
-            IndexOptions::DocsAndFreqs
-        } else {
-            IndexOptions::Docs
-        }
-    }
+    pub index_options: IndexOptions,
 }
 
 // ============================================================================
@@ -173,7 +151,7 @@ impl BlockTreeTermsWriter {
         segment: &str,
         suffix: &str,
         id: &[u8; 16],
-        has_positions: bool,
+        max_index_options: IndexOptions,
     ) -> io::Result<Self> {
         // Create outputs from directory
         let tim_name = segment_file_name(segment, suffix, TERMS_EXTENSION);
@@ -207,7 +185,8 @@ impl BlockTreeTermsWriter {
         )?;
 
         // Create PostingsWriter (which creates .doc, .pos, .psm)
-        let postings_writer = PostingsWriter::new(directory, segment, suffix, id, has_positions)?;
+        let postings_writer =
+            PostingsWriter::new(directory, segment, suffix, id, max_index_options)?;
 
         // Write postings header into .tmd
         // In Java: postingsWriter.init(metaOut, state) writes TERMS_CODEC header + BLOCK_SIZE
@@ -241,8 +220,7 @@ impl BlockTreeTermsWriter {
         let field_ctx = FieldWriteContext {
             field_name: field_terms.field_name().to_string(),
             field_number: field_terms.field_number(),
-            write_freqs: field_terms.has_freqs(),
-            write_positions: field_terms.has_positions(),
+            index_options: field_terms.index_options(),
         };
 
         debug!(
@@ -261,7 +239,7 @@ impl BlockTreeTermsWriter {
 
             let state = self.postings_writer.write_term(
                 &mut *pe,
-                field_ctx.index_options(),
+                field_ctx.index_options,
                 norms,
                 &mut docs_seen,
             )?;
@@ -381,7 +359,7 @@ impl<'a> BlockTreeFieldWriter<'a> {
         min_items_in_block: usize,
         max_items_in_block: usize,
     ) -> Self {
-        let write_freqs = field_ctx.write_freqs;
+        let write_freqs = field_ctx.index_options.has_freqs();
         Self {
             write_freqs,
             min_items_in_block,
@@ -749,7 +727,7 @@ fn write_block_to_output(
     let mut meta_bytes = Vec::new();
 
     let mut suffix_lengths_writer = VecOutput(&mut suffix_lengths_bytes);
-    let mut stats_writer = StatsWriter::new(&mut stats_bytes, field_ctx.write_freqs);
+    let mut stats_writer = StatsWriter::new(&mut stats_bytes, field_ctx.index_options.has_freqs());
     let mut last_state = IntBlockTermState::new();
     let mut absolute = true;
 
@@ -771,7 +749,8 @@ fn write_block_to_output(
                     &mut meta_bytes,
                     &term.state,
                     ref_state,
-                    field_ctx.write_positions,
+                    field_ctx.index_options.has_positions(),
+                    field_ctx.index_options.has_offsets(),
                 )?;
                 last_state = term.state;
                 absolute = false;
@@ -796,7 +775,8 @@ fn write_block_to_output(
                         &mut meta_bytes,
                         &term.state,
                         ref_state,
-                        field_ctx.write_positions,
+                        field_ctx.index_options.has_positions(),
+                        field_ctx.index_options.has_offsets(),
                     )?;
                     last_state = term.state;
                     absolute = false;
@@ -1615,7 +1595,7 @@ mod tests {
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, IndexOptions::Docs).unwrap();
         btw.write_field(&tt.field_terms("test"), &BufferedNormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
@@ -1653,7 +1633,9 @@ mod tests {
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
+        let mut btw =
+            BlockTreeTermsWriter::new(&dir, "_0", "", &id, IndexOptions::DocsAndFreqsAndPositions)
+                .unwrap();
         btw.write_field(
             &tt.field_terms("contents"),
             &BufferedNormsLookup::no_norms(),
@@ -1684,7 +1666,9 @@ mod tests {
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
+        let mut btw =
+            BlockTreeTermsWriter::new(&dir, "_0", "", &id, IndexOptions::DocsAndFreqsAndPositions)
+                .unwrap();
         btw.write_field(
             &tt.field_terms("contents"),
             &BufferedNormsLookup::no_norms(),
@@ -1712,7 +1696,7 @@ mod tests {
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, IndexOptions::Docs).unwrap();
         btw.write_field(&tt.field_terms("test"), &BufferedNormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
@@ -1761,7 +1745,7 @@ mod tests {
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, false).unwrap();
+        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, IndexOptions::Docs).unwrap();
         btw.write_field(&tt.field_terms("test"), &BufferedNormsLookup::no_norms())
             .unwrap();
         let names = btw.finish().unwrap();
@@ -1851,7 +1835,9 @@ mod tests {
 
         let id = [0u8; 16];
         let dir = test_directory();
-        let mut btw = BlockTreeTermsWriter::new(&dir, "_0", "", &id, true).unwrap();
+        let mut btw =
+            BlockTreeTermsWriter::new(&dir, "_0", "", &id, IndexOptions::DocsAndFreqsAndPositions)
+                .unwrap();
         btw.write_field(
             &tt.field_terms("contents"),
             &BufferedNormsLookup::no_norms(),

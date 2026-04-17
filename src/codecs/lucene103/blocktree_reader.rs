@@ -486,7 +486,11 @@ mod tests {
         let segment_suffix = "";
         let segment_id = [0u8; 16];
 
-        let has_positions = fields_data.iter().any(|(_, opts, _)| opts.has_positions());
+        let max_index_options = fields_data
+            .iter()
+            .map(|(_, opts, _)| *opts)
+            .max()
+            .unwrap_or(IndexOptions::Docs);
 
         let shared_dir = MemoryDirectory::create();
 
@@ -496,7 +500,7 @@ mod tests {
                 segment_name,
                 segment_suffix,
                 &segment_id,
-                has_positions,
+                max_index_options,
             )?;
 
             for (field_number, (field_name, index_options, terms)) in fields_data.iter().enumerate()

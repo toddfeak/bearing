@@ -565,6 +565,8 @@ pub(crate) struct DecodedPostings {
     pub docs: Vec<DecodedDoc>,
     /// Flat positions buffer; docs reference ranges via `pos_start`/`pos_count`.
     pub positions: Vec<i32>,
+    /// Flat offsets buffer, parallel to `positions`. Empty when offsets not indexed.
+    pub offsets: Vec<TermOffset>,
 }
 
 /// Buffer capacity threshold in bytes. Buffers larger than this are replaced
@@ -577,6 +579,7 @@ impl DecodedPostings {
         Self {
             docs: Vec::new(),
             positions: Vec::new(),
+            offsets: Vec::new(),
         }
     }
 
@@ -589,6 +592,10 @@ impl DecodedPostings {
         self.positions.clear();
         if self.positions.capacity() * mem::size_of::<i32>() > DECODED_SHRINK_THRESHOLD {
             self.positions = Vec::new();
+        }
+        self.offsets.clear();
+        if self.offsets.capacity() * mem::size_of::<TermOffset>() > DECODED_SHRINK_THRESHOLD {
+            self.offsets = Vec::new();
         }
     }
 }
@@ -658,7 +665,12 @@ impl PostingsEnumProducer for BufferedPostingsEnum {
     }
 
     fn offset(&self) -> Option<TermOffset> {
-        None
+        if self.decoded.offsets.is_empty() {
+            return None;
+        }
+        let doc = self.current_doc();
+        let abs_idx = doc.pos_start as usize + self.pos_idx - 1;
+        Some(self.decoded.offsets[abs_idx])
     }
 
     fn payload(&self) -> Option<&[u8]> {
@@ -674,6 +686,8 @@ pub(crate) struct FreqProxTermsWriterPerField {
     pub base: TermsHashPerField,
     /// Per-term posting metadata arrays.
     pub postings_array: FreqProxPostingsArray,
+    /// What information is indexed for this field.
+    pub index_options: IndexOptions,
     /// Whether this field indexes term frequencies.
     pub has_freq: bool,
     /// Whether this field indexes positions.
@@ -707,6 +721,7 @@ impl FreqProxTermsWriterPerField {
         Self {
             base,
             postings_array,
+            index_options,
             has_freq,
             has_prox,
             has_offsets,
@@ -862,6 +877,7 @@ impl FreqProxTermsWriterPerField {
 
             if let Some(ref mut pr) = pos_reader {
                 let mut last_pos = 0;
+                let mut last_start_offset = 0u32;
                 for _ in 0..freq {
                     let prox_code = pr.read_vint()?;
                     // proxCode = positionDelta << 1 (no payload support)
@@ -871,9 +887,11 @@ impl FreqProxTermsWriterPerField {
                     last_pos = pos;
 
                     if self.has_offsets {
-                        // Consume offset data
-                        pr.read_vint()?; // start_offset delta
-                        pr.read_vint()?; // length
+                        let start_offset_delta = pr.read_vint()? as u32;
+                        let length = pr.read_vint()? as u16;
+                        let start = last_start_offset + start_offset_delta;
+                        buf.offsets.push(TermOffset { start, length });
+                        last_start_offset = start;
                     }
                 }
             }
@@ -1726,5 +1744,65 @@ mod tests {
         assert_eq!(off1_start, 0);
         let off1_len = read_vint(&mut reader);
         assert_eq!(off1_len, 5);
+    }
+
+    #[test]
+    fn test_buffered_postings_enum_returns_offsets() {
+        let mut decoded = DecodedPostings::new();
+        decoded.docs.push(DecodedDoc {
+            doc_id: 0,
+            freq: 2,
+            pos_start: 0,
+        });
+        decoded.positions.extend_from_slice(&[0, 5]);
+        decoded.offsets.extend_from_slice(&[
+            TermOffset {
+                start: 0,
+                length: 5,
+            },
+            TermOffset {
+                start: 6,
+                length: 5,
+            },
+        ]);
+
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        assert_eq!(pe.next_doc().unwrap(), 0);
+        assert_eq!(pe.freq(), 2);
+
+        assert_eq!(pe.next_position().unwrap(), 0);
+        assert_eq!(
+            pe.offset(),
+            Some(TermOffset {
+                start: 0,
+                length: 5
+            })
+        );
+
+        assert_eq!(pe.next_position().unwrap(), 5);
+        assert_eq!(
+            pe.offset(),
+            Some(TermOffset {
+                start: 6,
+                length: 5
+            })
+        );
+    }
+
+    #[test]
+    fn test_buffered_postings_enum_no_offsets() {
+        let mut decoded = DecodedPostings::new();
+        decoded.docs.push(DecodedDoc {
+            doc_id: 0,
+            freq: 1,
+            pos_start: 0,
+        });
+        decoded.positions.push(0);
+        // No offsets added
+
+        let mut pe = BufferedPostingsEnum::new(decoded, true);
+        assert_eq!(pe.next_doc().unwrap(), 0);
+        assert_eq!(pe.next_position().unwrap(), 0);
+        assert_none!(pe.offset());
     }
 }

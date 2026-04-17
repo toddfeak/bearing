@@ -234,11 +234,13 @@ impl FieldConsumer for PostingsConsumer {
             }
         }
 
-        // Determine if any field has positions (controls .pos file creation)
-        let has_positions = self
+        // Determine the maximum IndexOptions across all fields
+        let max_index_options = self
             .per_field
             .values()
-            .any(|s| s.index_options.has_positions());
+            .map(|s| s.index_options)
+            .max()
+            .unwrap_or(IndexOptions::Docs);
 
         // Suffix must match PerFieldPostingsFormat.suffix written in .fnm attributes
         let per_field_suffix = "Lucene103_0";
@@ -248,7 +250,7 @@ impl FieldConsumer for PostingsConsumer {
             &context.segment_name,
             per_field_suffix,
             &context.segment_id,
-            has_positions,
+            max_index_options,
         )?;
 
         let norms_data = accumulator.norms();
