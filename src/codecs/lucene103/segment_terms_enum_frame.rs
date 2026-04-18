@@ -7,6 +7,7 @@
 //! own their decoded block data (suffix bytes, suffix lengths, stats, metadata)
 //! and provide methods to iterate entries and decode term metadata.
 
+use std::cmp::Ordering;
 use std::io;
 
 use crate::codecs::lucene103::postings_format::IntBlockTermState;
@@ -15,6 +16,7 @@ use crate::codecs::lucene103::trie_reader::Node;
 use crate::document::IndexOptions;
 use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::{pfor, zigzag};
+use crate::index::terms::SeekStatus;
 use crate::store::slice_reader::SliceReader;
 use crate::store::{DataInput, IndexInput};
 
@@ -290,6 +292,7 @@ impl SegmentTermsEnumFrame {
         let num_stat_bytes = terms_in.read_vint()? as usize;
         self.data.stat_bytes = vec![0u8; num_stat_bytes];
         terms_in.read_exact(&mut self.data.stat_bytes)?;
+        self.data.stats_pos = 0;
         self.stats_singleton_run_length = 0;
         self.meta_data_upto = 0;
 
@@ -301,6 +304,8 @@ impl SegmentTermsEnumFrame {
         let num_meta_bytes = terms_in.read_vint()? as usize;
         self.data.meta_bytes = vec![0u8; num_meta_bytes];
         terms_in.read_exact(&mut self.data.meta_bytes)?;
+
+        self.data.meta_pos = 0;
 
         // fp_end = position after all block data
         self.pos.fp_end = terms_in.file_pointer() as i64;
@@ -596,6 +601,237 @@ impl SegmentTermsEnumFrame {
         }
 
         Ok(())
+    }
+
+    /// Copies the current suffix into the shared term buffer.
+    fn fill_term(&self, term: &mut Vec<u8>) {
+        let term_length = self.prefix_length + self.suffix_length;
+        term.resize(term_length, 0);
+        term[self.prefix_length..term_length].copy_from_slice(
+            &self.data.suffix_bytes[self.start_byte_pos..self.start_byte_pos + self.suffix_length],
+        );
+    }
+
+    /// Scans this block for a target term.
+    ///
+    /// If `exact_only` is true, only exact matches return [`SeekStatus::Found`].
+    /// If false, positions to the first term >= target (for `seek_ceil`).
+    pub fn scan_to_term(
+        &mut self,
+        target: &[u8],
+        exact_only: bool,
+        term: &mut Vec<u8>,
+        term_exists: &mut bool,
+    ) -> io::Result<SeekStatus> {
+        if self.flags.is_leaf_block {
+            if self.flags.all_equal {
+                self.binary_search_term_leaf(target, exact_only, term, term_exists)
+            } else {
+                self.scan_to_term_leaf(target, exact_only, term, term_exists)
+            }
+        } else {
+            self.scan_to_term_non_leaf(target, exact_only, term, term_exists)
+        }
+    }
+
+    /// Scans a leaf block for the target term using linear scan.
+    fn scan_to_term_leaf(
+        &mut self,
+        target: &[u8],
+        exact_only: bool,
+        term: &mut Vec<u8>,
+        term_exists: &mut bool,
+    ) -> io::Result<SeekStatus> {
+        debug_assert!(self.next_ent != -1);
+
+        *term_exists = true;
+        self.sub_code = 0;
+
+        if self.next_ent == self.ent_count as i32 {
+            if exact_only {
+                self.fill_term(term);
+            }
+            return Ok(SeekStatus::End);
+        }
+
+        loop {
+            self.next_ent += 1;
+
+            let mut suffix_lengths_reader =
+                SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+            self.suffix_length = suffix_lengths_reader.read_vint()? as usize;
+            self.data.suffix_length_pos += suffix_lengths_reader.pos();
+
+            self.start_byte_pos = self.data.suffix_pos;
+            self.data.suffix_pos += self.suffix_length;
+
+            let cmp = self.data.suffix_bytes
+                [self.start_byte_pos..self.start_byte_pos + self.suffix_length]
+                .cmp(&target[self.prefix_length..]);
+
+            if cmp.is_lt() {
+                // Current entry is still before the target; keep scanning
+            } else if cmp.is_gt() {
+                self.fill_term(term);
+                return Ok(SeekStatus::NotFound);
+            } else {
+                self.fill_term(term);
+                return Ok(SeekStatus::Found);
+            }
+
+            if self.next_ent >= self.ent_count as i32 {
+                break;
+            }
+        }
+
+        if exact_only {
+            self.fill_term(term);
+        }
+
+        Ok(SeekStatus::End)
+    }
+
+    /// Binary searches a leaf block where all suffixes have equal length.
+    fn binary_search_term_leaf(
+        &mut self,
+        target: &[u8],
+        exact_only: bool,
+        term: &mut Vec<u8>,
+        term_exists: &mut bool,
+    ) -> io::Result<SeekStatus> {
+        debug_assert!(self.next_ent != -1);
+
+        *term_exists = true;
+        self.sub_code = 0;
+
+        if self.next_ent == self.ent_count as i32 {
+            if exact_only {
+                self.fill_term(term);
+            }
+            return Ok(SeekStatus::End);
+        }
+
+        let mut suffix_lengths_reader =
+            SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+        self.suffix_length = suffix_lengths_reader.read_vint()? as usize;
+
+        let mut start = self.next_ent;
+        let mut end = self.ent_count as i32 - 1;
+        let mut cmp = 0i32;
+
+        while start <= end {
+            let mid = ((start + end) as u32 >> 1) as i32;
+            self.next_ent = mid + 1;
+            self.start_byte_pos = mid as usize * self.suffix_length;
+
+            let suffix = &self.data.suffix_bytes
+                [self.start_byte_pos..self.start_byte_pos + self.suffix_length];
+            let target_suffix = &target[self.prefix_length..];
+
+            cmp = match suffix.cmp(target_suffix) {
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+                Ordering::Greater => 1,
+            };
+
+            if cmp < 0 {
+                start = mid + 1;
+            } else if cmp > 0 {
+                end = mid - 1;
+            } else {
+                self.data.suffix_pos = self.start_byte_pos + self.suffix_length;
+                self.fill_term(term);
+                return Ok(SeekStatus::Found);
+            }
+        }
+
+        let seek_status;
+        if end < self.ent_count as i32 - 1 {
+            seek_status = SeekStatus::NotFound;
+            if cmp < 0 {
+                self.start_byte_pos += self.suffix_length;
+                self.next_ent += 1;
+            }
+            self.data.suffix_pos = self.start_byte_pos + self.suffix_length;
+            self.fill_term(term);
+        } else {
+            seek_status = SeekStatus::End;
+            self.data.suffix_pos = self.start_byte_pos + self.suffix_length;
+            if exact_only {
+                self.fill_term(term);
+            }
+        }
+
+        Ok(seek_status)
+    }
+
+    /// Scans a non-leaf block for the target term.
+    fn scan_to_term_non_leaf(
+        &mut self,
+        target: &[u8],
+        exact_only: bool,
+        term: &mut Vec<u8>,
+        term_exists: &mut bool,
+    ) -> io::Result<SeekStatus> {
+        debug_assert!(self.next_ent != -1);
+
+        if self.next_ent == self.ent_count as i32 {
+            if exact_only {
+                self.fill_term(term);
+                *term_exists = self.sub_code == 0;
+            }
+            return Ok(SeekStatus::End);
+        }
+
+        while self.next_ent < self.ent_count as i32 {
+            self.next_ent += 1;
+
+            let mut suffix_lengths_reader =
+                SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+            let code = suffix_lengths_reader.read_vint()?;
+            self.suffix_length = (code as u32 >> 1) as usize;
+
+            self.start_byte_pos = self.data.suffix_pos;
+            self.data.suffix_pos += self.suffix_length;
+            *term_exists = (code & 1) == 0;
+            if *term_exists {
+                self.state.term_block_ord += 1;
+                self.sub_code = 0;
+            } else {
+                self.sub_code = suffix_lengths_reader.read_vlong()?;
+                self.last_sub_fp = self.pos.fp - self.sub_code;
+            }
+            self.data.suffix_length_pos += suffix_lengths_reader.pos();
+
+            let cmp = self.data.suffix_bytes
+                [self.start_byte_pos..self.start_byte_pos + self.suffix_length]
+                .cmp(&target[self.prefix_length..]);
+
+            if cmp.is_lt() {
+                // Current entry is still before the target; keep scanning
+            } else if cmp.is_gt() {
+                self.fill_term(term);
+
+                if !exact_only && !*term_exists {
+                    // For seek_ceil: we are on a sub-block and caller wants
+                    // the next term — return NotFound and let the caller
+                    // push into sub-frames. The frame's last_sub_fp is set.
+                    // The caller (SegmentTermsEnum) handles the push.
+                }
+
+                return Ok(SeekStatus::NotFound);
+            } else {
+                debug_assert!(*term_exists);
+                self.fill_term(term);
+                return Ok(SeekStatus::Found);
+            }
+        }
+
+        if exact_only {
+            self.fill_term(term);
+        }
+
+        Ok(SeekStatus::End)
     }
 
     /// Rewinds this frame to its original state, forcing a reload on next access.

@@ -101,8 +101,14 @@ impl Node {
         }
     }
 
-    fn has_output(&self) -> bool {
+    /// Whether this node has an output (block file pointer).
+    pub(crate) fn has_output(&self) -> bool {
         self.output_fp != NO_OUTPUT
+    }
+
+    /// Returns the label byte that led to this node.
+    pub(crate) fn label(&self) -> u8 {
+        self.label
     }
 
     /// Whether this node has floor data (multiple sub-blocks sharing a prefix).
