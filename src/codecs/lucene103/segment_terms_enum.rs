@@ -15,7 +15,8 @@ use std::cmp::Ordering;
 use std::io;
 
 use crate::codecs::lucene103::postings_format::IntBlockTermState;
-use crate::codecs::lucene103::trie_reader::TrieReader;
+use crate::codecs::lucene103::segment_terms_enum_frame::SegmentTermsEnumFrame;
+use crate::codecs::lucene103::trie_reader::{Node, TrieReader};
 use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4, pfor, zigzag};
 use crate::index::terms::TermsEnum;
@@ -31,18 +32,34 @@ const COMPRESSION_LZ4: u32 = 2;
 /// Wraps trie navigation + block scanning into a [`TermsEnum`] implementation.
 /// Created by `FieldReader::iterator()` (via the [`Terms`](crate::index::terms::Terms) trait).
 pub struct SegmentTermsEnum {
-    /// Clone of the `.tim` terms dictionary input.
+    /// Handle to the `.tim` terms dictionary.
     terms_in: Box<dyn IndexInput>,
-    /// Clone of the `.tip` index input (for floor data reads).
+    /// Handle to the `.tip` index (for floor data reads).
     index_in: Box<dyn IndexInput>,
     /// Trie navigator for this field.
     trie: TrieReader,
     /// Index options for this field.
     index_options: IndexOptions,
-    /// The current term after a successful seek.
-    current_term: Vec<u8>,
-    /// The current term's metadata after a successful seek.
-    current_state: Option<IntBlockTermState>,
+    /// The shared term buffer, written into by frame iteration methods.
+    term: Vec<u8>,
+    /// Whether the current position is on a real term (vs a sub-block entry).
+    term_exists: bool,
+    /// Frame stack — one frame per tree depth.
+    stack: Vec<SegmentTermsEnumFrame>,
+    /// Static frame used for seek-by-state positioning.
+    static_frame: SegmentTermsEnumFrame,
+    /// Ordinal of the current frame in the stack (-1 = static_frame).
+    current_frame_ord: i32,
+    /// Trie nodes parallel to the frame stack.
+    nodes: Vec<Node>,
+    /// How much of the current term was validated against the trie index.
+    valid_index_prefix: usize,
+    /// The `currentFrame.ord` value saved before `next()` processes.
+    target_before_current_length: i32,
+    /// Whether `terms_in` has been initialized for frame-based access.
+    initialized: bool,
+    /// Whether iteration has reached the end.
+    eof: bool,
 }
 
 impl SegmentTermsEnum {
@@ -53,23 +70,102 @@ impl SegmentTermsEnum {
         trie: TrieReader,
         index_options: IndexOptions,
     ) -> Self {
+        let root_node = trie.root().clone();
         Self {
             terms_in,
             index_in,
             trie,
             index_options,
-            current_term: Vec::new(),
-            current_state: None,
+            term: Vec::new(),
+            term_exists: false,
+            stack: Vec::new(),
+            static_frame: SegmentTermsEnumFrame::new(-1),
+            current_frame_ord: -1,
+            nodes: vec![root_node],
+            valid_index_prefix: 0,
+            target_before_current_length: 0,
+            initialized: false,
+            eof: false,
+        }
+    }
+
+    /// Returns (or grows) the frame at the given stack ordinal.
+    fn get_frame(&mut self, ord: usize) -> &mut SegmentTermsEnumFrame {
+        while ord >= self.stack.len() {
+            self.stack
+                .push(SegmentTermsEnumFrame::new(self.stack.len() as i32));
+        }
+        debug_assert!(self.stack[ord].ord == ord as i32);
+        &mut self.stack[ord]
+    }
+
+    /// Returns (or grows) the trie node at the given ordinal.
+    #[expect(dead_code)]
+    fn get_node(&mut self, ord: usize) -> &mut Node {
+        while ord >= self.nodes.len() {
+            self.nodes.push(Node::new());
+        }
+        &mut self.nodes[ord]
+    }
+
+    /// Pushes a frame for a trie node with output. Sets up floor data if needed.
+    fn push_frame_for_node(&mut self, node: &Node, length: usize) -> io::Result<()> {
+        let new_ord = (self.current_frame_ord + 1) as usize;
+        self.get_frame(new_ord);
+        let f = &mut self.stack[new_ord];
+        f.flags.has_terms = node.has_terms();
+        f.flags.has_terms_orig = f.flags.has_terms;
+        f.flags.is_floor = node.is_floor();
+        if f.flags.is_floor {
+            f.floor
+                .load_from_input(self.index_in.as_mut(), node.floor_data_fp())?;
+        }
+        self.push_frame_fp(Some(node), node.output_fp(), length)?;
+        Ok(())
+    }
+
+    /// Pushes a frame at the given file pointer. Reuses the frame if already
+    /// loaded at the same position.
+    fn push_frame_fp(&mut self, node: Option<&Node>, fp: i64, length: usize) -> io::Result<()> {
+        let new_ord = (self.current_frame_ord + 1) as usize;
+        self.get_frame(new_ord);
+        let f = &mut self.stack[new_ord];
+        f.node = node.cloned();
+        if f.pos.fp_orig == fp && f.next_ent != -1 {
+            if f.ord > self.target_before_current_length {
+                f.rewind()?;
+            }
+            debug_assert!(length == f.prefix_length);
+        } else {
+            f.next_ent = -1;
+            f.prefix_length = length;
+            f.state.term_block_ord = 0;
+            f.pos.fp_orig = fp;
+            f.pos.fp = fp;
+            f.last_sub_fp = -1;
+        }
+        self.current_frame_ord = new_ord as i32;
+        Ok(())
+    }
+
+    /// Returns a mutable reference to the current frame.
+    #[expect(dead_code)]
+    fn current_frame(&mut self) -> &mut SegmentTermsEnumFrame {
+        if self.current_frame_ord == -1 {
+            &mut self.static_frame
+        } else {
+            &mut self.stack[self.current_frame_ord as usize]
         }
     }
 }
 
 impl TermsEnum for SegmentTermsEnum {
     fn seek_exact(&mut self, target: &[u8]) -> io::Result<bool> {
+        // Still uses the flat path — will be refactored to frames in step 7
         let trie_result = match self.trie.seek_to_block(target)? {
             Some(r) => r,
             None => {
-                self.current_state = None;
+                self.current_frame_ord = -1;
                 return Ok(false);
             }
         };
@@ -84,46 +180,153 @@ impl TermsEnum for SegmentTermsEnum {
 
         match state {
             Some(s) => {
-                self.current_term.clear();
-                self.current_term.extend_from_slice(target);
-                self.current_state = Some(s);
+                self.term.clear();
+                self.term.extend_from_slice(target);
+                // Store state on the static frame for seek_exact compatibility
+                self.static_frame.state = s;
+                self.static_frame.meta_data_upto = self.static_frame.get_term_block_ord();
+                self.current_frame_ord = -1;
+                self.term_exists = true;
                 Ok(true)
             }
             None => {
-                self.current_state = None;
+                self.current_frame_ord = -1;
+                self.term_exists = false;
                 Ok(false)
             }
         }
     }
 
     fn seek_exact_with_state(&mut self, term: &[u8], state: IntBlockTermState) {
-        self.current_term.clear();
-        self.current_term.extend_from_slice(term);
-        self.current_state = Some(state);
+        self.term.clear();
+        self.term.extend_from_slice(term);
+        self.current_frame_ord = -1;
+        self.static_frame.state = state;
+        self.static_frame.meta_data_upto = self.static_frame.get_term_block_ord();
+        self.term_exists = true;
     }
 
     fn term(&self) -> &[u8] {
-        &self.current_term
+        &self.term
     }
 
-    fn doc_freq(&self) -> io::Result<i32> {
-        match &self.current_state {
-            Some(s) => Ok(s.doc_freq),
-            None => Err(io::Error::other("TermsEnum not positioned")),
+    fn doc_freq(&mut self) -> io::Result<i32> {
+        if !self.term_exists {
+            return Err(io::Error::other("TermsEnum not positioned"));
+        }
+        if self.current_frame_ord == -1 {
+            Ok(self.static_frame.state.doc_freq)
+        } else {
+            let f = &mut self.stack[self.current_frame_ord as usize];
+            f.decode_meta_data(self.index_options)?;
+            Ok(f.state.doc_freq)
         }
     }
 
-    fn total_term_freq(&self) -> io::Result<i64> {
-        match &self.current_state {
-            Some(s) => Ok(s.total_term_freq),
-            None => Err(io::Error::other("TermsEnum not positioned")),
+    fn total_term_freq(&mut self) -> io::Result<i64> {
+        if !self.term_exists {
+            return Err(io::Error::other("TermsEnum not positioned"));
+        }
+        if self.current_frame_ord == -1 {
+            Ok(self.static_frame.state.total_term_freq)
+        } else {
+            let f = &mut self.stack[self.current_frame_ord as usize];
+            f.decode_meta_data(self.index_options)?;
+            Ok(f.state.total_term_freq)
         }
     }
 
-    fn term_state(&self) -> io::Result<IntBlockTermState> {
-        match &self.current_state {
-            Some(s) => Ok(*s),
-            None => Err(io::Error::other("TermsEnum not positioned")),
+    fn term_state(&mut self) -> io::Result<IntBlockTermState> {
+        if !self.term_exists {
+            return Err(io::Error::other("TermsEnum not positioned"));
+        }
+        if self.current_frame_ord == -1 {
+            Ok(self.static_frame.state)
+        } else {
+            let f = &mut self.stack[self.current_frame_ord as usize];
+            f.decode_meta_data(self.index_options)?;
+            Ok(f.state)
+        }
+    }
+
+    fn next(&mut self) -> io::Result<Option<&[u8]>> {
+        if self.eof {
+            return Ok(None);
+        }
+
+        if !self.initialized {
+            // First call — push root frame
+            let root = self.nodes[0].clone();
+            self.push_frame_for_node(&root, 0)?;
+            self.stack[self.current_frame_ord as usize].load_block(self.terms_in.as_mut())?;
+            self.initialized = true;
+        }
+
+        self.target_before_current_length = self.current_frame_ord;
+
+        if self.current_frame_ord == -1 {
+            // Positioned via seek_exact_with_state — re-seek to catch up
+            let result = self.seek_exact(&self.term.clone())?;
+            debug_assert!(result);
+        }
+
+        // Pop exhausted frames
+        loop {
+            let ord = self.current_frame_ord as usize;
+            let f = &self.stack[ord];
+            if f.next_ent < f.ent_count as i32 {
+                break;
+            }
+            if !f.flags.is_last_in_floor {
+                self.stack[ord].load_next_floor_block(self.terms_in.as_mut())?;
+                break;
+            } else {
+                if self.current_frame_ord == 0 {
+                    self.term.clear();
+                    self.valid_index_prefix = 0;
+                    self.stack[0].rewind()?;
+                    self.term_exists = false;
+                    self.eof = true;
+                    return Ok(None);
+                }
+                let last_fp = self.stack[ord].pos.fp_orig;
+                self.current_frame_ord -= 1;
+
+                let parent_ord = self.current_frame_ord as usize;
+                if self.stack[parent_ord].next_ent == -1
+                    || self.stack[parent_ord].last_sub_fp != last_fp
+                {
+                    let term_clone = self.term.clone();
+                    self.stack[parent_ord].scan_to_floor_frame(&term_clone);
+                    self.stack[parent_ord].load_block(self.terms_in.as_mut())?;
+                    self.stack[parent_ord].scan_to_sub_block(last_fp);
+                }
+
+                self.valid_index_prefix = self
+                    .valid_index_prefix
+                    .min(self.stack[parent_ord].prefix_length);
+            }
+        }
+
+        // Advance within frame, pushing into sub-blocks as needed
+        loop {
+            let ord = self.current_frame_ord as usize;
+            let is_sub_block = {
+                let f = &mut self.stack[ord];
+                f.next(
+                    &mut self.term,
+                    &mut self.term_exists,
+                    self.terms_in.as_mut(),
+                )?
+            };
+            if is_sub_block {
+                let last_sub_fp = self.stack[ord].last_sub_fp;
+                let term_len = self.term.len();
+                self.push_frame_fp(None, last_sub_fp, term_len)?;
+                self.stack[self.current_frame_ord as usize].load_block(self.terms_in.as_mut())?;
+            } else {
+                return Ok(Some(&self.term));
+            }
         }
     }
 }
@@ -895,7 +1098,7 @@ mod tests {
 
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
-        let te = fr.iterator().unwrap();
+        let mut te = fr.iterator().unwrap();
         // Before any seek, doc_freq and term_state should error
         assert!(te.doc_freq().is_err());
         assert!(te.term_state().is_err());
@@ -922,5 +1125,108 @@ mod tests {
             assert_eq!(te.doc_freq().unwrap(), 1);
             assert_eq!(te.term(), term.as_bytes());
         }
+    }
+
+    // --- next() tests ---
+
+    #[test]
+    fn test_next_single_block() {
+        let terms = vec![("alpha", &[0][..]), ("beta", &[1]), ("gamma", &[2])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        assert_eq!(te.next().unwrap().unwrap(), b"alpha");
+        assert_eq!(te.next().unwrap().unwrap(), b"beta");
+        assert_eq!(te.next().unwrap().unwrap(), b"gamma");
+        assert!(te.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_next_many_terms() {
+        let mut terms_data: Vec<(String, Vec<i32>)> = Vec::new();
+        for i in 0..100 {
+            terms_data.push((format!("term_{i:04}"), vec![i]));
+        }
+        let terms: Vec<(&str, &[i32])> = terms_data
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_slice()))
+            .collect();
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        for i in 0..100 {
+            let expected = format!("term_{i:04}");
+            let term = te.next().unwrap().unwrap();
+            assert_eq!(term, expected.as_bytes());
+        }
+        assert!(te.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_next_lexicographic_order() {
+        let terms = vec![
+            ("aardvark", &[0][..]),
+            ("banana", &[1]),
+            ("cherry", &[2]),
+            ("date", &[3]),
+        ];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        let mut prev: Option<Vec<u8>> = None;
+        while let Some(term) = te.next().unwrap() {
+            if let Some(ref p) = prev {
+                assert_lt!(*p, term.to_vec());
+            }
+            prev = Some(term.to_vec());
+        }
+        assert!(prev.is_some());
+    }
+
+    #[test]
+    fn test_next_doc_freq_after_next() {
+        let terms = vec![
+            ("alpha", &[0, 1][..]),
+            ("beta", &[2]),
+            ("gamma", &[3, 4, 5]),
+        ];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        te.next().unwrap();
+        assert_eq!(te.doc_freq().unwrap(), 2);
+
+        te.next().unwrap();
+        assert_eq!(te.doc_freq().unwrap(), 1);
+
+        te.next().unwrap();
+        assert_eq!(te.doc_freq().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_next_returns_none_after_exhaustion() {
+        let terms = vec![("only", &[0][..])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        assert_eq!(te.next().unwrap().unwrap(), b"only");
+        assert!(te.next().unwrap().is_none());
+        // Second call after exhaustion should also return None
+        assert!(te.next().unwrap().is_none());
     }
 }

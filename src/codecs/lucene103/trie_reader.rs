@@ -51,7 +51,7 @@ const STRATEGY_ARRAY: u32 = 1;
 const STRATEGY_BITS: u32 = 2;
 
 /// A loaded trie node with decoded metadata.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Node {
     /// Absolute file pointer of this node in the `.tip` file.
     fp: i64,
@@ -104,6 +104,26 @@ impl Node {
     fn has_output(&self) -> bool {
         self.output_fp != NO_OUTPUT
     }
+
+    /// Whether this node has floor data (multiple sub-blocks sharing a prefix).
+    pub(crate) fn is_floor(&self) -> bool {
+        self.floor_data_fp != NO_FLOOR_DATA
+    }
+
+    /// Returns the block file pointer for this node's terms.
+    pub(crate) fn output_fp(&self) -> i64 {
+        self.output_fp
+    }
+
+    /// Whether this node's block contains terms.
+    pub(crate) fn has_terms(&self) -> bool {
+        self.has_terms
+    }
+
+    /// Returns the floor data file pointer, if this node has floor data.
+    pub(crate) fn floor_data_fp(&self) -> i64 {
+        self.floor_data_fp
+    }
 }
 
 /// Reader for the trie index stored in the `.tip` file.
@@ -127,8 +147,8 @@ impl TrieReader {
         Ok(Self { access, root })
     }
 
-    #[cfg(test)]
-    fn root(&self) -> &Node {
+    /// Returns the root node of the trie.
+    pub(crate) fn root(&self) -> &Node {
         &self.root
     }
 

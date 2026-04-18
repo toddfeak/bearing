@@ -7,29 +7,19 @@
 //! own their decoded block data (suffix bytes, suffix lengths, stats, metadata)
 //! and provide methods to iterate entries and decode term metadata.
 
-#[cfg(test)]
 use std::io;
 
-#[cfg(test)]
 use crate::codecs::lucene103::postings_format::IntBlockTermState;
-#[cfg(test)]
 use crate::codecs::lucene103::segment_terms_enum::read_compressed;
-#[cfg(test)]
 use crate::codecs::lucene103::trie_reader::Node;
-#[cfg(test)]
 use crate::document::IndexOptions;
-#[cfg(test)]
 use crate::encoding::read_encoding::ReadEncoding;
-#[cfg(test)]
 use crate::encoding::{pfor, zigzag};
-#[cfg(test)]
 use crate::store::slice_reader::SliceReader;
-#[cfg(test)]
 use crate::store::{DataInput, IndexInput};
 
 /// File pointers tracking where a block lives in the `.tim` file.
 #[derive(Debug, Default)]
-#[cfg(test)]
 pub(super) struct BlockPosition {
     /// File pointer where this block was loaded from.
     pub fp: i64,
@@ -41,7 +31,6 @@ pub(super) struct BlockPosition {
 
 /// Boolean flags describing the structure of a loaded block.
 #[derive(Debug, Default)]
-#[cfg(test)]
 pub(super) struct BlockFlags {
     /// Whether this block has term entries (vs. only sub-blocks).
     pub has_terms: bool,
@@ -62,7 +51,6 @@ pub(super) struct BlockFlags {
 /// Contains the five sections of a term block: suffix bytes, suffix lengths,
 /// stats, and metadata, along with reader cursors for suffix iteration.
 #[derive(Debug, Default)]
-#[cfg(test)]
 pub(super) struct BlockData {
     /// Decompressed suffix bytes for all entries.
     pub suffix_bytes: Vec<u8>,
@@ -86,7 +74,6 @@ pub(super) struct BlockData {
 
 /// Floor block navigation state from the `.tip` file.
 #[derive(Debug, Default)]
-#[cfg(test)]
 pub(super) struct FloorState {
     /// Floor data bytes.
     pub data: Vec<u8>,
@@ -100,8 +87,44 @@ pub(super) struct FloorState {
     pub num_follow_blocks: i32,
 }
 
-#[cfg(test)]
 impl FloorState {
+    /// Reads floor data from an `IndexInput` at the given file pointer.
+    ///
+    /// Parses through the floor data structure to determine its size,
+    /// then reads all bytes into an owned buffer.
+    pub fn load_from_input(
+        &mut self,
+        mut index_in: &mut dyn IndexInput,
+        floor_data_fp: i64,
+    ) -> io::Result<()> {
+        let start = floor_data_fp as u64;
+        index_in.seek(start)?;
+
+        // Parse through to find total byte length
+        let num_follow = index_in.read_vint()?;
+        index_in.read_byte()?; // first label
+        for i in 0..num_follow {
+            index_in.read_vlong()?; // code
+            if i < num_follow - 1 {
+                index_in.read_byte()?; // next label
+            }
+        }
+        let total_len = (index_in.file_pointer() - start) as usize;
+
+        // Re-read all bytes into buffer
+        self.data = vec![0u8; total_len];
+        index_in.seek(start)?;
+        index_in.read_exact(&mut self.data)?;
+
+        // Parse initial fields
+        let mut reader = SliceReader::new(&self.data);
+        self.rewind_pos = 0;
+        self.num_follow_blocks = reader.read_vint()?;
+        self.next_label = reader.read_byte()? as i32 & 0xff;
+        self.data_pos = reader.pos();
+        Ok(())
+    }
+
     /// Parses floor data from a byte slice.
     #[cfg(test)]
     pub fn set(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -132,7 +155,6 @@ impl FloorState {
 /// Each frame holds the decoded contents of one term block and tracks
 /// iteration state within that block.
 #[derive(Debug)]
-#[cfg(test)]
 pub(super) struct SegmentTermsEnumFrame {
     /// Index of this frame in the stack.
     pub ord: i32,
@@ -171,7 +193,6 @@ pub(super) struct SegmentTermsEnumFrame {
     pub suffix_length: usize,
 }
 
-#[cfg(test)]
 impl SegmentTermsEnumFrame {
     /// Creates a new unloaded frame at the given stack position.
     pub fn new(ord: i32) -> Self {
@@ -390,6 +411,86 @@ impl SegmentTermsEnumFrame {
                 self.last_sub_fp = self.pos.fp - self.sub_code;
                 self.data.suffix_length_pos += suffix_lengths_reader.pos();
                 return Ok(true);
+            }
+        }
+    }
+
+    /// Scans floor data to find the correct sub-block for the target term.
+    ///
+    /// If the target's byte at `prefix_length` is past the current floor
+    /// block's label, advances through floor entries until the correct block
+    /// is found. Forces a block reload if the file pointer changes.
+    pub fn scan_to_floor_frame(&mut self, target: &[u8]) {
+        if !self.flags.is_floor || target.len() <= self.prefix_length {
+            return;
+        }
+
+        let target_label = target[self.prefix_length] as i32 & 0xFF;
+
+        if target_label < self.floor.next_label {
+            return;
+        }
+
+        debug_assert!(self.floor.num_follow_blocks != 0);
+
+        let mut new_fp;
+        let mut reader = SliceReader::new(&self.floor.data[self.floor.data_pos..]);
+        loop {
+            let code = reader.read_vlong().unwrap();
+            new_fp = self.pos.fp_orig + (code >> 1);
+            self.flags.has_terms = (code & 1) != 0;
+
+            self.flags.is_last_in_floor = self.floor.num_follow_blocks == 1;
+            self.floor.num_follow_blocks -= 1;
+
+            if self.flags.is_last_in_floor {
+                self.floor.next_label = 256;
+                break;
+            } else {
+                self.floor.next_label = reader.read_byte().unwrap() as i32 & 0xff;
+                if target_label < self.floor.next_label {
+                    break;
+                }
+            }
+        }
+        self.floor.data_pos += reader.pos();
+        if new_fp != self.pos.fp {
+            self.next_ent = -1;
+            self.pos.fp = new_fp;
+        }
+    }
+
+    /// Scans entries to find the sub-block with the given file pointer.
+    ///
+    /// Used by `next()` when popping back to a parent frame — advances through
+    /// entries until the sub-block matching `sub_fp` is found.
+    pub fn scan_to_sub_block(&mut self, sub_fp: i64) {
+        debug_assert!(!self.flags.is_leaf_block);
+        if self.last_sub_fp == sub_fp {
+            return;
+        }
+        debug_assert!(sub_fp < self.pos.fp);
+        let target_sub_code = self.pos.fp - sub_fp;
+
+        let mut suffix_lengths_reader =
+            SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+        let mut suffix_skip = 0usize;
+
+        loop {
+            debug_assert!(self.next_ent < self.ent_count as i32);
+            self.next_ent += 1;
+            let code = suffix_lengths_reader.read_vint().unwrap();
+            suffix_skip += (code as u32 >> 1) as usize;
+            if (code & 1) != 0 {
+                let sub_code = suffix_lengths_reader.read_vlong().unwrap();
+                if target_sub_code == sub_code {
+                    self.last_sub_fp = sub_fp;
+                    self.data.suffix_length_pos += suffix_lengths_reader.pos();
+                    self.data.suffix_pos += suffix_skip;
+                    return;
+                }
+            } else {
+                self.state.term_block_ord += 1;
             }
         }
     }
@@ -974,5 +1075,57 @@ mod tests {
         frame.decode_meta_data(IndexOptions::DocsAndFreqs).unwrap();
         assert_eq!(frame.state.doc_freq, 2);
         assert_ge!(frame.state.total_term_freq, 2);
+    }
+
+    // --- scan_to_floor_frame tests ---
+
+    #[test]
+    fn test_scan_to_floor_frame_skip_when_not_floor() {
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.flags.is_floor = false;
+        frame.prefix_length = 0;
+
+        // Should return immediately without touching anything
+        let fp_before = frame.pos.fp;
+        frame.scan_to_floor_frame(b"anything");
+        assert_eq!(frame.pos.fp, fp_before);
+    }
+
+    #[test]
+    fn test_scan_to_floor_frame_skip_when_target_short() {
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.flags.is_floor = true;
+        frame.prefix_length = 5;
+
+        // Target shorter than prefix — should skip
+        let fp_before = frame.pos.fp;
+        frame.scan_to_floor_frame(b"abc");
+        assert_eq!(frame.pos.fp, fp_before);
+    }
+
+    #[test]
+    fn test_scan_to_floor_frame_skip_when_already_correct() {
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.flags.is_floor = true;
+        frame.prefix_length = 0;
+        frame.floor.next_label = 0x7A; // 'z'
+
+        // Target label 'a' < next_floor_label 'z' — already on correct block
+        let fp_before = frame.pos.fp;
+        frame.scan_to_floor_frame(b"abc");
+        assert_eq!(frame.pos.fp, fp_before);
+    }
+
+    // --- scan_to_sub_block tests ---
+
+    #[test]
+    fn test_scan_to_sub_block_already_positioned() {
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.flags.is_leaf_block = false;
+        frame.last_sub_fp = 42;
+
+        // Already positioned at the target — should return immediately
+        frame.scan_to_sub_block(42);
+        assert_eq!(frame.last_sub_fp, 42);
     }
 }

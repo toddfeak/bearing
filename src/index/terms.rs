@@ -98,13 +98,19 @@ pub trait TermsEnum {
     fn term(&self) -> &[u8];
 
     /// Returns the number of documents containing the current term.
-    fn doc_freq(&self) -> io::Result<i32>;
+    ///
+    /// May trigger lazy metadata decoding.
+    fn doc_freq(&mut self) -> io::Result<i32>;
 
     /// Returns the total number of occurrences of this term across all documents.
-    fn total_term_freq(&self) -> io::Result<i64>;
+    ///
+    /// May trigger lazy metadata decoding.
+    fn total_term_freq(&mut self) -> io::Result<i64>;
 
     /// Returns the internal state to position the enum without re-seeking.
-    fn term_state(&self) -> io::Result<IntBlockTermState>;
+    ///
+    /// May trigger lazy metadata decoding.
+    fn term_state(&mut self) -> io::Result<IntBlockTermState>;
 
     /// Seeks to the specified term, if it exists, or to the next (ceiling) term.
     fn seek_ceil(&mut self, _target: &[u8]) -> io::Result<SeekStatus> {
