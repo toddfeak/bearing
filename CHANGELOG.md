@@ -8,11 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Term iteration implementation. Supports CLIs and future query path.
+- Indexing offset data.
+- Level 1 skip data support in indexing.
+- Codec abstraction traits for merge path preparation
 - Pluggable analyzers via `AnalyzerFactory` trait on `IndexWriterConfig`
 - `UnicodeAnalyzer` with UAX#29 word boundaries, closer to Java Lucene's `StandardAnalyzer`
 
 ### Changed
 
+- I/O and encoding layer refactored to `Read`/`Write` supertraits with blanket encoding traits
+- Memory optimizations for indexing
 - Improved `StandardAnalyzer` memory and throughput with streaming tokenization
 
 ## [0.1.0-alpha.4]
