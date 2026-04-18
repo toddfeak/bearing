@@ -106,6 +106,7 @@ public class GenerateIndexSummary {
 
         // Term statistics (if indexed)
         long termCount = 0;
+        long termCountVerified = 0;
         long sumTotalTermFreq = 0;
         long sumDocFreq = 0;
         int termsDocCount = 0;
@@ -120,12 +121,18 @@ public class GenerateIndexSummary {
                         termCount++;
                     }
                 }
+                // Count terms by iteration for cross-validation
+                TermsEnum te = terms.iterator();
+                while (te.next() != null) {
+                    termCountVerified++;
+                }
                 sumTotalTermFreq = terms.getSumTotalTermFreq();
                 sumDocFreq = terms.getSumDocFreq();
                 termsDocCount = terms.getDocCount();
             }
         }
         sb.append(indent).append("  \"termCount\": ").append(termCount).append(",\n");
+        sb.append(indent).append("  \"termCountVerified\": ").append(termCountVerified).append(",\n");
         sb.append(indent).append("  \"sumTotalTermFreq\": ").append(sumTotalTermFreq).append(",\n");
         sb.append(indent).append("  \"sumDocFreq\": ").append(sumDocFreq).append(",\n");
         sb.append(indent).append("  \"termsDocCount\": ").append(termsDocCount).append(",\n");

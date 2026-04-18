@@ -16,6 +16,7 @@ use serde::Serialize;
 use bearing::document::{DocValuesType, IndexOptions};
 use bearing::index::FieldInfo;
 use bearing::index::directory_reader::DirectoryReader;
+use bearing::index::terms::Terms;
 use bearing::store::FSDirectory;
 
 #[derive(Serialize)]
@@ -50,6 +51,7 @@ struct FieldSummary {
     point_index_dimension_count: u32,
     point_num_bytes: u32,
     term_count: i64,
+    term_count_verified: i64,
     sum_total_term_freq: i64,
     sum_doc_freq: i64,
     terms_doc_count: i64,
@@ -90,6 +92,7 @@ fn main() {
                 let terms = seg.terms(fi.name());
 
                 let term_count = terms.map_or(0, |t| t.size());
+                let term_count_verified = count_terms(terms);
                 let sum_total_term_freq = terms.map_or(0, |t| t.get_sum_total_term_freq());
                 let sum_doc_freq = terms.map_or(0, |t| t.get_sum_doc_freq());
                 let terms_doc_count = terms.map_or(0, |t| t.get_doc_count() as i64);
@@ -126,6 +129,7 @@ fn main() {
                     point_index_dimension_count: fi.point_config().index_dimension_count,
                     point_num_bytes: fi.point_config().num_bytes,
                     term_count,
+                    term_count_verified,
                     sum_total_term_freq,
                     sum_doc_freq,
                     terms_doc_count,
@@ -154,6 +158,19 @@ fn main() {
     });
     println!("{json}");
     println!();
+}
+
+fn count_terms(terms: Option<&dyn Terms>) -> i64 {
+    let Some(t) = terms else { return 0 };
+    let mut te = match t.iterator() {
+        Ok(te) => te,
+        Err(_) => return 0,
+    };
+    let mut count = 0i64;
+    while let Ok(Some(_)) = te.next() {
+        count += 1;
+    }
+    count
 }
 
 fn index_options_str(opt: IndexOptions) -> &'static str {

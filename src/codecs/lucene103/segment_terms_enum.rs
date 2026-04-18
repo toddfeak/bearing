@@ -17,8 +17,10 @@ use crate::codecs::lucene103::postings_format::IntBlockTermState;
 use crate::codecs::lucene103::segment_terms_enum_frame::SegmentTermsEnumFrame;
 use crate::codecs::lucene103::trie_reader::{Node, TrieReader};
 use crate::document::IndexOptions;
-use crate::encoding::{lowercase_ascii, lz4};
+use crate::encoding::read_encoding::ReadEncoding;
+use crate::encoding::{lowercase_ascii, lz4, pfor, zigzag};
 use crate::index::terms::{SeekStatus, TermsEnum};
+use crate::store::slice_reader::SliceReader;
 use crate::store::{DataInput, IndexInput};
 
 pub(crate) const COMPRESSION_NONE: u32 = 0;
@@ -154,15 +156,14 @@ impl SegmentTermsEnum {
             &mut self.stack[self.current_frame_ord as usize]
         }
     }
-}
 
-impl TermsEnum for SegmentTermsEnum {
-    /// Seeks to an exact term using the frame-based architecture.
+    /// Frame-based seek used by `seek_ceil` and as catch-up when `next()`
+    /// follows a flat `seek_exact`.
     ///
     /// Reuses seek state when possible: compares the target against the
     /// current term to find their common prefix, then walks the trie index
     /// only for the remaining bytes.
-    fn seek_exact(&mut self, target: &[u8]) -> io::Result<bool> {
+    fn seek_exact_frame_based(&mut self, target: &[u8]) -> io::Result<bool> {
         self.eof = false;
         self.initialized = true;
 
@@ -311,6 +312,237 @@ impl TermsEnum for SegmentTermsEnum {
             self.stack[ord].scan_to_term(target, true, &mut self.term, &mut self.term_exists)?;
         Ok(result == SeekStatus::Found)
     }
+}
+
+impl TermsEnum for SegmentTermsEnum {
+    /// Fast point lookup using the flat (stateless) path.
+    ///
+    /// Navigates the trie from scratch, parses one block, and discards all
+    /// state. Use `seek_exact_frame_based` when frame-stack consistency is
+    /// needed (e.g. before `next()`).
+    fn seek_exact(&mut self, target: &[u8]) -> io::Result<bool> {
+        self.eof = false;
+        self.initialized = true;
+
+        let trie_result = match self.trie.seek_to_block(target)? {
+            Some(r) => r,
+            None => {
+                self.current_frame_ord = -1;
+                self.term_exists = false;
+                return Ok(false);
+            }
+        };
+
+        let state = seek_exact_in_block(
+            &*self.terms_in,
+            &trie_result,
+            target,
+            self.index_options,
+            &*self.index_in,
+        )?;
+
+        match state {
+            Some(s) => {
+                self.term.clear();
+                self.term.extend_from_slice(target);
+                self.static_frame.state = s;
+                self.static_frame.meta_data_upto = self.static_frame.get_term_block_ord();
+                self.current_frame_ord = -1;
+                self.term_exists = true;
+                Ok(true)
+            }
+            None => {
+                self.current_frame_ord = -1;
+                self.term_exists = false;
+                Ok(false)
+            }
+        }
+    }
+
+    fn seek_ceil(&mut self, target: &[u8]) -> io::Result<SeekStatus> {
+        self.eof = false;
+        self.initialized = true;
+
+        let mut target_upto;
+
+        self.target_before_current_length = if self.current_frame_ord == -1 {
+            -1
+        } else {
+            self.stack[self.current_frame_ord as usize].ord
+        };
+
+        if self.current_frame_ord != -1 {
+            // Reuse seek state from current position.
+            let node = self.nodes[0].clone();
+            debug_assert!(node.has_output());
+            target_upto = 0;
+
+            let mut last_frame_ord = 0i32;
+            debug_assert!(self.valid_index_prefix <= self.term.len());
+
+            let target_limit = target.len().min(self.valid_index_prefix);
+
+            let mut cmp = 0i32;
+
+            while target_upto < target_limit {
+                cmp = (self.term[target_upto] as i32) - (target[target_upto] as i32);
+                if cmp != 0 {
+                    break;
+                }
+                let next_node = &self.nodes[1 + target_upto];
+                debug_assert_eq!(next_node.label(), target[target_upto]);
+
+                if next_node.has_output() {
+                    last_frame_ord = self.stack[1 + last_frame_ord as usize].ord;
+                }
+                target_upto += 1;
+            }
+
+            if cmp == 0 {
+                cmp = match self.term[target_upto..].cmp(&target[target_upto..]) {
+                    Ordering::Less => -1,
+                    Ordering::Equal => 0,
+                    Ordering::Greater => 1,
+                };
+            }
+
+            if cmp < 0 {
+                self.current_frame_ord = last_frame_ord;
+            } else if cmp > 0 {
+                self.target_before_current_length = 0;
+                self.current_frame_ord = last_frame_ord;
+                self.stack[last_frame_ord as usize].rewind()?;
+            } else {
+                debug_assert_eq!(self.term.len(), target.len());
+                if self.term_exists {
+                    return Ok(SeekStatus::Found);
+                }
+            }
+        } else {
+            self.target_before_current_length = -1;
+
+            let root = self.nodes[0].clone();
+            debug_assert!(root.has_output());
+
+            self.current_frame_ord = -1;
+            target_upto = 0;
+            self.push_frame_for_node(&root, 0)?;
+        }
+
+        // Walk the trie index
+        while target_upto < target.len() {
+            let target_label = target[target_upto];
+
+            let node_idx = 1 + target_upto;
+            self.get_node(node_idx);
+
+            let parent = self.nodes[target_upto].clone();
+            let found = self
+                .trie
+                .lookup_child(target_label, &parent, &mut self.nodes[node_idx])?;
+
+            if !found {
+                let ord = self.current_frame_ord as usize;
+                self.valid_index_prefix = self.stack[ord].prefix_length;
+
+                let target_clone = target.to_vec();
+                self.stack[ord].scan_to_floor_frame(&target_clone);
+
+                self.stack[ord].load_block(self.terms_in.as_mut())?;
+
+                let result = self.stack[ord].scan_to_term(
+                    target,
+                    false,
+                    &mut self.term,
+                    &mut self.term_exists,
+                )?;
+                if result == SeekStatus::End {
+                    self.term.clear();
+                    self.term.extend_from_slice(target);
+                    self.term_exists = false;
+                    if self.next()?.is_some() {
+                        return Ok(SeekStatus::NotFound);
+                    } else {
+                        return Ok(SeekStatus::End);
+                    }
+                }
+                if result == SeekStatus::NotFound && !self.term_exists {
+                    // On a sub-block entry past the target; push into sub-frames
+                    // to find the first term.
+                    let ord = self.current_frame_ord as usize;
+                    let last_sub_fp = self.stack[ord].last_sub_fp;
+                    let prefix_len = self.stack[ord].prefix_length + self.stack[ord].suffix_length;
+                    self.push_frame_fp(None, last_sub_fp, prefix_len)?;
+                    self.stack[self.current_frame_ord as usize]
+                        .load_block(self.terms_in.as_mut())?;
+                    while self.stack[self.current_frame_ord as usize].next(
+                        &mut self.term,
+                        &mut self.term_exists,
+                        self.terms_in.as_mut(),
+                    )? {
+                        let sub_fp = self.stack[self.current_frame_ord as usize].last_sub_fp;
+                        let term_len = self.term.len();
+                        self.push_frame_fp(None, sub_fp, term_len)?;
+                        self.stack[self.current_frame_ord as usize]
+                            .load_block(self.terms_in.as_mut())?;
+                    }
+                }
+                return Ok(result);
+            } else {
+                if self.term.len() <= target_upto {
+                    self.term.resize(target_upto + 1, 0);
+                }
+                self.term[target_upto] = target_label;
+                target_upto += 1;
+
+                if self.nodes[node_idx].has_output() {
+                    let node = self.nodes[node_idx].clone();
+                    self.push_frame_for_node(&node, target_upto)?;
+                }
+            }
+        }
+
+        // Target entirely in index
+        let ord = self.current_frame_ord as usize;
+        self.valid_index_prefix = self.stack[ord].prefix_length;
+
+        let target_clone = target.to_vec();
+        self.stack[ord].scan_to_floor_frame(&target_clone);
+
+        self.stack[ord].load_block(self.terms_in.as_mut())?;
+
+        let result =
+            self.stack[ord].scan_to_term(target, false, &mut self.term, &mut self.term_exists)?;
+
+        if result == SeekStatus::End {
+            self.term.clear();
+            self.term.extend_from_slice(target);
+            self.term_exists = false;
+            if self.next()?.is_some() {
+                return Ok(SeekStatus::NotFound);
+            } else {
+                return Ok(SeekStatus::End);
+            }
+        }
+        if result == SeekStatus::NotFound && !self.term_exists {
+            let ord = self.current_frame_ord as usize;
+            let last_sub_fp = self.stack[ord].last_sub_fp;
+            let prefix_len = self.stack[ord].prefix_length + self.stack[ord].suffix_length;
+            self.push_frame_fp(None, last_sub_fp, prefix_len)?;
+            self.stack[self.current_frame_ord as usize].load_block(self.terms_in.as_mut())?;
+            while self.stack[self.current_frame_ord as usize].next(
+                &mut self.term,
+                &mut self.term_exists,
+                self.terms_in.as_mut(),
+            )? {
+                let sub_fp = self.stack[self.current_frame_ord as usize].last_sub_fp;
+                let term_len = self.term.len();
+                self.push_frame_fp(None, sub_fp, term_len)?;
+                self.stack[self.current_frame_ord as usize].load_block(self.terms_in.as_mut())?;
+            }
+        }
+        Ok(result)
+    }
 
     fn seek_exact_with_state(&mut self, term: &[u8], state: IntBlockTermState) {
         self.term.clear();
@@ -380,8 +612,9 @@ impl TermsEnum for SegmentTermsEnum {
         self.target_before_current_length = self.current_frame_ord;
 
         if self.current_frame_ord == -1 {
-            // Positioned via seek_exact_with_state — re-seek to catch up
-            let result = self.seek_exact(&self.term.clone())?;
+            // Positioned via flat seek_exact or seek_exact_with_state —
+            // re-seek with frame-based path to set up frame stack for iteration.
+            let result = self.seek_exact_frame_based(&self.term.clone())?;
             debug_assert!(result);
         }
 
@@ -444,6 +677,249 @@ impl TermsEnum for SegmentTermsEnum {
             }
         }
     }
+}
+
+/// Seeks to an exact term in the `.tim` file and returns its metadata.
+fn seek_exact_in_block(
+    terms_in: &dyn IndexInput,
+    trie_result: &super::trie_reader::TrieSeekResult,
+    target: &[u8],
+    index_options: IndexOptions,
+    index_in: &dyn IndexInput,
+) -> io::Result<Option<IntBlockTermState>> {
+    let prefix_length = trie_result.depth;
+    let mut block_fp = trie_result.output_fp;
+
+    // Handle floor blocks: find the right sub-block for the target's next byte
+    if trie_result.floor_data_fp >= 0 && target.len() > prefix_length {
+        let target_label = target[prefix_length];
+        block_fp = scan_to_floor_block(
+            index_in,
+            trie_result.floor_data_fp,
+            trie_result.output_fp,
+            target_label,
+        )?;
+    }
+
+    let mut input = terms_in.slice("seek_exact", 0, terms_in.length())?;
+    input.seek(block_fp as u64)?;
+
+    let result = scan_block(input.as_mut(), target, prefix_length, index_options)?;
+    match result {
+        ScanResult::Found(state) => Ok(Some(state)),
+        ScanResult::NotFound => Ok(None),
+    }
+}
+
+/// Scans floor data from `.tip` to find the block FP for the given target label.
+fn scan_to_floor_block(
+    index_in: &dyn IndexInput,
+    floor_data_fp: i64,
+    base_fp: i64,
+    target_label: u8,
+) -> io::Result<i64> {
+    let mut input = index_in.slice("floor_data", 0, index_in.length())?;
+    input.seek(floor_data_fp as u64)?;
+
+    let num_follow_blocks = input.read_vint()?;
+    let mut result_fp = base_fp;
+
+    for i in 0..num_follow_blocks {
+        let floor_lead_byte = input.read_byte()?;
+        let code = input.read_vlong()?;
+        let fp_delta = code >> 1;
+        let fp = base_fp + fp_delta;
+
+        if target_label < floor_lead_byte {
+            break;
+        }
+
+        result_fp = fp;
+
+        if i == num_follow_blocks - 1 {
+            break;
+        }
+    }
+
+    Ok(result_fp)
+}
+
+enum ScanResult {
+    Found(IntBlockTermState),
+    NotFound,
+}
+
+/// Loads and scans a single term block from the current position.
+fn scan_block(
+    mut input: &mut dyn DataInput,
+    target: &[u8],
+    prefix_length: usize,
+    index_options: IndexOptions,
+) -> io::Result<ScanResult> {
+    let code = input.read_vint()?;
+    let entry_count = (code >> 1) as usize;
+    let _is_last_in_floor = (code & 1) != 0;
+
+    let suffix_token = input.read_vlong()?;
+    let is_leaf_block = (suffix_token & 0x04) != 0;
+    let num_suffix_bytes = (suffix_token >> 3) as usize;
+    let compression_code = (suffix_token & 0x03) as u32;
+
+    let suffix_bytes = read_compressed(input, num_suffix_bytes, compression_code)?;
+
+    let suffix_lengths_token = input.read_vint()?;
+    let all_equal = (suffix_lengths_token & 1) != 0;
+    let num_suffix_length_bytes = (suffix_lengths_token >> 1) as usize;
+
+    let suffix_length_bytes = if all_equal {
+        let common = input.read_byte()?;
+        vec![common; num_suffix_length_bytes]
+    } else {
+        let mut buf = vec![0u8; num_suffix_length_bytes];
+        input.read_exact(&mut buf)?;
+        buf
+    };
+
+    let num_stats_bytes = input.read_vint()? as usize;
+    let mut stats_bytes = vec![0u8; num_stats_bytes];
+    input.read_exact(&mut stats_bytes)?;
+
+    let num_meta_bytes = input.read_vint()? as usize;
+    let mut meta_bytes = vec![0u8; num_meta_bytes];
+    input.read_exact(&mut meta_bytes)?;
+
+    let target_suffix = &target[prefix_length..];
+
+    let mut suffix_reader = SliceReader::new(&suffix_bytes);
+    let mut suffix_lengths_reader = SliceReader::new(&suffix_length_bytes);
+
+    let mut term_ord = 0usize;
+
+    for _entry_idx in 0..entry_count {
+        let (suffix_len, is_sub_block) = if is_leaf_block {
+            let len = suffix_lengths_reader.read_vint()? as usize;
+            (len, false)
+        } else {
+            let code = suffix_lengths_reader.read_vint()?;
+            let len = (code >> 1) as usize;
+            let is_sub = (code & 1) != 0;
+            if is_sub {
+                suffix_lengths_reader.read_vlong()?;
+            }
+            (len, is_sub)
+        };
+
+        let suffix_start = suffix_reader.pos();
+        suffix_reader.skip(suffix_len);
+
+        if is_sub_block {
+            continue;
+        }
+
+        let suffix = &suffix_bytes[suffix_start..suffix_start + suffix_len];
+        let cmp = suffix.cmp(target_suffix);
+
+        match cmp {
+            Ordering::Equal => {
+                let state = decode_term_state(&stats_bytes, &meta_bytes, term_ord, index_options)?;
+                return Ok(ScanResult::Found(state));
+            }
+            Ordering::Greater => {
+                return Ok(ScanResult::NotFound);
+            }
+            Ordering::Less => {
+                term_ord += 1;
+            }
+        }
+    }
+
+    Ok(ScanResult::NotFound)
+}
+
+/// Decode stats and metadata for the Nth term in a block.
+fn decode_term_state(
+    stats_bytes: &[u8],
+    meta_bytes: &[u8],
+    target_ord: usize,
+    index_options: IndexOptions,
+) -> io::Result<IntBlockTermState> {
+    let mut stats_reader = SliceReader::new(stats_bytes);
+    let mut meta_reader = SliceReader::new(meta_bytes);
+    let has_freqs = index_options.has_freqs();
+
+    let mut state = IntBlockTermState::new();
+    let mut last_state = IntBlockTermState::new();
+    let mut singleton_run = 0i32;
+
+    for ord in 0..=target_ord {
+        if singleton_run > 0 {
+            state.doc_freq = 1;
+            state.total_term_freq = 1;
+            singleton_run -= 1;
+        } else {
+            let token = stats_reader.read_vint()?;
+            if (token & 1) == 1 {
+                state.doc_freq = 1;
+                state.total_term_freq = 1;
+                singleton_run = token >> 1;
+            } else {
+                state.doc_freq = token >> 1;
+                if !has_freqs {
+                    state.total_term_freq = state.doc_freq as i64;
+                } else {
+                    state.total_term_freq = state.doc_freq as i64 + stats_reader.read_vlong()?;
+                }
+            }
+        }
+
+        let empty_state = IntBlockTermState::new();
+        let ref_state = if ord == 0 { &empty_state } else { &last_state };
+        decode_term_meta(&mut meta_reader, &mut state, ref_state, index_options)?;
+
+        if ord < target_ord {
+            last_state = state;
+        }
+    }
+
+    Ok(state)
+}
+
+/// Decode one term's postings metadata from the metadata bytes.
+fn decode_term_meta(
+    reader: &mut SliceReader,
+    state: &mut IntBlockTermState,
+    last_state: &IntBlockTermState,
+    index_options: IndexOptions,
+) -> io::Result<()> {
+    let code = reader.read_vlong()?;
+    if (code & 1) != 0 {
+        let encoded = code >> 1;
+        let delta = zigzag::decode_i64(encoded);
+        state.singleton_doc_id = (last_state.singleton_doc_id as i64 + delta) as i32;
+        state.doc_start_fp = last_state.doc_start_fp;
+    } else {
+        let fp_delta = code >> 1;
+        state.doc_start_fp = last_state.doc_start_fp + fp_delta;
+        if state.doc_freq == 1 {
+            state.singleton_doc_id = reader.read_vint()?;
+        } else {
+            state.singleton_doc_id = -1;
+        }
+    }
+
+    if index_options.has_positions() {
+        state.pos_start_fp = last_state.pos_start_fp + reader.read_vlong()?;
+        if index_options.has_offsets() {
+            state.pay_start_fp = last_state.pay_start_fp + reader.read_vlong()?;
+        }
+        if state.total_term_freq > pfor::BLOCK_SIZE as i64 {
+            state.last_pos_block_offset = reader.read_vlong()?;
+        } else {
+            state.last_pos_block_offset = -1;
+        }
+    }
+
+    Ok(())
 }
 
 /// Read and decompress suffix bytes.
@@ -1210,5 +1686,115 @@ mod tests {
         // Next after backward seek
         let next = te.next().unwrap().unwrap();
         assert_eq!(next, b"term_0011");
+    }
+
+    // --- seek_ceil tests ---
+
+    #[test]
+    fn test_seek_ceil_exact_match() {
+        let terms = vec![("alpha", &[0][..]), ("beta", &[1]), ("gamma", &[2])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        assert_eq!(te.seek_ceil(b"beta").unwrap(), SeekStatus::Found);
+        assert_eq!(te.term(), b"beta");
+        assert_eq!(te.doc_freq().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_seek_ceil_not_found() {
+        let terms = vec![("alpha", &[0][..]), ("gamma", &[1])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        // "beta" doesn't exist, ceiling is "gamma"
+        assert_eq!(te.seek_ceil(b"beta").unwrap(), SeekStatus::NotFound);
+        assert_eq!(te.term(), b"gamma");
+        assert_eq!(te.doc_freq().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_seek_ceil_past_all_terms() {
+        let terms = vec![("alpha", &[0][..]), ("beta", &[1])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        assert_eq!(te.seek_ceil(b"zzz").unwrap(), SeekStatus::End);
+    }
+
+    #[test]
+    fn test_seek_ceil_before_first_term() {
+        let terms = vec![("beta", &[0][..]), ("gamma", &[1])];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        // "alpha" is before all terms, ceiling is "beta"
+        assert_eq!(te.seek_ceil(b"alpha").unwrap(), SeekStatus::NotFound);
+        assert_eq!(te.term(), b"beta");
+    }
+
+    #[test]
+    fn test_seek_ceil_then_next() {
+        let terms = vec![
+            ("alpha", &[0][..]),
+            ("beta", &[1]),
+            ("delta", &[2]),
+            ("gamma", &[3]),
+        ];
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        // seek_ceil to "charlie" -> "delta"
+        assert_eq!(te.seek_ceil(b"charlie").unwrap(), SeekStatus::NotFound);
+        assert_eq!(te.term(), b"delta");
+
+        // next() should continue to "gamma"
+        let next = te.next().unwrap().unwrap();
+        assert_eq!(next, b"gamma");
+
+        assert!(te.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_seek_ceil_many_terms() {
+        let mut terms_data: Vec<(String, Vec<i32>)> = Vec::new();
+        for i in 0..100 {
+            terms_data.push((format!("term_{i:04}"), vec![i]));
+        }
+        let terms: Vec<(&str, &[i32])> = terms_data
+            .iter()
+            .map(|(t, d)| (t.as_str(), d.as_slice()))
+            .collect();
+        let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
+
+        // Exact match in multi-block index
+        assert_eq!(te.seek_ceil(b"term_0050").unwrap(), SeekStatus::Found);
+        assert_eq!(te.term(), b"term_0050");
+
+        // Between two terms
+        assert_eq!(te.seek_ceil(b"term_0050x").unwrap(), SeekStatus::NotFound);
+        assert_eq!(te.term(), b"term_0051");
+
+        // Past all terms
+        assert_eq!(te.seek_ceil(b"term_9999").unwrap(), SeekStatus::End);
     }
 }
