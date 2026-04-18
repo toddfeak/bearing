@@ -501,6 +501,7 @@ impl PostingsWriter {
             Ok(IntBlockTermState {
                 doc_freq,
                 total_term_freq,
+                term_block_ord: 0,
                 doc_start_fp,
                 pos_start_fp,
                 pay_start_fp,
@@ -604,6 +605,7 @@ impl PostingsWriter {
             Ok(IntBlockTermState {
                 doc_freq,
                 total_term_freq,
+                term_block_ord: 0,
                 doc_start_fp,
                 pos_start_fp,
                 pay_start_fp,
@@ -756,6 +758,7 @@ impl PostingsWriter {
         Ok(IntBlockTermState {
             doc_freq,
             total_term_freq,
+            term_block_ord: 0,
             doc_start_fp,
             pos_start_fp,
             pay_start_fp,
@@ -1462,6 +1465,7 @@ mod tests {
         let state = IntBlockTermState {
             doc_freq: 1,
             total_term_freq: 1,
+            term_block_ord: 0,
             doc_start_fp: 0,
             pos_start_fp: 0,
             pay_start_fp: 0,

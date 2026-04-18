@@ -44,6 +44,8 @@ pub struct IntBlockTermState {
     // From BlockTermState base class
     pub doc_freq: i32,
     pub total_term_freq: i64,
+    /// Ordinal of this term within its block (used for lazy metadata decoding).
+    pub term_block_ord: i32,
     // Lucene103-specific fields
     pub doc_start_fp: i64,
     pub pos_start_fp: i64,
@@ -57,6 +59,7 @@ impl IntBlockTermState {
         Self {
             doc_freq: 0,
             total_term_freq: 0,
+            term_block_ord: 0,
             doc_start_fp: 0,
             pos_start_fp: 0,
             pay_start_fp: 0,

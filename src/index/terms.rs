@@ -20,7 +20,7 @@ use crate::codecs::lucene103::postings_format::IntBlockTermState;
 /// own `Terms` instance.
 pub trait Terms {
     /// Returns an iterator that will step through all terms.
-    fn iterator(&self) -> io::Result<Box<dyn TermsEnum>>;
+    fn iterator(&self) -> io::Result<Box<dyn TermsEnum + '_>>;
 
     /// Returns the number of terms for this field, or -1 if not available.
     fn size(&self) -> i64;

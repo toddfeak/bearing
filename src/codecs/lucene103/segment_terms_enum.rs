@@ -22,7 +22,7 @@ use crate::index::terms::TermsEnum;
 use crate::store::slice_reader::SliceReader;
 use crate::store::{DataInput, IndexInput};
 
-const COMPRESSION_NONE: u32 = 0;
+pub(crate) const COMPRESSION_NONE: u32 = 0;
 const COMPRESSION_LOWERCASE_ASCII: u32 = 1;
 const COMPRESSION_LZ4: u32 = 2;
 
@@ -402,7 +402,7 @@ fn decode_term_meta(
 }
 
 /// Read and decompress suffix bytes.
-fn read_compressed(
+pub(crate) fn read_compressed(
     input: &mut dyn DataInput,
     uncompressed_len: usize,
     compression_code: u32,
@@ -432,6 +432,7 @@ mod tests {
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, BufferedFieldTerms};
     use crate::document::{DocValuesType, TermOffset};
     use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
+    use crate::index::terms::Terms;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
     use crate::store::memory::MemoryDirectory;
     use crate::store::{Directory, SharedDirectory};
@@ -824,17 +825,13 @@ mod tests {
 
     // --- SegmentTermsEnum (struct API) tests ---
 
-    use crate::index::terms::Terms;
-
-    /// Open a SegmentTermsEnum via FieldReader::iterator() for field 0.
-    fn open_terms_enum(
+    /// Open a BlockTreeTermsReader for field 0.
+    fn open_reader(
         dir: &dyn Directory,
         field_infos: &FieldInfos,
         segment_id: &[u8; 16],
-    ) -> Box<dyn TermsEnum> {
-        let reader = BlockTreeTermsReader::open(dir, "_0", "", segment_id, field_infos).unwrap();
-        let fr = reader.field_reader(0).unwrap();
-        fr.iterator().unwrap()
+    ) -> BlockTreeTermsReader {
+        BlockTreeTermsReader::open(dir, "_0", "", segment_id, field_infos).unwrap()
     }
 
     #[test]
@@ -842,7 +839,9 @@ mod tests {
         let terms = vec![("alpha", &[0, 1][..]), ("beta", &[2]), ("gamma", &[3])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let mut te = open_terms_enum(&dir, &fi, &id);
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
         assert!(te.seek_exact(b"alpha").unwrap());
         assert_eq!(te.term(), b"alpha");
         assert_eq!(te.doc_freq().unwrap(), 2);
@@ -859,7 +858,9 @@ mod tests {
         let terms = vec![("hello", &[0, 1, 2][..]), ("world", &[3])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let mut te = open_terms_enum(&dir, &fi, &id);
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
         assert!(te.seek_exact(b"hello").unwrap());
         let state = te.term_state().unwrap();
         assert_eq!(state.doc_freq, 3);
@@ -880,7 +881,9 @@ mod tests {
         let terms = vec![("hello", &[0, 1][..]), ("world", &[0])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::DocsAndFreqs).unwrap();
 
-        let mut te = open_terms_enum(&dir, &fi, &id);
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
         assert!(te.seek_exact(b"hello").unwrap());
         assert_ge!(te.total_term_freq().unwrap(), 2);
     }
@@ -890,7 +893,9 @@ mod tests {
         let terms = vec![("hello", &[0][..])];
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let te = open_terms_enum(&dir, &fi, &id);
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let te = fr.iterator().unwrap();
         // Before any seek, doc_freq and term_state should error
         assert!(te.doc_freq().is_err());
         assert!(te.term_state().is_err());
@@ -908,7 +913,9 @@ mod tests {
             .collect();
         let (dir, fi, id) = write_terms(terms, IndexOptions::Docs).unwrap();
 
-        let mut te = open_terms_enum(&dir, &fi, &id);
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+        let mut te = fr.iterator().unwrap();
         for i in 0..100 {
             let term = format!("term_{i:04}");
             assert!(te.seek_exact(term.as_bytes()).unwrap());

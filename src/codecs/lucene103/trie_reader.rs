@@ -84,7 +84,7 @@ pub(crate) struct Node {
 }
 
 impl Node {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fp: 0,
             sign: 0,

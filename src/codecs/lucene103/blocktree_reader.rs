@@ -64,7 +64,7 @@ pub struct FieldReader {
 }
 
 impl Terms for FieldReader {
-    fn iterator(&self) -> io::Result<Box<dyn TermsEnum>> {
+    fn iterator(&self) -> io::Result<Box<dyn TermsEnum + '_>> {
         let terms_in = self.terms_in.slice("terms_in", 0, self.terms_in.length())?;
         let index_in = self.index_input()?;
         let trie = self.new_trie_reader()?;
