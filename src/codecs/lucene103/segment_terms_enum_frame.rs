@@ -7,17 +7,29 @@
 //! own their decoded block data (suffix bytes, suffix lengths, stats, metadata)
 //! and provide methods to iterate entries and decode term metadata.
 
+#[cfg(test)]
 use std::io;
 
+#[cfg(test)]
 use crate::codecs::lucene103::postings_format::IntBlockTermState;
+#[cfg(test)]
 use crate::codecs::lucene103::segment_terms_enum::read_compressed;
+#[cfg(test)]
 use crate::codecs::lucene103::trie_reader::Node;
+#[cfg(test)]
+use crate::document::IndexOptions;
+#[cfg(test)]
 use crate::encoding::read_encoding::ReadEncoding;
+#[cfg(test)]
+use crate::encoding::{pfor, zigzag};
+#[cfg(test)]
 use crate::store::slice_reader::SliceReader;
+#[cfg(test)]
 use crate::store::{DataInput, IndexInput};
 
 /// File pointers tracking where a block lives in the `.tim` file.
 #[derive(Debug, Default)]
+#[cfg(test)]
 pub(super) struct BlockPosition {
     /// File pointer where this block was loaded from.
     pub fp: i64,
@@ -29,6 +41,7 @@ pub(super) struct BlockPosition {
 
 /// Boolean flags describing the structure of a loaded block.
 #[derive(Debug, Default)]
+#[cfg(test)]
 pub(super) struct BlockFlags {
     /// Whether this block has term entries (vs. only sub-blocks).
     pub has_terms: bool,
@@ -49,6 +62,7 @@ pub(super) struct BlockFlags {
 /// Contains the five sections of a term block: suffix bytes, suffix lengths,
 /// stats, and metadata, along with reader cursors for suffix iteration.
 #[derive(Debug, Default)]
+#[cfg(test)]
 pub(super) struct BlockData {
     /// Decompressed suffix bytes for all entries.
     pub suffix_bytes: Vec<u8>,
@@ -60,14 +74,19 @@ pub(super) struct BlockData {
     pub suffix_length_pos: usize,
     /// Stats bytes for all entries.
     pub stat_bytes: Vec<u8>,
+    /// Stats reader position (cursor into `stat_bytes`).
+    pub stats_pos: usize,
     /// Metadata bytes for all entries.
     pub meta_bytes: Vec<u8>,
+    /// Metadata reader position (cursor into `meta_bytes`).
+    pub meta_pos: usize,
     /// Total suffix bytes in block (for stats).
     pub total_suffix_bytes: i64,
 }
 
 /// Floor block navigation state from the `.tip` file.
 #[derive(Debug, Default)]
+#[cfg(test)]
 pub(super) struct FloorState {
     /// Floor data bytes.
     pub data: Vec<u8>,
@@ -81,6 +100,7 @@ pub(super) struct FloorState {
     pub num_follow_blocks: i32,
 }
 
+#[cfg(test)]
 impl FloorState {
     /// Parses floor data from a byte slice.
     #[cfg(test)]
@@ -112,7 +132,7 @@ impl FloorState {
 /// Each frame holds the decoded contents of one term block and tracks
 /// iteration state within that block.
 #[derive(Debug)]
-#[expect(dead_code)]
+#[cfg(test)]
 pub(super) struct SegmentTermsEnumFrame {
     /// Index of this frame in the stack.
     pub ord: i32,
@@ -140,6 +160,8 @@ pub(super) struct SegmentTermsEnumFrame {
     pub state: IntBlockTermState,
     /// File pointer of the last sub-block seen during iteration.
     pub last_sub_fp: i64,
+    /// Sub-block FP delta code from the suffix lengths stream.
+    pub sub_code: i64,
 
     /// The trie node at this frame's depth.
     pub node: Option<Node>,
@@ -149,7 +171,7 @@ pub(super) struct SegmentTermsEnumFrame {
     pub suffix_length: usize,
 }
 
-#[expect(dead_code)]
+#[cfg(test)]
 impl SegmentTermsEnumFrame {
     /// Creates a new unloaded frame at the given stack position.
     pub fn new(ord: i32) -> Self {
@@ -166,6 +188,7 @@ impl SegmentTermsEnumFrame {
             meta_data_upto: 0,
             state: IntBlockTermState::new(),
             last_sub_fp: -1,
+            sub_code: 0,
             node: None,
             start_byte_pos: 0,
             suffix_length: 0,
@@ -260,6 +283,216 @@ impl SegmentTermsEnumFrame {
 
         // fp_end = position after all block data
         self.pos.fp_end = terms_in.file_pointer() as i64;
+
+        Ok(())
+    }
+
+    /// Decodes the next entry in the block. Returns `true` if the entry is a
+    /// sub-block, `false` if it is a term.
+    ///
+    /// For leaf blocks, delegates to [`next_leaf`](Self::next_leaf). For
+    /// non-leaf blocks, delegates to [`next_non_leaf`](Self::next_non_leaf).
+    pub fn next(
+        &mut self,
+        term: &mut Vec<u8>,
+        term_exists: &mut bool,
+        terms_in: &mut dyn IndexInput,
+    ) -> io::Result<bool> {
+        if self.flags.is_leaf_block {
+            self.next_leaf(term, term_exists)?;
+            Ok(false)
+        } else {
+            self.next_non_leaf(term, term_exists, terms_in)
+        }
+    }
+
+    /// Advances to the next entry in a leaf block.
+    ///
+    /// Reads the suffix length and suffix bytes, copies them into the shared
+    /// term buffer, and sets `term_exists = true`.
+    pub fn next_leaf(&mut self, term: &mut Vec<u8>, term_exists: &mut bool) -> io::Result<()> {
+        debug_assert!(self.next_ent != -1 && self.next_ent < self.ent_count as i32);
+        self.next_ent += 1;
+
+        let mut suffix_lengths_reader =
+            SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+        self.suffix_length = suffix_lengths_reader.read_vint()? as usize;
+        self.data.suffix_length_pos += suffix_lengths_reader.pos();
+
+        self.start_byte_pos = self.data.suffix_pos;
+        term.resize(self.prefix_length + self.suffix_length, 0);
+        term[self.prefix_length..self.prefix_length + self.suffix_length].copy_from_slice(
+            &self.data.suffix_bytes
+                [self.data.suffix_pos..self.data.suffix_pos + self.suffix_length],
+        );
+        self.data.suffix_pos += self.suffix_length;
+
+        *term_exists = true;
+        Ok(())
+    }
+
+    /// Advances to the next entry in a non-leaf block.
+    ///
+    /// Returns `true` if the entry is a sub-block, `false` if it is a term.
+    /// When a sub-block is encountered, `last_sub_fp` is set to the sub-block's
+    /// absolute file pointer. When all entries are exhausted, loads the next
+    /// floor block and continues.
+    pub fn next_non_leaf(
+        &mut self,
+        term: &mut Vec<u8>,
+        term_exists: &mut bool,
+        terms_in: &mut dyn IndexInput,
+    ) -> io::Result<bool> {
+        loop {
+            if self.next_ent == self.ent_count as i32 {
+                debug_assert!(
+                    self.node.is_none() || (self.flags.is_floor && !self.flags.is_last_in_floor),
+                    "is_floor={} is_last_in_floor={}",
+                    self.flags.is_floor,
+                    self.flags.is_last_in_floor,
+                );
+                self.load_next_floor_block(terms_in)?;
+                if self.flags.is_leaf_block {
+                    self.next_leaf(term, term_exists)?;
+                    return Ok(false);
+                } else {
+                    continue;
+                }
+            }
+
+            debug_assert!(self.next_ent != -1 && self.next_ent < self.ent_count as i32);
+            self.next_ent += 1;
+
+            let mut suffix_lengths_reader =
+                SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+            let code = suffix_lengths_reader.read_vint()?;
+            self.suffix_length = (code as u32 >> 1) as usize;
+
+            self.start_byte_pos = self.data.suffix_pos;
+            term.resize(self.prefix_length + self.suffix_length, 0);
+            term[self.prefix_length..self.prefix_length + self.suffix_length].copy_from_slice(
+                &self.data.suffix_bytes
+                    [self.data.suffix_pos..self.data.suffix_pos + self.suffix_length],
+            );
+            self.data.suffix_pos += self.suffix_length;
+
+            if (code & 1) == 0 {
+                // A normal term
+                *term_exists = true;
+                self.sub_code = 0;
+                self.state.term_block_ord += 1;
+                self.data.suffix_length_pos += suffix_lengths_reader.pos();
+                return Ok(false);
+            } else {
+                // A sub-block; make sub-FP absolute
+                *term_exists = false;
+                self.sub_code = suffix_lengths_reader.read_vlong()?;
+                self.last_sub_fp = self.pos.fp - self.sub_code;
+                self.data.suffix_length_pos += suffix_lengths_reader.pos();
+                return Ok(true);
+            }
+        }
+    }
+
+    /// Lazily decodes stats and metadata up to the current term position.
+    ///
+    /// Only decodes entries that haven't been decoded yet (`meta_data_upto`
+    /// through `get_term_block_ord()`). This makes `next()` fast for
+    /// term-only iteration — metadata is only decoded when `doc_freq()`,
+    /// `total_term_freq()`, or `term_state()` is called.
+    pub fn decode_meta_data(&mut self, index_options: IndexOptions) -> io::Result<()> {
+        let limit = self.get_term_block_ord();
+        let mut absolute = self.meta_data_upto == 0;
+        debug_assert!(limit > 0);
+
+        let mut stats_reader = SliceReader::new(&self.data.stat_bytes[self.data.stats_pos..]);
+        let mut meta_reader = SliceReader::new(&self.data.meta_bytes[self.data.meta_pos..]);
+
+        while self.meta_data_upto < limit {
+            // Stats decoding (with singleton RLE)
+            if self.stats_singleton_run_length > 0 {
+                self.state.doc_freq = 1;
+                self.state.total_term_freq = 1;
+                self.stats_singleton_run_length -= 1;
+            } else {
+                let token = stats_reader.read_vint()?;
+                if (token & 1) == 1 {
+                    self.state.doc_freq = 1;
+                    self.state.total_term_freq = 1;
+                    self.stats_singleton_run_length = token >> 1;
+                } else {
+                    self.state.doc_freq = token >> 1;
+                    if index_options == IndexOptions::Docs {
+                        self.state.total_term_freq = self.state.doc_freq as i64;
+                    } else {
+                        self.state.total_term_freq =
+                            self.state.doc_freq as i64 + stats_reader.read_vlong()?;
+                    }
+                }
+            }
+
+            // Metadata decoding — state accumulates across iterations.
+            // On the first term (absolute=true), file pointers are absolute.
+            // On subsequent terms, they are delta-encoded relative to the
+            // previous state values already in self.state.
+            Self::decode_term_meta(&mut meta_reader, &mut self.state, absolute, index_options)?;
+
+            self.meta_data_upto += 1;
+            absolute = false;
+        }
+
+        self.data.stats_pos += stats_reader.pos();
+        self.data.meta_pos += meta_reader.pos();
+        self.state.term_block_ord = self.meta_data_upto;
+
+        Ok(())
+    }
+
+    /// Decode one term's postings metadata from the metadata bytes.
+    ///
+    /// When `absolute` is true, file pointers are read as absolute values
+    /// (state fields are zeroed first). When false, values are delta-encoded
+    /// relative to the current state.
+    fn decode_term_meta(
+        reader: &mut SliceReader,
+        state: &mut IntBlockTermState,
+        absolute: bool,
+        index_options: IndexOptions,
+    ) -> io::Result<()> {
+        if absolute {
+            state.doc_start_fp = 0;
+            state.pos_start_fp = 0;
+            state.pay_start_fp = 0;
+            state.singleton_doc_id = -1;
+        }
+
+        let code = reader.read_vlong()?;
+        if (code & 1) != 0 {
+            let encoded = code >> 1;
+            let delta = zigzag::decode_i64(encoded);
+            state.singleton_doc_id = (state.singleton_doc_id as i64 + delta) as i32;
+            // doc_start_fp unchanged (same as previous)
+        } else {
+            let fp_delta = code >> 1;
+            state.doc_start_fp += fp_delta;
+            if state.doc_freq == 1 {
+                state.singleton_doc_id = reader.read_vint()?;
+            } else {
+                state.singleton_doc_id = -1;
+            }
+        }
+
+        if index_options.has_positions() {
+            state.pos_start_fp += reader.read_vlong()?;
+            if index_options.has_offsets() {
+                state.pay_start_fp += reader.read_vlong()?;
+            }
+            if state.total_term_freq > pfor::BLOCK_SIZE as i64 {
+                state.last_pos_block_offset = reader.read_vlong()?;
+            } else {
+                state.last_pos_block_offset = -1;
+            }
+        }
 
         Ok(())
     }
@@ -568,5 +801,178 @@ mod tests {
         frame.load_block(terms_in.as_mut()).unwrap();
         assert_eq!(frame.ent_count, ent_count);
         assert_eq!(frame.pos.fp_end, fp_end);
+    }
+
+    // --- next_leaf / next tests ---
+
+    #[test]
+    fn test_next_leaf_iterates_all_terms() {
+        let terms = vec![("alpha", &[0][..]), ("beta", &[1]), ("gamma", &[2])];
+        let (dir, fi, id) = write_terms(&terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+
+        let terms_in = reader.terms_in();
+        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
+        let trie_result = trie.seek_to_block(b"alpha").unwrap().unwrap();
+
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.pos.fp = trie_result.output_fp;
+        frame.load_block(terms_in.as_mut()).unwrap();
+        assert!(frame.flags.is_leaf_block);
+
+        let mut term = Vec::new();
+        let mut term_exists = false;
+
+        frame.next_leaf(&mut term, &mut term_exists).unwrap();
+        assert_eq!(term, b"alpha");
+        assert!(term_exists);
+
+        frame.next_leaf(&mut term, &mut term_exists).unwrap();
+        assert_eq!(term, b"beta");
+
+        frame.next_leaf(&mut term, &mut term_exists).unwrap();
+        assert_eq!(term, b"gamma");
+    }
+
+    #[test]
+    fn test_next_leaf_lexicographic_order() {
+        let terms = vec![
+            ("aaa", &[0][..]),
+            ("aab", &[1]),
+            ("bbb", &[2]),
+            ("zzz", &[3]),
+        ];
+        let (dir, fi, id) = write_terms(&terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+
+        let terms_in = reader.terms_in();
+        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
+        let trie_result = trie.seek_to_block(b"aaa").unwrap().unwrap();
+
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.pos.fp = trie_result.output_fp;
+        frame.load_block(terms_in.as_mut()).unwrap();
+
+        let mut term = Vec::new();
+        let mut term_exists = false;
+        let mut collected = Vec::new();
+
+        for _ in 0..frame.ent_count {
+            frame.next_leaf(&mut term, &mut term_exists).unwrap();
+            collected.push(term.clone());
+        }
+
+        // Verify lexicographic order
+        for i in 1..collected.len() {
+            assert_lt!(collected[i - 1], collected[i]);
+        }
+    }
+
+    #[test]
+    fn test_next_dispatches_to_leaf() {
+        let terms = vec![("hello", &[0][..]), ("world", &[1])];
+        let (dir, fi, id) = write_terms(&terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+
+        let terms_in = reader.terms_in();
+        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
+        let trie_result = trie.seek_to_block(b"hello").unwrap().unwrap();
+
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.pos.fp = trie_result.output_fp;
+        frame.load_block(terms_in.as_mut()).unwrap();
+        assert!(frame.flags.is_leaf_block);
+
+        let mut term = Vec::new();
+        let mut term_exists = false;
+
+        // next() on a leaf block should return false (not a sub-block)
+        let is_sub_block = frame
+            .next(&mut term, &mut term_exists, terms_in.as_mut())
+            .unwrap();
+        assert!(!is_sub_block);
+        assert_eq!(term, b"hello");
+        assert!(term_exists);
+    }
+
+    // --- decode_meta_data tests ---
+
+    #[test]
+    fn test_decode_meta_data_doc_freq() {
+        let terms = vec![
+            ("alpha", &[0, 1][..]),
+            ("beta", &[2]),
+            ("gamma", &[3, 4, 5]),
+        ];
+        let (dir, fi, id) = write_terms(&terms, IndexOptions::Docs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+
+        let terms_in = reader.terms_in();
+        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
+        let trie_result = trie.seek_to_block(b"alpha").unwrap().unwrap();
+
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.pos.fp = trie_result.output_fp;
+        frame.load_block(terms_in.as_mut()).unwrap();
+
+        let mut term = Vec::new();
+        let mut term_exists = false;
+
+        // Advance to first term
+        frame.next_leaf(&mut term, &mut term_exists).unwrap();
+        assert_eq!(term, b"alpha");
+        frame.decode_meta_data(IndexOptions::Docs).unwrap();
+        assert_eq!(frame.state.doc_freq, 2);
+
+        // Advance to second term
+        frame.next_leaf(&mut term, &mut term_exists).unwrap();
+        assert_eq!(term, b"beta");
+        frame.decode_meta_data(IndexOptions::Docs).unwrap();
+        assert_eq!(frame.state.doc_freq, 1);
+
+        // Advance to third term
+        frame.next_leaf(&mut term, &mut term_exists).unwrap();
+        assert_eq!(term, b"gamma");
+        frame.decode_meta_data(IndexOptions::Docs).unwrap();
+        assert_eq!(frame.state.doc_freq, 3);
+    }
+
+    #[test]
+    fn test_decode_meta_data_total_term_freq() {
+        let terms = vec![("hello", &[0, 1][..]), ("world", &[0])];
+        let (dir, fi, id) = write_terms(&terms, IndexOptions::DocsAndFreqs).unwrap();
+
+        let reader = open_reader(&dir, &fi, &id);
+        let fr = reader.field_reader(0).unwrap();
+
+        let terms_in = reader.terms_in();
+        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
+        let trie_result = trie.seek_to_block(b"hello").unwrap().unwrap();
+
+        let mut frame = SegmentTermsEnumFrame::new(0);
+        frame.pos.fp = trie_result.output_fp;
+        frame.load_block(terms_in.as_mut()).unwrap();
+
+        let mut term = Vec::new();
+        let mut term_exists = false;
+
+        frame.next_leaf(&mut term, &mut term_exists).unwrap();
+        assert_eq!(term, b"hello");
+        frame.decode_meta_data(IndexOptions::DocsAndFreqs).unwrap();
+        assert_eq!(frame.state.doc_freq, 2);
+        assert_ge!(frame.state.total_term_freq, 2);
     }
 }
