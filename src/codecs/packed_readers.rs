@@ -4,23 +4,23 @@
 
 use std::io;
 
-use crate::store::{DataInput, IndexInput};
+use crate::store2::IndexInput;
 
 /// Reads bit-packed integers written by [`super::packed_writers::DirectWriter`].
 ///
 /// Values are stored LSB-first in little-endian byte order. Supported
 /// bits-per-value: 1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64.
-pub struct DirectReader {
-    input: Box<dyn IndexInput>,
+pub struct DirectReader<'a> {
+    input: IndexInput<'a>,
     bits_per_value: u32,
     offset: u64,
 }
 
-impl DirectReader {
-    /// Creates a reader over `input` starting at `offset` with the given bpv.
-    pub fn new(input: Box<dyn IndexInput>, bits_per_value: u32, offset: u64) -> Self {
+impl<'a> DirectReader<'a> {
+    /// Creates a reader over `bytes` starting at `offset` with the given bpv.
+    pub fn new(bytes: &'a [u8], bits_per_value: u32, offset: u64) -> Self {
         Self {
-            input,
+            input: IndexInput::new("direct", bytes),
             bits_per_value,
             offset,
         }
@@ -56,7 +56,7 @@ impl DirectReader {
         let bit_offset = (index % values_per_byte as u64) * bpv as u64;
         let mask = (1u64 << bpv) - 1;
 
-        self.input.seek(self.offset + byte_offset)?;
+        self.input.seek((self.offset + byte_offset) as usize)?;
         let b = self.input.read_byte()? as u64;
         Ok(((b >> bit_offset) & mask) as i64)
     }
@@ -64,10 +64,10 @@ impl DirectReader {
     /// Byte-aligned bpv (8, 16, 24, 32, 40, 48, 56, 64).
     fn get_byte_aligned(&mut self, index: u64, bytes_per_value: u64, mask: u64) -> io::Result<i64> {
         let pos = self.offset + index * bytes_per_value;
-        self.input.seek(pos)?;
+        self.input.seek(pos as usize)?;
         let mut buf = [0u8; 8];
         self.input
-            .read_exact(&mut buf[..bytes_per_value as usize])?;
+            .read_bytes(&mut buf[..bytes_per_value as usize])?;
         let raw = u64::from_le_bytes(buf);
         Ok((raw & mask) as i64)
     }
@@ -78,11 +78,10 @@ impl DirectReader {
         let shift = (index & 1) * 4;
         let bytes_to_read = if bpv <= 16 { 4usize } else { 8 };
 
-        self.input.seek(self.offset + byte_offset)?;
+        self.input.seek((self.offset + byte_offset) as usize)?;
         let mut buf = [0u8; 8];
-        let read_len =
-            bytes_to_read.min((self.input.length() - self.input.file_pointer()) as usize);
-        self.input.read_exact(&mut buf[..read_len])?;
+        let read_len = bytes_to_read.min(self.input.length() - self.input.position());
+        self.input.read_bytes(&mut buf[..read_len])?;
         let raw = u64::from_le_bytes(buf);
         Ok(((raw >> shift) & mask) as i64)
     }
@@ -93,6 +92,8 @@ struct BlockMeta {
     min: i64,
     avg: f32,
     bpv: u8,
+    /// Relative offset within the data region where this block's packed values begin.
+    offset: u64,
 }
 
 /// Reads monotonically-increasing sequences written by
@@ -100,20 +101,21 @@ struct BlockMeta {
 ///
 /// Each block stores a minimum, average increment, and bit-packed deltas.
 /// Values are reconstructed as `min + avg * index_within_block + delta`.
+///
+/// The reader owns its per-block metadata but does not own the data bytes —
+/// callers pass the data slice at read time via [`get`](Self::get). This
+/// matches the Layer 3 principle that codec readers do not hold cursor state.
 pub(crate) struct DirectMonotonicReader {
     block_shift: u32,
+    base_data_offset: u64,
     blocks: Box<[BlockMeta]>,
-    readers: Box<[DirectReader]>,
 }
 
 impl DirectMonotonicReader {
-    /// Loads metadata from `meta` and creates per-block DirectReaders from `data`.
-    ///
-    /// `num_values` is the total number of values in the monotonic sequence.
-    /// The number of metadata blocks is derived from `num_values` and `block_shift`.
+    /// Loads metadata from `meta`. `base_data_offset` is the absolute offset
+    /// within the caller-supplied data slice where per-block data begins.
     pub(crate) fn load_with_shift(
-        meta: &mut dyn DataInput,
-        data: &dyn IndexInput,
+        meta: &mut IndexInput<'_>,
         num_values: u32,
         base_data_offset: u64,
         block_shift: u32,
@@ -121,38 +123,40 @@ impl DirectMonotonicReader {
         let block_size = 1u32 << block_shift;
         let num_blocks = (num_values as usize).div_ceil(block_size as usize);
         let mut blocks = Vec::with_capacity(num_blocks);
-        let mut readers = Vec::with_capacity(num_blocks);
 
         for _ in 0..num_blocks {
             let min = meta.read_le_long()?;
             let avg_bits = meta.read_le_int()? as u32;
             let avg = f32::from_bits(avg_bits);
-            let offset = meta.read_le_long()?;
+            let offset = meta.read_le_long()? as u64;
             let bpv = meta.read_byte()?;
 
-            let start = base_data_offset + offset as u64;
-            let remaining = data.length().saturating_sub(start);
-            let reader_input = data.slice("DirectMonotonicReader", start, remaining)?;
-            readers.push(DirectReader::new(reader_input, bpv as u32, 0));
-            blocks.push(BlockMeta { min, avg, bpv });
+            blocks.push(BlockMeta {
+                min,
+                avg,
+                bpv,
+                offset,
+            });
         }
 
         Ok(Self {
             block_shift,
+            base_data_offset,
             blocks: blocks.into_boxed_slice(),
-            readers: readers.into_boxed_slice(),
         })
     }
 
-    /// Reads the value at the given logical index.
-    pub(crate) fn get(&mut self, index: u64) -> io::Result<i64> {
+    /// Reads the value at the given logical index, borrowing packed bytes from `data`.
+    pub(crate) fn get(&self, index: u64, data: &[u8]) -> io::Result<i64> {
         let block = (index >> self.block_shift) as usize;
         let block_index = index & ((1u64 << self.block_shift) - 1);
         let meta = &self.blocks[block];
         let delta = if meta.bpv == 0 {
             0
         } else {
-            self.readers[block].get(block_index)?
+            let start = (self.base_data_offset + meta.offset) as usize;
+            let mut reader = DirectReader::new(&data[start..], meta.bpv as u32, 0);
+            reader.get(block_index)?
         };
         Ok(meta.min + (meta.avg as f64 * block_index as f64) as i64 + delta)
     }
@@ -162,13 +166,8 @@ impl DirectMonotonicReader {
 mod tests {
     use super::*;
     use crate::codecs::packed_writers::DirectWriter;
-    use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::memory::MemoryIndexOutput;
     use crate::store::{DataOutput, IndexOutput};
-
-    fn input_from_bytes(data: &[u8]) -> Box<dyn IndexInput> {
-        Box::new(ByteSliceIndexInput::new("test".to_string(), data.to_vec()))
-    }
 
     /// Helper to write values with DirectWriter and read them back with DirectReader.
     fn round_trip(values: &[i64], bpv: u32) {
@@ -179,7 +178,7 @@ mod tests {
         }
         writer.finish(&mut out).unwrap();
 
-        let mut reader = DirectReader::new(input_from_bytes(out.bytes()), bpv, 0);
+        let mut reader = DirectReader::new(out.bytes(), bpv, 0);
 
         for (i, &expected) in values.iter().enumerate() {
             let actual = reader.get(i as u64).unwrap();
@@ -259,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_direct_reader_bpv0() {
-        let mut reader = DirectReader::new(input_from_bytes(&[]), 0, 0);
+        let mut reader = DirectReader::new(&[], 0, 0);
         assert_eq!(reader.get(0).unwrap(), 0);
         assert_eq!(reader.get(100).unwrap(), 0);
     }
@@ -273,9 +272,7 @@ mod tests {
 
     #[test]
     fn test_direct_reader_with_offset() {
-        // Write some prefix bytes, then the packed data
         let mut out = MemoryIndexOutput::new("test".to_string());
-        // Write 10 bytes of prefix
         for i in 0..10u8 {
             out.write_byte(i).unwrap();
         }
@@ -287,7 +284,7 @@ mod tests {
         writer.add(255);
         writer.finish(&mut out).unwrap();
 
-        let mut reader = DirectReader::new(input_from_bytes(out.bytes()), 8, offset);
+        let mut reader = DirectReader::new(out.bytes(), 8, offset);
 
         assert_eq!(reader.get(0).unwrap(), 42);
         assert_eq!(reader.get(1).unwrap(), 99);
@@ -310,21 +307,16 @@ mod tests {
         let _num_blocks = writer.finish(&mut meta_out, &mut data_out).unwrap();
 
         let meta_bytes = meta_out.bytes().to_vec();
-        let data_input = input_from_bytes(data_out.bytes());
-        let mut meta_input = ByteSliceIndexInput::new("meta".to_string(), meta_bytes);
+        let data_bytes = data_out.bytes().to_vec();
+        let mut meta_input = IndexInput::new("meta", &meta_bytes);
 
         let num_values = values.len() as u32;
-        let mut reader = DirectMonotonicReader::load_with_shift(
-            &mut meta_input,
-            data_input.as_ref(),
-            num_values,
-            0,
-            block_shift,
-        )
-        .unwrap();
+        let reader =
+            DirectMonotonicReader::load_with_shift(&mut meta_input, num_values, 0, block_shift)
+                .unwrap();
 
         for (i, &expected) in values.iter().enumerate() {
-            let actual = reader.get(i as u64).unwrap();
+            let actual = reader.get(i as u64, &data_bytes).unwrap();
             assert_eq!(
                 actual, expected,
                 "mismatch at index {i}: expected {expected}, got {actual}"

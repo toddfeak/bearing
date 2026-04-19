@@ -53,12 +53,13 @@ Each codec reader migrates in its own commit. The pattern:
 
 Suggested order (simplest first to validate the pattern, complex last):
 
-1. `points_reader` or `norms_reader` — fewer code paths, good for proving the pattern
-2. `doc_values_producer` and `term_vectors_reader`
-3. `stored_fields_reader`
-4. `postings_reader`
-5. `blocktree_reader` and `segment_terms_enum` (deepest call chains, most iterators)
-6. `compound_reader` (Directory implementation, may need its own ordering consideration)
+1. ~~`points_reader`~~ — migrated (commit b9ed958)
+2. ~~`stored_fields_reader`~~ — migrated (this commit); `term_vectors_reader` partially migrated (its `.tvm` meta path only, since it shares `FieldsIndexReader` with stored_fields); `DirectReader` / `DirectMonotonicReader` in `packed_readers.rs` also moved to `store2::IndexInput`
+3. `norms_reader`
+4. `doc_values_producer` and `term_vectors_reader` (full migration of the `.tvd`/`.tvx` paths)
+5. `postings_reader`
+6. `blocktree_reader` and `segment_terms_enum` (deepest call chains, most iterators)
+7. `compound_reader` (Directory implementation, may need its own ordering consideration)
 
 ## Final Cleanup Commit
 

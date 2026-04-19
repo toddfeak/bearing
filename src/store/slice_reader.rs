@@ -7,10 +7,6 @@ use std::io;
 use crate::store::DataInput;
 
 /// A [`DataInput`] that reads from a borrowed byte slice.
-///
-/// Unlike [`ByteSliceIndexInput`](super::byte_slice_input::ByteSliceIndexInput)
-/// which owns its data, `SliceReader` borrows a `&[u8]` and can return
-/// zero-copy sub-slices via [`read_slice`](Self::read_slice).
 pub(crate) struct SliceReader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -30,16 +26,6 @@ impl<'a> SliceReader<'a> {
     /// Advances the position by `n` bytes without reading.
     pub(crate) fn skip(&mut self, n: usize) {
         self.pos += n;
-    }
-
-    /// Returns a zero-copy sub-slice of `len` bytes and advances the position.
-    pub(crate) fn read_slice(&mut self, len: usize) -> io::Result<&'a [u8]> {
-        if self.pos + len > self.data.len() {
-            return Err(io::Error::other("read past end of slice"));
-        }
-        let slice = &self.data[self.pos..self.pos + len];
-        self.pos += len;
-        Ok(slice)
     }
 }
 
@@ -122,22 +108,6 @@ mod tests {
         let mut reader = SliceReader::new(&[1, 2, 3, 4, 5]);
         reader.skip(3);
         assert_eq!(reader.read_byte().unwrap(), 4);
-    }
-
-    #[test]
-    fn test_read_slice() {
-        let data = [10, 20, 30, 40, 50];
-        let mut reader = SliceReader::new(&data);
-        let slice = reader.read_slice(3).unwrap();
-        assert_eq!(slice, &[10, 20, 30]);
-        assert_eq!(reader.pos(), 3);
-        assert_eq!(reader.read_byte().unwrap(), 40);
-    }
-
-    #[test]
-    fn test_read_slice_past_end() {
-        let mut reader = SliceReader::new(&[1, 2]);
-        assert_err!(reader.read_slice(3));
     }
 
     #[test]

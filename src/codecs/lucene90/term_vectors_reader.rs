@@ -6,7 +6,6 @@
 //! by [`super::term_vectors`]. Metadata and chunk index are read eagerly;
 //! chunk data in `.tvd` is available via the retained `vectors_stream` handle.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::io;
 
 use log::debug;
@@ -18,8 +17,10 @@ use crate::codecs::lucene90::term_vectors::{
     VECTORS_EXTENSION, VERSION,
 };
 use crate::index::index_file_names;
-use crate::store::checksum_input::ChecksumIndexInput;
 use crate::store::{Directory, IndexInput};
+use crate::store2::IndexInput as Store2IndexInput;
+use crate::store2::codec_footers::{FOOTER_LENGTH, verify_checksum};
+use crate::store2::codec_headers::check_index_header as store2_check_index_header;
 
 /// Reads term vectors for a segment.
 ///
@@ -79,12 +80,16 @@ impl TermVectorsReader {
             segment_suffix,
         )?;
 
-        // 2. Open .tvm (meta) with checksum
+        // 2. Open .tvm (meta), verify full-file CRC, then parse metadata.
         let tvm_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let meta_input = directory.open_input(&tvm_name)?;
-        let mut meta_in = ChecksumIndexInput::new(meta_input);
-        codec_util::check_index_header(
+        let tvm_backing = directory.open_file(&tvm_name)?;
+        verify_checksum(tvm_backing.as_bytes())?;
+
+        let tvm_bytes = tvm_backing.as_bytes();
+        let prefix_len = tvm_bytes.len() - FOOTER_LENGTH;
+        let mut meta_in = Store2IndexInput::new(&tvm_name, &tvm_bytes[..prefix_len]);
+        store2_check_index_header(
             &mut meta_in,
             INDEX_CODEC_META,
             VERSION,
@@ -111,7 +116,7 @@ impl TermVectorsReader {
             segment_id,
             segment_suffix,
         )?;
-        let index_reader = FieldsIndexReader::open(&mut meta_in, tvx_input.as_ref())?;
+        let index_reader = FieldsIndexReader::open(&mut meta_in)?;
 
         // 4. Read chunk counts
         let num_chunks = meta_in.read_vlong()?;
@@ -134,8 +139,6 @@ impl TermVectorsReader {
                 "numDirtyDocs < numDirtyChunks: dirtyDocs={num_dirty_docs} dirtyChunks={num_dirty_chunks}"
             )));
         }
-
-        codec_util::check_footer(&mut meta_in)?;
 
         debug!("term_vectors_reader: {num_chunks} chunks for segment {segment_name}");
 

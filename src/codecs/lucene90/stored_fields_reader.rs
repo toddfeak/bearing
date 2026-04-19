@@ -5,7 +5,6 @@
 //! Reads `.fdt` (field data), `.fdx` (index), and `.fdm` (metadata) files
 //! produced by the Lucene90 compressing stored fields writer.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::io;
 use std::str;
 
@@ -21,9 +20,10 @@ use crate::document::StoredValue;
 use crate::encoding::lz4;
 use crate::encoding::zigzag;
 use crate::index::index_file_names;
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::slice_reader::SliceReader;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::Directory;
+use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
+use crate::store2::{FileBacking, IndexInput};
 
 const STORED_FIELDS_INTS_BLOCK_SIZE: usize = 128;
 
@@ -32,6 +32,9 @@ const STORED_FIELDS_INTS_BLOCK_SIZE: usize = 128;
 /// Maintains two [`DirectMonotonicReader`]s:
 /// - `docs`: maps chunk index to starting doc ID
 /// - `start_pointers`: maps chunk index to file pointer in `.fdt`
+///
+/// The readers own per-block metadata only; packed data is borrowed from the
+/// caller-supplied `.fdx` bytes at lookup time.
 pub(crate) struct FieldsIndexReader {
     docs: DirectMonotonicReader,
     start_pointers: DirectMonotonicReader,
@@ -40,11 +43,8 @@ pub(crate) struct FieldsIndexReader {
 }
 
 impl FieldsIndexReader {
-    /// Loads the fields index from metadata and index files.
-    pub(crate) fn open(
-        meta_input: &mut dyn DataInput,
-        fdx_input: &dyn IndexInput,
-    ) -> io::Result<Self> {
+    /// Loads the fields index metadata from the meta stream.
+    pub(crate) fn open(meta_input: &mut IndexInput<'_>) -> io::Result<Self> {
         let _num_docs = meta_input.read_le_int()?;
         let block_shift = meta_input.read_le_int()? as u32;
         let num_chunks = meta_input.read_le_int()? as u32;
@@ -52,7 +52,6 @@ impl FieldsIndexReader {
 
         let docs = DirectMonotonicReader::load_with_shift(
             meta_input,
-            fdx_input,
             num_chunks,
             docs_start_pointer,
             block_shift,
@@ -62,7 +61,6 @@ impl FieldsIndexReader {
 
         let start_pointers = DirectMonotonicReader::load_with_shift(
             meta_input,
-            fdx_input,
             num_chunks,
             start_pointers_start,
             block_shift,
@@ -79,13 +77,13 @@ impl FieldsIndexReader {
     }
 
     /// Returns the chunk index containing the given doc ID.
-    fn block_id(&mut self, doc_id: u32) -> io::Result<u32> {
+    fn block_id(&self, doc_id: u32, fdx: &[u8]) -> io::Result<u32> {
         // Binary search: find the last chunk whose starting doc ID <= doc_id
         let mut lo = 0u32;
         let mut hi = self.num_chunks;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let mid_doc = self.docs.get(mid as u64)? as u32;
+            let mid_doc = self.docs.get(mid as u64, fdx)? as u32;
             if mid_doc <= doc_id {
                 lo = mid + 1;
             } else {
@@ -102,8 +100,8 @@ impl FieldsIndexReader {
     }
 
     /// Returns the file pointer in `.fdt` where the given chunk starts.
-    fn block_start_pointer(&mut self, block: u32) -> io::Result<u64> {
-        Ok(self.start_pointers.get(block as u64)? as u64)
+    fn block_start_pointer(&self, block: u32, fdx: &[u8]) -> io::Result<u64> {
+        Ok(self.start_pointers.get(block as u64, fdx)? as u64)
     }
 }
 
@@ -168,7 +166,8 @@ impl BlockState {
 /// so that consecutive reads within the same chunk avoid redundant I/O
 /// and decompression.
 pub struct StoredFieldsReader {
-    fields_stream: Box<dyn IndexInput>,
+    fdt: FileBacking,
+    fdx: FileBacking,
     index_reader: FieldsIndexReader,
     chunk_size: i32,
     state: BlockState,
@@ -177,36 +176,61 @@ pub struct StoredFieldsReader {
 impl StoredFieldsReader {
     /// Opens a stored fields reader for the given segment.
     ///
-    /// 1. Open `.fdt` (data) — keep handle
-    /// 2. Open `.fdm` (meta) with checksum — read chunk size, fields index, dirty chunk counts
-    /// 3. Validate dirty chunk invariants
-    /// 4. `retrieve_checksum` on `.fdt`
+    /// 1. Open `.fdt` (data), validate header and footer — keep backing
+    /// 2. Open `.fdx` (index), validate header and footer — keep backing
+    /// 3. Open `.fdm` (meta), verify full CRC over file bytes, parse metadata
+    /// 4. Validate dirty chunk invariants
     pub fn open(
         directory: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
-        segment_id: &[u8; 16],
+        segment_id: &[u8; codec_util::ID_LENGTH],
     ) -> io::Result<Self> {
-        // 1. Open .fdt (field data) — keep handle
+        // 1. Open .fdt (field data) — validate header, retrieve footer checksum
         let fdt_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, FIELDS_EXTENSION);
-        let mut fdt_input = directory.open_input(&fdt_name)?;
-        let header_len = codec_util::check_index_header(
-            fdt_input.as_mut(),
-            FORMAT_NAME,
-            FDT_VERSION,
-            FDT_VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
+        let fdt = directory.open_file(&fdt_name)?;
+        {
+            let mut input = IndexInput::new(&fdt_name, fdt.as_bytes());
+            check_index_header(
+                &mut input,
+                FORMAT_NAME,
+                FDT_VERSION,
+                FDT_VERSION,
+                segment_id,
+                segment_suffix,
+            )?;
+        }
+        retrieve_checksum(fdt.as_bytes())?;
 
-        // 2. Open .fdm (metadata) with checksum
+        // 2. Open .fdx (index) — validate header, retrieve footer checksum
+        let fdx_name =
+            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
+        let fdx = directory.open_file(&fdx_name)?;
+        {
+            let mut input = IndexInput::new(&fdx_name, fdx.as_bytes());
+            check_index_header(
+                &mut input,
+                INDEX_CODEC_NAME_IDX,
+                FDX_VERSION,
+                FDX_VERSION,
+                segment_id,
+                segment_suffix,
+            )?;
+        }
+        retrieve_checksum(fdx.as_bytes())?;
+
+        // 3. Open .fdm (metadata), verify full-file CRC, then parse metadata.
         let fdm_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let fdm_input = directory.open_input(&fdm_name)?;
-        let mut meta_in = ChecksumIndexInput::new(fdm_input);
-        codec_util::check_index_header(
-            &mut meta_in,
+        let fdm = directory.open_file(&fdm_name)?;
+        verify_checksum(fdm.as_bytes())?;
+
+        let meta_bytes = fdm.as_bytes();
+        let prefix_len = meta_bytes.len() - FOOTER_LENGTH;
+        let mut meta = IndexInput::new(&fdm_name, &meta_bytes[..prefix_len]);
+        check_index_header(
+            &mut meta,
             INDEX_CODEC_NAME_META,
             FDM_VERSION,
             FDM_VERSION,
@@ -214,31 +238,14 @@ impl StoredFieldsReader {
             segment_suffix,
         )?;
 
-        let chunk_size = meta_in.read_vint()?;
+        let chunk_size = meta.read_vint()?;
 
-        // Validate .fdt footer structure
-        codec_util::retrieve_checksum(fdt_input.as_mut())?;
+        let index_reader = FieldsIndexReader::open(&mut meta)?;
 
-        // Open .fdx (index) and validate header
-        let fdx_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let mut fdx_input = directory.open_input(&fdx_name)?;
-        codec_util::check_index_header(
-            fdx_input.as_mut(),
-            INDEX_CODEC_NAME_IDX,
-            FDX_VERSION,
-            FDX_VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
-
-        // Read the fields index (needs meta_in + fdx_input)
-        let index_reader = FieldsIndexReader::open(&mut meta_in, fdx_input.as_ref())?;
-
-        // Read and validate dirty chunk counts
-        let num_chunks = meta_in.read_vlong()?;
-        let num_dirty_chunks = meta_in.read_vlong()?;
-        let num_dirty_docs = meta_in.read_vlong()?;
+        // 4. Read and validate dirty chunk counts
+        let num_chunks = meta.read_vlong()?;
+        let num_dirty_chunks = meta.read_vlong()?;
+        let num_dirty_docs = meta.read_vlong()?;
 
         if num_dirty_chunks > num_chunks {
             return Err(io::Error::other(format!(
@@ -256,13 +263,9 @@ impl StoredFieldsReader {
             )));
         }
 
-        codec_util::check_footer(&mut meta_in)?;
-
-        // Position .fdt past the header for reading
-        fdt_input.seek(header_len as u64)?;
-
         Ok(Self {
-            fields_stream: fdt_input,
+            fdt,
+            fdx,
             index_reader,
             chunk_size,
             state: BlockState::new(),
@@ -289,14 +292,17 @@ impl StoredFieldsReader {
         // Invalidate first — if anything below fails, state stays empty
         self.state.chunk_docs = 0;
 
-        let block = self.index_reader.block_id(doc_id)?;
-        let start_pointer = self.index_reader.block_start_pointer(block)?;
+        let block = self.index_reader.block_id(doc_id, self.fdx.as_bytes())?;
+        let start_pointer = self
+            .index_reader
+            .block_start_pointer(block, self.fdx.as_bytes())?;
 
-        self.fields_stream.seek(start_pointer)?;
+        let mut stream = IndexInput::new("fdt", self.fdt.as_bytes());
+        stream.seek(start_pointer as usize)?;
 
         // Read chunk header
-        let doc_base = self.fields_stream.read_vint()? as u32;
-        let token = self.fields_stream.read_vint()? as u32;
+        let doc_base = stream.read_vint()? as u32;
+        let token = stream.read_vint()? as u32;
         let chunk_docs = token >> 2;
         let sliced = (token & 1) != 0;
 
@@ -313,19 +319,15 @@ impl StoredFieldsReader {
 
         // Read numStoredFields and lengths arrays
         let (num_stored_fields, offsets) = if chunk_docs == 1 {
-            let nsf = self.fields_stream.read_vint()?;
-            let length = self.fields_stream.read_vint()?;
+            let nsf = stream.read_vint()?;
+            let length = stream.read_vint()?;
             (vec![nsf as i64], vec![0i64, length as i64])
         } else {
             let mut nsf = vec![0i64; chunk_docs as usize];
-            read_stored_fields_ints(self.fields_stream.as_mut(), chunk_docs as usize, &mut nsf)?;
+            read_stored_fields_ints(&mut stream, chunk_docs as usize, &mut nsf)?;
 
             let mut lengths = vec![0i64; chunk_docs as usize + 1];
-            read_stored_fields_ints(
-                self.fields_stream.as_mut(),
-                chunk_docs as usize,
-                &mut lengths[1..],
-            )?;
+            read_stored_fields_ints(&mut stream, chunk_docs as usize, &mut lengths[1..])?;
             // Convert lengths to cumulative offsets
             for i in 1..=chunk_docs as usize {
                 lengths[i] += lengths[i - 1];
@@ -336,7 +338,7 @@ impl StoredFieldsReader {
         let total_length = *offsets.last().unwrap() as usize;
 
         // Decompress the chunk data
-        let decompressed = self.decompress_chunk(total_length, sliced)?;
+        let decompressed = decompress_chunk(&mut stream, self.chunk_size, total_length, sliced)?;
 
         // Store in cached state
         self.state = BlockState {
@@ -349,90 +351,98 @@ impl StoredFieldsReader {
 
         Ok(())
     }
+}
 
-    /// Decompresses the chunk data starting at the current stream position.
-    fn decompress_chunk(&mut self, total_length: usize, sliced: bool) -> io::Result<Vec<u8>> {
-        if !sliced {
-            // Single LZ4 block with preset dictionary
-            self.decompress_lz4_with_dict(total_length)
-        } else {
-            // Multiple slices, each up to chunk_size bytes
-            let chunk_size = self.chunk_size as usize;
-            let mut result = Vec::with_capacity(total_length);
-            let mut remaining = total_length;
+/// Decompresses the chunk data starting at the current stream position.
+fn decompress_chunk(
+    stream: &mut IndexInput<'_>,
+    chunk_size: i32,
+    total_length: usize,
+    sliced: bool,
+) -> io::Result<Vec<u8>> {
+    if !sliced {
+        // Single LZ4 block with preset dictionary
+        decompress_lz4_with_dict(stream, total_length)
+    } else {
+        // Multiple slices, each up to chunk_size bytes
+        let chunk_size = chunk_size as usize;
+        let mut result = Vec::with_capacity(total_length);
+        let mut remaining = total_length;
 
-            while remaining > 0 {
-                let block_len = remaining.min(chunk_size);
-                let block_data = self.decompress_lz4_with_dict(block_len)?;
-                result.extend_from_slice(&block_data);
-                remaining -= block_len;
-            }
-            Ok(result)
-        }
-    }
-
-    /// Decompresses a single LZ4-with-preset-dict block from the fields stream.
-    ///
-    /// Format: all compressed lengths first, then all compressed data.
-    fn decompress_lz4_with_dict(&mut self, decompressed_length: usize) -> io::Result<Vec<u8>> {
-        let dict_length = self.fields_stream.read_vint()? as usize;
-        let block_length = self.fields_stream.read_vint()? as usize;
-
-        // Read all compressed lengths first
-        let mut compressed_lengths = Vec::new();
-
-        // Dictionary compressed length
-        let dict_compressed_len = self.fields_stream.read_vint()? as usize;
-        compressed_lengths.push(dict_compressed_len);
-
-        // Sub-block compressed lengths
-        if block_length > 0 {
-            let data_length = decompressed_length.saturating_sub(dict_length);
-            let num_sub_blocks = data_length.div_ceil(block_length);
-            for _ in 0..num_sub_blocks {
-                compressed_lengths.push(self.fields_stream.read_vint()? as usize);
-            }
-        }
-
-        // Now read all compressed data
-        // Decompress dictionary
-        let mut dict_compressed = vec![0u8; dict_compressed_len];
-        self.fields_stream.read_exact(&mut dict_compressed)?;
-        let dict = if dict_length > 0 {
-            lz4::decompress(&dict_compressed, dict_length)?
-        } else {
-            Vec::new()
-        };
-
-        // Decompress sub-blocks
-        if block_length == 0 {
-            // No sub-blocks — dictionary is the entire data
-            return Ok(dict);
-        }
-
-        // Result includes dictionary bytes followed by decompressed sub-blocks
-        let mut result = Vec::with_capacity(decompressed_length);
-        result.extend_from_slice(&dict);
-        let mut data_start = dict_length;
-
-        for &comp_len in &compressed_lengths[1..] {
-            let block_decompressed = (decompressed_length - data_start).min(block_length);
-            let mut compressed = vec![0u8; comp_len];
-            self.fields_stream.read_exact(&mut compressed)?;
-
-            let block_data = lz4::decompress_with_prefix(&compressed, block_decompressed, &dict)?;
+        while remaining > 0 {
+            let block_len = remaining.min(chunk_size);
+            let block_data = decompress_lz4_with_dict(stream, block_len)?;
             result.extend_from_slice(&block_data);
-            data_start += block_decompressed;
+            remaining -= block_len;
         }
-
         Ok(result)
     }
+}
+
+/// Decompresses a single LZ4-with-preset-dict block from the fields stream.
+///
+/// Format: all compressed lengths first, then all compressed data.
+fn decompress_lz4_with_dict(
+    stream: &mut IndexInput<'_>,
+    decompressed_length: usize,
+) -> io::Result<Vec<u8>> {
+    let dict_length = stream.read_vint()? as usize;
+    let block_length = stream.read_vint()? as usize;
+
+    // Read all compressed lengths first
+    let mut compressed_lengths = Vec::new();
+
+    // Dictionary compressed length
+    let dict_compressed_len = stream.read_vint()? as usize;
+    compressed_lengths.push(dict_compressed_len);
+
+    // Sub-block compressed lengths
+    if block_length > 0 {
+        let data_length = decompressed_length.saturating_sub(dict_length);
+        let num_sub_blocks = data_length.div_ceil(block_length);
+        for _ in 0..num_sub_blocks {
+            compressed_lengths.push(stream.read_vint()? as usize);
+        }
+    }
+
+    // Now read all compressed data
+    // Decompress dictionary
+    let mut dict_compressed = vec![0u8; dict_compressed_len];
+    stream.read_bytes(&mut dict_compressed)?;
+    let dict = if dict_length > 0 {
+        lz4::decompress(&dict_compressed, dict_length)?
+    } else {
+        Vec::new()
+    };
+
+    // Decompress sub-blocks
+    if block_length == 0 {
+        // No sub-blocks — dictionary is the entire data
+        return Ok(dict);
+    }
+
+    // Result includes dictionary bytes followed by decompressed sub-blocks
+    let mut result = Vec::with_capacity(decompressed_length);
+    result.extend_from_slice(&dict);
+    let mut data_start = dict_length;
+
+    for &comp_len in &compressed_lengths[1..] {
+        let block_decompressed = (decompressed_length - data_start).min(block_length);
+        let mut compressed = vec![0u8; comp_len];
+        stream.read_bytes(&mut compressed)?;
+
+        let block_data = lz4::decompress_with_prefix(&compressed, block_decompressed, &dict)?;
+        result.extend_from_slice(&block_data);
+        data_start += block_decompressed;
+    }
+
+    Ok(result)
 }
 
 /// Decodes stored fields from decompressed data.
 fn decode_fields(data: &[u8], num_fields: usize) -> io::Result<Vec<StoredField>> {
     let mut fields = Vec::with_capacity(num_fields);
-    let mut reader = SliceReader::new(data);
+    let mut reader = IndexInput::new("doc", data);
 
     for _ in 0..num_fields {
         let info_and_bits = reader.read_vlong()?;
@@ -450,7 +460,7 @@ fn decode_fields(data: &[u8], num_fields: usize) -> io::Result<Vec<StoredField>>
                 let len = reader.read_vint()? as usize;
                 StoredValue::Bytes(reader.read_slice(len)?.to_vec())
             }
-            TYPE_NUMERIC_INT => StoredValue::Int(read_zint(&mut reader)?),
+            TYPE_NUMERIC_INT => StoredValue::Int(reader.read_zint()?),
             TYPE_NUMERIC_FLOAT => StoredValue::Float(read_zfloat(&mut reader)?),
             TYPE_NUMERIC_LONG => StoredValue::Long(read_tlong(&mut reader)?),
             TYPE_NUMERIC_DOUBLE => StoredValue::Double(read_zdouble(&mut reader)?),
@@ -476,7 +486,7 @@ fn decode_fields(data: &[u8], num_fields: usize) -> io::Result<Vec<StoredField>>
 
 /// Reads `count` integers from the input using StoredFieldsInts encoding.
 fn read_stored_fields_ints(
-    mut input: &mut dyn DataInput,
+    input: &mut IndexInput<'_>,
     count: usize,
     values: &mut [i64],
 ) -> io::Result<()> {
@@ -498,7 +508,7 @@ fn read_stored_fields_ints(
     Ok(())
 }
 
-fn read_ints_8(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> io::Result<()> {
+fn read_ints_8(input: &mut IndexInput<'_>, count: usize, values: &mut [i64]) -> io::Result<()> {
     let mut k = 0;
     while k + STORED_FIELDS_INTS_BLOCK_SIZE <= count {
         // Read 16 LE longs, each packing 8 values
@@ -522,7 +532,7 @@ fn read_ints_8(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> i
     Ok(())
 }
 
-fn read_ints_16(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> io::Result<()> {
+fn read_ints_16(input: &mut IndexInput<'_>, count: usize, values: &mut [i64]) -> io::Result<()> {
     let mut k = 0;
     while k + STORED_FIELDS_INTS_BLOCK_SIZE <= count {
         for i in 0..32 {
@@ -541,7 +551,7 @@ fn read_ints_16(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> 
     Ok(())
 }
 
-fn read_ints_32(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> io::Result<()> {
+fn read_ints_32(input: &mut IndexInput<'_>, count: usize, values: &mut [i64]) -> io::Result<()> {
     let mut k = 0;
     while k + STORED_FIELDS_INTS_BLOCK_SIZE <= count {
         for i in 0..64 {
@@ -562,13 +572,8 @@ fn read_ints_32(input: &mut dyn DataInput, count: usize, values: &mut [i64]) -> 
 // Field value decoders
 // ============================================================
 
-/// Reads a zigzag-encoded variable-length int.
-fn read_zint(input: &mut SliceReader) -> io::Result<i32> {
-    input.read_zint()
-}
-
 /// Reads a variable-length float (ZFloat encoding).
-fn read_zfloat(input: &mut SliceReader) -> io::Result<f32> {
+fn read_zfloat(input: &mut IndexInput<'_>) -> io::Result<f32> {
     let header = input.read_byte()? as u32;
     if header == 0xFF {
         // Negative float: 4 bytes follow
@@ -587,7 +592,7 @@ fn read_zfloat(input: &mut SliceReader) -> io::Result<f32> {
 }
 
 /// Reads a timestamp-compressed long (TLong encoding).
-fn read_tlong(input: &mut SliceReader) -> io::Result<i64> {
+fn read_tlong(input: &mut IndexInput<'_>) -> io::Result<i64> {
     let header = input.read_byte()?;
     let time_encoding = header & 0xC0;
     let mut zig_zag = (header as u64 & 0x1F) as i64;
@@ -612,7 +617,7 @@ fn read_tlong(input: &mut SliceReader) -> io::Result<i64> {
 }
 
 /// Reads a variable-length double (ZDouble encoding).
-fn read_zdouble(input: &mut SliceReader) -> io::Result<f64> {
+fn read_zdouble(input: &mut IndexInput<'_>) -> io::Result<f64> {
     let header = input.read_byte()? as u32;
     if header == 0xFF {
         // Negative double: 8 bytes follow
@@ -778,17 +783,17 @@ mod tests {
         // Small int encoding: header = 0x80 + (1 + val)
         // val=0 -> header=0x81
         let data = [0x81u8];
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         assert_in_delta!(read_zfloat(&mut reader).unwrap(), 0.0, 0.001);
 
         // val=42 -> header=0x80+43=0xAB
         let data = [0xABu8];
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         assert_in_delta!(read_zfloat(&mut reader).unwrap(), 42.0, 0.001);
 
         // val=-1 -> header=0x80+0=0x80
         let data = [0x80u8];
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         assert_in_delta!(read_zfloat(&mut reader).unwrap(), -1.0, 0.001);
     }
 
@@ -796,12 +801,12 @@ mod tests {
     fn test_read_zdouble_small_int() {
         // val=0 -> header=0x81
         let data = [0x81u8];
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         assert_in_delta!(read_zdouble(&mut reader).unwrap(), 0.0, 0.001);
 
         // val=-1 -> header=0x80
         let data = [0x80u8];
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         assert_in_delta!(read_zdouble(&mut reader).unwrap(), -1.0, 0.001);
     }
 
@@ -810,7 +815,7 @@ mod tests {
         // val=5, no time encoding, no upper bits
         // zigzag(5) = 10, header = 0x00 | 10 = 0x0A
         let data = [0x0Au8];
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         assert_eq!(read_tlong(&mut reader).unwrap(), 5);
     }
 
@@ -820,7 +825,7 @@ mod tests {
         // val/SECOND = 5, zigzag(5) = 10
         // header = SECOND_ENCODING | 10 = 0x40 | 0x0A = 0x4A
         let data = [0x4Au8];
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         assert_eq!(read_tlong(&mut reader).unwrap(), 5000);
     }
 
@@ -828,7 +833,7 @@ mod tests {
     fn test_stored_fields_ints_uniform() {
         // All values equal: marker=0, VInt=42
         let data = [0x00u8, 42];
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         let mut values = vec![0i64; 4];
         read_stored_fields_ints(&mut reader, 4, &mut values).unwrap();
         assert_eq!(values, vec![42, 42, 42, 42]);
@@ -838,7 +843,7 @@ mod tests {
     fn test_stored_fields_ints_8bit() {
         // 3 values (< 128 block size), 8-bit packing, remainder path
         let data = [8u8, 10, 20, 30]; // marker=8, then 3 bytes
-        let mut reader = SliceReader::new(&data);
+        let mut reader = IndexInput::new("t", &data);
         let mut values = vec![0i64; 3];
         read_stored_fields_ints(&mut reader, 3, &mut values).unwrap();
         assert_eq!(values, vec![10, 20, 30]);
@@ -853,7 +858,8 @@ mod tests {
     fn zfloat_round_trip(val: f32) -> f32 {
         let mut out = MemoryIndexOutput::new("test".to_string());
         stored_fields::write_zfloat_for_test(&mut out, val).unwrap();
-        let mut reader = SliceReader::new(out.bytes());
+        let bytes = out.bytes();
+        let mut reader = IndexInput::new("t", bytes);
         read_zfloat(&mut reader).unwrap()
     }
 
@@ -861,7 +867,8 @@ mod tests {
     fn zdouble_round_trip(val: f64) -> f64 {
         let mut out = MemoryIndexOutput::new("test".to_string());
         stored_fields::write_zdouble_for_test(&mut out, val).unwrap();
-        let mut reader = SliceReader::new(out.bytes());
+        let bytes = out.bytes();
+        let mut reader = IndexInput::new("t", bytes);
         read_zdouble(&mut reader).unwrap()
     }
 
@@ -869,7 +876,8 @@ mod tests {
     fn tlong_round_trip(val: i64) -> i64 {
         let mut out = MemoryIndexOutput::new("test".to_string());
         stored_fields::write_tlong_for_test(&mut out, val).unwrap();
-        let mut reader = SliceReader::new(out.bytes());
+        let bytes = out.bytes();
+        let mut reader = IndexInput::new("t", bytes);
         read_tlong(&mut reader).unwrap()
     }
 
@@ -877,7 +885,8 @@ mod tests {
     fn stored_ints_round_trip(values: &[i32]) -> Vec<i64> {
         let mut out = MemoryIndexOutput::new("test".to_string());
         stored_fields::save_ints_for_test(values, values.len(), &mut out).unwrap();
-        let mut reader = SliceReader::new(out.bytes());
+        let bytes = out.bytes();
+        let mut reader = IndexInput::new("t", bytes);
         let mut result = vec![0i64; values.len()];
         if values.len() == 1 {
             result[0] = reader.read_vint().unwrap() as i64;
