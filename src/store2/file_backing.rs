@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Owned backing storage for a file's bytes.
+//!
+//! Held by a segment for each of its component files. Readers obtain a
+//! `&[u8]` view via [`FileBacking::as_bytes`].
 
 use std::fmt;
 
 use memmap2::Mmap;
 
 /// Owns the bytes of one file for the lifetime of this value.
-///
-/// The two variants cover the production path (`Mmap`) and in-memory / test path
-/// (`Owned`). Readers borrow `&[u8]` from this enum via [`as_bytes`](Self::as_bytes);
-/// no reader implementation needs to know which variant backs it.
 pub enum FileBacking {
-    /// Memory-mapped region from a file on disk.
+    /// Memory-mapped region of a file on disk.
     Mmap(Mmap),
-    /// Owned byte vector, e.g. for in-memory directories or tests.
+    /// In-memory byte vector.
     Owned(Vec<u8>),
 }
 

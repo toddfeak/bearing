@@ -67,6 +67,7 @@ Once every codec reader is migrated:
 - Delete `MmapIndexInput`, `ByteSliceIndexInput`, `FSIndexInput`, `SliceReader`, `ChecksumIndexInput`
 - Delete the old `Directory::open_input` method
 - Delete the old `ReadEncoding` blanket trait if no longer used
+- Move `verify_checksum` from `src/store2/checksum.rs` into `src/codecs/codec_util.rs` alongside `write_footer`; drop the local `FOOTER_MAGIC` / `FOOTER_LENGTH` copies in favor of the existing `codec_util` constants. The footer format is codec-specific wire format, not generic byte I/O, and belongs next to its writer.
 - Move new module contents to `src/store/`, rename types if temporary names were used
 - Update imports across the codebase
 

@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cursor-based decoders for VInt-prefixed strings and string collections.
+//! Decoders for VInt-prefixed strings and string collections.
 //!
 //! Each parser advances the cursor by the bytes it consumes. On error the
-//! cursor is left at the point the failure was detected (consistent with
-//! Lucene's `DataInput` semantics and the existing `crate::encoding::string`
-//! reader); a corrupt file is expected to abort the surrounding read, not
-//! be resumed from the failed cursor.
+//! cursor is left at the point the failure was detected; a corrupt file is
+//! expected to abort the surrounding read, not resume from the failed cursor.
 
 use std::collections::HashMap;
 use std::io;
