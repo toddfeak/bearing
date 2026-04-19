@@ -209,7 +209,7 @@ impl Weight for TermWeight {
 
 /// Supplies a `TermScorer` for a single leaf, holding pre-built components.
 struct TermScorerSupplier<'a> {
-    postings_enum: Option<BlockPostingsEnum>,
+    postings_enum: Option<BlockPostingsEnum<'a>>,
     sim_scorer: Option<Box<dyn SimScorer>>,
     norms: Option<Box<dyn NumericDocValues + 'a>>,
     doc_freq: i32,
@@ -277,7 +277,7 @@ impl<'a> ScorerSupplier<'a> for TermScorerSupplier<'a> {
 /// `top_level_scoring_clause` is true, includes ImpactsDISI logic inline to skip
 /// non-competitive blocks using `MaxScoreCache`.
 pub struct TermScorer<'a> {
-    postings_enum: BlockPostingsEnum,
+    postings_enum: BlockPostingsEnum<'a>,
     sim_scorer: Box<dyn SimScorer>,
     max_score_cache: MaxScoreCache,
     norms: Option<Box<dyn NumericDocValues + 'a>>,
@@ -300,7 +300,7 @@ impl fmt::Debug for TermScorer<'_> {
 impl<'a> TermScorer<'a> {
     /// Constructs a new `TermScorer`.
     fn new(
-        postings_enum: BlockPostingsEnum,
+        postings_enum: BlockPostingsEnum<'a>,
         sim_scorer: Box<dyn SimScorer>,
         norms: Option<Box<dyn NumericDocValues + 'a>>,
         _score_mode: ScoreMode,

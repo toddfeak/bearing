@@ -7,7 +7,6 @@
 //! headers are read during construction; posting list data is read lazily via
 //! [`BlockPostingsEnum`].
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::io;
 
 use log::debug;
@@ -18,12 +17,14 @@ use crate::codecs::lucene103::postings_format::{
     self, DOC_CODEC, DOC_EXTENSION, LEVEL1_NUM_DOCS, META_CODEC, META_EXTENSION, POS_CODEC,
     POS_EXTENSION, VERSION_CURRENT, VERSION_START,
 };
-use crate::encoding::pfor::{self, BLOCK_SIZE};
+use crate::encoding::pfor::BLOCK_SIZE;
 use crate::index::{FieldInfos, index_file_names};
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
 use crate::search::scorer::{Impacts, ImpactsSource};
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::Directory;
+use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
+use crate::store2::{FileBacking, IndexInput};
 
 /// Dummy impacts: maximum possible term frequency and lowest possible unsigned norm.
 /// Used on tail blocks that don't record impacts.
@@ -61,8 +62,9 @@ pub struct IndexFeatures {
 /// metadata (impact statistics) is read eagerly; `.doc` and `.pos` file handles
 /// are retained for lazy posting list reads via [`BlockPostingsEnum`].
 pub struct PostingsReader {
-    /// Open handle to the `.doc` file for reading posting lists.
-    doc_in: Box<dyn IndexInput>,
+    /// Owned bytes of the `.doc` file. `IndexInput<'_>` views are constructed on
+    /// demand for each [`BlockPostingsEnum`].
+    doc: FileBacking,
     /// Impact statistics from the `.psm` metadata file.
     impact_stats: ImpactStats,
 }
@@ -76,13 +78,17 @@ impl PostingsReader {
         segment_id: &[u8; codec_util::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // Open .psm (metadata) with checksum validation
+        // Open .psm (metadata): read into memory, verify CRC over the whole file,
+        // then parse the prefix (file length minus the 16-byte footer).
         let psm_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let meta_input = directory.open_input(&psm_name)?;
-        let mut meta_in = ChecksumIndexInput::new(meta_input);
+        let psm = directory.open_file(&psm_name)?;
+        verify_checksum(psm.as_bytes())?;
+        let psm_bytes = psm.as_bytes();
+        let psm_prefix = &psm_bytes[..psm_bytes.len() - FOOTER_LENGTH];
+        let mut meta_in = IndexInput::new(&psm_name, psm_prefix);
 
-        codec_util::check_index_header(
+        check_index_header(
             &mut meta_in,
             META_CODEC,
             VERSION_START,
@@ -106,34 +112,42 @@ impl PostingsReader {
             }
         }
 
-        codec_util::check_footer(&mut meta_in)?;
-
-        // Validate .doc header
+        // Open .doc: retain the bytes, validate the header, then check the footer
+        // magic/algorithm without recomputing the CRC.
         let doc_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, DOC_EXTENSION);
-        let mut doc_in = directory.open_input(&doc_name)?;
-        codec_util::check_index_header(
-            doc_in.as_mut(),
-            DOC_CODEC,
-            VERSION_START,
-            VERSION_CURRENT,
-            segment_id,
-            segment_suffix,
-        )?;
-
-        // Validate .pos header if positions exist
-        if field_infos.has_prox() {
-            let pos_name =
-                index_file_names::segment_file_name(segment_name, segment_suffix, POS_EXTENSION);
-            let mut pos_in = directory.open_input(&pos_name)?;
-            codec_util::check_index_header(
-                pos_in.as_mut(),
-                POS_CODEC,
+        let doc = directory.open_file(&doc_name)?;
+        {
+            let mut doc_in = IndexInput::new(&doc_name, doc.as_bytes());
+            check_index_header(
+                &mut doc_in,
+                DOC_CODEC,
                 VERSION_START,
                 VERSION_CURRENT,
                 segment_id,
                 segment_suffix,
             )?;
+        }
+        retrieve_checksum(doc.as_bytes())?;
+
+        // Validate .pos header if positions exist. Positions aren't read yet, so
+        // the `FileBacking` is dropped at the end of this block.
+        if field_infos.has_prox() {
+            let pos_name =
+                index_file_names::segment_file_name(segment_name, segment_suffix, POS_EXTENSION);
+            let pos = directory.open_file(&pos_name)?;
+            {
+                let mut pos_in = IndexInput::new(&pos_name, pos.as_bytes());
+                check_index_header(
+                    &mut pos_in,
+                    POS_CODEC,
+                    VERSION_START,
+                    VERSION_CURRENT,
+                    segment_id,
+                    segment_suffix,
+                )?;
+            }
+            retrieve_checksum(pos.as_bytes())?;
         }
 
         let impact_stats = ImpactStats {
@@ -149,10 +163,7 @@ impl PostingsReader {
              {max_num_impacts_at_level1}, {max_impact_num_bytes_at_level1}]"
         );
 
-        Ok(Self {
-            doc_in,
-            impact_stats,
-        })
+        Ok(Self { doc, impact_stats })
     }
 
     /// Returns the impact statistics read from segment metadata.
@@ -168,9 +179,9 @@ impl PostingsReader {
         term_state: &postings_format::IntBlockTermState,
         index_features: IndexFeatures,
         needs_freq: bool,
-    ) -> io::Result<BlockPostingsEnum> {
+    ) -> io::Result<BlockPostingsEnum<'_>> {
         BlockPostingsEnum::new(
-            &*self.doc_in,
+            IndexInput::new("doc", self.doc.as_bytes()),
             term_state,
             index_features,
             needs_freq,
@@ -185,9 +196,9 @@ impl PostingsReader {
         term_state: &postings_format::IntBlockTermState,
         index_features: IndexFeatures,
         needs_freq: bool,
-    ) -> io::Result<BlockPostingsEnum> {
+    ) -> io::Result<BlockPostingsEnum<'_>> {
         BlockPostingsEnum::new(
-            &*self.doc_in,
+            IndexInput::new("doc", self.doc.as_bytes()),
             term_state,
             index_features,
             needs_freq,
@@ -251,7 +262,7 @@ impl MutableImpactList {
 ///
 /// Supports skip-level navigation via level 0 and level 1 skip data for efficient
 /// `advance()` and `advance_shallow()` operations.
-pub struct BlockPostingsEnum {
+pub struct BlockPostingsEnum<'a> {
     // Current state
     encoding: DeltaEncoding,
     doc: i32,
@@ -288,7 +299,7 @@ pub struct BlockPostingsEnum {
     doc_buffer_upto: usize,
 
     // Doc input
-    doc_in: Box<dyn IndexInput>,
+    doc_in: IndexInput<'a>,
 
     // Freq buffer
     freq_buffer: [i32; BLOCK_SIZE],
@@ -316,10 +327,10 @@ pub struct BlockPostingsEnum {
     needs_refilling: bool,
 }
 
-impl BlockPostingsEnum {
+impl<'a> BlockPostingsEnum<'a> {
     /// Creates a new `BlockPostingsEnum` and resets it for the given term state.
     fn new(
-        doc_in: &dyn IndexInput,
+        doc_in: IndexInput<'a>,
         term_state: &postings_format::IntBlockTermState,
         index_features: IndexFeatures,
         needs_freq: bool,
@@ -379,7 +390,7 @@ impl BlockPostingsEnum {
             prev_doc_id: -1,
             doc_buffer_size: BLOCK_SIZE,
             doc_buffer_upto: BLOCK_SIZE,
-            doc_in: doc_in.slice("BlockPostingsEnum", 0, doc_in.length())?,
+            doc_in,
             freq_buffer,
             freq_fp: -1,
             index_has_freq: index_features.has_freq,
@@ -419,7 +430,7 @@ impl BlockPostingsEnum {
         if self.doc_freq < LEVEL1_NUM_DOCS as i32 {
             self.level1_last_doc_id = NO_MORE_DOCS;
             if self.doc_freq > 1 {
-                self.doc_in.seek(term_state.doc_start_fp as u64)?;
+                self.doc_in.seek(term_state.doc_start_fp as usize)?;
             }
         } else {
             self.level1_last_doc_id = -1;
@@ -436,9 +447,9 @@ impl BlockPostingsEnum {
     /// Returns the current document's frequency.
     pub fn freq(&mut self) -> io::Result<i32> {
         if self.freq_fp != -1 {
-            self.doc_in.seek(self.freq_fp as u64)?;
+            self.doc_in.seek(self.freq_fp as usize)?;
             let mut longs = [0i64; BLOCK_SIZE];
-            pfor::pfor_decode(self.doc_in.as_mut(), &mut longs)?;
+            self.doc_in.pfor_decode(&mut longs)?;
             for (i, &val) in longs.iter().enumerate() {
                 self.freq_buffer[i] = val as i32;
             }
@@ -448,12 +459,12 @@ impl BlockPostingsEnum {
     }
 
     fn refill_full_block(&mut self) -> io::Result<()> {
-        let input = self.doc_in.as_mut();
+        let input = &mut self.doc_in;
         let bits_per_value = input.read_byte()? as i8;
         if bits_per_value > 0 {
             // Block is encoded as 128 packed integers (FOR delta)
             let mut arr = [0i32; BLOCK_SIZE];
-            pfor::for_delta_decode(bits_per_value as u32, input, self.prev_doc_id, &mut arr)?;
+            input.for_delta_decode(bits_per_value as u32, self.prev_doc_id, &mut arr)?;
             self.doc_buffer[..BLOCK_SIZE].copy_from_slice(&arr);
             self.encoding = DeltaEncoding::Packed;
         } else {
@@ -499,9 +510,9 @@ impl BlockPostingsEnum {
         }
         if self.index_has_freq {
             if self.needs_freq {
-                self.freq_fp = self.doc_in.file_pointer() as i64;
+                self.freq_fp = self.doc_in.position() as i64;
             }
-            skip_pfor(self.doc_in.as_mut())?;
+            skip_pfor(&mut self.doc_in)?;
         }
         self.doc_count_left -= BLOCK_SIZE as i32;
         self.prev_doc_id = self.doc_buffer[BLOCK_SIZE - 1];
@@ -522,7 +533,7 @@ impl BlockPostingsEnum {
             // Read vInts
             let num = self.doc_count_left as usize;
             read_vint_block(
-                self.doc_in.as_mut(),
+                &mut self.doc_in,
                 &mut self.doc_buffer,
                 &mut self.freq_buffer,
                 num,
@@ -557,7 +568,7 @@ impl BlockPostingsEnum {
         loop {
             self.prev_doc_id = self.level1_last_doc_id;
             self.level0_last_doc_id = self.level1_last_doc_id;
-            self.doc_in.seek(self.level1_doc_end_fp as u64)?;
+            self.doc_in.seek(self.level1_doc_end_fp as usize)?;
             self.doc_count_left = self.doc_freq - self.level1_doc_count_upto;
             self.level1_doc_count_upto += LEVEL1_NUM_DOCS as i32;
 
@@ -568,23 +579,23 @@ impl BlockPostingsEnum {
 
             self.level1_last_doc_id += self.doc_in.read_vint()?;
             let delta = self.doc_in.read_vlong()?;
-            self.level1_doc_end_fp = delta + self.doc_in.file_pointer() as i64;
+            self.level1_doc_end_fp = delta + self.doc_in.position() as i64;
 
             if self.index_has_freq {
                 let skip1_end_fp =
-                    self.doc_in.read_le_short()? as i64 + self.doc_in.file_pointer() as i64;
+                    self.doc_in.read_le_short()? as i64 + self.doc_in.position() as i64;
                 let num_impact_bytes = self.doc_in.read_le_short()? as usize;
                 if self.needs_impacts && self.level1_last_doc_id >= target {
                     if let Some(ref mut buf) = self.level1_serialized_impacts {
-                        self.doc_in.read_exact(&mut buf[..num_impact_bytes])?;
+                        self.doc_in.read_bytes(&mut buf[..num_impact_bytes])?;
                         self.level1_serialized_impacts_length = num_impact_bytes;
                     }
                 } else {
-                    self.doc_in.skip_bytes(num_impact_bytes as u64)?;
+                    self.doc_in.skip_bytes(num_impact_bytes)?;
                 }
                 // Skip pos/pay data (positions not supported yet)
                 // Seek to skip1EndFP to skip any remaining pos/pay skip data
-                self.doc_in.seek(skip1_end_fp as u64)?;
+                self.doc_in.seek(skip1_end_fp as usize)?;
             }
 
             if self.level1_last_doc_id >= target {
@@ -600,19 +611,19 @@ impl BlockPostingsEnum {
 
         if self.doc_count_left >= BLOCK_SIZE as i32 {
             self.doc_in.read_vlong()?; // level0NumBytes
-            let doc_delta = read_vint15(self.doc_in.as_mut())?;
+            let doc_delta = read_vint15(&mut self.doc_in)?;
             self.level0_last_doc_id += doc_delta;
-            let block_length = read_vlong15(self.doc_in.as_mut())?;
-            self.level0_doc_end_fp = self.doc_in.file_pointer() as i64 + block_length;
+            let block_length = read_vlong15(&mut self.doc_in)?;
+            self.level0_doc_end_fp = self.doc_in.position() as i64 + block_length;
             if self.index_has_freq {
                 let num_impact_bytes = self.doc_in.read_vint()? as usize;
                 if self.needs_impacts {
                     if let Some(ref mut buf) = self.level0_serialized_impacts {
-                        self.doc_in.read_exact(&mut buf[..num_impact_bytes])?;
+                        self.doc_in.read_bytes(&mut buf[..num_impact_bytes])?;
                         self.level0_serialized_impacts_length = num_impact_bytes;
                     }
                 } else {
-                    self.doc_in.skip_bytes(num_impact_bytes as u64)?;
+                    self.doc_in.skip_bytes(num_impact_bytes)?;
                 }
 
                 if self.index_has_pos {
@@ -644,8 +655,8 @@ impl BlockPostingsEnum {
         if self.needs_docs_and_freqs_only && self.doc_count_left >= BLOCK_SIZE as i32 {
             // Optimize the common path for exhaustive evaluation
             let level0_num_bytes = self.doc_in.read_vlong()?;
-            let level0_end = self.doc_in.file_pointer() + level0_num_bytes as u64;
-            let doc_delta = read_vint15(self.doc_in.as_mut())?;
+            let level0_end = self.doc_in.position() + level0_num_bytes as usize;
+            let doc_delta = read_vint15(&mut self.doc_in)?;
             self.level0_last_doc_id += doc_delta;
             self.doc_in.seek(level0_end)?;
             self.refill_full_block()?;
@@ -661,12 +672,12 @@ impl BlockPostingsEnum {
 
             if self.doc_count_left >= BLOCK_SIZE as i32 {
                 let num_skip_bytes = self.doc_in.read_vlong()?;
-                let skip0_end = self.doc_in.file_pointer() + num_skip_bytes as u64;
-                let doc_delta = read_vint15(self.doc_in.as_mut())?;
+                let skip0_end = self.doc_in.position() + num_skip_bytes as usize;
+                let doc_delta = read_vint15(&mut self.doc_in)?;
                 self.level0_last_doc_id += doc_delta;
                 let found = target <= self.level0_last_doc_id;
-                let block_length = read_vlong15(self.doc_in.as_mut())?;
-                self.level0_doc_end_fp = self.doc_in.file_pointer() as i64 + block_length;
+                let block_length = read_vlong15(&mut self.doc_in)?;
+                self.level0_doc_end_fp = self.doc_in.position() as i64 + block_length;
 
                 if self.index_has_freq {
                     if !found {
@@ -675,11 +686,11 @@ impl BlockPostingsEnum {
                         let num_impact_bytes = self.doc_in.read_vint()? as usize;
                         if self.needs_impacts && found {
                             if let Some(ref mut buf) = self.level0_serialized_impacts {
-                                self.doc_in.read_exact(&mut buf[..num_impact_bytes])?;
+                                self.doc_in.read_bytes(&mut buf[..num_impact_bytes])?;
                                 self.level0_serialized_impacts_length = num_impact_bytes;
                             }
                         } else {
-                            self.doc_in.skip_bytes(num_impact_bytes as u64)?;
+                            self.doc_in.skip_bytes(num_impact_bytes)?;
                         }
                         // Skip pos data — positions not supported yet
                         self.doc_in.seek(skip0_end)?;
@@ -690,7 +701,7 @@ impl BlockPostingsEnum {
                     break;
                 }
 
-                self.doc_in.seek(self.level0_doc_end_fp as u64)?;
+                self.doc_in.seek(self.level0_doc_end_fp as usize)?;
                 self.doc_count_left -= BLOCK_SIZE as i32;
             } else {
                 self.level0_last_doc_id = NO_MORE_DOCS;
@@ -706,7 +717,7 @@ impl BlockPostingsEnum {
             // advance skip data on level 1
             self.skip_level1_to(target)?;
         } else if self.needs_refilling {
-            self.doc_in.seek(self.level0_doc_end_fp as u64)?;
+            self.doc_in.seek(self.level0_doc_end_fp as usize)?;
             self.doc_count_left -= BLOCK_SIZE as i32;
         }
 
@@ -715,7 +726,7 @@ impl BlockPostingsEnum {
     }
 }
 
-impl DocIdSetIterator for BlockPostingsEnum {
+impl DocIdSetIterator for BlockPostingsEnum<'_> {
     fn doc_id(&self) -> i32 {
         self.doc
     }
@@ -795,7 +806,7 @@ impl DocIdSetIterator for BlockPostingsEnum {
     }
 }
 
-impl ImpactsSource for BlockPostingsEnum {
+impl ImpactsSource for BlockPostingsEnum<'_> {
     fn advance_shallow(&mut self, target: i32) -> io::Result<()> {
         if target > self.level0_last_doc_id {
             // advance level 0 skip data
@@ -826,7 +837,7 @@ impl ImpactsSource for BlockPostingsEnum {
 }
 
 // Implement `Impacts` directly on `BlockPostingsEnum` so `get_impacts` can return `&self`.
-impl Impacts for BlockPostingsEnum {
+impl Impacts for BlockPostingsEnum<'_> {
     fn num_levels(&self) -> usize {
         if !self.index_has_freq || self.level1_last_doc_id == NO_MORE_DOCS {
             1
@@ -872,7 +883,7 @@ impl Impacts for BlockPostingsEnum {
 // ---------------------------------------------------------------------------
 
 /// Reads a VInt15 value: a short followed optionally by a VInt for the high bits.
-fn read_vint15(mut input: &mut dyn DataInput) -> io::Result<i32> {
+fn read_vint15(input: &mut IndexInput<'_>) -> io::Result<i32> {
     let s = input.read_le_short()?;
     if s >= 0 {
         Ok(s as i32)
@@ -882,7 +893,7 @@ fn read_vint15(mut input: &mut dyn DataInput) -> io::Result<i32> {
 }
 
 /// Reads a VLong15 value: a short followed optionally by a VLong for the high bits.
-fn read_vlong15(mut input: &mut dyn DataInput) -> io::Result<i64> {
+fn read_vlong15(input: &mut IndexInput<'_>) -> io::Result<i64> {
     let s = input.read_le_short()?;
     if s >= 0 {
         Ok(s as i64)
@@ -1012,16 +1023,16 @@ fn next_set_bit(bits: &[u64; 64], from_index: usize) -> usize {
 }
 
 /// Skips a PFOR-encoded block of 128 values without decoding.
-fn skip_pfor(mut input: &mut dyn DataInput) -> io::Result<()> {
+fn skip_pfor(input: &mut IndexInput<'_>) -> io::Result<()> {
     let token = input.read_byte()? as u32;
     let bpv = token & 0x1F;
     let num_exceptions = token >> 5;
     if bpv == 0 {
         input.read_vlong()?; // constant value
-        input.skip_bytes((num_exceptions * 2) as u64)?;
+        input.skip_bytes((num_exceptions * 2) as usize)?;
     } else {
-        let for_bytes = (bpv << 4) as u64; // bpv * 16
-        input.skip_bytes(for_bytes + (num_exceptions * 2) as u64)?;
+        let for_bytes = (bpv << 4) as usize; // bpv * 16
+        input.skip_bytes(for_bytes + (num_exceptions * 2) as usize)?;
     }
     Ok(())
 }
@@ -1030,7 +1041,7 @@ fn skip_pfor(mut input: &mut dyn DataInput) -> io::Result<()> {
 ///
 /// Matches Java's `PostingsUtil.readVIntBlock`.
 fn read_vint_block(
-    mut input: &mut dyn DataInput,
+    input: &mut IndexInput<'_>,
     doc_buffer: &mut [i32],
     freq_buffer: &mut [i32],
     num: usize,
@@ -1071,7 +1082,6 @@ mod tests {
     use crate::index::segment_infos;
     use crate::index::writer::IndexWriter;
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
-    use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::{MemoryDirectory, SharedDirectory};
     use assertables::*;
 
@@ -1401,8 +1411,8 @@ mod tests {
     #[test]
     fn test_read_vint15() {
         // Values < 0x8000 are stored as a single LE short
-        let data = vec![0x42u8, 0x00]; // 0x0042 = 66
-        let mut input = ByteSliceIndexInput::new("test".to_string(), data);
+        let data = [0x42u8, 0x00]; // 0x0042 = 66
+        let mut input = IndexInput::new("test", &data);
         let val = read_vint15(&mut input).unwrap();
         assert_eq!(val, 66);
     }

@@ -378,11 +378,11 @@ mod tests {
 
     /// Test helper: seek a term and create a postings iterator, following the
     /// same path production code uses (Terms → TermsEnum → PostingsReader).
-    fn seek_postings(
-        reader: &SegmentReader,
+    fn seek_postings<'a>(
+        reader: &'a SegmentReader,
         field: &str,
         term: &[u8],
-    ) -> io::Result<Option<BlockPostingsEnum>> {
+    ) -> io::Result<Option<BlockPostingsEnum<'a>>> {
         let field_info = match reader.field_infos().field_info_by_name(field) {
             Some(fi) => fi,
             None => return Ok(None),
@@ -411,7 +411,7 @@ mod tests {
         Ok(Some(iter))
     }
 
-    fn collect_docs(iter: &mut BlockPostingsEnum) -> Vec<i32> {
+    fn collect_docs(iter: &mut BlockPostingsEnum<'_>) -> Vec<i32> {
         let mut docs = Vec::new();
         loop {
             let doc = iter.next_doc().unwrap();

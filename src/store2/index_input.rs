@@ -14,6 +14,8 @@ use std::io;
 use std::io::BufRead;
 use std::io::Cursor;
 
+use crate::encoding::group_vint;
+use crate::encoding::pfor;
 use crate::store2::string;
 use crate::store2::varint;
 
@@ -141,6 +143,29 @@ impl<'a> IndexInput<'a> {
     #[inline]
     pub fn read_map_of_strings(&mut self) -> io::Result<HashMap<String, String>> {
         string::read_map_of_strings(&mut self.cursor)
+    }
+
+    /// Reads `limit` group-varint-encoded integers into `values`.
+    #[inline]
+    pub fn read_group_vints(&mut self, values: &mut [i32], limit: usize) -> io::Result<()> {
+        group_vint::read_group_vints(&mut self.cursor, values, limit)
+    }
+
+    /// Decodes a block of PFOR-encoded values.
+    #[inline]
+    pub fn pfor_decode(&mut self, longs: &mut [i64; pfor::BLOCK_SIZE]) -> io::Result<()> {
+        pfor::pfor_decode(&mut self.cursor, longs)
+    }
+
+    /// Decodes a block of FOR-delta-encoded doc ID deltas with prefix-sum.
+    #[inline]
+    pub fn for_delta_decode(
+        &mut self,
+        bpv: u32,
+        base: i32,
+        ints: &mut [i32; pfor::BLOCK_SIZE],
+    ) -> io::Result<()> {
+        pfor::for_delta_decode(bpv, &mut self.cursor, base, ints)
     }
 
     // ---------- bulk reads ----------
