@@ -6,8 +6,8 @@
 //! (terms metadata) files written by [`super::blocktree_writer`].
 //!
 //! Follows the Java `Lucene103BlockTreeTermsReader` design: metadata is read
-//! eagerly from `.tmd` during construction, while `.tim` and `.tip` file handles
-//! are kept open for lazy term enumeration at query time.
+//! eagerly from `.tmd` during construction, while `.tim` and `.tip` bytes are
+//! retained via [`FileBacking`] for lazy term enumeration at query time.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -20,147 +20,166 @@ use crate::codecs::lucene103::postings_format::{
     VERSION_CURRENT, VERSION_START,
 };
 use crate::document::IndexOptions;
-use crate::encoding::read_encoding::ReadEncoding;
 use crate::index::terms::{Terms, TermsEnum};
 use crate::index::{FieldInfos, index_file_names};
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::Directory;
+use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
+use crate::store2::{FileBacking, IndexInput};
 
 /// Per-field metadata read from the `.tmd` terms metadata file.
 ///
-/// Mirrors Java's `FieldReader` — holds all metadata needed to access a field's
-/// terms dictionary. The trie index pointers (`index_start`, `root_fp`,
-/// `index_end`) and the `.tip` file handle are stored for lazy `TrieReader`
-/// creation via [`new_trie_reader`](FieldReader::new_trie_reader).
-pub struct FieldReader {
+/// Holds all lightweight data needed to access a field's terms dictionary.
+/// Bytes are owned by the parent [`BlockTreeTermsReader`]; [`FieldReader`]
+/// views are constructed on demand via [`BlockTreeTermsReader::terms`].
+#[derive(Debug)]
+pub struct FieldMeta {
     /// Field number from [`FieldInfos`].
     pub field_number: u32,
     /// Total number of unique terms in this field.
-    num_terms: i64,
+    pub num_terms: i64,
     /// Sum of `totalTermFreq` across all terms in this field.
-    sum_total_term_freq: i64,
+    pub sum_total_term_freq: i64,
     /// Sum of `docFreq` across all terms in this field.
-    sum_doc_freq: i64,
+    pub sum_doc_freq: i64,
     /// Number of documents that have at least one term in this field.
-    doc_count: i32,
+    pub doc_count: i32,
     /// Lexicographically smallest term in this field.
-    min_term: Box<[u8]>,
+    pub min_term: Box<[u8]>,
     /// Lexicographically largest term in this field.
-    max_term: Box<[u8]>,
+    pub max_term: Box<[u8]>,
     /// Index options for this field (controls freqs, positions, offsets).
-    index_options: IndexOptions,
+    pub index_options: IndexOptions,
     /// Whether this field stores payloads.
-    has_payloads: bool,
+    pub has_payloads: bool,
     /// Trie index start file pointer in `.tip`.
     pub index_start: i64,
     /// Trie root node file pointer in `.tip`.
     pub root_fp: i64,
     /// Trie index end file pointer in `.tip`.
     pub index_end: i64,
-    /// Open handle to the `.tip` file for creating trie readers.
-    index_in: Box<dyn IndexInput>,
-    /// Open handle to the `.tim` terms dictionary for creating term iterators.
-    terms_in: Box<dyn IndexInput>,
 }
 
-impl Terms for FieldReader {
+/// Borrowed view of a single field's terms dictionary.
+///
+/// Constructed on demand by [`BlockTreeTermsReader::terms`]; carries
+/// references to the parent's `.tim` / `.tip` bytes and the field's
+/// [`FieldMeta`].
+#[derive(Debug)]
+pub struct FieldReader<'a> {
+    meta: &'a FieldMeta,
+    /// Whole `.tim` bytes.
+    terms_bytes: &'a [u8],
+    /// Whole `.tip` bytes. The field's trie region is
+    /// `&index_bytes[index_start..index_end]`.
+    index_bytes: &'a [u8],
+}
+
+impl<'a> FieldReader<'a> {
+    /// Returns the underlying metadata for this field.
+    pub fn meta(&self) -> &'a FieldMeta {
+        self.meta
+    }
+
+    /// Creates a [`super::trie_reader::TrieReader`] for this field.
+    ///
+    /// Constructs an [`IndexInput`] over the field's `.tip` region and loads
+    /// the root node (a handful of bytes). `root_fp` is already stored
+    /// slice-relative by the writer (see `TrieBuilder::save_nodes`).
+    pub fn new_trie_reader(&self) -> io::Result<super::trie_reader::TrieReader<'a>> {
+        let slice = &self.index_bytes[self.meta.index_start as usize..self.meta.index_end as usize];
+        let access = IndexInput::new("trie index", slice);
+        super::trie_reader::TrieReader::new(access, self.meta.root_fp)
+    }
+
+    /// Returns an [`IndexInput`] over the field's `.tip` region (for floor
+    /// data reads in [`super::segment_terms_enum::SegmentTermsEnum`]).
+    pub fn index_input(&self) -> IndexInput<'a> {
+        let slice = &self.index_bytes[self.meta.index_start as usize..self.meta.index_end as usize];
+        IndexInput::new("index input", slice)
+    }
+
+    /// Returns an [`IndexInput`] over the whole `.tim` terms dictionary.
+    pub fn terms_input(&self) -> IndexInput<'a> {
+        IndexInput::new("terms_in", self.terms_bytes)
+    }
+}
+
+impl Terms for FieldReader<'_> {
     fn iterator(&self) -> io::Result<Box<dyn TermsEnum + '_>> {
-        let terms_in = self.terms_in.slice("terms_in", 0, self.terms_in.length())?;
-        let index_in = self.index_input()?;
+        let terms_in = self.terms_input();
+        let index_in = self.index_input();
         let trie = self.new_trie_reader()?;
         Ok(Box::new(super::segment_terms_enum::SegmentTermsEnum::new(
             terms_in,
             index_in,
             trie,
-            self.index_options,
+            self.meta.index_options,
         )))
     }
 
     fn size(&self) -> i64 {
-        self.num_terms
+        self.meta.num_terms
     }
 
     fn get_sum_total_term_freq(&self) -> i64 {
-        self.sum_total_term_freq
+        self.meta.sum_total_term_freq
     }
 
     fn get_sum_doc_freq(&self) -> i64 {
-        self.sum_doc_freq
+        self.meta.sum_doc_freq
     }
 
     fn get_doc_count(&self) -> i32 {
-        self.doc_count
+        self.meta.doc_count
     }
 
     fn has_freqs(&self) -> bool {
-        self.index_options >= IndexOptions::DocsAndFreqs
+        self.meta.index_options >= IndexOptions::DocsAndFreqs
     }
 
     fn has_offsets(&self) -> bool {
-        self.index_options >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets
+        self.meta.index_options >= IndexOptions::DocsAndFreqsAndPositionsAndOffsets
     }
 
     fn has_positions(&self) -> bool {
-        self.index_options >= IndexOptions::DocsAndFreqsAndPositions
+        self.meta.index_options >= IndexOptions::DocsAndFreqsAndPositions
     }
 
     fn has_payloads(&self) -> bool {
-        self.has_payloads
+        self.meta.has_payloads
     }
 
     fn get_min(&self) -> Option<&[u8]> {
-        Some(&self.min_term)
+        Some(&self.meta.min_term)
     }
 
     fn get_max(&self) -> Option<&[u8]> {
-        Some(&self.max_term)
+        Some(&self.meta.max_term)
     }
 }
 
-impl FieldReader {
-    /// Creates a new [`super::trie_reader::TrieReader`] for this field.
-    ///
-    /// Slices the `.tip` file to the trie region and loads the root node.
-    /// Lightweight — only reads a few bytes from the root.
-    pub fn new_trie_reader(&self) -> io::Result<super::trie_reader::TrieReader> {
-        let slice = self.index_in.slice(
-            "trie index",
-            self.index_start as u64,
-            (self.index_end - self.index_start) as u64,
-        )?;
-        let access = slice.random_access()?;
-        super::trie_reader::TrieReader::new(access, self.root_fp)
-    }
-
-    /// Returns a slice of the `.tip` file for reading floor data.
-    pub fn index_input(&self) -> io::Result<Box<dyn IndexInput>> {
-        self.index_in.slice(
-            "index input",
-            self.index_start as u64,
-            (self.index_end - self.index_start) as u64,
-        )
-    }
-}
-
-/// Block tree terms reader that provides access to per-field term metadata
-/// and keeps file handles open for future lazy term enumeration.
+/// Block tree terms reader that owns the `.tim` and `.tip` bytes and per-field
+/// metadata.
 ///
 /// Mirrors Java's `Lucene103BlockTreeTermsReader`. Construction reads all
-/// per-field metadata from `.tmd` (then closes it), while `.tim` and `.tip`
-/// remain open.
+/// per-field metadata from `.tmd` (then drops it); `.tim` and `.tip`
+/// [`FileBacking`]s are retained for the lifetime of this reader.
 pub struct BlockTreeTermsReader {
-    /// Open handle to the terms dictionary (`.tim`).
-    terms_in: Box<dyn IndexInput>,
+    /// Owned `.tim` terms dictionary bytes.
+    terms_file: FileBacking,
+    /// Owned `.tip` terms index bytes.
+    index_file: FileBacking,
     /// Per-field metadata, keyed by field number.
-    fields: HashMap<u32, FieldReader>,
+    fields: HashMap<u32, FieldMeta>,
 }
 
 impl BlockTreeTermsReader {
     /// Opens the block tree terms reader for a segment.
     ///
-    /// Reads metadata eagerly from `.tmd`, validates headers on `.tim` and `.tip`,
-    /// and keeps all three file handles. The `.tmd` checksum input is consumed
-    /// and dropped after construction.
+    /// Reads `.tmd` metadata eagerly (verifying its full CRC), validates
+    /// headers on `.tim` and `.tip`, and performs an O(1) footer sanity check
+    /// on both. The `.tmd` bytes are dropped after construction.
     pub fn open(
         directory: &dyn Directory,
         segment_name: &str,
@@ -174,15 +193,18 @@ impl BlockTreeTermsReader {
             segment_suffix,
             postings_format::TERMS_EXTENSION,
         );
-        let mut terms_in = directory.open_input(&terms_name)?;
-        let version = codec_util::check_index_header(
-            terms_in.as_mut(),
-            TERMS_CODEC_NAME,
-            BLOCKTREE_VERSION_START,
-            BLOCKTREE_VERSION_CURRENT,
-            segment_id,
-            segment_suffix,
-        )?;
+        let terms_file = directory.open_file(&terms_name)?;
+        {
+            let mut terms_in = IndexInput::new(&terms_name, terms_file.as_bytes());
+            check_index_header(
+                &mut terms_in,
+                TERMS_CODEC_NAME,
+                BLOCKTREE_VERSION_START,
+                BLOCKTREE_VERSION_CURRENT,
+                segment_id,
+                segment_suffix,
+            )?;
+        }
 
         // Open .tip and validate header
         let index_name = index_file_names::segment_file_name(
@@ -190,23 +212,29 @@ impl BlockTreeTermsReader {
             segment_suffix,
             TERMS_INDEX_EXTENSION,
         );
-        let mut index_in = directory.open_input(&index_name)?;
-        codec_util::check_index_header(
-            index_in.as_mut(),
-            TERMS_INDEX_CODEC_NAME,
-            version,
-            version,
-            segment_id,
-            segment_suffix,
-        )?;
+        let index_file = directory.open_file(&index_name)?;
+        let version = {
+            let mut index_in = IndexInput::new(&index_name, index_file.as_bytes());
+            check_index_header(
+                &mut index_in,
+                TERMS_INDEX_CODEC_NAME,
+                BLOCKTREE_VERSION_START,
+                BLOCKTREE_VERSION_CURRENT,
+                segment_id,
+                segment_suffix,
+            )?
+        };
 
-        // Open .tmd with checksum validation and read all metadata
+        // Open .tmd, verify full CRC, then parse metadata off the prefix.
         let meta_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, TERMS_META_EXTENSION);
-        let meta_input = directory.open_input(&meta_name)?;
-        let mut meta_in = ChecksumIndexInput::new(meta_input);
+        let meta_file = directory.open_file(&meta_name)?;
+        verify_checksum(meta_file.as_bytes())?;
+        let meta_bytes = meta_file.as_bytes();
+        let meta_prefix = &meta_bytes[..meta_bytes.len() - FOOTER_LENGTH];
+        let mut meta_in = IndexInput::new(&meta_name, meta_prefix);
 
-        codec_util::check_index_header(
+        check_index_header(
             &mut meta_in,
             TERMS_META_CODEC_NAME,
             version,
@@ -216,7 +244,7 @@ impl BlockTreeTermsReader {
         )?;
 
         // Postings reader init: validate postings header + block size
-        codec_util::check_index_header(
+        check_index_header(
             &mut meta_in,
             TERMS_CODEC,
             VERSION_START,
@@ -240,10 +268,9 @@ impl BlockTreeTermsReader {
 
         let mut fields = HashMap::with_capacity(num_fields as usize);
         for _ in 0..num_fields {
-            let field_reader =
-                read_field_metadata(&mut meta_in, field_infos, &*index_in, &*terms_in)?;
-            let field_number = field_reader.field_number;
-            if fields.insert(field_number, field_reader).is_some() {
+            let field_meta = read_field_metadata(&mut meta_in, field_infos)?;
+            let field_number = field_meta.field_number;
+            if fields.insert(field_number, field_meta).is_some() {
                 return Err(io::Error::other(format!(
                     "duplicate field number: {field_number}"
                 )));
@@ -254,26 +281,33 @@ impl BlockTreeTermsReader {
         let _index_length = meta_in.read_le_long()?;
         let _terms_length = meta_in.read_le_long()?;
 
-        // Validate .tmd footer
-        codec_util::check_footer(&mut meta_in)?;
+        // O(1) footer sanity on the data files
+        retrieve_checksum(terms_file.as_bytes())?;
+        retrieve_checksum(index_file.as_bytes())?;
 
-        // index_in is now distributed to each FieldReader — drop it here
-        drop(index_in);
-
-        Ok(Self { terms_in, fields })
+        Ok(Self {
+            terms_file,
+            index_file,
+            fields,
+        })
     }
 
     /// Returns the [`FieldReader`] for the given field number, if it exists.
-    pub fn field_reader(&self, field_number: u32) -> Option<&FieldReader> {
-        self.fields.get(&field_number)
+    pub fn field_reader(&self, field_number: u32) -> Option<FieldReader<'_>> {
+        let meta = self.fields.get(&field_number)?;
+        Some(FieldReader {
+            meta,
+            terms_bytes: self.terms_file.as_bytes(),
+            index_bytes: self.index_file.as_bytes(),
+        })
     }
 
     /// Returns the [`FieldReader`] for the given field name, if it exists.
     ///
     /// Matches Java's `FieldsProducer.terms(String)`.
-    pub fn terms(&self, field_name: &str, field_infos: &FieldInfos) -> Option<&FieldReader> {
+    pub fn terms(&self, field_name: &str, field_infos: &FieldInfos) -> Option<FieldReader<'_>> {
         let fi = field_infos.field_info_by_name(field_name)?;
-        self.fields.get(&fi.number())
+        self.field_reader(fi.number())
     }
 
     /// Returns the number of indexed fields.
@@ -286,31 +320,29 @@ impl BlockTreeTermsReader {
         self.fields.is_empty()
     }
 
-    /// Returns the `.tim` terms dictionary input.
-    pub fn terms_in(&self) -> &dyn IndexInput {
-        &*self.terms_in
+    /// Returns the whole `.tim` terms dictionary bytes. Primarily useful for
+    /// low-level frame tests that need to construct their own
+    /// [`IndexInput`] over the dictionary.
+    pub fn terms_bytes(&self) -> &[u8] {
+        self.terms_file.as_bytes()
     }
 }
 
-impl fmt::Debug for FieldReader {
+impl fmt::Debug for BlockTreeTermsReader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FieldReader")
-            .field("field_number", &self.field_number)
-            .field("num_terms", &self.num_terms)
-            .field("index_start", &self.index_start)
-            .field("root_fp", &self.root_fp)
-            .field("index_end", &self.index_end)
+        f.debug_struct("BlockTreeTermsReader")
+            .field("terms_len", &self.terms_file.len())
+            .field("index_len", &self.index_file.len())
+            .field("field_count", &self.fields.len())
             .finish()
     }
 }
 
 /// Reads a single field's metadata from the `.tmd` stream.
 fn read_field_metadata(
-    mut input: &mut dyn DataInput,
+    input: &mut IndexInput<'_>,
     field_infos: &FieldInfos,
-    index_in: &dyn IndexInput,
-    terms_in: &dyn IndexInput,
-) -> io::Result<FieldReader> {
+) -> io::Result<FieldMeta> {
     let field_number = input.read_vint()?;
     if field_number < 0 {
         return Err(io::Error::other(format!(
@@ -359,15 +391,12 @@ fn read_field_metadata(
         )));
     }
 
-    // Trie index pointers (stored for future lazy TrieReader creation)
+    // Trie index pointers
     let index_start = input.read_vlong()?;
     let root_fp = input.read_vlong()?;
     let index_end = input.read_vlong()?;
 
-    let field_index_in =
-        index_in.slice(&format!("field {field_number} trie"), 0, index_in.length())?;
-
-    Ok(FieldReader {
+    Ok(FieldMeta {
         field_number,
         num_terms,
         sum_total_term_freq,
@@ -380,19 +409,17 @@ fn read_field_metadata(
         index_start,
         root_fp,
         index_end,
-        index_in: field_index_in,
-        terms_in: terms_in.slice("field terms_in", 0, terms_in.length())?,
     })
 }
 
 /// Reads a length-prefixed byte array (VInt length + raw bytes).
-fn read_bytes_ref(mut input: &mut dyn DataInput) -> io::Result<Box<[u8]>> {
+fn read_bytes_ref(input: &mut IndexInput<'_>) -> io::Result<Box<[u8]>> {
     let len = input.read_vint()?;
     if len < 0 {
         return Err(io::Error::other(format!("invalid bytes length: {len}")));
     }
     let mut buf = vec![0u8; len as usize];
-    input.read_exact(&mut buf)?;
+    input.read_bytes(&mut buf)?;
     Ok(buf.into_boxed_slice())
 }
 
@@ -402,13 +429,10 @@ mod tests {
     use crate::codecs::competitive_impact::BufferedNormsLookup;
     use crate::codecs::lucene103::blocktree_writer::{BlockTreeTermsWriter, BufferedFieldTerms};
     use crate::document::{DocValuesType, IndexOptions, TermOffset};
-    use crate::encoding::write_encoding::WriteEncoding;
     use crate::index::pipeline::terms_hash::{FreqProxTermsWriterPerField, TermsHash};
     use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig};
-    use crate::store::byte_slice_input::ByteSliceIndexInput;
     use crate::store::memory::MemoryDirectory;
     use crate::util::byte_block_pool::ByteBlockPool;
-    use assertables::*;
 
     fn make_field_info(name: &str, number: u32, index_options: IndexOptions) -> FieldInfo {
         FieldInfo::new(
@@ -547,13 +571,14 @@ mod tests {
         assert_eq!(reader.len(), 1);
 
         let fr = reader.field_reader(0).unwrap();
-        assert_eq!(fr.field_number, 0);
-        assert_eq!(fr.num_terms, 3);
+        let meta = fr.meta();
+        assert_eq!(meta.field_number, 0);
+        assert_eq!(meta.num_terms, 3);
         // For DOCS-only, sumTotalTermFreq == sumDocFreq
-        assert_eq!(fr.sum_total_term_freq, fr.sum_doc_freq);
-        assert_eq!(&*fr.min_term, b"alpha");
-        assert_eq!(&*fr.max_term, b"gamma");
-        assert_ge!(fr.doc_count, 1);
+        assert_eq!(meta.sum_total_term_freq, meta.sum_doc_freq);
+        assert_eq!(&*meta.min_term, b"alpha");
+        assert_eq!(&*meta.max_term, b"gamma");
+        assert_ge!(meta.doc_count, 1);
 
         Ok(())
     }
@@ -566,12 +591,13 @@ mod tests {
         let reader = write_and_read(vec![fi], vec![("body", IndexOptions::DocsAndFreqs, terms)])?;
 
         let fr = reader.field_reader(0).unwrap();
-        assert_eq!(fr.num_terms, 2);
+        let meta = fr.meta();
+        assert_eq!(meta.num_terms, 2);
         // With freqs, sumTotalTermFreq >= sumDocFreq
-        assert_ge!(fr.sum_total_term_freq, fr.sum_doc_freq);
-        assert_ge!(fr.sum_doc_freq, fr.doc_count as i64);
-        assert_eq!(&*fr.min_term, b"hello");
-        assert_eq!(&*fr.max_term, b"world");
+        assert_ge!(meta.sum_total_term_freq, meta.sum_doc_freq);
+        assert_ge!(meta.sum_doc_freq, meta.doc_count as i64);
+        assert_eq!(&*meta.min_term, b"hello");
+        assert_eq!(&*meta.max_term, b"world");
 
         Ok(())
     }
@@ -600,11 +626,14 @@ mod tests {
         assert_eq!(reader.len(), 2);
 
         let path_fr = reader.field_reader(0).unwrap();
-        assert_eq!(path_fr.num_terms, 2);
+        assert_eq!(path_fr.meta().num_terms, 2);
 
         let contents_fr = reader.field_reader(1).unwrap();
-        assert_eq!(contents_fr.num_terms, 3);
-        assert_ge!(contents_fr.sum_total_term_freq, contents_fr.sum_doc_freq);
+        assert_eq!(contents_fr.meta().num_terms, 3);
+        assert_ge!(
+            contents_fr.meta().sum_total_term_freq,
+            contents_fr.meta().sum_doc_freq
+        );
 
         // Non-existent field
         assert_none!(reader.field_reader(99));
@@ -614,6 +643,7 @@ mod tests {
 
     // --- Validation tests for read_field_metadata ---
 
+    use crate::encoding::write_encoding::WriteEncoding;
     use crate::store::{DataOutput, VecOutput};
 
     /// Builds a valid field metadata byte stream for field 0 (DOCS-only).
@@ -638,27 +668,17 @@ mod tests {
         FieldInfos::new(vec![make_field_info("test", 0, IndexOptions::Docs)])
     }
 
-    fn dummy_index_input() -> Box<dyn IndexInput> {
-        Box::new(ByteSliceIndexInput::new("dummy".into(), vec![0u8; 16]))
-    }
-
     #[test]
     fn test_valid_field_metadata_parses() {
         let data = valid_field_metadata_bytes();
         let fi = docs_field_infos();
-        let mut input = ByteSliceIndexInput::new("test".into(), data);
-        let fr = read_field_metadata(
-            &mut input,
-            &fi,
-            &*dummy_index_input(),
-            &*dummy_index_input(),
-        )
-        .unwrap();
-        assert_eq!(fr.field_number, 0);
-        assert_eq!(fr.num_terms, 5);
-        assert_eq!(fr.doc_count, 3);
-        assert_eq!(&*fr.min_term, b"a");
-        assert_eq!(&*fr.max_term, b"z");
+        let mut input = IndexInput::new("test", &data);
+        let meta = read_field_metadata(&mut input, &fi).unwrap();
+        assert_eq!(meta.field_number, 0);
+        assert_eq!(meta.num_terms, 5);
+        assert_eq!(meta.doc_count, 3);
+        assert_eq!(&*meta.min_term, b"a");
+        assert_eq!(&*meta.max_term, b"z");
     }
 
     #[test]
@@ -669,14 +689,8 @@ mod tests {
         out.write_vlong(0).unwrap(); // num_terms = 0 (invalid)
 
         let fi = docs_field_infos();
-        let mut input = ByteSliceIndexInput::new("test".into(), buf);
-        let err = read_field_metadata(
-            &mut input,
-            &fi,
-            &*dummy_index_input(),
-            &*dummy_index_input(),
-        )
-        .unwrap_err();
+        let mut input = IndexInput::new("test", &buf);
+        let err = read_field_metadata(&mut input, &fi).unwrap_err();
         assert_contains!(err.to_string(), "invalid numTerms");
     }
 
@@ -688,14 +702,8 @@ mod tests {
         out.write_vlong(1).unwrap(); // num_terms
 
         let fi = docs_field_infos();
-        let mut input = ByteSliceIndexInput::new("test".into(), buf);
-        let err = read_field_metadata(
-            &mut input,
-            &fi,
-            &*dummy_index_input(),
-            &*dummy_index_input(),
-        )
-        .unwrap_err();
+        let mut input = IndexInput::new("test", &buf);
+        let err = read_field_metadata(&mut input, &fi).unwrap_err();
         assert_contains!(err.to_string(), "invalid field number");
     }
 
@@ -711,14 +719,8 @@ mod tests {
         out.write_vint(0).unwrap(); // max_term (empty)
 
         let fi = docs_field_infos();
-        let mut input = ByteSliceIndexInput::new("test".into(), buf);
-        let err = read_field_metadata(
-            &mut input,
-            &fi,
-            &*dummy_index_input(),
-            &*dummy_index_input(),
-        )
-        .unwrap_err();
+        let mut input = IndexInput::new("test", &buf);
+        let err = read_field_metadata(&mut input, &fi).unwrap_err();
         assert_contains!(err.to_string(), "invalid sumDocFreq");
     }
 
@@ -737,14 +739,8 @@ mod tests {
         out.write_vint(0).unwrap(); // min_term (empty)
         out.write_vint(0).unwrap(); // max_term (empty)
 
-        let mut input = ByteSliceIndexInput::new("test".into(), buf);
-        let err = read_field_metadata(
-            &mut input,
-            &fi,
-            &*dummy_index_input(),
-            &*dummy_index_input(),
-        )
-        .unwrap_err();
+        let mut input = IndexInput::new("test", &buf);
+        let err = read_field_metadata(&mut input, &fi).unwrap_err();
         assert_contains!(err.to_string(), "invalid sumTotalTermFreq");
     }
 

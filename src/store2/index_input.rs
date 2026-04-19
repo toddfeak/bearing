@@ -106,6 +106,14 @@ impl<'a> IndexInput<'a> {
         Ok(i64::from_be_bytes(buf))
     }
 
+    /// Returns a mutable reference to the underlying cursor. Intended for
+    /// codec-level adapters that delegate to `std::io::Read`-based encoding
+    /// helpers without introducing per-helper wrappers on [`IndexInput`].
+    #[inline]
+    pub fn cursor_mut(&mut self) -> &mut Cursor<&'a [u8]> {
+        &mut self.cursor
+    }
+
     // ---------- variable-length integer reads ----------
 
     #[inline]

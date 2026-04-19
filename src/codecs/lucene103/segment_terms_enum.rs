@@ -21,7 +21,7 @@ use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::{lowercase_ascii, lz4, pfor, zigzag};
 use crate::index::terms::{SeekStatus, TermsEnum};
 use crate::store::slice_reader::SliceReader;
-use crate::store::{DataInput, IndexInput};
+use crate::store2::IndexInput;
 
 pub(crate) const COMPRESSION_NONE: u32 = 0;
 const COMPRESSION_LOWERCASE_ASCII: u32 = 1;
@@ -31,13 +31,13 @@ const COMPRESSION_LZ4: u32 = 2;
 ///
 /// Wraps trie navigation + block scanning into a [`TermsEnum`] implementation.
 /// Created by `FieldReader::iterator()` (via the [`Terms`](crate::index::terms::Terms) trait).
-pub struct SegmentTermsEnum {
-    /// Handle to the `.tim` terms dictionary.
-    terms_in: Box<dyn IndexInput>,
-    /// Handle to the `.tip` index (for floor data reads).
-    index_in: Box<dyn IndexInput>,
+pub struct SegmentTermsEnum<'a> {
+    /// Borrowed view of the `.tim` terms dictionary.
+    terms_in: IndexInput<'a>,
+    /// Borrowed view of the `.tip` field region (for floor data reads).
+    index_in: IndexInput<'a>,
     /// Trie navigator for this field.
-    trie: TrieReader,
+    trie: TrieReader<'a>,
     /// Index options for this field.
     index_options: IndexOptions,
     /// The shared term buffer, written into by frame iteration methods.
@@ -62,12 +62,12 @@ pub struct SegmentTermsEnum {
     eof: bool,
 }
 
-impl SegmentTermsEnum {
+impl<'a> SegmentTermsEnum<'a> {
     /// Creates a new `SegmentTermsEnum` for a field.
     pub fn new(
-        terms_in: Box<dyn IndexInput>,
-        index_in: Box<dyn IndexInput>,
-        trie: TrieReader,
+        terms_in: IndexInput<'a>,
+        index_in: IndexInput<'a>,
+        trie: TrieReader<'a>,
         index_options: IndexOptions,
     ) -> Self {
         let root_node = trie.root().clone();
@@ -117,7 +117,7 @@ impl SegmentTermsEnum {
         f.flags.is_floor = node.is_floor();
         if f.flags.is_floor {
             f.floor
-                .load_from_input(self.index_in.as_mut(), node.floor_data_fp())?;
+                .load_from_input(&mut self.index_in, node.floor_data_fp())?;
         }
         self.push_frame_fp(Some(node), node.output_fp(), length)?;
         Ok(())
@@ -269,7 +269,7 @@ impl SegmentTermsEnum {
                     return Ok(false);
                 }
 
-                self.stack[ord].load_block(self.terms_in.as_mut())?;
+                self.stack[ord].load_block(&mut self.terms_in)?;
 
                 let result = self.stack[ord].scan_to_term(
                     target,
@@ -306,7 +306,7 @@ impl SegmentTermsEnum {
             return Ok(false);
         }
 
-        self.stack[ord].load_block(self.terms_in.as_mut())?;
+        self.stack[ord].load_block(&mut self.terms_in)?;
 
         let result =
             self.stack[ord].scan_to_term(target, true, &mut self.term, &mut self.term_exists)?;
@@ -314,7 +314,7 @@ impl SegmentTermsEnum {
     }
 }
 
-impl TermsEnum for SegmentTermsEnum {
+impl TermsEnum for SegmentTermsEnum<'_> {
     /// Fast point lookup using the flat (stateless) path.
     ///
     /// Navigates the trie from scratch, parses one block, and discards all
@@ -334,11 +334,11 @@ impl TermsEnum for SegmentTermsEnum {
         };
 
         let state = seek_exact_in_block(
-            &*self.terms_in,
+            &self.terms_in,
             &trie_result,
             target,
             self.index_options,
-            &*self.index_in,
+            &self.index_in,
         )?;
 
         match state {
@@ -448,7 +448,7 @@ impl TermsEnum for SegmentTermsEnum {
                 let target_clone = target.to_vec();
                 self.stack[ord].scan_to_floor_frame(&target_clone);
 
-                self.stack[ord].load_block(self.terms_in.as_mut())?;
+                self.stack[ord].load_block(&mut self.terms_in)?;
 
                 let result = self.stack[ord].scan_to_term(
                     target,
@@ -473,18 +473,17 @@ impl TermsEnum for SegmentTermsEnum {
                     let last_sub_fp = self.stack[ord].last_sub_fp;
                     let prefix_len = self.stack[ord].prefix_length + self.stack[ord].suffix_length;
                     self.push_frame_fp(None, last_sub_fp, prefix_len)?;
-                    self.stack[self.current_frame_ord as usize]
-                        .load_block(self.terms_in.as_mut())?;
+                    self.stack[self.current_frame_ord as usize].load_block(&mut self.terms_in)?;
                     while self.stack[self.current_frame_ord as usize].next(
                         &mut self.term,
                         &mut self.term_exists,
-                        self.terms_in.as_mut(),
+                        &mut self.terms_in,
                     )? {
                         let sub_fp = self.stack[self.current_frame_ord as usize].last_sub_fp;
                         let term_len = self.term.len();
                         self.push_frame_fp(None, sub_fp, term_len)?;
                         self.stack[self.current_frame_ord as usize]
-                            .load_block(self.terms_in.as_mut())?;
+                            .load_block(&mut self.terms_in)?;
                     }
                 }
                 return Ok(result);
@@ -509,7 +508,7 @@ impl TermsEnum for SegmentTermsEnum {
         let target_clone = target.to_vec();
         self.stack[ord].scan_to_floor_frame(&target_clone);
 
-        self.stack[ord].load_block(self.terms_in.as_mut())?;
+        self.stack[ord].load_block(&mut self.terms_in)?;
 
         let result =
             self.stack[ord].scan_to_term(target, false, &mut self.term, &mut self.term_exists)?;
@@ -529,16 +528,16 @@ impl TermsEnum for SegmentTermsEnum {
             let last_sub_fp = self.stack[ord].last_sub_fp;
             let prefix_len = self.stack[ord].prefix_length + self.stack[ord].suffix_length;
             self.push_frame_fp(None, last_sub_fp, prefix_len)?;
-            self.stack[self.current_frame_ord as usize].load_block(self.terms_in.as_mut())?;
+            self.stack[self.current_frame_ord as usize].load_block(&mut self.terms_in)?;
             while self.stack[self.current_frame_ord as usize].next(
                 &mut self.term,
                 &mut self.term_exists,
-                self.terms_in.as_mut(),
+                &mut self.terms_in,
             )? {
                 let sub_fp = self.stack[self.current_frame_ord as usize].last_sub_fp;
                 let term_len = self.term.len();
                 self.push_frame_fp(None, sub_fp, term_len)?;
-                self.stack[self.current_frame_ord as usize].load_block(self.terms_in.as_mut())?;
+                self.stack[self.current_frame_ord as usize].load_block(&mut self.terms_in)?;
             }
         }
         Ok(result)
@@ -605,7 +604,7 @@ impl TermsEnum for SegmentTermsEnum {
             // First call — push root frame
             let root = self.nodes[0].clone();
             self.push_frame_for_node(&root, 0)?;
-            self.stack[self.current_frame_ord as usize].load_block(self.terms_in.as_mut())?;
+            self.stack[self.current_frame_ord as usize].load_block(&mut self.terms_in)?;
             self.initialized = true;
         }
 
@@ -626,7 +625,7 @@ impl TermsEnum for SegmentTermsEnum {
                 break;
             }
             if !f.flags.is_last_in_floor {
-                self.stack[ord].load_next_floor_block(self.terms_in.as_mut())?;
+                self.stack[ord].load_next_floor_block(&mut self.terms_in)?;
                 break;
             } else {
                 if self.current_frame_ord == 0 {
@@ -646,7 +645,7 @@ impl TermsEnum for SegmentTermsEnum {
                 {
                     let term_clone = self.term.clone();
                     self.stack[parent_ord].scan_to_floor_frame(&term_clone);
-                    self.stack[parent_ord].load_block(self.terms_in.as_mut())?;
+                    self.stack[parent_ord].load_block(&mut self.terms_in)?;
                     self.stack[parent_ord].scan_to_sub_block(last_fp);
                 }
 
@@ -661,17 +660,13 @@ impl TermsEnum for SegmentTermsEnum {
             let ord = self.current_frame_ord as usize;
             let is_sub_block = {
                 let f = &mut self.stack[ord];
-                f.next(
-                    &mut self.term,
-                    &mut self.term_exists,
-                    self.terms_in.as_mut(),
-                )?
+                f.next(&mut self.term, &mut self.term_exists, &mut self.terms_in)?
             };
             if is_sub_block {
                 let last_sub_fp = self.stack[ord].last_sub_fp;
                 let term_len = self.term.len();
                 self.push_frame_fp(None, last_sub_fp, term_len)?;
-                self.stack[self.current_frame_ord as usize].load_block(self.terms_in.as_mut())?;
+                self.stack[self.current_frame_ord as usize].load_block(&mut self.terms_in)?;
             } else {
                 return Ok(Some(&self.term));
             }
@@ -681,11 +676,11 @@ impl TermsEnum for SegmentTermsEnum {
 
 /// Seeks to an exact term in the `.tim` file and returns its metadata.
 fn seek_exact_in_block(
-    terms_in: &dyn IndexInput,
+    terms_in: &IndexInput<'_>,
     trie_result: &super::trie_reader::TrieSeekResult,
     target: &[u8],
     index_options: IndexOptions,
-    index_in: &dyn IndexInput,
+    index_in: &IndexInput<'_>,
 ) -> io::Result<Option<IntBlockTermState>> {
     let prefix_length = trie_result.depth;
     let mut block_fp = trie_result.output_fp;
@@ -701,10 +696,10 @@ fn seek_exact_in_block(
         )?;
     }
 
-    let mut input = terms_in.slice("seek_exact", 0, terms_in.length())?;
-    input.seek(block_fp as u64)?;
+    let mut input = terms_in.sub_input("seek_exact", 0, terms_in.length())?;
+    input.seek(block_fp as usize)?;
 
-    let result = scan_block(input.as_mut(), target, prefix_length, index_options)?;
+    let result = scan_block(&mut input, target, prefix_length, index_options)?;
     match result {
         ScanResult::Found(state) => Ok(Some(state)),
         ScanResult::NotFound => Ok(None),
@@ -713,13 +708,13 @@ fn seek_exact_in_block(
 
 /// Scans floor data from `.tip` to find the block FP for the given target label.
 fn scan_to_floor_block(
-    index_in: &dyn IndexInput,
+    index_in: &IndexInput<'_>,
     floor_data_fp: i64,
     base_fp: i64,
     target_label: u8,
 ) -> io::Result<i64> {
-    let mut input = index_in.slice("floor_data", 0, index_in.length())?;
-    input.seek(floor_data_fp as u64)?;
+    let mut input = index_in.sub_input("floor_data", 0, index_in.length())?;
+    input.seek(floor_data_fp as usize)?;
 
     let num_follow_blocks = input.read_vint()?;
     let mut result_fp = base_fp;
@@ -751,7 +746,7 @@ enum ScanResult {
 
 /// Loads and scans a single term block from the current position.
 fn scan_block(
-    mut input: &mut dyn DataInput,
+    input: &mut IndexInput<'_>,
     target: &[u8],
     prefix_length: usize,
     index_options: IndexOptions,
@@ -776,17 +771,17 @@ fn scan_block(
         vec![common; num_suffix_length_bytes]
     } else {
         let mut buf = vec![0u8; num_suffix_length_bytes];
-        input.read_exact(&mut buf)?;
+        input.read_bytes(&mut buf)?;
         buf
     };
 
     let num_stats_bytes = input.read_vint()? as usize;
     let mut stats_bytes = vec![0u8; num_stats_bytes];
-    input.read_exact(&mut stats_bytes)?;
+    input.read_bytes(&mut stats_bytes)?;
 
     let num_meta_bytes = input.read_vint()? as usize;
     let mut meta_bytes = vec![0u8; num_meta_bytes];
-    input.read_exact(&mut meta_bytes)?;
+    input.read_bytes(&mut meta_bytes)?;
 
     let target_suffix = &target[prefix_length..];
 
@@ -924,19 +919,22 @@ fn decode_term_meta(
 
 /// Read and decompress suffix bytes.
 pub(crate) fn read_compressed(
-    input: &mut dyn DataInput,
+    input: &mut IndexInput<'_>,
     uncompressed_len: usize,
     compression_code: u32,
 ) -> io::Result<Vec<u8>> {
     match compression_code {
         COMPRESSION_NONE => {
             let mut buf = vec![0u8; uncompressed_len];
-            input.read_exact(&mut buf)?;
+            input.read_bytes(&mut buf)?;
             Ok(buf)
         }
-        COMPRESSION_LZ4 => Ok(lz4::decompress_from_reader(input, uncompressed_len)?),
+        COMPRESSION_LZ4 => Ok(lz4::decompress_from_reader(
+            input.cursor_mut(),
+            uncompressed_len,
+        )?),
         COMPRESSION_LOWERCASE_ASCII => Ok(lowercase_ascii::decompress_from_reader(
-            input,
+            input.cursor_mut(),
             uncompressed_len,
         )?),
         _ => Err(io::Error::other(format!(

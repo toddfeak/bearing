@@ -11,6 +11,7 @@ use std::fmt;
 use std::io;
 
 use crate::codecs::lucene103::postings_format::IntBlockTermState;
+use crate::index::terms::Terms;
 use crate::search::index_searcher::IndexSearcher;
 
 /// Maintains per-leaf [`IntBlockTermState`] for a single term across all segments.

@@ -17,8 +17,9 @@ use crate::document::IndexOptions;
 use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::{pfor, zigzag};
 use crate::index::terms::SeekStatus;
+use crate::store::DataInput;
 use crate::store::slice_reader::SliceReader;
-use crate::store::{DataInput, IndexInput};
+use crate::store2::IndexInput;
 
 /// File pointers tracking where a block lives in the `.tim` file.
 #[derive(Debug, Default)]
@@ -96,10 +97,10 @@ impl FloorState {
     /// then reads all bytes into an owned buffer.
     pub fn load_from_input(
         &mut self,
-        mut index_in: &mut dyn IndexInput,
+        index_in: &mut IndexInput<'_>,
         floor_data_fp: i64,
     ) -> io::Result<()> {
-        let start = floor_data_fp as u64;
+        let start = floor_data_fp as usize;
         index_in.seek(start)?;
 
         // Parse through to find total byte length
@@ -111,12 +112,12 @@ impl FloorState {
                 index_in.read_byte()?; // next label
             }
         }
-        let total_len = (index_in.file_pointer() - start) as usize;
+        let total_len = index_in.position() - start;
 
         // Re-read all bytes into buffer
         self.data = vec![0u8; total_len];
         index_in.seek(start)?;
-        index_in.read_exact(&mut self.data)?;
+        index_in.read_bytes(&mut self.data)?;
 
         // Parse initial fields
         let mut reader = SliceReader::new(&self.data);
@@ -228,7 +229,7 @@ impl SegmentTermsEnumFrame {
     }
 
     /// Loads the next floor block.
-    pub fn load_next_floor_block(&mut self, terms_in: &mut dyn IndexInput) -> io::Result<()> {
+    pub fn load_next_floor_block(&mut self, terms_in: &mut IndexInput<'_>) -> io::Result<()> {
         debug_assert!(self.node.is_none() || self.flags.is_floor);
         self.pos.fp = self.pos.fp_end;
         self.next_ent = -1;
@@ -240,13 +241,13 @@ impl SegmentTermsEnumFrame {
     /// Reads block header, suffix data, suffix lengths, stats, and metadata
     /// into owned buffers. Does not decode stats or metadata — that happens
     /// lazily via `decode_meta_data`.
-    pub fn load_block(&mut self, mut terms_in: &mut dyn IndexInput) -> io::Result<()> {
+    pub fn load_block(&mut self, terms_in: &mut IndexInput<'_>) -> io::Result<()> {
         if self.next_ent != -1 {
             // Already loaded
             return Ok(());
         }
 
-        terms_in.seek(self.pos.fp as u64)?;
+        terms_in.seek(self.pos.fp as usize)?;
 
         // Section 1: Block header
         let code = terms_in.read_vint()?;
@@ -264,7 +265,7 @@ impl SegmentTermsEnumFrame {
         );
 
         // Section 2: Suffix data
-        let start_suffix_fp = terms_in.file_pointer();
+        let start_suffix_fp = terms_in.position();
         let code_l = terms_in.read_vlong()?;
         self.flags.is_leaf_block = (code_l & 0x04) != 0;
         let num_suffix_bytes = (code_l as u64 >> 3) as usize;
@@ -283,15 +284,15 @@ impl SegmentTermsEnumFrame {
             self.data.suffix_length_bytes = vec![common; num_suffix_length_bytes];
         } else {
             self.data.suffix_length_bytes = vec![0u8; num_suffix_length_bytes];
-            terms_in.read_exact(&mut self.data.suffix_length_bytes)?;
+            terms_in.read_bytes(&mut self.data.suffix_length_bytes)?;
         }
         self.data.suffix_length_pos = 0;
-        self.data.total_suffix_bytes = terms_in.file_pointer() as i64 - start_suffix_fp as i64;
+        self.data.total_suffix_bytes = terms_in.position() as i64 - start_suffix_fp as i64;
 
         // Section 4: Stats
         let num_stat_bytes = terms_in.read_vint()? as usize;
         self.data.stat_bytes = vec![0u8; num_stat_bytes];
-        terms_in.read_exact(&mut self.data.stat_bytes)?;
+        terms_in.read_bytes(&mut self.data.stat_bytes)?;
         self.data.stats_pos = 0;
         self.stats_singleton_run_length = 0;
         self.meta_data_upto = 0;
@@ -303,12 +304,12 @@ impl SegmentTermsEnumFrame {
         // Section 5: Metadata
         let num_meta_bytes = terms_in.read_vint()? as usize;
         self.data.meta_bytes = vec![0u8; num_meta_bytes];
-        terms_in.read_exact(&mut self.data.meta_bytes)?;
+        terms_in.read_bytes(&mut self.data.meta_bytes)?;
 
         self.data.meta_pos = 0;
 
         // fp_end = position after all block data
-        self.pos.fp_end = terms_in.file_pointer() as i64;
+        self.pos.fp_end = terms_in.position() as i64;
 
         Ok(())
     }
@@ -322,7 +323,7 @@ impl SegmentTermsEnumFrame {
         &mut self,
         term: &mut Vec<u8>,
         term_exists: &mut bool,
-        terms_in: &mut dyn IndexInput,
+        terms_in: &mut IndexInput<'_>,
     ) -> io::Result<bool> {
         if self.flags.is_leaf_block {
             self.next_leaf(term, term_exists)?;
@@ -367,7 +368,7 @@ impl SegmentTermsEnumFrame {
         &mut self,
         term: &mut Vec<u8>,
         term_exists: &mut bool,
-        terms_in: &mut dyn IndexInput,
+        terms_in: &mut IndexInput<'_>,
     ) -> io::Result<bool> {
         loop {
             if self.next_ent == self.ent_count as i32 {
@@ -1070,14 +1071,14 @@ mod tests {
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
 
-        let terms_in = reader.terms_in();
-        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let terms_bytes = reader.terms_bytes();
+        let mut terms_in = IndexInput::new("test", terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"alpha").unwrap().unwrap();
 
         let mut frame = SegmentTermsEnumFrame::new(0);
         frame.pos.fp = trie_result.output_fp;
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
 
         assert_eq!(frame.ent_count, 3);
         assert!(frame.flags.is_leaf_block);
@@ -1100,14 +1101,14 @@ mod tests {
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
 
-        let terms_in = reader.terms_in();
-        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let terms_bytes = reader.terms_bytes();
+        let mut terms_in = IndexInput::new("test", terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"term_0000").unwrap().unwrap();
 
         let mut frame = SegmentTermsEnumFrame::new(0);
         frame.pos.fp = trie_result.output_fp;
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
 
         assert!(frame.ent_count > 0);
         assert_eq!(frame.next_ent, 0);
@@ -1122,20 +1123,20 @@ mod tests {
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
 
-        let terms_in = reader.terms_in();
-        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let terms_bytes = reader.terms_bytes();
+        let mut terms_in = IndexInput::new("test", terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"hello").unwrap().unwrap();
 
         let mut frame = SegmentTermsEnumFrame::new(0);
         frame.pos.fp = trie_result.output_fp;
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
 
         let ent_count = frame.ent_count;
         let fp_end = frame.pos.fp_end;
 
         // Loading again should be a no-op (next_ent != -1)
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
         assert_eq!(frame.ent_count, ent_count);
         assert_eq!(frame.pos.fp_end, fp_end);
     }
@@ -1150,14 +1151,14 @@ mod tests {
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
 
-        let terms_in = reader.terms_in();
-        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let terms_bytes = reader.terms_bytes();
+        let mut terms_in = IndexInput::new("test", terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"alpha").unwrap().unwrap();
 
         let mut frame = SegmentTermsEnumFrame::new(0);
         frame.pos.fp = trie_result.output_fp;
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
         assert!(frame.flags.is_leaf_block);
 
         let mut term = Vec::new();
@@ -1187,14 +1188,14 @@ mod tests {
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
 
-        let terms_in = reader.terms_in();
-        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let terms_bytes = reader.terms_bytes();
+        let mut terms_in = IndexInput::new("test", terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"aaa").unwrap().unwrap();
 
         let mut frame = SegmentTermsEnumFrame::new(0);
         frame.pos.fp = trie_result.output_fp;
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
 
         let mut term = Vec::new();
         let mut term_exists = false;
@@ -1219,14 +1220,14 @@ mod tests {
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
 
-        let terms_in = reader.terms_in();
-        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let terms_bytes = reader.terms_bytes();
+        let mut terms_in = IndexInput::new("test", terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"hello").unwrap().unwrap();
 
         let mut frame = SegmentTermsEnumFrame::new(0);
         frame.pos.fp = trie_result.output_fp;
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
         assert!(frame.flags.is_leaf_block);
 
         let mut term = Vec::new();
@@ -1234,7 +1235,7 @@ mod tests {
 
         // next() on a leaf block should return false (not a sub-block)
         let is_sub_block = frame
-            .next(&mut term, &mut term_exists, terms_in.as_mut())
+            .next(&mut term, &mut term_exists, &mut terms_in)
             .unwrap();
         assert!(!is_sub_block);
         assert_eq!(term, b"hello");
@@ -1255,14 +1256,14 @@ mod tests {
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
 
-        let terms_in = reader.terms_in();
-        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let terms_bytes = reader.terms_bytes();
+        let mut terms_in = IndexInput::new("test", terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"alpha").unwrap().unwrap();
 
         let mut frame = SegmentTermsEnumFrame::new(0);
         frame.pos.fp = trie_result.output_fp;
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
 
         let mut term = Vec::new();
         let mut term_exists = false;
@@ -1294,14 +1295,14 @@ mod tests {
         let reader = open_reader(&dir, &fi, &id);
         let fr = reader.field_reader(0).unwrap();
 
-        let terms_in = reader.terms_in();
-        let mut terms_in = terms_in.slice("test", 0, terms_in.length()).unwrap();
+        let terms_bytes = reader.terms_bytes();
+        let mut terms_in = IndexInput::new("test", terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"hello").unwrap().unwrap();
 
         let mut frame = SegmentTermsEnumFrame::new(0);
         frame.pos.fp = trie_result.output_fp;
-        frame.load_block(terms_in.as_mut()).unwrap();
+        frame.load_block(&mut terms_in).unwrap();
 
         let mut term = Vec::new();
         let mut term_exists = false;

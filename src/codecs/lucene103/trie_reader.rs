@@ -14,7 +14,7 @@
 
 use std::io;
 
-use crate::store::RandomAccessInput;
+use crate::store2::IndexInput;
 
 // Node type signatures (lowest 2 bits of header)
 const SIGN_NO_CHILDREN: u32 = 0x00;
@@ -53,7 +53,7 @@ const STRATEGY_BITS: u32 = 2;
 /// A loaded trie node with decoded metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
-    /// Absolute file pointer of this node in the `.tip` file.
+    /// File pointer of this node within the `.tip` field slice.
     fp: i64,
     /// Node type signature (lowest 2 bits of header).
     sign: u32,
@@ -63,7 +63,7 @@ pub(crate) struct Node {
     output_fp: i64,
     /// Whether this node's block contains terms (vs only sub-blocks).
     has_terms: bool,
-    /// File pointer to floor data, or [`NO_FLOOR_DATA`].
+    /// File pointer to floor data within the `.tip` field slice, or [`NO_FLOOR_DATA`].
     floor_data_fp: i64,
 
     // Single-child fields
@@ -137,19 +137,20 @@ impl Node {
 /// Provides child lookup to navigate from the root node down to a leaf,
 /// following target term bytes. Each node may carry an `output_fp` pointing
 /// to the corresponding block in the `.tim` file.
-pub struct TrieReader {
-    access: Box<dyn RandomAccessInput>,
+pub struct TrieReader<'a> {
+    access: IndexInput<'a>,
     root: Node,
 }
 
-impl TrieReader {
-    /// Creates a new trie reader from the `.tip` index input.
+impl<'a> TrieReader<'a> {
+    /// Creates a new trie reader from the `.tip` field slice bytes.
     ///
-    /// `root_fp` is the file pointer to the root node, read from the `.tmd`
-    /// metadata file (stored in [`super::blocktree_reader::FieldReader`]).
-    pub fn new(access: Box<dyn RandomAccessInput>, root_fp: i64) -> io::Result<Self> {
+    /// `access` borrows the `.tip` bytes for this field (from `index_start`
+    /// to `index_end`). `root_fp` is the file pointer to the root node,
+    /// rebased to be relative to the start of `access`.
+    pub fn new(access: IndexInput<'a>, root_fp: i64) -> io::Result<Self> {
         let mut root = Node::new();
-        load(&*access, &mut root, root_fp)?;
+        load(&access, &mut root, root_fp)?;
         Ok(Self { access, root })
     }
 
@@ -180,7 +181,7 @@ impl TrieReader {
                 return Ok(false);
             }
             child.label = target_label;
-            load(&*self.access, child, parent.fp - parent.child_delta_fp)?;
+            load(&self.access, child, parent.fp - parent.child_delta_fp)?;
             return Ok(true);
         }
 
@@ -192,7 +193,7 @@ impl TrieReader {
             strategy_lookup(
                 parent.child_save_strategy,
                 target_label,
-                &*self.access,
+                &self.access,
                 parent.strategy_fp,
                 parent.strategy_bytes,
                 min_label,
@@ -209,12 +210,12 @@ impl TrieReader {
         let pos = parent.strategy_fp
             + parent.strategy_bytes as i64
             + bytes_per_entry as i64 * position as i64;
-        let delta = self.access.read_le_long_at(pos as u64)? as u64
+        let delta = self.access.read_le_long_at(pos as usize)? as u64
             & BYTES_MASK[bytes_per_entry as usize - 1];
         let fp = parent.fp - delta as i64;
 
         child.label = target_label;
-        load(&*self.access, child, fp)?;
+        load(&self.access, child, fp)?;
         Ok(true)
     }
 
@@ -227,7 +228,7 @@ impl TrieReader {
         // Use two nodes and alternate between them to avoid borrow issues.
         let mut nodes = [Node::new(), Node::new()];
         // Copy root into nodes[0] so we own it.
-        load(&*self.access, &mut nodes[0], self.root.fp)?;
+        load(&self.access, &mut nodes[0], self.root.fp)?;
         let mut current_idx = 0usize;
         let mut best: Option<TrieSeekResult> = None;
 
@@ -281,10 +282,10 @@ pub struct TrieSeekResult {
     pub depth: usize,
 }
 
-/// Loads a trie node from the `.tip` file at the given file pointer.
-fn load(access: &dyn RandomAccessInput, node: &mut Node, fp: i64) -> io::Result<()> {
+/// Loads a trie node from the `.tip` field slice at the given file pointer.
+fn load(access: &IndexInput<'_>, node: &mut Node, fp: i64) -> io::Result<()> {
     node.fp = fp;
-    let term_flags_long = access.read_le_long_at(fp as u64)?;
+    let term_flags_long = access.read_le_long_at(fp as usize)?;
     let term_flags = term_flags_long as u32;
     let sign = term_flags & 0x03;
     node.sign = sign;
@@ -299,7 +300,7 @@ fn load(access: &dyn RandomAccessInput, node: &mut Node, fp: i64) -> io::Result<
 }
 
 fn load_leaf_node(
-    access: &dyn RandomAccessInput,
+    access: &IndexInput<'_>,
     term_flags: u32,
     term_flags_long: i64,
     fp: i64,
@@ -309,7 +310,7 @@ fn load_leaf_node(
     node.output_fp = if fp_bytes_minus1 <= 6 {
         ((term_flags_long as u64 >> 8) & BYTES_MASK[fp_bytes_minus1]) as i64
     } else {
-        access.read_le_long_at((fp + 1) as u64)?
+        access.read_le_long_at((fp + 1) as usize)?
     };
     node.has_terms = (term_flags & LEAF_NODE_HAS_TERMS) != 0;
     node.floor_data_fp = if (term_flags & LEAF_NODE_HAS_FLOOR) != 0 {
@@ -321,7 +322,7 @@ fn load_leaf_node(
 }
 
 fn load_single_child_node(
-    access: &dyn RandomAccessInput,
+    access: &IndexInput<'_>,
     sign: u32,
     term_flags: u32,
     term_flags_long: i64,
@@ -332,7 +333,7 @@ fn load_single_child_node(
     let l = if child_delta_fp_bytes_minus1 <= 5 {
         (term_flags_long as u64) >> 16
     } else {
-        access.read_le_long_at((fp + 2) as u64)? as u64
+        access.read_le_long_at((fp + 2) as usize)? as u64
     };
     node.child_delta_fp = (l & BYTES_MASK[child_delta_fp_bytes_minus1]) as i64;
     node.min_children_label = ((term_flags >> 8) & 0xFF) as u8;
@@ -345,7 +346,7 @@ fn load_single_child_node(
         // SIGN_SINGLE_CHILD_WITH_OUTPUT
         let encoded_output_fp_bytes_minus1 = ((term_flags >> 5) & 0x07) as usize;
         let offset = fp + child_delta_fp_bytes_minus1 as i64 + 3;
-        let encoded_fp = access.read_le_long_at(offset as u64)? as u64
+        let encoded_fp = access.read_le_long_at(offset as usize)? as u64
             & BYTES_MASK[encoded_output_fp_bytes_minus1];
         node.output_fp = (encoded_fp >> 2) as i64;
         node.has_terms = (encoded_fp & NON_LEAF_NODE_HAS_TERMS) != 0;
@@ -359,7 +360,7 @@ fn load_single_child_node(
 }
 
 fn load_multi_children_node(
-    access: &dyn RandomAccessInput,
+    access: &IndexInput<'_>,
     term_flags: u32,
     _term_flags_long: i64,
     fp: i64,
@@ -376,7 +377,7 @@ fn load_multi_children_node(
         let l = if encoded_output_fp_bytes_minus1 <= 4 {
             (_term_flags_long as u64) >> 24
         } else {
-            access.read_le_long_at((fp + 3) as u64)? as u64
+            access.read_le_long_at((fp + 3) as usize)? as u64
         };
         let encoded_fp = l & BYTES_MASK[encoded_output_fp_bytes_minus1];
         node.output_fp = (encoded_fp >> 2) as i64;
@@ -384,7 +385,7 @@ fn load_multi_children_node(
 
         if (encoded_fp & NON_LEAF_NODE_HAS_FLOOR) != 0 {
             let offset = fp + 4 + encoded_output_fp_bytes_minus1 as i64;
-            let children_num = (access.read_byte_at(offset as u64)? as u64) + 1;
+            let children_num = (access.read_byte_at(offset as usize)? as u64) + 1;
             node.strategy_fp = offset + 1;
             node.floor_data_fp = node.strategy_fp
                 + node.strategy_bytes as i64
@@ -408,7 +409,7 @@ fn load_multi_children_node(
 fn strategy_lookup(
     strategy_code: u32,
     target_label: u8,
-    access: &dyn RandomAccessInput,
+    access: &IndexInput<'_>,
     strategy_fp: i64,
     strategy_bytes: u32,
     min_label: u8,
@@ -430,7 +431,7 @@ fn strategy_lookup(
 /// Bitset strategy: each bit represents presence of a label relative to min_label.
 fn bits_lookup(
     target_label: u8,
-    access: &dyn RandomAccessInput,
+    access: &IndexInput<'_>,
     strategy_fp: i64,
     strategy_bytes: u32,
     min_label: u8,
@@ -441,7 +442,7 @@ fn bits_lookup(
     }
     let word_index = (bit_index >> 6) as i64;
     let word_fp = strategy_fp + (word_index << 3);
-    let word = access.read_le_long_at(word_fp as u64)? as u64;
+    let word = access.read_le_long_at(word_fp as usize)? as u64;
     let mask = 1u64 << bit_index;
     if word & mask == 0 {
         return Ok(-1);
@@ -449,7 +450,7 @@ fn bits_lookup(
     let mut pos = 0i32;
     let mut fp = strategy_fp;
     while fp < word_fp {
-        pos += (access.read_le_long_at(fp as u64)? as u64).count_ones() as i32;
+        pos += (access.read_le_long_at(fp as usize)? as u64).count_ones() as i32;
         fp += 8;
     }
     pos += (word & (mask - 1)).count_ones() as i32;
@@ -460,7 +461,7 @@ fn bits_lookup(
 /// Binary search for the target.
 fn array_lookup(
     target_label: u8,
-    access: &dyn RandomAccessInput,
+    access: &IndexInput<'_>,
     strategy_fp: i64,
     strategy_bytes: u32,
     min_label: u8,
@@ -473,7 +474,7 @@ fn array_lookup(
     let mut hi = strategy_bytes; // strategy_bytes = num_children - 1
     while lo < hi {
         let mid = (lo + hi) / 2;
-        let label = access.read_byte_at((strategy_fp + mid as i64) as u64)?;
+        let label = access.read_byte_at((strategy_fp + mid as i64) as usize)?;
         if label < target_label {
             lo = mid + 1;
         } else {
@@ -481,7 +482,7 @@ fn array_lookup(
         }
     }
     if lo < strategy_bytes {
-        let label = access.read_byte_at((strategy_fp + lo as i64) as u64)?;
+        let label = access.read_byte_at((strategy_fp + lo as i64) as usize)?;
         if label == target_label {
             return Ok((lo + 1) as i32); // +1 because min_label is position 0
         }
@@ -493,12 +494,12 @@ fn array_lookup(
 /// A label is present if it's in [min_label, max_label] and NOT in the absent array.
 fn reverse_array_lookup(
     target_label: u8,
-    access: &dyn RandomAccessInput,
+    access: &IndexInput<'_>,
     strategy_fp: i64,
     strategy_bytes: u32,
     min_label: u8,
 ) -> io::Result<i32> {
-    let max_label = access.read_byte_at(strategy_fp as u64)?;
+    let max_label = access.read_byte_at(strategy_fp as usize)?;
     if target_label > max_label {
         return Ok(-1);
     }
@@ -514,7 +515,7 @@ fn reverse_array_lookup(
     let mut high = strategy_bytes as i32 - 2;
     while low <= high {
         let mid = (low + high) as u32 >> 1;
-        let mid_label = access.read_byte_at((absent_fp + mid as i64) as u64)?;
+        let mid_label = access.read_byte_at((absent_fp + mid as i64) as usize)?;
         if mid_label < target_label {
             low = mid as i32 + 1;
         } else if mid_label > target_label {
@@ -641,15 +642,14 @@ mod tests {
         Ok((shared_dir, field_infos, segment_id))
     }
 
-    /// Open a trie reader from the .tip file for field 0.
-    fn open_trie(
+    /// Open the blocktree reader. The caller builds a trie view from the
+    /// returned reader using `fr.new_trie_reader()`.
+    fn open_reader(
         dir: &dyn Directory,
         field_infos: &FieldInfos,
         segment_id: &[u8; 16],
-    ) -> io::Result<TrieReader> {
-        let reader = BlockTreeTermsReader::open(dir, "_0", "", segment_id, field_infos)?;
-        let fr = reader.field_reader(0).unwrap();
-        fr.new_trie_reader()
+    ) -> io::Result<BlockTreeTermsReader> {
+        BlockTreeTermsReader::open(dir, "_0", "", segment_id, field_infos)
     }
 
     #[test]
@@ -660,7 +660,9 @@ mod tests {
             ("gamma", &[0, 2]),
         ];
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // Root should have an output (the root block FP)
         assert!(trie.root().has_output());
@@ -671,7 +673,9 @@ mod tests {
         // Few terms → single block → root has output, no children needed
         let terms = vec![("alpha", &[0][..]), ("beta", &[1]), ("gamma", &[2])];
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // Any term should find the root block
         let result = trie.seek_to_block(b"alpha").unwrap();
@@ -698,7 +702,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // Both prefixes should find blocks
         let a_result = trie.seek_to_block(b"aaa0025").unwrap();
@@ -720,7 +726,9 @@ mod tests {
     fn test_trie_seek_nonexistent_prefix() {
         let terms = vec![("alpha", &[0][..]), ("beta", &[1])];
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // Empty target should still find the root block (empty prefix)
         let result = trie.seek_to_block(b"").unwrap();
@@ -742,7 +750,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         let root = trie.root();
         // Root has a single child (all terms start with 'p')
@@ -775,7 +785,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // Verify we can navigate to a term in the block
         let result = trie.seek_to_block(b"aa0025").unwrap();
@@ -800,7 +812,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // Root should be multi-children with children for 'a', 'b', 'c'
         let root = trie.root();
@@ -844,7 +858,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         let root = trie.root();
         assert_eq!(root.sign, SIGN_MULTI_CHILDREN);
@@ -876,7 +892,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // The node with children 'a','b','c','d' may be root or one level down
         // depending on how the blocktree groups things. Let's just verify
@@ -928,7 +946,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         let root = trie.root();
         assert_eq!(root.sign, SIGN_MULTI_CHILDREN);
@@ -965,7 +985,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // Should traverse deep into the trie
         let alpha = trie.seek_to_block(b"category/alpha/item_025").unwrap();
@@ -998,7 +1020,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         let root = trie.root();
         let mut child = Node::new();
@@ -1027,7 +1051,9 @@ mod tests {
             .collect();
 
         let (dir, fi, id) = write_terms(terms).unwrap();
-        let trie = open_trie(&dir, &fi, &id).unwrap();
+        let reader = open_reader(&dir, &fi, &id).unwrap();
+        let fr = reader.field_reader(0).unwrap();
+        let trie = fr.new_trie_reader().unwrap();
 
         // "by0000" has prefix "by" where 'y' is beyond the BITS range
         let result = trie.seek_to_block(b"by0000").unwrap();
@@ -1051,27 +1077,6 @@ mod tests {
         }
     }
 
-    /// In-memory `RandomAccessInput` for unit tests.
-    struct BytesRandomAccess(Box<[u8]>);
-
-    impl RandomAccessInput for BytesRandomAccess {
-        fn read_byte_at(&self, pos: u64) -> io::Result<u8> {
-            Ok(self.0[pos as usize])
-        }
-        fn read_le_short_at(&self, pos: u64) -> io::Result<i16> {
-            let p = pos as usize;
-            Ok(i16::from_le_bytes([self.0[p], self.0[p + 1]]))
-        }
-        fn read_le_int_at(&self, pos: u64) -> io::Result<i32> {
-            let p = pos as usize;
-            Ok(i32::from_le_bytes(self.0[p..p + 4].try_into().unwrap()))
-        }
-        fn read_le_long_at(&self, pos: u64) -> io::Result<i64> {
-            let p = pos as usize;
-            Ok(i64::from_le_bytes(self.0[p..p + 8].try_into().unwrap()))
-        }
-    }
-
     #[test]
     fn test_load_leaf_node_8_byte_output_fp() {
         // Craft a leaf node where fp_bytes_minus1 == 7 (8-byte output FP).
@@ -1084,10 +1089,10 @@ mod tests {
         data[0] = 0x1C | 0x20;
         data[1..9].copy_from_slice(&expected_fp.to_le_bytes());
 
-        let access = BytesRandomAccess(data.into());
+        let access = IndexInput::new("trie", &data);
         let mut node = Node::new();
         let fp = 0i64;
-        let term_flags_long = access.read_le_long_at(fp as u64).unwrap();
+        let term_flags_long = access.read_le_long_at(fp as usize).unwrap();
         let term_flags = term_flags_long as u32;
 
         load_leaf_node(&access, term_flags, term_flags_long, fp, &mut node).unwrap();
@@ -1106,10 +1111,10 @@ mod tests {
         data[0] = 0x1C | 0x20 | 0x40;
         data[1..9].copy_from_slice(&expected_fp.to_le_bytes());
 
-        let access = BytesRandomAccess(data.into());
+        let access = IndexInput::new("trie", &data);
         let mut node = Node::new();
         let fp = 0i64;
-        let term_flags_long = access.read_le_long_at(fp as u64).unwrap();
+        let term_flags_long = access.read_le_long_at(fp as usize).unwrap();
         let term_flags = term_flags_long as u32;
 
         load_leaf_node(&access, term_flags, term_flags_long, fp, &mut node).unwrap();

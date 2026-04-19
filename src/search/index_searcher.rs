@@ -6,6 +6,7 @@ use std::fmt;
 use std::io;
 
 use crate::index::directory_reader::{DirectoryReader, LeafReaderContext};
+use crate::index::terms::Terms;
 use crate::search::collector::{Collector, CollectorManager, LeafCollector, ScoreMode};
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
 use crate::search::query::{Query, Weight};

@@ -33,10 +33,9 @@ use crate::codecs::lucene90::stored_fields_reader::StoredFieldsReader;
 use crate::codecs::lucene90::term_vectors_reader::TermVectorsReader;
 use crate::codecs::lucene94::field_infos_format;
 use crate::codecs::lucene99::segment_info_format;
-use crate::codecs::lucene103::blocktree_reader::BlockTreeTermsReader;
+use crate::codecs::lucene103::blocktree_reader::{BlockTreeTermsReader, FieldReader};
 use crate::codecs::lucene103::postings_reader::PostingsReader;
 use crate::index::doc_values_iterators::NumericDocValues;
-use crate::index::terms::Terms;
 use crate::index::{FieldInfos, SegmentInfo};
 use crate::store::Directory;
 
@@ -254,16 +253,14 @@ impl SegmentReader {
         self.postings_reader.as_ref()
     }
 
-    /// Returns the [`Terms`] for the given field, or `None` if the field
-    /// does not exist or has no indexed terms.
+    /// Returns a borrowed view of the field's terms dictionary, or `None`
+    /// if the field does not exist or has no indexed terms.
     ///
-    /// Matches Java's `LeafReader.terms(String)`.
-    pub fn terms(&self, field: &str) -> Option<&dyn Terms> {
-        let fr = self
-            .terms_reader
-            .as_ref()?
-            .terms(field, &self.field_infos)?;
-        Some(fr as &dyn Terms)
+    /// Matches Java's `LeafReader.terms(String)`. The returned
+    /// [`FieldReader`] implements
+    /// [`Terms`](crate::index::terms::Terms).
+    pub fn terms(&self, field: &str) -> Option<FieldReader<'_>> {
+        self.terms_reader.as_ref()?.terms(field, &self.field_infos)
     }
 }
 
@@ -288,6 +285,7 @@ mod tests {
     use crate::index::config::IndexWriterConfig;
     use crate::index::field::{string, text};
     use crate::index::segment_infos;
+    use crate::index::terms::Terms;
     use crate::index::writer::IndexWriter;
     use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
     use crate::store::{MemoryDirectory, SharedDirectory};

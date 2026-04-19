@@ -10,6 +10,7 @@ use std::path::Path;
 use std::process;
 
 use bearing::index::directory_reader::DirectoryReader;
+use bearing::index::terms::Terms;
 use bearing::store::FSDirectory;
 
 fn main() {

@@ -91,11 +91,11 @@ fn main() {
             .map(|fi| {
                 let terms = seg.terms(fi.name());
 
-                let term_count = terms.map_or(0, |t| t.size());
-                let term_count_verified = count_terms(terms);
-                let sum_total_term_freq = terms.map_or(0, |t| t.get_sum_total_term_freq());
-                let sum_doc_freq = terms.map_or(0, |t| t.get_sum_doc_freq());
-                let terms_doc_count = terms.map_or(0, |t| t.get_doc_count() as i64);
+                let term_count = terms.as_ref().map_or(0, |t| t.size());
+                let term_count_verified = count_terms(terms.as_ref().map(|t| t as &dyn Terms));
+                let sum_total_term_freq = terms.as_ref().map_or(0, |t| t.get_sum_total_term_freq());
+                let sum_doc_freq = terms.as_ref().map_or(0, |t| t.get_sum_doc_freq());
+                let terms_doc_count = terms.as_ref().map_or(0, |t| t.get_doc_count() as i64);
 
                 let norms_doc_count = seg
                     .norms_reader()
