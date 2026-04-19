@@ -2,17 +2,18 @@
 //! Segment infos reader and writer for the segments_N commit point file.
 
 use std::collections::HashMap;
-use std::io::{self, Read};
+use std::io;
 
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::segment::FlushedSegment;
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory};
+use crate::store::Directory;
+use crate::store2::IndexInput;
+use crate::store2::codec_footers::{FOOTER_LENGTH, verify_checksum};
+use crate::store2::codec_headers::check_header;
 use crate::util::string_helper;
 
 /// Codec name for the segments_N file header.
@@ -124,21 +125,25 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
     let generation = generation_from_segments_file_name(segment_file_name)?;
     let expected_suffix = index_file_names::radix36(generation as u64);
 
-    let input = directory.open_input(segment_file_name)?;
-    let mut input = ChecksumIndexInput::new(input);
+    let backing = directory.open_file(segment_file_name)?;
+    verify_checksum(backing.as_bytes())?;
+
+    let bytes = backing.as_bytes();
+    let prefix_len = bytes.len() - FOOTER_LENGTH;
+    let mut input = IndexInput::new(segment_file_name, &bytes[..prefix_len]);
 
     // The segments_N file has a random ID we don't know ahead of time,
     // so use check_header (not check_index_header) then read the ID and suffix manually.
-    codec_util::check_header(&mut input, CODEC_NAME, VERSION_CURRENT, VERSION_CURRENT)?;
+    check_header(&mut input, CODEC_NAME, VERSION_CURRENT, VERSION_CURRENT)?;
 
     // Read segment infos ID (16 bytes) — we discover it here
     let mut _id = [0u8; codec_util::ID_LENGTH];
-    input.read_exact(&mut _id)?;
+    input.read_bytes(&mut _id)?;
 
     // Read and validate suffix (should match generation in base-36)
     let suffix_len = input.read_byte()? as usize;
     let mut suffix_bytes = vec![0u8; suffix_len];
-    input.read_exact(&mut suffix_bytes)?;
+    input.read_bytes(&mut suffix_bytes)?;
     let suffix = String::from_utf8(suffix_bytes).map_err(|e| io::Error::other(e.to_string()))?;
     if suffix != expected_suffix {
         return Err(io::Error::other(format!(
@@ -181,7 +186,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
         let seg_name = input.read_string()?;
 
         let mut seg_id = [0u8; codec_util::ID_LENGTH];
-        input.read_exact(&mut seg_id)?;
+        input.read_bytes(&mut seg_id)?;
 
         let codec_name = input.read_string()?;
 
@@ -194,7 +199,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
         let sci_id = match input.read_byte()? {
             1 => {
                 let mut id = [0u8; codec_util::ID_LENGTH];
-                input.read_exact(&mut id)?;
+                input.read_bytes(&mut id)?;
                 Some(id)
             }
             0 => None,
@@ -228,9 +233,6 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
 
     // User data
     let user_data = input.read_map_of_strings()?;
-
-    // Footer
-    codec_util::check_footer(&mut input)?;
 
     debug!(
         "segment_infos: read {segment_file_name}, version={version}, \

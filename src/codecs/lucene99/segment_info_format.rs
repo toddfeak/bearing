@@ -7,12 +7,13 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_util;
-use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory};
+use crate::store::Directory;
+use crate::store2::IndexInput;
+use crate::store2::codec_footers::{FOOTER_LENGTH, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
 const VERSION_CURRENT: i32 = 0;
@@ -123,11 +124,15 @@ pub fn read(
     segment_id: &[u8; codec_util::ID_LENGTH],
 ) -> io::Result<SegmentInfo> {
     let file_name = index_file_names::segment_file_name(segment_name, "", EXTENSION);
-    let input = directory.open_input(&file_name)?;
-    let mut checksum_input = ChecksumIndexInput::new(input);
+    let backing = directory.open_file(&file_name)?;
+    verify_checksum(backing.as_bytes())?;
 
-    codec_util::check_index_header(
-        &mut checksum_input,
+    let bytes = backing.as_bytes();
+    let prefix_len = bytes.len() - FOOTER_LENGTH;
+    let mut input = IndexInput::new(&file_name, &bytes[..prefix_len]);
+
+    check_index_header(
+        &mut input,
         CODEC_NAME,
         VERSION_CURRENT,
         VERSION_CURRENT,
@@ -136,18 +141,18 @@ pub fn read(
     )?;
 
     // Lucene version (LE ints)
-    let _major = checksum_input.read_le_int()?;
-    let _minor = checksum_input.read_le_int()?;
-    let _bugfix = checksum_input.read_le_int()?;
+    let _major = input.read_le_int()?;
+    let _minor = input.read_le_int()?;
+    let _bugfix = input.read_le_int()?;
 
     // Min version
-    let has_min_version = checksum_input.read_byte()?;
+    let has_min_version = input.read_byte()?;
     match has_min_version {
         0 => {} // no min version
         1 => {
-            let _min_major = checksum_input.read_le_int()?;
-            let _min_minor = checksum_input.read_le_int()?;
-            let _min_bugfix = checksum_input.read_le_int()?;
+            let _min_major = input.read_le_int()?;
+            let _min_minor = input.read_le_int()?;
+            let _min_bugfix = input.read_le_int()?;
         }
         _ => {
             return Err(io::Error::other(format!(
@@ -157,38 +162,35 @@ pub fn read(
     }
 
     // Max doc
-    let max_doc = checksum_input.read_le_int()?;
+    let max_doc = input.read_le_int()?;
     if max_doc < 0 {
         return Err(io::Error::other(format!("invalid docCount: {max_doc}")));
     }
 
     // Compound file flag
-    let is_compound_file = checksum_input.read_byte()? == SI_YES;
+    let is_compound_file = input.read_byte()? == SI_YES;
 
     // Has blocks flag
-    let has_blocks_byte = checksum_input.read_byte()?;
+    let has_blocks_byte = input.read_byte()?;
     let has_blocks = has_blocks_byte == SI_YES;
 
     // Diagnostics
-    let diagnostics = checksum_input.read_map_of_strings()?;
+    let diagnostics = input.read_map_of_strings()?;
 
     // Files
-    let files_vec = checksum_input.read_set_of_strings()?;
+    let files_vec = input.read_set_of_strings()?;
     let files: HashSet<String> = files_vec.into_iter().collect();
 
     // Attributes
-    let attributes = checksum_input.read_map_of_strings()?;
+    let attributes = input.read_map_of_strings()?;
 
     // Sort fields (must be 0 — sorted segments not supported)
-    let num_sort_fields = checksum_input.read_vint()?;
+    let num_sort_fields = input.read_vint()?;
     if num_sort_fields != 0 {
         return Err(io::Error::other(format!(
             "index sort not supported, got {num_sort_fields} sort fields"
         )));
     }
-
-    // Footer
-    codec_util::check_footer(&mut checksum_input)?;
 
     let mut si = SegmentInfo::new(
         segment_name.to_string(),

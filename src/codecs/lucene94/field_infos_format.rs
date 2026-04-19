@@ -8,12 +8,13 @@ use log::debug;
 
 use crate::codecs::codec_util;
 use crate::document::{DocValuesType, IndexOptions};
-use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig, SegmentInfo};
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory};
+use crate::store::Directory;
+use crate::store2::IndexInput;
+use crate::store2::codec_footers::{FOOTER_LENGTH, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
 
 const CODEC_NAME: &str = "Lucene94FieldInfos";
 const FORMAT_CURRENT: i32 = 2; // FORMAT_DOCVALUE_SKIPPER
@@ -157,11 +158,15 @@ pub fn read(
 ) -> io::Result<FieldInfos> {
     let file_name =
         index_file_names::segment_file_name(&segment_info.name, segment_suffix, EXTENSION);
-    let input = directory.open_input(&file_name)?;
-    let mut checksum_input = ChecksumIndexInput::new(input);
+    let backing = directory.open_file(&file_name)?;
+    verify_checksum(backing.as_bytes())?;
 
-    codec_util::check_index_header(
-        &mut checksum_input,
+    let bytes = backing.as_bytes();
+    let prefix_len = bytes.len() - FOOTER_LENGTH;
+    let mut input = IndexInput::new(&file_name, &bytes[..prefix_len]);
+
+    check_index_header(
+        &mut input,
         CODEC_NAME,
         FORMAT_CURRENT,
         FORMAT_CURRENT,
@@ -169,7 +174,7 @@ pub fn read(
         segment_suffix,
     )?;
 
-    let num_fields = checksum_input.read_vint()?;
+    let num_fields = input.read_vint()?;
     if num_fields < 0 {
         return Err(io::Error::other(format!(
             "invalid field count: {num_fields}"
@@ -179,11 +184,11 @@ pub fn read(
     let mut fields = Vec::with_capacity(num_fields as usize);
 
     for _ in 0..num_fields {
-        let name = checksum_input.read_string()?;
-        let number = checksum_input.read_vint()? as u32;
+        let name = input.read_string()?;
+        let number = input.read_vint()? as u32;
 
         // Field bits
-        let bits = checksum_input.read_byte()?;
+        let bits = input.read_byte()?;
         let store_term_vector = bits & STORE_TERMVECTOR != 0;
         let omit_norms = bits & OMIT_NORMS != 0;
         let store_payloads = bits & STORE_PAYLOADS != 0;
@@ -191,25 +196,25 @@ pub fn read(
         let is_parent_field = bits & PARENT_FIELD_FIELD != 0;
 
         // Index options
-        let index_options = byte_to_index_options(checksum_input.read_byte()?)?;
+        let index_options = byte_to_index_options(input.read_byte()?)?;
 
         // Doc values type
-        let doc_values_type = byte_to_doc_values_type(checksum_input.read_byte()?)?;
+        let doc_values_type = byte_to_doc_values_type(input.read_byte()?)?;
 
         // Doc values skip index type (FORMAT >= 2): 0 = NONE, 1 = RANGE
-        let dv_skip_index_type = checksum_input.read_byte()?;
+        let dv_skip_index_type = input.read_byte()?;
 
         // Doc values gen
-        let dv_gen = checksum_input.read_le_long()?;
+        let dv_gen = input.read_le_long()?;
 
         // Attributes
-        let attributes = checksum_input.read_map_of_strings()?;
+        let attributes = input.read_map_of_strings()?;
 
         // Point dimensions
-        let dimension_count = checksum_input.read_vint()? as u32;
+        let dimension_count = input.read_vint()? as u32;
         let point_config = if dimension_count != 0 {
-            let index_dimension_count = checksum_input.read_vint()? as u32;
-            let num_bytes = checksum_input.read_vint()? as u32;
+            let index_dimension_count = input.read_vint()? as u32;
+            let num_bytes = input.read_vint()? as u32;
             PointDimensionConfig {
                 dimension_count,
                 index_dimension_count,
@@ -220,11 +225,11 @@ pub fn read(
         };
 
         // Vector dimension (read and discard — not supported yet)
-        let _vector_dimension = checksum_input.read_vint()?;
+        let _vector_dimension = input.read_vint()?;
         // Vector encoding (byte)
-        let _vector_encoding = checksum_input.read_byte()?;
+        let _vector_encoding = input.read_byte()?;
         // Vector similarity (byte)
-        let _vector_similarity = checksum_input.read_byte()?;
+        let _vector_similarity = input.read_byte()?;
 
         let mut fi = FieldInfo::new(
             name,
@@ -246,8 +251,6 @@ pub fn read(
 
         fields.push(fi);
     }
-
-    codec_util::check_footer(&mut checksum_input)?;
 
     debug!(
         "field_infos: read {} fields from {}",
