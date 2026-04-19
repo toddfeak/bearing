@@ -7,18 +7,18 @@ use std::fmt;
 use super::scorer::Scorer;
 
 /// Wraps a `Scorer` with cached `doc` and `cost` fields for efficient priority queue operations.
-pub struct DisiWrapper {
+pub struct DisiWrapper<'a> {
     /// The wrapped scorer, providing both scoring and iteration.
-    pub scorer: Box<dyn Scorer>,
+    pub scorer: Box<dyn Scorer + 'a>,
     /// Cost of the underlying iterator, cached at construction.
     pub cost: i64,
     /// Current document ID. Updated during iteration.
     pub doc: i32,
 }
 
-impl DisiWrapper {
+impl<'a> DisiWrapper<'a> {
     /// Creates a new `DisiWrapper` from a scorer.
-    pub fn new(mut scorer: Box<dyn Scorer>) -> Self {
+    pub fn new(mut scorer: Box<dyn Scorer + 'a>) -> Self {
         let cost = scorer.iterator().cost();
         Self {
             scorer,
@@ -28,7 +28,7 @@ impl DisiWrapper {
     }
 }
 
-impl fmt::Debug for DisiWrapper {
+impl fmt::Debug for DisiWrapper<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DisiWrapper")
             .field("cost", &self.cost)

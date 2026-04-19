@@ -220,7 +220,10 @@ impl SegmentReader {
     /// if no norms exist for this field.
     ///
     /// Matches Java's `LeafReader.getNormValues(String field)`.
-    pub fn get_norm_values(&self, field: &str) -> io::Result<Option<Box<dyn NumericDocValues>>> {
+    pub fn get_norm_values(
+        &self,
+        field: &str,
+    ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>> {
         let field_info = match self.field_infos.field_info_by_name(field) {
             Some(fi) => fi,
             None => return Ok(None),

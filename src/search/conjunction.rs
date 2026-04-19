@@ -188,10 +188,10 @@ impl DocIdSetIterator for ConjunctionDISI {
 /// extract owned iterators. Instead, `required` is sorted by cost and the conjunction
 /// ping-pong algorithm is implemented inline over `required[i].iterator()`. The `scorers`
 /// field stores indices into `required` identifying the scoring subset.
-pub(crate) struct ConjunctionScorer {
+pub(crate) struct ConjunctionScorer<'a> {
     /// All required scorers, sorted by cost ascending.
     /// `required[0]` = lead1, `required[1]` = lead2, `required[2..]` = others.
-    required: Vec<Box<dyn Scorer>>,
+    required: Vec<Box<dyn Scorer + 'a>>,
     /// Indices into `required` identifying the scoring subset.
     scorers: Vec<usize>,
     /// Cached lead cost (from `required[0]`). Needed because `DocIdSetIterator::cost(&self)`
@@ -199,7 +199,7 @@ pub(crate) struct ConjunctionScorer {
     lead_cost: i64,
 }
 
-impl fmt::Debug for ConjunctionScorer {
+impl fmt::Debug for ConjunctionScorer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConjunctionScorer")
             .field("doc_id", &self.required[0].doc_id())
@@ -209,13 +209,16 @@ impl fmt::Debug for ConjunctionScorer {
     }
 }
 
-impl ConjunctionScorer {
+impl<'a> ConjunctionScorer<'a> {
     /// Creates a new `ConjunctionScorer`, note that `scoring` must be a subset of `required`.
     ///
     /// In the reference implementation, both parameters share references to the same scorer
     /// objects. In Rust we must own them, so `required` and `scoring` are disjoint vecs that
     /// get merged internally.
-    pub(crate) fn new(mut required: Vec<Box<dyn Scorer>>, scoring: Vec<Box<dyn Scorer>>) -> Self {
+    pub(crate) fn new(
+        mut required: Vec<Box<dyn Scorer + 'a>>,
+        scoring: Vec<Box<dyn Scorer + 'a>>,
+    ) -> Self {
         // Merge scoring into required and record scoring indices before sorting.
         let scoring_start = required.len();
         let scoring_len = scoring.len();
@@ -239,8 +242,9 @@ impl ConjunctionScorer {
             old_to_new[old_idx] = new_idx;
         }
 
-        let mut sorted: Vec<Option<Box<dyn Scorer>>> = required.into_iter().map(Some).collect();
-        let mut required_sorted: Vec<Box<dyn Scorer>> = Vec::with_capacity(sorted.len());
+        let mut sorted: Vec<Option<Box<dyn Scorer + 'a>>> =
+            required.into_iter().map(Some).collect();
+        let mut required_sorted: Vec<Box<dyn Scorer + 'a>> = Vec::with_capacity(sorted.len());
         for &(old_idx, _) in &indexed_costs {
             required_sorted.push(sorted[old_idx].take().unwrap());
         }
@@ -294,7 +298,7 @@ impl ConjunctionScorer {
     }
 }
 
-impl Scorable for ConjunctionScorer {
+impl Scorable for ConjunctionScorer<'_> {
     fn score(&mut self) -> io::Result<f32> {
         let mut sum = 0.0_f64;
         for &idx in &self.scorers {
@@ -313,7 +317,7 @@ impl Scorable for ConjunctionScorer {
     }
 }
 
-impl Scorer for ConjunctionScorer {
+impl Scorer for ConjunctionScorer<'_> {
     fn doc_id(&self) -> i32 {
         self.required[0].doc_id()
     }
@@ -345,7 +349,7 @@ impl Scorer for ConjunctionScorer {
     }
 }
 
-impl DocIdSetIterator for ConjunctionScorer {
+impl DocIdSetIterator for ConjunctionScorer<'_> {
     fn doc_id(&self) -> i32 {
         self.required[0].doc_id()
     }

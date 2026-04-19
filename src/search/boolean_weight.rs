@@ -87,13 +87,13 @@ impl BooleanWeight {
 }
 
 impl Weight for BooleanWeight {
-    fn scorer_supplier(
+    fn scorer_supplier<'a>(
         &self,
-        context: &LeafReaderContext,
-    ) -> io::Result<Option<Box<dyn ScorerSupplier>>> {
+        context: &'a LeafReaderContext,
+    ) -> io::Result<Option<Box<dyn ScorerSupplier<'a> + 'a>>> {
         let mut min_should_match = self.min_should_match;
 
-        let mut scorers: HashMap<Occur, Vec<Box<dyn ScorerSupplier>>> = HashMap::new();
+        let mut scorers: HashMap<Occur, Vec<Box<dyn ScorerSupplier<'a> + 'a>>> = HashMap::new();
         scorers.insert(Occur::Must, Vec::new());
         scorers.insert(Occur::Filter, Vec::new());
         scorers.insert(Occur::Should, Vec::new());
@@ -157,8 +157,8 @@ impl Weight for BooleanWeight {
 // ---------------------------------------------------------------------------
 
 /// Supplier of scorers for `BooleanQuery`.
-struct BooleanScorerSupplier {
-    subs: HashMap<Occur, Vec<Box<dyn ScorerSupplier>>>,
+struct BooleanScorerSupplier<'a> {
+    subs: HashMap<Occur, Vec<Box<dyn ScorerSupplier<'a> + 'a>>>,
     score_mode: ScoreMode,
     min_should_match: i32,
     max_doc: i32,
@@ -166,7 +166,7 @@ struct BooleanScorerSupplier {
     top_level_scoring_clause: bool,
 }
 
-impl fmt::Debug for BooleanScorerSupplier {
+impl fmt::Debug for BooleanScorerSupplier<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BooleanScorerSupplier")
             .field("score_mode", &self.score_mode)
@@ -175,9 +175,9 @@ impl fmt::Debug for BooleanScorerSupplier {
     }
 }
 
-impl BooleanScorerSupplier {
+impl<'a> BooleanScorerSupplier<'a> {
     fn new(
-        subs: HashMap<Occur, Vec<Box<dyn ScorerSupplier>>>,
+        subs: HashMap<Occur, Vec<Box<dyn ScorerSupplier<'a> + 'a>>>,
         score_mode: ScoreMode,
         min_should_match: i32,
         max_doc: i32,
@@ -245,7 +245,7 @@ impl BooleanScorerSupplier {
         )
     }
 
-    fn get_internal(&mut self, lead_cost: i64) -> io::Result<Box<dyn Scorer>> {
+    fn get_internal(&mut self, lead_cost: i64) -> io::Result<Box<dyn Scorer + 'a>> {
         // three cases: conjunction, disjunction, or mix
         let lead_cost = lead_cost.min(self.cost());
         let top_level_scoring_clause = self.top_level_scoring_clause;
@@ -302,7 +302,7 @@ impl BooleanScorerSupplier {
         )?))
     }
 
-    fn boolean_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer>>> {
+    fn boolean_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer + 'a>>> {
         let num_optional_clauses = self.subs[&Occur::Should].len();
         let num_must_clauses = self.subs[&Occur::Must].len();
         let num_required_clauses = num_must_clauses + self.subs[&Occur::Filter].len();
@@ -344,7 +344,7 @@ impl BooleanScorerSupplier {
 
         let positive_scorer_cost = positive_scorer.cost();
 
-        let mut prohibited: Vec<Box<dyn Scorer>> = Vec::new();
+        let mut prohibited: Vec<Box<dyn Scorer + 'a>> = Vec::new();
         for ss in self.subs.get_mut(&Occur::MustNot).unwrap() {
             prohibited.push(ss.get(positive_scorer_cost)?);
         }
@@ -364,7 +364,7 @@ impl BooleanScorerSupplier {
 
     /// Returns a `BulkScorer` for the optional (SHOULD) clauses only, or `None` if not
     /// applicable.
-    fn optional_bulk_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer>>> {
+    fn optional_bulk_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer + 'a>>> {
         let should = self.subs.get_mut(&Occur::Should).unwrap();
         if should.is_empty() {
             return Ok(None);
@@ -379,7 +379,7 @@ impl BooleanScorerSupplier {
 
         let should_cost = self.compute_should_cost();
         let should = self.subs.get_mut(&Occur::Should).unwrap();
-        let mut optional: Vec<Box<dyn Scorer>> = Vec::new();
+        let mut optional: Vec<Box<dyn Scorer + 'a>> = Vec::new();
         for ss in should {
             optional.push(ss.get(should_cost)?);
         }
@@ -391,7 +391,7 @@ impl BooleanScorerSupplier {
         )?)))
     }
 
-    fn required_bulk_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer>>> {
+    fn required_bulk_scorer(&mut self) -> io::Result<Option<Box<dyn BulkScorer + 'a>>> {
         if self.subs[&Occur::Must].len() + self.subs[&Occur::Filter].len() == 0 {
             return Ok(None);
         }
@@ -419,11 +419,11 @@ impl BooleanScorerSupplier {
             .unwrap_or(i64::MAX);
         let lead_cost = must_lead_cost.min(filter_lead_cost);
 
-        let mut required_no_scoring: Vec<Box<dyn Scorer>> = Vec::new();
+        let mut required_no_scoring: Vec<Box<dyn Scorer + 'a>> = Vec::new();
         for ss in self.subs.get_mut(&Occur::Filter).unwrap() {
             required_no_scoring.push(ss.get(lead_cost)?);
         }
-        let mut required_scoring: Vec<Box<dyn Scorer>> = Vec::new();
+        let mut required_scoring: Vec<Box<dyn Scorer + 'a>> = Vec::new();
         let required_scoring_supplier_size = self.subs[&Occur::Must].len();
         for ss in self.subs.get_mut(&Occur::Must).unwrap() {
             if required_scoring_supplier_size == 1 {
@@ -454,7 +454,7 @@ impl BooleanScorerSupplier {
         // DenseConjunctionBulkScorer) — not yet implemented, fall through to
         // DefaultBulkScorer wrapping a ConjunctionScorer.
 
-        let conjunction_scorer: Box<dyn Scorer>;
+        let conjunction_scorer: Box<dyn Scorer + 'a>;
         if required_no_scoring.len() + required_scoring.len() == 1 {
             if required_scoring.len() == 1 {
                 conjunction_scorer = required_scoring.remove(0);
@@ -474,12 +474,12 @@ impl BooleanScorerSupplier {
     }
 
     fn req(
-        mut required_no_scoring: Vec<Box<dyn ScorerSupplier>>,
-        mut required_scoring: Vec<Box<dyn ScorerSupplier>>,
+        mut required_no_scoring: Vec<Box<dyn ScorerSupplier<'a> + 'a>>,
+        mut required_scoring: Vec<Box<dyn ScorerSupplier<'a> + 'a>>,
         lead_cost: i64,
         top_level_scoring_clause: bool,
         score_mode: ScoreMode,
-    ) -> io::Result<Box<dyn Scorer>> {
+    ) -> io::Result<Box<dyn Scorer + 'a>> {
         if required_no_scoring.len() + required_scoring.len() == 1 {
             let req = if required_no_scoring.is_empty() {
                 required_scoring[0].get(lead_cost)?
@@ -500,8 +500,8 @@ impl BooleanScorerSupplier {
             return Ok(req);
         }
 
-        let mut required_scorers: Vec<Box<dyn Scorer>> = Vec::new();
-        let mut scoring_scorers: Vec<Box<dyn Scorer>> = Vec::new();
+        let mut required_scorers: Vec<Box<dyn Scorer + 'a>> = Vec::new();
+        let mut scoring_scorers: Vec<Box<dyn Scorer + 'a>> = Vec::new();
         for s in &mut required_no_scoring {
             required_scorers.push(s.get(lead_cost)?);
         }
@@ -520,10 +520,10 @@ impl BooleanScorerSupplier {
     }
 
     fn excl(
-        main: Box<dyn Scorer>,
-        mut prohibited: Vec<Box<dyn ScorerSupplier>>,
+        main: Box<dyn Scorer + 'a>,
+        mut prohibited: Vec<Box<dyn ScorerSupplier<'a> + 'a>>,
         lead_cost: i64,
-    ) -> io::Result<Box<dyn Scorer>> {
+    ) -> io::Result<Box<dyn Scorer + 'a>> {
         if prohibited.is_empty() {
             Ok(main)
         } else {
@@ -538,10 +538,10 @@ impl BooleanScorerSupplier {
     /// For a single clause, returns the scorer directly. For multiple clauses,
     /// requires DisjunctionSumScorer (not yet implemented).
     fn opt(
-        mut optional: Vec<Box<dyn ScorerSupplier>>,
+        mut optional: Vec<Box<dyn ScorerSupplier<'a> + 'a>>,
         min_should_match: i32,
         lead_cost: i64,
-    ) -> io::Result<Box<dyn Scorer>> {
+    ) -> io::Result<Box<dyn Scorer + 'a>> {
         if optional.len() == 1 {
             optional.remove(0).get(lead_cost)
         } else {
@@ -551,14 +551,14 @@ impl BooleanScorerSupplier {
     }
 }
 
-impl ScorerSupplier for BooleanScorerSupplier {
-    fn get(&mut self, lead_cost: i64) -> io::Result<Box<dyn Scorer>> {
+impl<'a> ScorerSupplier<'a> for BooleanScorerSupplier<'a> {
+    fn get(&mut self, lead_cost: i64) -> io::Result<Box<dyn Scorer + 'a>> {
         let scorer = self.get_internal(lead_cost)?;
         // with no scoring clauses — not yet implemented.
         Ok(scorer)
     }
 
-    fn bulk_scorer(&mut self) -> io::Result<Box<dyn BulkScorer>> {
+    fn bulk_scorer(&mut self) -> io::Result<Box<dyn BulkScorer + 'a>> {
         let bulk_scorer = self.boolean_scorer()?;
         if let Some(bs) = bulk_scorer {
             // bulk scoring is applicable, use it

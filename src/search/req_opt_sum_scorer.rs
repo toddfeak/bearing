@@ -18,9 +18,9 @@ use super::scorer::Scorer;
 /// documents. When the required scorer's max score alone can't beat the minimum competitive
 /// score, the optional scorer becomes required (conjunction mode) to find docs where the
 /// combined score is competitive.
-pub struct ReqOptSumScorer {
-    req_scorer: Box<dyn Scorer>,
-    opt_scorer: Box<dyn Scorer>,
+pub struct ReqOptSumScorer<'a> {
+    req_scorer: Box<dyn Scorer + 'a>,
+    opt_scorer: Box<dyn Scorer + 'a>,
     req_cost: i64,
     is_top_scores: bool,
     // TOP_SCORES iterator state
@@ -32,7 +32,7 @@ pub struct ReqOptSumScorer {
     opt_is_required: bool,
 }
 
-impl fmt::Debug for ReqOptSumScorer {
+impl fmt::Debug for ReqOptSumScorer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReqOptSumScorer")
             .field("min_score", &self.min_score)
@@ -42,14 +42,14 @@ impl fmt::Debug for ReqOptSumScorer {
     }
 }
 
-impl ReqOptSumScorer {
+impl<'a> ReqOptSumScorer<'a> {
     /// Creates a new `ReqOptSumScorer`.
     ///
     /// Rust adaptation: no TwoPhaseIterator support. Iterators are accessed via
     /// `scorer.iterator()` rather than cached as fields.
     pub fn new(
-        mut req_scorer: Box<dyn Scorer>,
-        mut opt_scorer: Box<dyn Scorer>,
+        mut req_scorer: Box<dyn Scorer + 'a>,
+        mut opt_scorer: Box<dyn Scorer + 'a>,
         score_mode: ScoreMode,
     ) -> io::Result<Self> {
         let req_cost = req_scorer.iterator().cost();
@@ -182,7 +182,7 @@ impl ReqOptSumScorer {
     }
 }
 
-impl Scorable for ReqOptSumScorer {
+impl Scorable for ReqOptSumScorer<'_> {
     fn score(&mut self) -> io::Result<f32> {
         let cur_doc = self.req_scorer.doc_id();
         let mut score = self.req_scorer.score()?;
@@ -211,7 +211,7 @@ impl Scorable for ReqOptSumScorer {
     }
 }
 
-impl Scorer for ReqOptSumScorer {
+impl Scorer for ReqOptSumScorer<'_> {
     fn doc_id(&self) -> i32 {
         self.req_scorer.doc_id()
     }
@@ -229,7 +229,7 @@ impl Scorer for ReqOptSumScorer {
     }
 }
 
-impl DocIdSetIterator for ReqOptSumScorer {
+impl DocIdSetIterator for ReqOptSumScorer<'_> {
     fn doc_id(&self) -> i32 {
         Scorer::doc_id(self)
     }

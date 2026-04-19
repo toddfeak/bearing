@@ -22,8 +22,10 @@ use crate::index::pipeline::segment_accumulator::PerFieldNormsData;
 use crate::index::{FieldInfo, FieldInfos, index_file_names};
 use crate::search::DocIdSetIterator;
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput, RandomAccessInput};
+use crate::store::Directory;
+use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
+use crate::store2::{FileBacking, IndexInput};
 
 /// Per-field norms metadata entry read from `.nvm`.
 #[derive(Clone)]
@@ -69,8 +71,8 @@ pub struct NormsReader {
     entries: Box<[Option<NormsEntry>]>,
     /// Maximum document ID + 1 for this segment.
     max_doc: i32,
-    /// Open handle to the `.nvd` data file.
-    data: Box<dyn IndexInput>,
+    /// Owned bytes of the `.nvd` data file.
+    data: FileBacking,
 }
 
 impl fmt::Debug for NormsReader {
@@ -95,13 +97,17 @@ impl NormsReader {
         field_infos: &FieldInfos,
         max_doc: i32,
     ) -> io::Result<Self> {
-        // Open .nvm (metadata) with checksum validation
+        // Open .nvm (metadata): read into memory, verify CRC over the whole file,
+        // then parse the prefix (file length minus the 16-byte footer).
         let nvm_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let meta_input = directory.open_input(&nvm_name)?;
-        let mut meta_in = ChecksumIndexInput::new(meta_input);
+        let nvm = directory.open_file(&nvm_name)?;
+        verify_checksum(nvm.as_bytes())?;
+        let nvm_bytes = nvm.as_bytes();
+        let nvm_prefix = &nvm_bytes[..nvm_bytes.len() - FOOTER_LENGTH];
+        let mut meta_in = IndexInput::new(&nvm_name, nvm_prefix);
 
-        let version = codec_util::check_index_header(
+        let version = check_index_header(
             &mut meta_in,
             META_CODEC,
             VERSION,
@@ -112,20 +118,22 @@ impl NormsReader {
 
         let entries = read_fields(&mut meta_in, field_infos)?;
 
-        codec_util::check_footer(&mut meta_in)?;
-
-        // Open .nvd (data) and validate header
+        // Open .nvd (data): retain the bytes, validate the header, then check
+        // the footer magic/algorithm without recomputing the CRC.
         let nvd_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
-        let mut data = directory.open_input(&nvd_name)?;
-        let data_version = codec_util::check_index_header(
-            data.as_mut(),
-            DATA_CODEC,
-            VERSION,
-            VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
+        let data = directory.open_file(&nvd_name)?;
+        let data_version = {
+            let mut data_in = IndexInput::new(&nvd_name, data.as_bytes());
+            check_index_header(
+                &mut data_in,
+                DATA_CODEC,
+                VERSION,
+                VERSION,
+                segment_id,
+                segment_suffix,
+            )?
+        };
 
         if version != data_version {
             return Err(io::Error::other(format!(
@@ -133,7 +141,7 @@ impl NormsReader {
             )));
         }
 
-        codec_util::retrieve_checksum(data.as_mut())?;
+        retrieve_checksum(data.as_bytes())?;
 
         debug!(
             "norms_reader: opened {} entries for segment {segment_name}",
@@ -149,16 +157,18 @@ impl NormsReader {
 
     /// Returns a [`NumericDocValues`] for the given field, or `None` if absent.
     ///
-    /// The returned iterators own their data (file-backed slices), so they are
-    /// `'static`. The [`NormsProducer`] trait impl delegates here.
+    /// The returned iterator borrows from `&self.data`; its lifetime is tied to
+    /// this reader. The [`NormsProducer`] trait impl delegates here.
     pub fn get_norms(
         &self,
         field_info: &FieldInfo,
-    ) -> io::Result<Option<Box<dyn NumericDocValues>>> {
+    ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>> {
         let entry = match self.entry(field_info.number()) {
             Some(e) => e,
             None => return Ok(None),
         };
+
+        let data_input = IndexInput::new("nvd", self.data.as_bytes());
 
         if entry.docs_with_field_offset == -2 {
             // EMPTY: no documents have norms for this field
@@ -174,11 +184,9 @@ impl NormsReader {
                     constant_value: entry.norms_offset,
                 })));
             }
-            let data_length = entry.num_docs_with_field as u64 * entry.bytes_per_norm as u64;
-            let slice_input =
-                self.data
-                    .slice("norms data", entry.norms_offset as u64, data_length)?;
-            let slice = slice_input.random_access()?;
+            let data_length = entry.num_docs_with_field as usize * entry.bytes_per_norm as usize;
+            let slice =
+                data_input.sub_input("norms data", entry.norms_offset as usize, data_length)?;
             return Ok(Some(Box::new(DenseNormsIterator {
                 doc: -1,
                 max_doc: self.max_doc,
@@ -190,9 +198,9 @@ impl NormsReader {
 
         // SPARSE: use IndexedDISI to check presence and get ordinal
         let disi = IndexedDISI::new(
-            self.data.as_ref(),
-            entry.docs_with_field_offset,
-            entry.docs_with_field_length,
+            &data_input,
+            entry.docs_with_field_offset as usize,
+            entry.docs_with_field_length as usize,
             entry.jump_table_entry_count,
             entry.dense_rank_power,
             entry.num_docs_with_field as i64,
@@ -206,11 +214,8 @@ impl NormsReader {
                 constant_value: entry.norms_offset,
             })));
         }
-        let data_length = entry.num_docs_with_field as u64 * entry.bytes_per_norm as u64;
-        let slice_input = self
-            .data
-            .slice("norms data", entry.norms_offset as u64, data_length)?;
-        let slice = slice_input.random_access()?;
+        let data_length = entry.num_docs_with_field as usize * entry.bytes_per_norm as usize;
+        let slice = data_input.sub_input("norms data", entry.norms_offset as usize, data_length)?;
         Ok(Some(Box::new(SparseNormsIterator {
             disi,
             slice: Some(slice),
@@ -239,11 +244,7 @@ impl NormsProducer for NormsReader {
         &self,
         field_info: &FieldInfo,
     ) -> io::Result<Option<Box<dyn NumericDocValues + '_>>> {
-        // Delegates to the inherent method. The returned iterators are 'static
-        // (they own their data), so widening to '_ is safe.
-        Ok(self
-            .get_norms(field_info)?
-            .map(|v| -> Box<dyn NumericDocValues + '_> { v }))
+        self.get_norms(field_info)
     }
 }
 
@@ -388,15 +389,15 @@ impl NumericDocValues for BufferedNorms<'_> {
 ///
 /// For `bytes_per_norm > 0`, reads values via random access into the `.nvd`
 /// data slice. For `bytes_per_norm == 0`, returns a constant value.
-struct DenseNormsIterator {
+struct DenseNormsIterator<'a> {
     doc: i32,
     max_doc: i32,
-    slice: Option<Box<dyn RandomAccessInput>>,
+    slice: Option<IndexInput<'a>>,
     bytes_per_norm: u8,
     constant_value: i64,
 }
 
-impl fmt::Debug for DenseNormsIterator {
+impl fmt::Debug for DenseNormsIterator<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DenseNormsIterator")
             .field("doc", &self.doc)
@@ -406,7 +407,7 @@ impl fmt::Debug for DenseNormsIterator {
     }
 }
 
-impl DocIdSetIterator for DenseNormsIterator {
+impl DocIdSetIterator for DenseNormsIterator<'_> {
     fn doc_id(&self) -> i32 {
         self.doc
     }
@@ -429,24 +430,24 @@ impl DocIdSetIterator for DenseNormsIterator {
     }
 }
 
-impl DocValuesIterator for DenseNormsIterator {
+impl DocValuesIterator for DenseNormsIterator<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         self.doc = target;
         Ok(true)
     }
 }
 
-impl NumericDocValues for DenseNormsIterator {
+impl NumericDocValues for DenseNormsIterator<'_> {
     fn long_value(&self) -> io::Result<i64> {
         if self.bytes_per_norm == 0 {
             return Ok(self.constant_value);
         }
         let slice = self.slice.as_ref().unwrap();
         match self.bytes_per_norm {
-            1 => Ok(slice.read_byte_at(self.doc as u64)? as i8 as i64),
-            2 => Ok(slice.read_le_short_at((self.doc as u64) << 1)? as i64),
-            4 => Ok(slice.read_le_int_at((self.doc as u64) << 2)? as i64),
-            8 => slice.read_le_long_at((self.doc as u64) << 3),
+            1 => Ok(slice.read_byte_at(self.doc as usize)? as i8 as i64),
+            2 => Ok(slice.read_le_short_at((self.doc as usize) << 1)? as i64),
+            4 => Ok(slice.read_le_int_at((self.doc as usize) << 2)? as i64),
+            8 => slice.read_le_long_at((self.doc as usize) << 3),
             _ => Err(io::Error::other(format!(
                 "invalid bytes_per_norm: {}",
                 self.bytes_per_norm
@@ -463,14 +464,14 @@ impl NumericDocValues for DenseNormsIterator {
 ///
 /// `advance_exact` delegates to the DISI to check document presence.
 /// `long_value` reads from the data slice at the DISI's ordinal index.
-struct SparseNormsIterator {
-    disi: IndexedDISI,
-    slice: Option<Box<dyn RandomAccessInput>>,
+struct SparseNormsIterator<'a> {
+    disi: IndexedDISI<'a>,
+    slice: Option<IndexInput<'a>>,
     bytes_per_norm: u8,
     constant_value: i64,
 }
 
-impl fmt::Debug for SparseNormsIterator {
+impl fmt::Debug for SparseNormsIterator<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SparseNormsIterator")
             .field("bytes_per_norm", &self.bytes_per_norm)
@@ -478,7 +479,7 @@ impl fmt::Debug for SparseNormsIterator {
     }
 }
 
-impl DocIdSetIterator for SparseNormsIterator {
+impl DocIdSetIterator for SparseNormsIterator<'_> {
     fn doc_id(&self) -> i32 {
         self.disi.doc_id()
     }
@@ -502,18 +503,18 @@ impl DocIdSetIterator for SparseNormsIterator {
     }
 }
 
-impl DocValuesIterator for SparseNormsIterator {
+impl DocValuesIterator for SparseNormsIterator<'_> {
     fn advance_exact(&mut self, target: i32) -> io::Result<bool> {
         self.disi.advance_exact(target)
     }
 }
 
-impl NumericDocValues for SparseNormsIterator {
+impl NumericDocValues for SparseNormsIterator<'_> {
     fn long_value(&self) -> io::Result<i64> {
         if self.bytes_per_norm == 0 {
             return Ok(self.constant_value);
         }
-        let index = self.disi.index() as u64;
+        let index = self.disi.index() as usize;
         let slice = self.slice.as_ref().unwrap();
         match self.bytes_per_norm {
             1 => Ok(slice.read_byte_at(index)? as i8 as i64),
@@ -532,7 +533,7 @@ impl NumericDocValues for SparseNormsIterator {
 ///
 /// Returns a `Box<[Option<NormsEntry>]>` indexed by field number.
 fn read_fields(
-    meta: &mut dyn DataInput,
+    meta: &mut IndexInput<'_>,
     field_infos: &FieldInfos,
 ) -> io::Result<Box<[Option<NormsEntry>]>> {
     let mut entries: Vec<Option<NormsEntry>> = vec![None; field_infos.len()];

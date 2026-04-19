@@ -12,12 +12,12 @@ use super::scorer::Scorer;
 ///
 /// Scores documents in ranges between excluded doc IDs, using `doc_id_run_end()` to skip
 /// over contiguous runs of excluded documents efficiently.
-pub struct ReqExclBulkScorer {
-    req: Box<dyn BulkScorer>,
-    excl: Box<dyn Scorer>,
+pub struct ReqExclBulkScorer<'a> {
+    req: Box<dyn BulkScorer + 'a>,
+    excl: Box<dyn Scorer + 'a>,
 }
 
-impl fmt::Debug for ReqExclBulkScorer {
+impl fmt::Debug for ReqExclBulkScorer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReqExclBulkScorer")
             .field("req", &self.req)
@@ -25,17 +25,17 @@ impl fmt::Debug for ReqExclBulkScorer {
     }
 }
 
-impl ReqExclBulkScorer {
+impl<'a> ReqExclBulkScorer<'a> {
     /// Creates a new `ReqExclBulkScorer`.
     ///
     /// Rust adaptation: no TwoPhaseIterator support; the excluded scorer's iterator is
     /// accessed via `excl.iterator()`
-    pub fn new(req: Box<dyn BulkScorer>, excl: Box<dyn Scorer>) -> Self {
+    pub fn new(req: Box<dyn BulkScorer + 'a>, excl: Box<dyn Scorer + 'a>) -> Self {
         Self { req, excl }
     }
 }
 
-impl BulkScorer for ReqExclBulkScorer {
+impl BulkScorer for ReqExclBulkScorer<'_> {
     fn score(
         &mut self,
         collector: &mut dyn super::collector::LeafCollector,

@@ -144,10 +144,10 @@ impl fmt::Debug for TermWeight {
 }
 
 impl Weight for TermWeight {
-    fn scorer_supplier(
+    fn scorer_supplier<'a>(
         &self,
-        context: &LeafReaderContext,
-    ) -> io::Result<Option<Box<dyn ScorerSupplier>>> {
+        context: &'a LeafReaderContext,
+    ) -> io::Result<Option<Box<dyn ScorerSupplier<'a> + 'a>>> {
         // Java: termStates.get(context) — use cached state, no trie navigation
         let state = match self.term_states.get(context.ord) {
             Some(s) => s,
@@ -208,16 +208,16 @@ impl Weight for TermWeight {
 // ---------------------------------------------------------------------------
 
 /// Supplies a `TermScorer` for a single leaf, holding pre-built components.
-struct TermScorerSupplier {
+struct TermScorerSupplier<'a> {
     postings_enum: Option<BlockPostingsEnum>,
     sim_scorer: Option<Box<dyn SimScorer>>,
-    norms: Option<Box<dyn NumericDocValues>>,
+    norms: Option<Box<dyn NumericDocValues + 'a>>,
     doc_freq: i32,
     score_mode: ScoreMode,
     top_level_scoring_clause: bool,
 }
 
-impl fmt::Debug for TermScorerSupplier {
+impl fmt::Debug for TermScorerSupplier<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TermScorerSupplier")
             .field("doc_freq", &self.doc_freq)
@@ -226,8 +226,8 @@ impl fmt::Debug for TermScorerSupplier {
     }
 }
 
-impl ScorerSupplier for TermScorerSupplier {
-    fn get(&mut self, _lead_cost: i64) -> io::Result<Box<dyn Scorer>> {
+impl<'a> ScorerSupplier<'a> for TermScorerSupplier<'a> {
+    fn get(&mut self, _lead_cost: i64) -> io::Result<Box<dyn Scorer + 'a>> {
         let postings_enum = self
             .postings_enum
             .take()
@@ -248,7 +248,7 @@ impl ScorerSupplier for TermScorerSupplier {
         Ok(Box::new(scorer))
     }
 
-    fn bulk_scorer(&mut self) -> io::Result<Box<dyn BulkScorer>> {
+    fn bulk_scorer(&mut self) -> io::Result<Box<dyn BulkScorer + 'a>> {
         if !self.score_mode.needs_scores() {
             let scorer = self.get(i64::MAX)?;
             return Ok(Box::new(DefaultBulkScorer::new(scorer)));
@@ -276,11 +276,11 @@ impl ScorerSupplier for TermScorerSupplier {
 /// Iterates over matching documents and computes BM25 scores. When
 /// `top_level_scoring_clause` is true, includes ImpactsDISI logic inline to skip
 /// non-competitive blocks using `MaxScoreCache`.
-pub struct TermScorer {
+pub struct TermScorer<'a> {
     postings_enum: BlockPostingsEnum,
     sim_scorer: Box<dyn SimScorer>,
     max_score_cache: MaxScoreCache,
-    norms: Option<Box<dyn NumericDocValues>>,
+    norms: Option<Box<dyn NumericDocValues + 'a>>,
     norm_values: Vec<i64>,
     // ImpactsDISI state (inlined — see Java ImpactsDISI)
     min_competitive_score: f32,
@@ -289,7 +289,7 @@ pub struct TermScorer {
     top_level_scoring_clause: bool,
 }
 
-impl fmt::Debug for TermScorer {
+impl fmt::Debug for TermScorer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TermScorer")
             .field("doc_id", &self.postings_enum.doc_id())
@@ -297,12 +297,12 @@ impl fmt::Debug for TermScorer {
     }
 }
 
-impl TermScorer {
+impl<'a> TermScorer<'a> {
     /// Constructs a new `TermScorer`.
     fn new(
         postings_enum: BlockPostingsEnum,
         sim_scorer: Box<dyn SimScorer>,
-        norms: Option<Box<dyn NumericDocValues>>,
+        norms: Option<Box<dyn NumericDocValues + 'a>>,
         _score_mode: ScoreMode,
         top_level_scoring_clause: bool,
     ) -> Self {
@@ -391,7 +391,7 @@ impl TermScorer {
     }
 }
 
-impl Scorable for TermScorer {
+impl Scorable for TermScorer<'_> {
     fn score(&mut self) -> io::Result<f32> {
         // Java TermScorer.score() L96-105
         let freq = self.postings_enum.freq()? as f32;
@@ -429,7 +429,7 @@ impl Scorable for TermScorer {
     }
 }
 
-impl Scorer for TermScorer {
+impl Scorer for TermScorer<'_> {
     fn doc_id(&self) -> i32 {
         self.postings_enum.doc_id()
     }

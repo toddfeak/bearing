@@ -20,8 +20,8 @@ const MAX_WINDOW_SIZE: i32 = 65536; // 16bits - 0xFF.
 /// BulkScorer implementation that focuses on top-level conjunctions over clauses that do not
 /// have two-phase iterators. Computes scores on the fly in order to skip evaluating more
 /// clauses if the total score would be under the minimum competitive score anyway.
-pub struct BlockMaxConjunctionBulkScorer {
-    scorers: Vec<Box<dyn Scorer>>,
+pub struct BlockMaxConjunctionBulkScorer<'a> {
+    scorers: Vec<Box<dyn Scorer + 'a>>,
     sum_of_other_clauses: Vec<f64>,
     max_doc: i32,
     lead_cost: i64,
@@ -29,7 +29,7 @@ pub struct BlockMaxConjunctionBulkScorer {
     doc_and_score_acc_buffer: DocAndScoreAccBuffer,
 }
 
-impl fmt::Debug for BlockMaxConjunctionBulkScorer {
+impl fmt::Debug for BlockMaxConjunctionBulkScorer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlockMaxConjunctionBulkScorer")
             .field("num_scorers", &self.scorers.len())
@@ -38,13 +38,13 @@ impl fmt::Debug for BlockMaxConjunctionBulkScorer {
     }
 }
 
-impl BlockMaxConjunctionBulkScorer {
+impl<'a> BlockMaxConjunctionBulkScorer<'a> {
     /// Creates a new `BlockMaxConjunctionBulkScorer`.
     ///
     /// # Panics
     ///
     /// Panics if `scorers` has fewer than 2 elements.
-    pub fn new(max_doc: i32, mut scorers: Vec<Box<dyn Scorer>>) -> Self {
+    pub fn new(max_doc: i32, mut scorers: Vec<Box<dyn Scorer + 'a>>) -> Self {
         assert!(
             scorers.len() >= 2,
             "Expected 2 or more scorers, got {}",
@@ -56,7 +56,7 @@ impl BlockMaxConjunctionBulkScorer {
         // Precompute costs, then sort by cached cost using sort_by_cached_key pattern.
         let costs: Vec<i64> = scorers.iter_mut().map(|s| s.iterator().cost()).collect();
         // Zip scorers with costs, sort by cost, unzip
-        let mut paired: Vec<(Box<dyn Scorer>, i64)> = scorers.into_iter().zip(costs).collect();
+        let mut paired: Vec<(Box<dyn Scorer + 'a>, i64)> = scorers.into_iter().zip(costs).collect();
         paired.sort_by_key(|(_, cost)| *cost);
         let lead_cost = paired[0].1;
         let scorers: Vec<Box<dyn Scorer>> = paired.into_iter().map(|(s, _)| s).collect();
@@ -208,7 +208,7 @@ impl BlockMaxConjunctionBulkScorer {
     }
 }
 
-impl BulkScorer for BlockMaxConjunctionBulkScorer {
+impl BulkScorer for BlockMaxConjunctionBulkScorer<'_> {
     fn score(&mut self, collector: &mut dyn LeafCollector, min: i32, max: i32) -> io::Result<i32> {
         let score_context = ScoreContext::new();
         collector.set_scorer(Rc::clone(&score_context))?;

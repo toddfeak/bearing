@@ -51,11 +51,11 @@ impl HeadPQ {
     }
 
     #[inline]
-    fn less_than(a: usize, b: usize, wrappers: &[DisiWrapper]) -> bool {
+    fn less_than(a: usize, b: usize, wrappers: &[DisiWrapper<'_>]) -> bool {
         wrappers[a].doc < wrappers[b].doc
     }
 
-    fn add(&mut self, idx: usize, wrappers: &[DisiWrapper]) -> usize {
+    fn add(&mut self, idx: usize, wrappers: &[DisiWrapper<'_>]) -> usize {
         self.size += 1;
         if self.size < self.heap.len() {
             self.heap[self.size] = idx;
@@ -66,7 +66,7 @@ impl HeadPQ {
         self.heap[1]
     }
 
-    fn pop(&mut self, wrappers: &[DisiWrapper]) -> Option<usize> {
+    fn pop(&mut self, wrappers: &[DisiWrapper<'_>]) -> Option<usize> {
         if self.size > 0 {
             let result = self.heap[1];
             self.heap[1] = self.heap[self.size];
@@ -87,20 +87,20 @@ impl HeadPQ {
     }
 
     /// Re-sift after top's key changed.
-    fn update_top(&mut self, wrappers: &[DisiWrapper]) -> usize {
+    fn update_top(&mut self, wrappers: &[DisiWrapper<'_>]) -> usize {
         self.down_heap(1, wrappers);
         self.heap[1]
     }
 
     /// Replace top with new element and re-sift.
-    fn update_top_with(&mut self, new_idx: usize, wrappers: &[DisiWrapper]) -> usize {
+    fn update_top_with(&mut self, new_idx: usize, wrappers: &[DisiWrapper<'_>]) -> usize {
         self.heap[1] = new_idx;
         self.down_heap(1, wrappers);
         self.heap[1]
     }
 
     /// Bounded insert. Returns the evicted index, or None if nothing was evicted.
-    fn insert_with_overflow(&mut self, idx: usize, wrappers: &[DisiWrapper]) -> Option<usize> {
+    fn insert_with_overflow(&mut self, idx: usize, wrappers: &[DisiWrapper<'_>]) -> Option<usize> {
         if self.size < self.max_size {
             self.add(idx, wrappers);
             None
@@ -118,7 +118,7 @@ impl HeadPQ {
         self.size
     }
 
-    fn up_heap(&mut self, orig_pos: usize, wrappers: &[DisiWrapper]) {
+    fn up_heap(&mut self, orig_pos: usize, wrappers: &[DisiWrapper<'_>]) {
         let mut i = orig_pos;
         let node = self.heap[i];
         let mut j = i >> 1;
@@ -130,7 +130,7 @@ impl HeadPQ {
         self.heap[i] = node;
     }
 
-    fn down_heap(&mut self, start: usize, wrappers: &[DisiWrapper]) {
+    fn down_heap(&mut self, start: usize, wrappers: &[DisiWrapper<'_>]) {
         let mut i = start;
         let node = self.heap[i];
         let mut j = i << 1;
@@ -174,11 +174,11 @@ impl TailPQ {
     }
 
     #[inline]
-    fn less_than(a: usize, b: usize, wrappers: &[DisiWrapper]) -> bool {
+    fn less_than(a: usize, b: usize, wrappers: &[DisiWrapper<'_>]) -> bool {
         wrappers[a].cost < wrappers[b].cost
     }
 
-    fn add(&mut self, idx: usize, wrappers: &[DisiWrapper]) -> usize {
+    fn add(&mut self, idx: usize, wrappers: &[DisiWrapper<'_>]) -> usize {
         self.size += 1;
         if self.size < self.heap.len() {
             self.heap[self.size] = idx;
@@ -189,7 +189,7 @@ impl TailPQ {
         self.heap[1]
     }
 
-    fn pop(&mut self, wrappers: &[DisiWrapper]) -> Option<usize> {
+    fn pop(&mut self, wrappers: &[DisiWrapper<'_>]) -> Option<usize> {
         if self.size > 0 {
             let result = self.heap[1];
             self.heap[1] = self.heap[self.size];
@@ -210,14 +210,14 @@ impl TailPQ {
     }
 
     /// Replace top with new element and re-sift.
-    fn update_top_with(&mut self, new_idx: usize, wrappers: &[DisiWrapper]) -> usize {
+    fn update_top_with(&mut self, new_idx: usize, wrappers: &[DisiWrapper<'_>]) -> usize {
         self.heap[1] = new_idx;
         self.down_heap(1, wrappers);
         self.heap[1]
     }
 
     /// Bounded insert. Returns the evicted index, or None if nothing was evicted.
-    fn insert_with_overflow(&mut self, idx: usize, wrappers: &[DisiWrapper]) -> Option<usize> {
+    fn insert_with_overflow(&mut self, idx: usize, wrappers: &[DisiWrapper<'_>]) -> Option<usize> {
         if self.size < self.max_size {
             self.add(idx, wrappers);
             None
@@ -245,7 +245,7 @@ impl TailPQ {
         self.heap[1 + i]
     }
 
-    fn up_heap(&mut self, orig_pos: usize, wrappers: &[DisiWrapper]) {
+    fn up_heap(&mut self, orig_pos: usize, wrappers: &[DisiWrapper<'_>]) {
         let mut i = orig_pos;
         let node = self.heap[i];
         let mut j = i >> 1;
@@ -257,7 +257,7 @@ impl TailPQ {
         self.heap[i] = node;
     }
 
-    fn down_heap(&mut self, start: usize, wrappers: &[DisiWrapper]) {
+    fn down_heap(&mut self, start: usize, wrappers: &[DisiWrapper<'_>]) {
         let mut i = start;
         let node = self.heap[i];
         let mut j = i << 1;
@@ -351,8 +351,8 @@ impl DocIdStream for BitSetDocIdStream<'_> {
 // ---------------------------------------------------------------------------
 
 /// BulkScorer for pure disjunctions that scores documents in batches of 4,096 docs.
-pub struct BooleanScorer {
-    wrappers: Vec<DisiWrapper>,
+pub struct BooleanScorer<'a> {
+    wrappers: Vec<DisiWrapper<'a>>,
     buckets: Option<Vec<Bucket>>,
     matching: FixedBitSet,
     leads: Vec<usize>,
@@ -365,7 +365,7 @@ pub struct BooleanScorer {
     doc_and_score_buffer: DocAndFloatFeatureBuffer,
 }
 
-impl fmt::Debug for BooleanScorer {
+impl fmt::Debug for BooleanScorer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BooleanScorer")
             .field("wrappers_count", &self.wrappers.len())
@@ -376,10 +376,10 @@ impl fmt::Debug for BooleanScorer {
     }
 }
 
-impl BooleanScorer {
+impl<'a> BooleanScorer<'a> {
     /// Creates a new BooleanScorer from a collection of scorers.
     pub fn new(
-        scorers: Vec<Box<dyn Scorer>>,
+        scorers: Vec<Box<dyn Scorer + 'a>>,
         min_should_match: i32,
         needs_scores: bool,
     ) -> io::Result<Self> {
@@ -698,7 +698,7 @@ impl BooleanScorer {
     }
 }
 
-impl BulkScorer for BooleanScorer {
+impl BulkScorer for BooleanScorer<'_> {
     fn score(&mut self, collector: &mut dyn LeafCollector, min: i32, max: i32) -> io::Result<i32> {
         collector.set_scorer(Rc::clone(&self.score_context))?;
 

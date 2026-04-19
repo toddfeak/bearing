@@ -66,17 +66,20 @@ pub trait BulkScorer: fmt::Debug {
 
 /// A supplier of `Scorer`. This allows getting an estimate of the cost before building the
 /// `Scorer`.
-pub trait ScorerSupplier: fmt::Debug {
+///
+/// The `'a` lifetime parameter bounds the reader-borrowed state (such as norms iterators)
+/// that the produced `Scorer` / `BulkScorer` may hold.
+pub trait ScorerSupplier<'a>: fmt::Debug + 'a {
     /// Get the `Scorer`. This may not return `None` and must be called at most once.
     ///
     /// `lead_cost` can be interpreted as an upper bound of the number of times that
     /// `DocIdSetIterator::next_doc`, `DocIdSetIterator::advance` will be called. Under doubt,
     /// pass `i64::MAX`.
-    fn get(&mut self, lead_cost: i64) -> io::Result<Box<dyn Scorer>>;
+    fn get(&mut self, lead_cost: i64) -> io::Result<Box<dyn Scorer + 'a>>;
 
     /// Optional method: Get a scorer that is optimized for bulk-scoring. The default
     /// implementation iterates matches from the `Scorer`.
-    fn bulk_scorer(&mut self) -> io::Result<Box<dyn BulkScorer>> {
+    fn bulk_scorer(&mut self) -> io::Result<Box<dyn BulkScorer + 'a>> {
         let scorer = self.get(i64::MAX)?;
         Ok(Box::new(DefaultBulkScorer::new(scorer)))
     }
@@ -106,16 +109,19 @@ pub trait ScorerSupplier: fmt::Debug {
 pub trait Weight: fmt::Debug {
     /// Get a `ScorerSupplier`, which allows knowing the cost of the `Scorer` before building
     /// it. Returns `None` if no documents match.
-    fn scorer_supplier(
+    fn scorer_supplier<'a>(
         &self,
-        context: &LeafReaderContext,
-    ) -> io::Result<Option<Box<dyn ScorerSupplier>>>;
+        context: &'a LeafReaderContext,
+    ) -> io::Result<Option<Box<dyn ScorerSupplier<'a> + 'a>>>;
 
     /// Returns a `Scorer` which can iterate in order over all matching documents and assign
     /// them a score. Returns `None` if no documents match.
     ///
     /// The default implementation delegates to `scorer_supplier`.
-    fn scorer(&self, context: &LeafReaderContext) -> io::Result<Option<Box<dyn Scorer>>> {
+    fn scorer<'a>(
+        &self,
+        context: &'a LeafReaderContext,
+    ) -> io::Result<Option<Box<dyn Scorer + 'a>>> {
         match self.scorer_supplier(context)? {
             None => Ok(None),
             Some(mut supplier) => Ok(Some(supplier.get(i64::MAX)?)),
@@ -126,7 +132,10 @@ pub trait Weight: fmt::Debug {
     /// given leaf, or `None` if no documents match.
     ///
     /// The default implementation calls `set_top_level_scoring_clause` then `bulk_scorer`.
-    fn bulk_scorer(&self, context: &LeafReaderContext) -> io::Result<Option<Box<dyn BulkScorer>>> {
+    fn bulk_scorer<'a>(
+        &self,
+        context: &'a LeafReaderContext,
+    ) -> io::Result<Option<Box<dyn BulkScorer + 'a>>> {
         match self.scorer_supplier(context)? {
             None => Ok(None),
             Some(mut supplier) => {
@@ -151,19 +160,19 @@ pub trait Weight: fmt::Debug {
 ///
 /// This is the default `BulkScorer` implementation when a `Weight` doesn't provide a
 /// specialized one.
-pub struct DefaultBulkScorer {
-    scorer: Box<dyn Scorer>,
+pub struct DefaultBulkScorer<'a> {
+    scorer: Box<dyn Scorer + 'a>,
 }
 
-impl fmt::Debug for DefaultBulkScorer {
+impl fmt::Debug for DefaultBulkScorer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DefaultBulkScorer").finish()
     }
 }
 
-impl DefaultBulkScorer {
+impl<'a> DefaultBulkScorer<'a> {
     /// Sole constructor.
-    pub fn new(scorer: Box<dyn Scorer>) -> Self {
+    pub fn new(scorer: Box<dyn Scorer + 'a>) -> Self {
         Self { scorer }
     }
 
@@ -207,7 +216,7 @@ impl DefaultBulkScorer {
     }
 }
 
-impl BulkScorer for DefaultBulkScorer {
+impl BulkScorer for DefaultBulkScorer<'_> {
     fn score(&mut self, collector: &mut dyn LeafCollector, min: i32, max: i32) -> io::Result<i32> {
         let score_context = ScoreContext::new();
         collector.set_scorer(Rc::clone(&score_context))?;
@@ -275,12 +284,12 @@ impl BulkScorer for DefaultBulkScorer {
 // ---------------------------------------------------------------------------
 
 /// A wrapper for a pre-built `Scorer` that implements `ScorerSupplier`.
-pub struct DefaultScorerSupplier {
-    scorer: Option<Box<dyn Scorer>>,
+pub struct DefaultScorerSupplier<'a> {
+    scorer: Option<Box<dyn Scorer + 'a>>,
     cost: i64,
 }
 
-impl fmt::Debug for DefaultScorerSupplier {
+impl fmt::Debug for DefaultScorerSupplier<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DefaultScorerSupplier")
             .field("cost", &self.cost)
@@ -288,9 +297,9 @@ impl fmt::Debug for DefaultScorerSupplier {
     }
 }
 
-impl DefaultScorerSupplier {
+impl<'a> DefaultScorerSupplier<'a> {
     /// Creates a new `DefaultScorerSupplier` wrapping the given scorer.
-    pub fn new(scorer: Box<dyn Scorer>, cost: i64) -> Self {
+    pub fn new(scorer: Box<dyn Scorer + 'a>, cost: i64) -> Self {
         Self {
             scorer: Some(scorer),
             cost,
@@ -298,8 +307,8 @@ impl DefaultScorerSupplier {
     }
 }
 
-impl ScorerSupplier for DefaultScorerSupplier {
-    fn get(&mut self, _lead_cost: i64) -> io::Result<Box<dyn Scorer>> {
+impl<'a> ScorerSupplier<'a> for DefaultScorerSupplier<'a> {
+    fn get(&mut self, _lead_cost: i64) -> io::Result<Box<dyn Scorer + 'a>> {
         self.scorer
             .take()
             .ok_or_else(|| io::Error::other("ScorerSupplier.get() called more than once"))
@@ -319,20 +328,20 @@ impl ScorerSupplier for DefaultScorerSupplier {
 /// Used when `ScoreMode::needs_scores()` is true and `Scorer::next_docs_and_scores` has
 /// optimizations to run faster than one-by-one iteration. If the collector has a
 /// competitive iterator, falls back to `DefaultBulkScorer`.
-pub struct BatchScoreBulkScorer {
-    scorer: Box<dyn Scorer>,
+pub struct BatchScoreBulkScorer<'a> {
+    scorer: Box<dyn Scorer + 'a>,
     buffer: DocAndFloatFeatureBuffer,
 }
 
-impl fmt::Debug for BatchScoreBulkScorer {
+impl fmt::Debug for BatchScoreBulkScorer<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BatchScoreBulkScorer").finish()
     }
 }
 
-impl BatchScoreBulkScorer {
+impl<'a> BatchScoreBulkScorer<'a> {
     /// Sole constructor.
-    pub fn new(scorer: Box<dyn Scorer>) -> Self {
+    pub fn new(scorer: Box<dyn Scorer + 'a>) -> Self {
         Self {
             scorer,
             buffer: DocAndFloatFeatureBuffer::new(),
@@ -340,7 +349,7 @@ impl BatchScoreBulkScorer {
     }
 }
 
-impl BulkScorer for BatchScoreBulkScorer {
+impl BulkScorer for BatchScoreBulkScorer<'_> {
     fn score(&mut self, collector: &mut dyn LeafCollector, min: i32, max: i32) -> io::Result<i32> {
         let score_context = ScoreContext::new();
 
