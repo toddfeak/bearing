@@ -49,6 +49,7 @@ pub mod index;
 pub mod prelude;
 pub mod search;
 pub mod store;
+pub mod store2;
 #[cfg(test)]
 pub mod test_util;
 pub mod util;
