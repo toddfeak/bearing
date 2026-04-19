@@ -103,7 +103,7 @@ mod tests {
         buf.extend_from_slice(&CODEC_MAGIC.to_be_bytes());
         // VInt of length 1: codec name length is < 128 in our tests
         let name_bytes = codec.as_bytes();
-        assert!(name_bytes.len() < 128);
+        assert_len_lt_x!(name_bytes, 128);
         buf.push(name_bytes.len() as u8);
         buf.extend_from_slice(name_bytes);
         buf.extend_from_slice(&version.to_be_bytes());
@@ -120,7 +120,7 @@ mod tests {
         let mut buf = build_header(codec, version);
         buf.extend_from_slice(id);
         let suffix_bytes = suffix.as_bytes();
-        assert!(suffix_bytes.len() <= 255);
+        assert_len_le_x!(suffix_bytes, 255);
         buf.push(suffix_bytes.len() as u8);
         buf.extend_from_slice(suffix_bytes);
         buf

@@ -17,10 +17,10 @@ use crate::codecs::lucene90::term_vectors::{
     VECTORS_EXTENSION, VERSION,
 };
 use crate::index::index_file_names;
-use crate::store::{Directory, IndexInput};
-use crate::store2::IndexInput as Store2IndexInput;
-use crate::store2::codec_footers::{FOOTER_LENGTH, verify_checksum};
-use crate::store2::codec_headers::check_index_header as store2_check_index_header;
+use crate::store::Directory;
+use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
+use crate::store2::{FileBacking, IndexInput};
 
 /// Reads term vectors for a segment.
 ///
@@ -28,9 +28,12 @@ use crate::store2::codec_headers::check_index_header as store2_check_index_heade
 /// reads metadata from `.tvm`, creates chunk index from `.tvx`, validates
 /// dirty chunk invariants.
 pub struct TermVectorsReader {
-    /// Open handle to the `.tvd` data file.
+    /// Owned bytes of the `.tvd` data file.
     #[expect(dead_code)]
-    vectors_stream: Box<dyn IndexInput>,
+    tvd: FileBacking,
+    /// Owned bytes of the `.tvx` index file.
+    #[expect(dead_code)]
+    tvx: FileBacking,
     /// Chunk index for doc ID → chunk lookup.
     #[expect(dead_code)]
     index_reader: FieldsIndexReader,
@@ -67,18 +70,21 @@ impl TermVectorsReader {
         segment_suffix: &str,
         segment_id: &[u8; codec_util::ID_LENGTH],
     ) -> io::Result<Self> {
-        // 1. Open .tvd (data) — keep handle
+        // 1. Open .tvd (data) — keep backing, validate header
         let tvd_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, VECTORS_EXTENSION);
-        let mut vectors_stream = directory.open_input(&tvd_name)?;
-        let version = codec_util::check_index_header(
-            vectors_stream.as_mut(),
-            DATA_CODEC,
-            VERSION,
-            VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
+        let tvd = directory.open_file(&tvd_name)?;
+        let version = {
+            let mut input = IndexInput::new(&tvd_name, tvd.as_bytes());
+            check_index_header(
+                &mut input,
+                DATA_CODEC,
+                VERSION,
+                VERSION,
+                segment_id,
+                segment_suffix,
+            )?
+        };
 
         // 2. Open .tvm (meta), verify full-file CRC, then parse metadata.
         let tvm_name =
@@ -88,8 +94,8 @@ impl TermVectorsReader {
 
         let tvm_bytes = tvm_backing.as_bytes();
         let prefix_len = tvm_bytes.len() - FOOTER_LENGTH;
-        let mut meta_in = Store2IndexInput::new(&tvm_name, &tvm_bytes[..prefix_len]);
-        store2_check_index_header(
+        let mut meta_in = IndexInput::new(&tvm_name, &tvm_bytes[..prefix_len]);
+        check_index_header(
             &mut meta_in,
             INDEX_CODEC_META,
             VERSION,
@@ -102,20 +108,23 @@ impl TermVectorsReader {
         let chunk_size = meta_in.read_vint()?;
 
         // Validate .tvd footer structure
-        codec_util::retrieve_checksum(vectors_stream.as_mut())?;
+        retrieve_checksum(tvd.as_bytes())?;
 
-        // 3. Open .tvx (index) and create FieldsIndexReader
+        // 3. Open .tvx (index) — keep backing, validate header, then build FieldsIndexReader from .tvm
         let tvx_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let mut tvx_input = directory.open_input(&tvx_name)?;
-        codec_util::check_index_header(
-            tvx_input.as_mut(),
-            INDEX_CODEC_IDX,
-            VERSION,
-            VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
+        let tvx = directory.open_file(&tvx_name)?;
+        {
+            let mut input = IndexInput::new(&tvx_name, tvx.as_bytes());
+            check_index_header(
+                &mut input,
+                INDEX_CODEC_IDX,
+                VERSION,
+                VERSION,
+                segment_id,
+                segment_suffix,
+            )?;
+        }
         let index_reader = FieldsIndexReader::open(&mut meta_in)?;
 
         // 4. Read chunk counts
@@ -143,7 +152,8 @@ impl TermVectorsReader {
         debug!("term_vectors_reader: {num_chunks} chunks for segment {segment_name}");
 
         Ok(Self {
-            vectors_stream,
+            tvd,
+            tvx,
             index_reader,
             version,
             packed_ints_version,

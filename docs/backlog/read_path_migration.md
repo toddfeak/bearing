@@ -56,7 +56,7 @@ Suggested order (simplest first to validate the pattern, complex last):
 1. ~~`points_reader`~~ — migrated (commit b9ed958)
 2. ~~`stored_fields_reader`~~ — migrated (this commit); `term_vectors_reader` partially migrated (its `.tvm` meta path only, since it shares `FieldsIndexReader` with stored_fields); `DirectReader` / `DirectMonotonicReader` in `packed_readers.rs` also moved to `store2::IndexInput`
 3. ~~`norms_reader`~~ — migrated (this commit); `IndexedDISI` migrated alongside since norms is its only runtime caller; search-side types (`Weight`, `ScorerSupplier`, `Scorer`, `BulkScorer` impls) gained a `'r` lifetime to carry the now-borrowed norms iterator from `LeafReaderContext`
-4. `doc_values_producer` and `term_vectors_reader` (full migration of the `.tvd`/`.tvx` paths)
+4. ~~`doc_values_producer` and `term_vectors_reader` (full migration of the `.tvd`/`.tvx` paths)~~ — `term_vectors_reader` `.tvd`/`.tvx` migrated (this commit); `doc_values_producer` is a field-type-only swap — `data` field moved to `FileBacking`, `.dvm`/`.dvd` paths and helper signatures moved to `store2::IndexInput`, but the five `DocValuesProducer::get_*` methods remain `todo!()`. Full disk-backed doc values read-path implementation (iterator types, DocValuesEntry offset/encoding metadata, IndexedDISI integration) is deferred to a future step.
 5. `postings_reader`
 6. `blocktree_reader` and `segment_terms_enum` (deepest call chains, most iterators)
 7. `compound_reader` (Directory implementation, may need its own ordering consideration)

@@ -109,24 +109,24 @@ mod tests {
 
     #[test]
     fn len_owned_nonempty() {
-        assert_eq!(owned(&[1, 2, 3]).len(), 3);
+        assert_len_eq_x!(owned(&[1, 2, 3]), 3);
     }
 
     #[test]
     fn len_owned_empty() {
-        assert_eq!(owned(&[]).len(), 0);
+        assert_is_empty!(owned(&[]));
     }
 
     #[test]
     fn len_mmap_nonempty() {
         let (backing, _dir) = mmap_of(&[10, 20, 30, 40]);
-        assert_eq!(backing.len(), 4);
+        assert_len_eq_x!(backing, 4);
     }
 
     #[test]
     fn len_mmap_empty() {
         let (backing, _dir) = mmap_of(&[]);
-        assert_eq!(backing.len(), 0);
+        assert_is_empty!(backing);
     }
 
     // is_empty

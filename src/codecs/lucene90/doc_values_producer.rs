@@ -9,7 +9,6 @@
 //! by [`super::doc_values`]. Metadata is read eagerly during construction; value
 //! data is read lazily from the `.dvd` data file on demand.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::fmt;
 use std::io;
 
@@ -24,8 +23,10 @@ use crate::index::doc_values_iterators::{
     BinaryDocValues, NumericDocValues, SortedDocValues, SortedNumericDocValues, SortedSetDocValues,
 };
 use crate::index::{FieldInfo, FieldInfos, index_file_names};
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::Directory;
+use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
+use crate::store2::{FileBacking, IndexInput};
 
 // ---------------------------------------------------------------------------
 // Entry types — one per doc values type, stored eagerly in memory
@@ -92,8 +93,9 @@ pub trait DocValuesProducer: fmt::Debug {
 pub struct DocValuesReader {
     /// Per-field metadata indexed by field number. `None` for fields without doc values.
     entries: Box<[Option<DocValuesEntry>]>,
-    /// Open handle to the `.dvd` data file for lazy value reads.
-    data: Box<dyn IndexInput>,
+    /// Owned bytes of the `.dvd` data file for lazy value reads.
+    #[expect(dead_code)]
+    data: FileBacking,
 }
 
 impl fmt::Debug for DocValuesReader {
@@ -116,13 +118,17 @@ impl DocValuesReader {
         segment_id: &[u8; codec_util::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // Open .dvm (metadata) with checksum validation
+        // Open .dvm (metadata): read into memory, verify CRC over the whole file,
+        // then parse the prefix (file length minus the 16-byte footer).
         let dvm_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let meta_input = directory.open_input(&dvm_name)?;
-        let mut meta_in = ChecksumIndexInput::new(meta_input);
+        let dvm = directory.open_file(&dvm_name)?;
+        verify_checksum(dvm.as_bytes())?;
+        let dvm_bytes = dvm.as_bytes();
+        let dvm_prefix = &dvm_bytes[..dvm_bytes.len() - FOOTER_LENGTH];
+        let mut meta_in = IndexInput::new(&dvm_name, dvm_prefix);
 
-        let version = codec_util::check_index_header(
+        let version = check_index_header(
             &mut meta_in,
             META_CODEC,
             VERSION,
@@ -133,20 +139,21 @@ impl DocValuesReader {
 
         let entries = read_fields(&mut meta_in, field_infos)?;
 
-        codec_util::check_footer(&mut meta_in)?;
-
-        // Open .dvd (data) and validate header
+        // Open .dvd (data): keep backing, validate header, retrieve footer checksum.
         let dvd_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
-        let mut data = directory.open_input(&dvd_name)?;
-        let data_version = codec_util::check_index_header(
-            data.as_mut(),
-            DATA_CODEC,
-            VERSION,
-            VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
+        let data = directory.open_file(&dvd_name)?;
+        let data_version = {
+            let mut input = IndexInput::new(&dvd_name, data.as_bytes());
+            check_index_header(
+                &mut input,
+                DATA_CODEC,
+                VERSION,
+                VERSION,
+                segment_id,
+                segment_suffix,
+            )?
+        };
 
         if version != data_version {
             return Err(io::Error::other(format!(
@@ -154,7 +161,7 @@ impl DocValuesReader {
             )));
         }
 
-        codec_util::retrieve_checksum(data.as_mut())?;
+        retrieve_checksum(data.as_bytes())?;
 
         debug!(
             "doc_values_reader: opened {} entries for segment {segment_name}",
@@ -162,11 +169,6 @@ impl DocValuesReader {
         );
 
         Ok(Self { entries, data })
-    }
-
-    /// Returns a reference to the `.dvd` data input for lazy value reads.
-    pub fn data(&self) -> &dyn IndexInput {
-        self.data.as_ref()
     }
 
     /// Returns the number of documents that have values for the given field.
@@ -221,7 +223,7 @@ impl DocValuesProducer for DocValuesReader {
 
 /// Reads all doc values metadata entries from the `.dvm` file.
 fn read_fields(
-    meta: &mut dyn DataInput,
+    meta: &mut IndexInput<'_>,
     field_infos: &FieldInfos,
 ) -> io::Result<Box<[Option<DocValuesEntry>]>> {
     let mut entries: Vec<Option<DocValuesEntry>> = vec![None; field_infos.len()];
@@ -268,7 +270,7 @@ fn read_fields(
 /// Java stores these values in a `DocValuesSkipperEntry` for use by
 /// `getDocValuesSkipper()`. We read and discard them for now since skip
 /// index queries are not yet implemented.
-fn read_doc_values_skipper_meta(meta: &mut dyn DataInput) -> io::Result<()> {
+fn read_doc_values_skipper_meta(meta: &mut IndexInput<'_>) -> io::Result<()> {
     meta.read_le_long()?; // offset
     meta.read_le_long()?; // length
     meta.read_le_long()?; // maxValue
@@ -279,7 +281,7 @@ fn read_doc_values_skipper_meta(meta: &mut dyn DataInput) -> io::Result<()> {
 }
 
 /// Skips the docs-with-field block written by `write_values()`.
-fn skip_docs_with_field(meta: &mut dyn DataInput) -> io::Result<()> {
+fn skip_docs_with_field(meta: &mut IndexInput<'_>) -> io::Result<()> {
     meta.read_le_long()?; // offset
     meta.read_le_long()?; // length
     meta.read_le_short()?; // jump_table_entry_count
@@ -289,14 +291,14 @@ fn skip_docs_with_field(meta: &mut dyn DataInput) -> io::Result<()> {
 
 /// Reads the `write_values()` block, returning `num_values`.
 /// Skips all encoding metadata (table, bpv, min, gcd, offsets).
-fn read_values_num_values(meta: &mut dyn DataInput) -> io::Result<i64> {
+fn read_values_num_values(meta: &mut IndexInput<'_>) -> io::Result<i64> {
     skip_docs_with_field(meta)?;
 
     let num_values = meta.read_le_long()?;
 
     let table_size = meta.read_le_int()?;
     if table_size > 0 {
-        meta.skip_bytes(table_size as u64 * 8)?; // table entries
+        meta.skip_bytes(table_size as usize * 8)?; // table entries
     }
 
     meta.read_byte()?; // bits_per_value
@@ -309,14 +311,14 @@ fn read_values_num_values(meta: &mut dyn DataInput) -> io::Result<i64> {
     Ok(num_values)
 }
 
-fn read_numeric(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
+fn read_numeric(meta: &mut IndexInput<'_>) -> io::Result<DocValuesEntry> {
     let num_values = read_values_num_values(meta)?;
     Ok(DocValuesEntry {
         num_docs_with_field: num_values as i32,
     })
 }
 
-fn read_binary(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
+fn read_binary(meta: &mut IndexInput<'_>) -> io::Result<DocValuesEntry> {
     meta.read_le_long()?; // data_offset
     meta.read_le_long()?; // data_length
     skip_docs_with_field(meta)?;
@@ -333,7 +335,7 @@ fn read_binary(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
     })
 }
 
-fn read_sorted(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
+fn read_sorted(meta: &mut IndexInput<'_>) -> io::Result<DocValuesEntry> {
     let num_values = read_values_num_values(meta)?;
     skip_terms_dict(meta)?;
     Ok(DocValuesEntry {
@@ -341,7 +343,7 @@ fn read_sorted(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
     })
 }
 
-fn read_sorted_numeric(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
+fn read_sorted_numeric(meta: &mut IndexInput<'_>) -> io::Result<DocValuesEntry> {
     let num_values = read_values_num_values(meta)?;
     let num_docs_with_field = meta.read_le_int()?;
 
@@ -354,7 +356,7 @@ fn read_sorted_numeric(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
     })
 }
 
-fn read_sorted_set(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
+fn read_sorted_set(meta: &mut IndexInput<'_>) -> io::Result<DocValuesEntry> {
     let is_multi_valued = meta.read_byte()?;
 
     if is_multi_valued == 0 {
@@ -389,23 +391,20 @@ fn read_sorted_set(meta: &mut dyn DataInput) -> io::Result<DocValuesEntry> {
 ///
 /// Each block is 21 bytes: min(i64) + avgInc(i32) + offset(i64) + bpv(u8).
 fn skip_direct_monotonic_meta_blocks(
-    meta: &mut dyn DataInput,
+    meta: &mut IndexInput<'_>,
     num_values: i64,
     block_shift: u32,
 ) -> io::Result<()> {
     let block_size = 1i64 << block_shift;
     let num_blocks = (num_values + block_size - 1) / block_size;
     // 21 bytes per block: i64(8) + i32(4) + i64(8) + u8(1)
-    meta.skip_bytes(num_blocks as u64 * 21)?;
+    meta.skip_bytes(num_blocks as usize * 21)?;
     Ok(())
 }
 
 /// Skips DirectMonotonic addresses metadata: offset, blockShift vint,
 /// DM meta blocks, and length.
-fn skip_direct_monotonic_addresses(
-    mut meta: &mut dyn DataInput,
-    num_values: i64,
-) -> io::Result<()> {
+fn skip_direct_monotonic_addresses(meta: &mut IndexInput<'_>, num_values: i64) -> io::Result<()> {
     let _addresses_offset = meta.read_le_long()?;
     let block_shift = meta.read_vint()? as u32;
     skip_direct_monotonic_meta_blocks(meta, num_values, block_shift)?;
@@ -414,7 +413,7 @@ fn skip_direct_monotonic_addresses(
 }
 
 /// Skips the terms dictionary metadata written by `add_terms_dict()`.
-fn skip_terms_dict(mut meta: &mut dyn DataInput) -> io::Result<()> {
+fn skip_terms_dict(meta: &mut IndexInput<'_>) -> io::Result<()> {
     let num_terms = meta.read_vlong()?;
     let block_shift = meta.read_le_int()? as u32;
 
@@ -1172,7 +1171,6 @@ mod tests {
 
         let reader = write_and_read(&field_infos, &fields, 3, "Lucene90_0");
         assert_eq!(reader.num_docs_with_field(0), Some(3));
-        assert_gt!(reader.data().length(), 0);
     }
 
     #[test]
