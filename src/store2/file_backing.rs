@@ -15,6 +15,16 @@ pub enum FileBacking {
     Mmap(Mmap),
     /// In-memory byte vector.
     Owned(Vec<u8>),
+    /// A sub-range of a memory-mapped parent file. Used by `CompoundDirectory`
+    /// to hand out sub-file views of a `.cfs` without copying.
+    MmapSlice {
+        /// Mmap of the parent file (e.g., `.cfs`).
+        mmap: Mmap,
+        /// Byte offset of the sub-range within the parent mapping.
+        offset: usize,
+        /// Length of the sub-range in bytes.
+        length: usize,
+    },
 }
 
 impl FileBacking {
@@ -23,6 +33,11 @@ impl FileBacking {
         match self {
             FileBacking::Mmap(m) => m.as_ref(),
             FileBacking::Owned(v) => v.as_slice(),
+            FileBacking::MmapSlice {
+                mmap,
+                offset,
+                length,
+            } => &mmap.as_ref()[*offset..*offset + *length],
         }
     }
 
@@ -31,6 +46,7 @@ impl FileBacking {
         match self {
             FileBacking::Mmap(m) => m.len(),
             FileBacking::Owned(v) => v.len(),
+            FileBacking::MmapSlice { length, .. } => *length,
         }
     }
 
@@ -45,6 +61,7 @@ impl fmt::Debug for FileBacking {
         let variant = match self {
             FileBacking::Mmap(_) => "Mmap",
             FileBacking::Owned(_) => "Owned",
+            FileBacking::MmapSlice { .. } => "MmapSlice",
         };
         f.debug_struct("FileBacking")
             .field("variant", &variant)
@@ -170,6 +187,80 @@ mod tests {
         let rendered = format!("{backing:?}");
         assert_contains!(rendered, "Mmap");
         assert_contains!(rendered, "1024");
+        assert_not_contains!(rendered, "0, 0, 0");
+    }
+
+    // MmapSlice
+
+    fn mmap_slice_of(parent: &[u8], offset: usize, length: usize) -> (FileBacking, TempDir) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("parent.bin");
+        {
+            let mut file = File::create(&path).unwrap();
+            file.write_all(parent).unwrap();
+        }
+        let file = File::open(&path).unwrap();
+        let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
+        (
+            FileBacking::MmapSlice {
+                mmap,
+                offset,
+                length,
+            },
+            dir,
+        )
+    }
+
+    #[test]
+    fn mmap_slice_as_bytes_full_range() {
+        let parent: Vec<u8> = (0..16u8).collect();
+        let (backing, _dir) = mmap_slice_of(&parent, 0, parent.len());
+        assert_eq!(backing.as_bytes(), parent.as_slice());
+    }
+
+    #[test]
+    fn mmap_slice_as_bytes_sub_range() {
+        let parent: Vec<u8> = (0..16u8).collect();
+        let (backing, _dir) = mmap_slice_of(&parent, 4, 8);
+        assert_eq!(backing.as_bytes(), &parent[4..12]);
+    }
+
+    #[test]
+    fn mmap_slice_as_bytes_at_end_of_parent() {
+        let parent: Vec<u8> = (0..16u8).collect();
+        let (backing, _dir) = mmap_slice_of(&parent, 12, 4);
+        assert_eq!(backing.as_bytes(), &parent[12..16]);
+    }
+
+    #[test]
+    fn mmap_slice_len_returns_sub_length_not_parent_length() {
+        let parent = vec![0u8; 1024];
+        let (backing, _dir) = mmap_slice_of(&parent, 100, 50);
+        assert_len_eq_x!(backing, 50);
+    }
+
+    #[test]
+    fn mmap_slice_is_empty_when_length_zero() {
+        let parent = vec![0u8; 1024];
+        let (backing, _dir) = mmap_slice_of(&parent, 10, 0);
+        assert!(backing.is_empty());
+    }
+
+    #[test]
+    fn mmap_slice_is_not_empty_when_length_positive() {
+        let parent = vec![0u8; 1024];
+        let (backing, _dir) = mmap_slice_of(&parent, 0, 1);
+        assert!(!backing.is_empty());
+    }
+
+    #[test]
+    fn debug_mmap_slice_shows_variant_and_sub_length_not_bytes() {
+        let parent = vec![0u8; 1024];
+        let (backing, _dir) = mmap_slice_of(&parent, 100, 200);
+        let rendered = format!("{backing:?}");
+        assert_contains!(rendered, "MmapSlice");
+        assert_contains!(rendered, "200");
+        assert_not_contains!(rendered, "1024");
         assert_not_contains!(rendered, "0, 0, 0");
     }
 }

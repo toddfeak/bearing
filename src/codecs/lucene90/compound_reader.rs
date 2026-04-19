@@ -8,10 +8,12 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::codecs::codec_util;
-use crate::encoding::read_encoding::ReadEncoding;
 use crate::index::index_file_names;
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput, IndexOutput};
+use crate::store::byte_slice_input::ByteSliceIndexInput;
+use crate::store::{Directory, IndexInput, IndexOutput};
+use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::store2::codec_headers::check_index_header;
+use crate::store2::{self, FileBacking};
 
 const ENTRIES_EXTENSION: &str = "cfe";
 const DATA_EXTENSION: &str = "cfs";
@@ -27,23 +29,27 @@ struct FileEntry {
 
 /// A read-only [`Directory`] that reads files from a compound file (`.cfs`/`.cfe`).
 ///
-/// Parses the `.cfe` entry table on construction and holds a handle to the `.cfs`
-/// data file. Files are accessed by slicing the `.cfs` handle.
-pub struct CompoundDirectory {
+/// Parses the `.cfe` entry table on construction and holds a borrowed reference
+/// to the parent [`Directory`]. Each [`Directory::open_file`] call re-maps the
+/// parent `.cfs` and returns a [`FileBacking::MmapSlice`] with the entry's
+/// offset and length.
+pub struct CompoundDirectory<'a> {
+    parent: &'a dyn Directory,
     segment_name: String,
+    data_file_name: String,
     entries: HashMap<String, FileEntry>,
-    handle: Box<dyn IndexInput>,
     #[expect(dead_code)]
     version: i32,
 }
 
-impl CompoundDirectory {
+impl<'a> CompoundDirectory<'a> {
     /// Opens a compound directory for the given segment.
     ///
-    /// Reads the `.cfe` entry table from `directory` and opens the `.cfs` data
-    /// file. Validates headers, footers, and file length.
+    /// Reads the `.cfe` entry table from `directory` and validates the `.cfs`
+    /// data file's header, footer, and length. Retains a reference to
+    /// `directory` for on-demand sub-file access.
     pub fn open(
-        directory: &dyn Directory,
+        directory: &'a dyn Directory,
         segment_name: &str,
         segment_id: &[u8; codec_util::ID_LENGTH],
     ) -> io::Result<Self> {
@@ -57,39 +63,39 @@ impl CompoundDirectory {
             .map(|e| e.offset + e.length)
             .max()
             .unwrap_or(codec_util::index_header_length(DATA_CODEC, "") as u64)
-            + codec_util::FOOTER_LENGTH as u64;
+            + FOOTER_LENGTH as u64;
 
         let data_file_name = index_file_names::segment_file_name(segment_name, "", DATA_EXTENSION);
-        let mut handle = directory.open_input(&data_file_name)?;
 
-        codec_util::check_index_header(
-            handle.as_mut(),
-            DATA_CODEC,
-            version,
-            version,
-            segment_id,
-            "",
-        )?;
-
-        codec_util::retrieve_checksum(handle.as_mut())?;
-
-        if handle.length() != expected_length {
-            return Err(io::Error::other(format!(
-                "length should be {expected_length} bytes, but is {} instead",
-                handle.length()
-            )));
+        // Validate .cfs header, footer, and length once at open time. The
+        // FileBacking is dropped at the end of this block; each subsequent
+        // sub-file open re-maps the parent via `self.parent.open_file`.
+        {
+            let cfs_backing = directory.open_file(&data_file_name)?;
+            {
+                let mut input = store2::IndexInput::new(&data_file_name, cfs_backing.as_bytes());
+                check_index_header(&mut input, DATA_CODEC, version, version, segment_id, "")?;
+            }
+            retrieve_checksum(cfs_backing.as_bytes())?;
+            if cfs_backing.len() as u64 != expected_length {
+                return Err(io::Error::other(format!(
+                    "length should be {expected_length} bytes, but is {} instead",
+                    cfs_backing.len()
+                )));
+            }
         }
 
         Ok(Self {
+            parent: directory,
             segment_name: segment_name.to_string(),
+            data_file_name,
             entries,
-            handle,
             version,
         })
     }
 }
 
-impl Directory for CompoundDirectory {
+impl Directory for CompoundDirectory<'_> {
     fn create_output(&self, _name: &str) -> io::Result<Box<dyn IndexOutput>> {
         Err(io::Error::other(
             "CompoundDirectory is read-only: cannot create output",
@@ -97,6 +103,13 @@ impl Directory for CompoundDirectory {
     }
 
     fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>> {
+        // Old-path compat: codec readers now use `open_file`; this path is
+        // exercised only by legacy tests and the `Directory` trait contract.
+        let bytes = self.read_file(name)?;
+        Ok(Box::new(ByteSliceIndexInput::new(name.to_string(), bytes)))
+    }
+
+    fn open_file(&self, name: &str) -> io::Result<FileBacking> {
         let id = index_file_names::strip_segment_name(name);
         let entry = self.entries.get(id).ok_or_else(|| {
             io::Error::new(
@@ -108,7 +121,20 @@ impl Directory for CompoundDirectory {
                 ),
             )
         })?;
-        self.handle.slice(name, entry.offset, entry.length)
+        let offset = entry.offset as usize;
+        let length = entry.length as usize;
+        let parent_backing = self.parent.open_file(&self.data_file_name)?;
+        match parent_backing {
+            FileBacking::Mmap(mmap) => Ok(FileBacking::MmapSlice {
+                mmap,
+                offset,
+                length,
+            }),
+            FileBacking::Owned(v) => Ok(FileBacking::Owned(v[offset..offset + length].to_vec())),
+            FileBacking::MmapSlice { .. } => {
+                Err(io::Error::other("nested compound files are not supported"))
+            }
+        }
     }
 
     fn list_all(&self) -> io::Result<Vec<String>> {
@@ -141,11 +167,7 @@ impl Directory for CompoundDirectory {
     }
 
     fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
-        let mut input = self.open_input(name)?;
-        let len = input.length() as usize;
-        let mut buf = vec![0u8; len];
-        input.read_exact(&mut buf)?;
-        Ok(buf)
+        Ok(self.open_file(name)?.as_bytes().to_vec())
     }
 }
 
@@ -155,10 +177,14 @@ fn read_entries(
     entries_file_name: &str,
     segment_id: &[u8; codec_util::ID_LENGTH],
 ) -> io::Result<(i32, HashMap<String, FileEntry>)> {
-    let input = directory.open_input(entries_file_name)?;
-    let mut input = ChecksumIndexInput::new(input);
+    let backing = directory.open_file(entries_file_name)?;
+    verify_checksum(backing.as_bytes())?;
 
-    let version = codec_util::check_index_header(
+    let bytes = backing.as_bytes();
+    let prefix_len = bytes.len() - FOOTER_LENGTH;
+    let mut input = store2::IndexInput::new(entries_file_name, &bytes[..prefix_len]);
+
+    let version = check_index_header(
         &mut input,
         ENTRY_CODEC,
         VERSION_START,
@@ -169,13 +195,11 @@ fn read_entries(
 
     let mapping = read_mapping(&mut input)?;
 
-    codec_util::check_footer(&mut input)?;
-
     Ok((version, mapping))
 }
 
 /// Reads the entry mapping from the `.cfe` stream.
-fn read_mapping(mut input: &mut dyn DataInput) -> io::Result<HashMap<String, FileEntry>> {
+fn read_mapping(input: &mut store2::IndexInput<'_>) -> io::Result<HashMap<String, FileEntry>> {
     let num_entries = input.read_vint()?;
     let mut mapping = HashMap::with_capacity(num_entries as usize);
 
@@ -227,17 +251,16 @@ mod tests {
         (cfs_out.into_inner(), cfe)
     }
 
-    fn setup_compound_dir(
+    fn setup_compound_files(
         segment_name: &str,
         segment_id: &[u8; 16],
         files: &[SegmentFile],
-    ) -> (SharedDirectory, CompoundDirectory) {
+    ) -> SharedDirectory {
         let (cfs, cfe) = write_compound(segment_name, segment_id, files);
         let dir = MemoryDirectory::create();
         dir.write_file(&cfs.name, &cfs.data).unwrap();
         dir.write_file(&cfe.name, &cfe.data).unwrap();
-        let compound_dir = CompoundDirectory::open(&dir, segment_name, segment_id).unwrap();
-        (dir, compound_dir)
+        dir
     }
 
     #[test]
@@ -247,7 +270,8 @@ mod tests {
             make_test_file("_0.fnm", &seg_id, b"field data"),
             make_test_file("_0.fdt", &seg_id, b"stored data"),
         ];
-        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let dir = setup_compound_files("_0", &seg_id, &files);
+        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         let listed = compound_dir.list_all().unwrap();
         assert_len_eq_x!(&listed, 2);
@@ -260,7 +284,8 @@ mod tests {
         let seg_id = [0xABu8; 16];
         let body = b"hello compound world";
         let files = vec![make_test_file("_0.fnm", &seg_id, body)];
-        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let dir = setup_compound_files("_0", &seg_id, &files);
+        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         let mut input = compound_dir.open_input("_0.fnm").unwrap();
         assert_gt!(input.length(), 0);
@@ -273,7 +298,8 @@ mod tests {
     fn test_open_input_strips_segment_name() {
         let seg_id = [0xABu8; 16];
         let files = vec![make_test_file("_0.fnm", &seg_id, b"data")];
-        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let dir = setup_compound_files("_0", &seg_id, &files);
+        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         // Both full name and stripped name resolve via strip_segment_name
         assert!(compound_dir.open_input("_0.fnm").is_ok());
@@ -285,7 +311,8 @@ mod tests {
         let seg_id = [0xABu8; 16];
         let body = b"test body";
         let files = vec![make_test_file("_0.fnm", &seg_id, body)];
-        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let dir = setup_compound_files("_0", &seg_id, &files);
+        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         let len = compound_dir.file_length("_0.fnm").unwrap();
         let expected = codec_util::index_header_length("TestCodec", "") as u64
@@ -298,7 +325,8 @@ mod tests {
     fn test_open_input_missing() {
         let seg_id = [0xABu8; 16];
         let files = vec![make_test_file("_0.fnm", &seg_id, b"data")];
-        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let dir = setup_compound_files("_0", &seg_id, &files);
+        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         assert!(compound_dir.open_input("_0.xxx").is_err());
     }
@@ -307,7 +335,8 @@ mod tests {
     fn test_read_only_operations() {
         let seg_id = [0xABu8; 16];
         let files = vec![make_test_file("_0.fnm", &seg_id, b"data")];
-        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let dir = setup_compound_files("_0", &seg_id, &files);
+        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         assert!(compound_dir.create_output("test").is_err());
         assert!(compound_dir.delete_file("test").is_err());
@@ -322,7 +351,8 @@ mod tests {
             make_test_file("_0.fdt", &seg_id, b"stored fields data here"),
             make_test_file("_0.nvd", &seg_id, b"norms"),
         ];
-        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let dir = setup_compound_files("_0", &seg_id, &files);
+        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         let listed = compound_dir.list_all().unwrap();
         assert_len_eq_x!(&listed, 3);
@@ -338,7 +368,8 @@ mod tests {
     fn test_read_file() {
         let seg_id = [0xABu8; 16];
         let files = vec![make_test_file("_0.fnm", &seg_id, b"body data")];
-        let (_dir, compound_dir) = setup_compound_dir("_0", &seg_id, &files);
+        let dir = setup_compound_files("_0", &seg_id, &files);
+        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         let data = compound_dir.read_file("_0.fnm").unwrap();
         assert_not_empty!(data);
