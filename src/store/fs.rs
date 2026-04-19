@@ -757,6 +757,31 @@ mod tests {
     }
 
     #[test]
+    fn test_fs_directory_open_file_returns_owned_with_correct_bytes() {
+        use crate::store2::FileBacking;
+
+        let dir_path = temp_dir("open_file");
+        let dir = FSDirectory::open_with_file_handles(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        dir.write_file("backing.bin", b"hello fs backing").unwrap();
+        let backing = dir.open_file("backing.bin").unwrap();
+
+        assert_matches!(backing, FileBacking::Owned(_));
+        assert_eq!(backing.as_bytes(), b"hello fs backing");
+        assert_len_eq_x!(backing, 16);
+    }
+
+    #[test]
+    fn test_fs_directory_open_file_missing() {
+        let dir_path = temp_dir("open_file_missing");
+        let dir = FSDirectory::open_with_file_handles(&dir_path).unwrap();
+        let _cleanup = DirCleanup(&dir_path);
+
+        assert_err!(dir.open_file("nonexistent.bin"));
+    }
+
+    #[test]
     fn test_fs_index_input_slice_out_of_bounds() {
         let dir_path = temp_dir("slice_oob");
         let dir = FSDirectory::open(&dir_path).unwrap();

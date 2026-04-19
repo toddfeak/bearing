@@ -6,7 +6,6 @@
 //! `super::points::write()`. Metadata is read eagerly from `.kdm`; tree and
 //! leaf data in `.kdi`/`.kdd` are available via retained file handles.
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::fmt;
 use std::io;
 
@@ -18,8 +17,12 @@ use crate::codecs::lucene90::points::{
     INDEX_EXTENSION, META_CODEC, META_EXTENSION, PointsFieldData,
 };
 use crate::index::{FieldInfo, FieldInfos, index_file_names};
-use crate::store::checksum_input::ChecksumIndexInput;
-use crate::store::{DataInput, Directory, IndexInput};
+use crate::store::Directory;
+use crate::store2::codec_footers::{
+    FOOTER_LENGTH, retrieve_checksum, retrieve_checksum_with_length, verify_checksum,
+};
+use crate::store2::codec_headers::{check_header, check_index_header};
+use crate::store2::{FileBacking, IndexInput};
 
 /// Per-field BKD tree metadata read eagerly from `.kdm`.
 #[derive(Clone)]
@@ -32,26 +35,26 @@ struct BkdEntry {
 /// Reads points/BKD metadata for a segment.
 ///
 /// Constructor matches the lifecycle of Java's `Lucene90PointsReader`:
-/// opens `.kdi` and `.kdd` first (keeps handles), then reads `.kdm` metadata,
+/// opens `.kdi` and `.kdd` first (keeps backings), then reads `.kdm` metadata,
 /// then validates file lengths.
 pub struct PointsReader {
     /// Per-field BKD metadata indexed by field number. `None` for fields without points.
     entries: Box<[Option<BkdEntry>]>,
-    /// Open handle to the `.kdi` index file.
+    /// Owned backing for the `.kdi` index file.
     #[expect(dead_code)]
-    index_in: Box<dyn IndexInput>,
-    /// Open handle to the `.kdd` data file.
+    index_in: FileBacking,
+    /// Owned backing for the `.kdd` data file.
     #[expect(dead_code)]
-    data_in: Box<dyn IndexInput>,
+    data_in: FileBacking,
 }
 
 impl PointsReader {
     /// Opens points files (`.kdi`, `.kdd`, `.kdm`) for the given segment.
     ///
-    /// 1. Open and validate `.kdi` (index) — keep handle
-    /// 2. Open and validate `.kdd` (data) — keep handle
-    /// 3. Open `.kdm` (meta) with checksum — read all per-field entries
-    /// 4. Validate file lengths via `retrieve_checksum_with_length`
+    /// 1. Open and validate `.kdi` (index) — keep backing
+    /// 2. Open and validate `.kdd` (data) — keep backing
+    /// 3. Open `.kdm` (meta), verify full CRC, read all per-field entries
+    /// 4. Validate `.kdi` and `.kdd` file lengths via `retrieve_checksum_with_length`
     pub fn open(
         directory: &dyn Directory,
         segment_name: &str,
@@ -59,41 +62,53 @@ impl PointsReader {
         segment_id: &[u8; codec_util::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // 1. Open .kdi (index) — keep handle
+        // 1. Open .kdi (index) — keep backing
         let kdi_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let mut index_in = directory.open_input(&kdi_name)?;
-        codec_util::check_index_header(
-            index_in.as_mut(),
-            INDEX_CODEC,
-            FORMAT_VERSION,
-            FORMAT_VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
-        codec_util::retrieve_checksum(index_in.as_mut())?;
+        let index_in = directory.open_file(&kdi_name)?;
+        {
+            let mut input = IndexInput::new(&kdi_name, index_in.as_bytes());
+            check_index_header(
+                &mut input,
+                INDEX_CODEC,
+                FORMAT_VERSION,
+                FORMAT_VERSION,
+                segment_id,
+                segment_suffix,
+            )?;
+        }
+        retrieve_checksum(index_in.as_bytes())?;
 
-        // 2. Open .kdd (data) — keep handle
+        // 2. Open .kdd (data) — keep backing
         let kdd_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
-        let mut data_in = directory.open_input(&kdd_name)?;
-        codec_util::check_index_header(
-            data_in.as_mut(),
-            DATA_CODEC,
-            FORMAT_VERSION,
-            FORMAT_VERSION,
-            segment_id,
-            segment_suffix,
-        )?;
-        codec_util::retrieve_checksum(data_in.as_mut())?;
+        let data_in = directory.open_file(&kdd_name)?;
+        {
+            let mut input = IndexInput::new(&kdd_name, data_in.as_bytes());
+            check_index_header(
+                &mut input,
+                DATA_CODEC,
+                FORMAT_VERSION,
+                FORMAT_VERSION,
+                segment_id,
+                segment_suffix,
+            )?;
+        }
+        retrieve_checksum(data_in.as_bytes())?;
 
-        // 3. Open .kdm (meta) with checksum — read entries, then close
+        // 3. Open .kdm (meta), verify full CRC over the file, then parse metadata.
+        // verify_checksum covers what Java's ChecksumIndexInput + check_footer
+        // do incrementally (CRC of header + body, plus footer magic/algorithm).
         let kdm_name =
             index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let meta_input = directory.open_input(&kdm_name)?;
-        let mut meta_in = ChecksumIndexInput::new(meta_input);
-        codec_util::check_index_header(
-            &mut meta_in,
+        let meta_in = directory.open_file(&kdm_name)?;
+        verify_checksum(meta_in.as_bytes())?;
+
+        let meta_bytes = meta_in.as_bytes();
+        let prefix_len = meta_bytes.len() - FOOTER_LENGTH;
+        let mut meta = IndexInput::new(&kdm_name, &meta_bytes[..prefix_len]);
+        check_index_header(
+            &mut meta,
             META_CODEC,
             FORMAT_VERSION,
             FORMAT_VERSION,
@@ -101,16 +116,14 @@ impl PointsReader {
             segment_suffix,
         )?;
 
-        let entries = read_fields(&mut meta_in, field_infos)?;
+        let entries = read_fields(&mut meta, field_infos)?;
 
-        let index_length = meta_in.read_le_long()?;
-        let data_length = meta_in.read_le_long()?;
+        let index_length = meta.read_le_long()?;
+        let data_length = meta.read_le_long()?;
 
-        codec_util::check_footer(&mut meta_in)?;
-
-        // 4. Validate file lengths
-        codec_util::retrieve_checksum_with_length(index_in.as_mut(), index_length)?;
-        codec_util::retrieve_checksum_with_length(data_in.as_mut(), data_length)?;
+        // 4. Validate file lengths against what `.kdm` claimed.
+        retrieve_checksum_with_length(index_in.as_bytes(), index_length)?;
+        retrieve_checksum_with_length(data_in.as_bytes(), data_length)?;
 
         debug!(
             "points_reader: opened {} entries for segment {segment_name}",
@@ -296,7 +309,7 @@ impl PointsProducer for PointsReader {
 
 /// Reads all per-field BKD metadata entries from `.kdm`.
 fn read_fields(
-    meta: &mut dyn DataInput,
+    meta: &mut IndexInput<'_>,
     field_infos: &FieldInfos,
 ) -> io::Result<Box<[Option<BkdEntry>]>> {
     let mut entries: Vec<Option<BkdEntry>> = vec![None; field_infos.len()];
@@ -325,8 +338,8 @@ fn read_fields(
 }
 
 /// Reads a single BKD metadata entry (one per point field).
-fn read_bkd_entry(mut meta: &mut dyn DataInput) -> io::Result<BkdEntry> {
-    codec_util::check_header(meta, BKD_CODEC, BKD_VERSION, BKD_VERSION)?;
+fn read_bkd_entry(meta: &mut IndexInput<'_>) -> io::Result<BkdEntry> {
+    check_header(meta, BKD_CODEC, BKD_VERSION, BKD_VERSION)?;
 
     let _num_dims = meta.read_vint()? as u32;
     let num_index_dims = meta.read_vint()? as u32;
@@ -335,7 +348,7 @@ fn read_bkd_entry(mut meta: &mut dyn DataInput) -> io::Result<BkdEntry> {
     let num_leaves = meta.read_vint()? as u32;
 
     // Skip min/max packed values (numIndexDims × bytesPerDim bytes each)
-    let packed_len = (num_index_dims * bytes_per_dim) as u64;
+    let packed_len = (num_index_dims * bytes_per_dim) as usize;
     meta.skip_bytes(packed_len * 2)?;
 
     let point_count = meta.read_vlong()?;
@@ -434,8 +447,8 @@ mod tests {
         )];
 
         let reader = write_and_read(&field_infos, &fields);
-        assert_eq!(reader.point_count(0), Some(3));
-        assert_eq!(reader.doc_count(0), Some(3));
+        assert_some_eq_x!(reader.point_count(0), 3);
+        assert_some_eq_x!(reader.doc_count(0), 3);
     }
 
     #[test]
@@ -460,9 +473,9 @@ mod tests {
         )];
 
         let reader = write_and_read(&field_infos, &fields);
-        assert_eq!(reader.point_count(0), Some(2));
-        assert_eq!(reader.doc_count(0), Some(2));
-        assert_eq!(reader.num_leaves(0), Some(1));
+        assert_some_eq_x!(reader.point_count(0), 2);
+        assert_some_eq_x!(reader.doc_count(0), 2);
+        assert_some_eq_x!(reader.num_leaves(0), 1);
     }
 
     #[test]
@@ -491,10 +504,10 @@ mod tests {
         ];
 
         let reader = write_and_read(&field_infos, &fields);
-        assert_eq!(reader.point_count(0), Some(2));
-        assert_eq!(reader.doc_count(0), Some(2));
-        assert_eq!(reader.point_count(1), Some(1));
-        assert_eq!(reader.doc_count(1), Some(1));
+        assert_some_eq_x!(reader.point_count(0), 2);
+        assert_some_eq_x!(reader.doc_count(0), 2);
+        assert_some_eq_x!(reader.point_count(1), 1);
+        assert_some_eq_x!(reader.doc_count(1), 1);
     }
 
     #[test]
@@ -534,9 +547,59 @@ mod tests {
         )];
 
         let reader = write_and_read(&field_infos, &fields);
-        assert_eq!(reader.point_count(0), Some(2));
-        assert_eq!(reader.doc_count(0), Some(2));
-        assert_eq!(reader.num_leaves(0), Some(1));
+        assert_some_eq_x!(reader.point_count(0), 2);
+        assert_some_eq_x!(reader.doc_count(0), 2);
+        assert_some_eq_x!(reader.num_leaves(0), 1);
+    }
+
+    #[test]
+    fn test_open_reads_files_from_indexer_pipeline() {
+        // End-to-end check: drive the real indexing pipeline (PointsConsumer)
+        // to produce .kdi/.kdd/.kdm files, then open them through the migrated
+        // PointsReader::open path. Exercises Directory::open_file +
+        // FileBacking + store2::IndexInput together against bytes produced by
+        // the indexer, not hand-built fixtures.
+        use crate::index::field::int_field;
+        use crate::index::pipeline::consumer::FieldConsumer;
+        use crate::index::pipeline::points_consumer::PointsConsumer;
+        use crate::index::pipeline::segment_accumulator::SegmentAccumulator;
+        use crate::index::pipeline::segment_context::SegmentContext;
+
+        let context = SegmentContext {
+            directory: MemoryDirectory::create(),
+            segment_name: "_0".to_string(),
+            segment_id: [0u8; 16],
+        };
+        let mut consumer = PointsConsumer::new();
+        let mut acc = SegmentAccumulator::new();
+
+        for doc_id in 0..3 {
+            let field = int_field("count").value(doc_id * 10);
+            consumer.start_document(doc_id).unwrap();
+            consumer.start_field(0, &field, &mut acc).unwrap();
+            consumer.finish_field(0, &field, &mut acc).unwrap();
+            consumer
+                .finish_document(doc_id, &mut acc, &context)
+                .unwrap();
+        }
+
+        let names = consumer.flush(&context, &acc).unwrap();
+        assert_len_eq_x!(&names, 3);
+
+        let fi = make_point_field("count", 0, 1, 1, 4);
+        let field_infos = FieldInfos::new(vec![fi]);
+        let reader = PointsReader::open(
+            &*context.directory,
+            &context.segment_name,
+            "",
+            &context.segment_id,
+            &field_infos,
+        )
+        .unwrap();
+
+        assert_some_eq_x!(reader.point_count(0), 3);
+        assert_some_eq_x!(reader.doc_count(0), 3);
+        assert_some_eq_x!(reader.num_leaves(0), 1);
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 use std::io;
 use std::sync::Arc;
 
+use crate::store2::FileBacking;
+
 /// A named in-memory file produced by codec writers during indexing.
 #[derive(Clone, Debug)]
 pub(crate) struct SegmentFile {
@@ -83,6 +85,16 @@ pub trait Directory: Send + Sync {
     /// Reads the raw bytes of a file into memory.
     fn read_file(&self, name: &str) -> io::Result<Vec<u8>>;
 
+    /// Opens a file as a [`FileBacking`].
+    ///
+    /// Returns the bytes of the named file as either an owned `Vec<u8>` or a
+    /// memory-mapped region, depending on the implementation. The default impl
+    /// reads the file into memory via [`read_file`](Self::read_file); mmap-backed
+    /// directories override this to return a zero-copy `Mmap`.
+    fn open_file(&self, name: &str) -> io::Result<FileBacking> {
+        Ok(FileBacking::Owned(self.read_file(name)?))
+    }
+
     /// Writes complete byte contents to a file in this directory.
     /// Default implementation uses `create_output` + `write_bytes`.
     fn write_file(&self, name: &str, data: &[u8]) -> io::Result<()> {
@@ -126,6 +138,9 @@ impl Directory for Arc<dyn Directory> {
     }
     fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
         (**self).read_file(name)
+    }
+    fn open_file(&self, name: &str) -> io::Result<FileBacking> {
+        (**self).open_file(name)
     }
     fn write_file(&self, name: &str, data: &[u8]) -> io::Result<()> {
         (**self).write_file(name, data)

@@ -19,6 +19,7 @@ use crate::store::fs::{
     fs_sync, fs_sync_meta_data, fs_write_file,
 };
 use crate::store::{DataInput, Directory, IndexInput, IndexOutput, RandomAccessInput};
+use crate::store2::FileBacking;
 
 /// Memory-mapped filesystem directory.
 ///
@@ -81,6 +82,13 @@ impl Directory for MmapDirectory {
 
     fn read_file(&self, name: &str) -> io::Result<Vec<u8>> {
         fs_read_file(&self.path, name)
+    }
+
+    fn open_file(&self, name: &str) -> io::Result<FileBacking> {
+        let file_path = self.path.join(name);
+        let file = fs::File::open(&file_path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        Ok(FileBacking::Mmap(mmap))
     }
 
     fn write_file(&self, name: &str, data: &[u8]) -> io::Result<()> {
@@ -317,6 +325,29 @@ mod tests {
         let ra2 = slice2.random_access().unwrap();
         assert_eq!(ra2.read_byte_at(0).unwrap(), 50);
         assert_eq!(ra2.read_byte_at(49).unwrap(), 99);
+    }
+
+    #[test]
+    fn test_mmap_open_file_returns_mmap_with_correct_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mmap_dir = MmapDirectory::create(dir.path()).unwrap();
+        mmap_dir
+            .write_file("backing.bin", b"hello mmap backing")
+            .unwrap();
+
+        let backing = mmap_dir.open_file("backing.bin").unwrap();
+
+        assert_matches!(backing, FileBacking::Mmap(_));
+        assert_eq!(backing.as_bytes(), b"hello mmap backing");
+        assert_len_eq_x!(backing, 18);
+    }
+
+    #[test]
+    fn test_mmap_open_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mmap_dir = MmapDirectory::create(dir.path()).unwrap();
+
+        assert_err!(mmap_dir.open_file("nonexistent.bin"));
     }
 
     #[test]

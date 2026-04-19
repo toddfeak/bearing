@@ -378,6 +378,27 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_directory_open_file_returns_owned_with_correct_bytes() {
+        use crate::store2::FileBacking;
+
+        let dir = MemoryDirectory::create();
+        dir.write_file("backing.bin", b"hello memory backing")
+            .unwrap();
+
+        let backing = dir.open_file("backing.bin").unwrap();
+
+        assert_matches!(backing, FileBacking::Owned(_));
+        assert_eq!(backing.as_bytes(), b"hello memory backing");
+        assert_len_eq_x!(backing, 20);
+    }
+
+    #[test]
+    fn test_memory_directory_open_file_missing() {
+        let dir = MemoryDirectory::create();
+        assert_err!(dir.open_file("nonexistent.bin"));
+    }
+
+    #[test]
     fn test_memory_directory_open_input_roundtrip() {
         let dir = MemoryDirectory::create();
         {
