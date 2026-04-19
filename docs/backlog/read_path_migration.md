@@ -25,10 +25,11 @@ Treat visibility as an audit step in the cleanup commit, not during build-up. On
 These are all new types in the new module — no conflict with the existing read path:
 
 - `FileBacking` enum (`Mmap` or `Owned`)
-- `SegmentFiles` struct
 - The new `IndexInput<'a>` struct with all inherent read methods
 - Free function for checksum verification
 - Unit tests for all of the above
+
+No generic segment-wide container is introduced; each codec reader will hold its own typed `FileBacking` fields at migration time (see architecture doc, Layer 3).
 
 This entire layer can ship and pass tests before any codec reader knows it exists.
 

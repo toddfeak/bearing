@@ -1,6 +1,6 @@
 # Read Path Architecture: Single Struct, Borrowed Cursor, Shared File Ownership
 
-The current read path is layered around traits (`DataInput`, `IndexInput`, `RandomAccessInput`) with multiple implementations behind `Box<dyn IndexInput>` and `Arc<Mmap>` inside each input. This document describes a target architecture that collapses the read-path types to a single concrete struct backed by `Cursor<&[u8]>`, with file ownership lifted out of the input layer and into the segment level where the natural cache boundary lives.
+The current read path is layered around traits (`DataInput`, `IndexInput`, `RandomAccessInput`) with multiple implementations behind `Box<dyn IndexInput>` and `Arc<Mmap>` inside each input. This document describes a target architecture that collapses the read-path types to a single concrete struct backed by `Cursor<&[u8]>`, with file ownership moved out of the input layer and into the codec readers that actually know which files they need.
 
 This is a companion to [cursor_read_path.md](cursor_read_path.md). That doc describes the immediate trigger (VInt optimization). This doc describes the destination shape.
 
@@ -12,7 +12,7 @@ Three observations drove the design:
 
 2. **The `Read` supertrait blocks the most common micro-optimization.** `DataInput: Read` forces encoding functions like `read_vint` to take `&mut dyn Read`, which has no way to peek at the underlying slice. Every multi-byte VInt requires up to five 1-byte vtable calls. `Cursor<&[u8]>` implements `BufRead`, whose `fill_buf()` returns a `&[u8]` view into the remaining bytes — enough to parse a VInt directly from the slice in a single call.
 
-3. **Shared file ownership is what enables cross-query caching.** Mmap is virtual memory; holding mmaps open is cheap, but the lifecycle of "which files stay mapped" needs to be explicit. The natural place for that ownership is the segment level, with shared (Arc) semantics so a future cache layer can own files independently of any one reader.
+3. **File ownership belongs with the codec that uses those files.** Mmap is virtual memory; holding mmaps open is cheap, but the lifecycle of "which files stay mapped" needs to be explicit. Each codec reader knows statically which component files it needs (postings, positions, payloads, terms index, etc.); holding those as typed `FileBacking` fields keeps lookups zero-cost and lets the type system enforce which files exist. Sharing across readers or a future cache layer is layered on top via `Arc` wrapping, not by introducing a separate owner type.
 
 ## Target Architecture
 
@@ -23,17 +23,9 @@ enum FileBacking {
     Mmap(Mmap),
     Owned(Vec<u8>),     // for MemoryDirectory / tests
 }
-
-struct SegmentFiles {
-    docs: FileBacking,
-    pos: FileBacking,
-    pay: FileBacking,
-    terms_index: FileBacking,
-    // ... one per codec component file
-}
 ```
 
-`SegmentFiles` is the unit of file ownership. One per segment. Held via `Arc<SegmentFiles>` so that segment readers, codec readers, and any future cache layer can share without lifetime contortions.
+`FileBacking` owns the bytes of one file. There is no segment-wide container; each codec reader holds exactly the `FileBacking`s it needs as typed fields (see Layer 3). Sharing across readers is handled by wrapping those fields in `Arc` when and where it's needed, not by introducing an intermediate owner type.
 
 ### Layer 2: Single read-path struct
 
@@ -48,11 +40,29 @@ One concrete struct. No traits. All read methods (VInt, VLong, strings, fixed-wi
 
 ### Layer 3: Codec readers
 
-Codec readers (`PostingsReader`, `BlockTreeTermsReader`, etc.) hold `Arc<SegmentFiles>`. They store metadata (read at open time) and per-field offsets. They do not hold cursor state.
+Each codec reader owns its component files directly as typed `FileBacking` fields:
+
+```rust
+struct PostingsReader {
+    // metadata read eagerly at open time
+    ...
+    docs: FileBacking,
+    pos: FileBacking,
+    pay: FileBacking,
+}
+
+impl PostingsReader {
+    fn open_docs(&self) -> IndexInput<'_> {
+        IndexInput::new("docs", self.docs.as_bytes())
+    }
+}
+```
+
+Codec readers store lightweight metadata (headers, per-field offsets, stats) read at open time. Actual data is read on demand during queries by constructing an `IndexInput<'_>` over the relevant `FileBacking`'s bytes. Codec readers do not hold cursor state.
 
 ### Layer 4: Per-query iterators
 
-Iterators (`BlockPostingsEnum`, term enumerators, etc.) hold `IndexInput<'_>` instances borrowed from the codec reader's `Arc<SegmentFiles>`. The lifetime says "this iterator cannot outlive its codec reader." Cursor state lives here, not in the codec reader, because cursor state is per-query.
+Iterators (`BlockPostingsEnum`, term enumerators, etc.) hold `IndexInput<'_>` instances borrowed from a codec reader's `FileBacking` fields. The lifetime says "this iterator cannot outlive its codec reader." Cursor state lives here, not in the codec reader, because cursor state is per-query.
 
 ## What This Gains
 
@@ -72,14 +82,14 @@ With this architecture, query-time RSS = mmap pages currently faulted in + decom
 
 ### Cache lifecycle is explicit
 
-`Arc<SegmentFiles>` is the ownership unit that maps to caching:
+Ownership is layered from individual files up to the reader tree:
 
 - **Per-iterator:** `IndexInput<'_>` dropped at iteration end; no impact on file lifetime
-- **Per-segment, multi-query:** `SegmentReader` holds `Arc<SegmentFiles>` for its lifetime; multiple queries on the same segment share the same Arc
-- **Cross-segment, cross-query:** `IndexReader` holds segment readers; app keeps `IndexReader` alive across queries
-- **Future cache layer:** A `FileCache` can own `Arc<FileBacking>`s and have `SegmentFiles` clone from it. Eviction = drop the cache's strong references; files stay alive while any reader holds them
+- **Per-codec, multi-query:** each codec reader owns its `FileBacking` fields; two queries on the same codec reader share them via `&reader` (immutable borrow), each getting its own `IndexInput<'_>` with independent cursor state
+- **Cross-segment, cross-query:** `SegmentReader` holds `Arc<CodecReader>` for each of its codec readers; `IndexReader` holds its segment readers. `IndexReader.reopen()` semantics fall out naturally — in-flight queries keep their `Arc<CodecReader>` clones alive until they finish
+- **Future cache layer:** a `FileCache` can own `Arc<FileBacking>`s; codec readers change their field type from `FileBacking` to `Arc<FileBacking>` and clone from the cache at construction. Eviction = drop the cache's strong references; files stay alive while any reader holds them. This is a localized field-type change, not a re-architecture
 
-The Arc is not a workaround. It is the indirection that allows ownership to be split between cache and reader without lifetime contortions, and it supports `IndexReader.reopen()` semantics where mid-flight queries on old segments must keep working while new readers swap in.
+Arc is not used on the hot path; it sits at the segment-reader layer (around codec readers) and optionally at the field level (around `FileBacking`s) if/when a cache is introduced.
 
 ## What Goes Away
 
@@ -104,7 +114,7 @@ This trade is consistent with the project's porting rule: idiomatic Rust types a
 
 ## Explicit Non-Goals
 
-- **Lifetime-only ownership (no Arc).** Achievable as a follow-up if profiling shows Arc clone/drop cost matters for codec reader construction. Not the starting target. Arc is the right semantic for the cache lifecycles described above.
-- **A file cache implementation.** Architecturally enabled by this design but not in scope. The `Arc<SegmentFiles>` ownership model is the prerequisite.
+- **Lifetime-only ownership (no Arc).** Achievable as a follow-up if profiling shows Arc clone/drop cost matters for codec reader construction. Not the starting target. Arc is the right semantic for the reopen and cache lifecycles described above.
+- **A file cache implementation.** Architecturally enabled by this design but not in scope. Wrapping codec-reader `FileBacking` fields in `Arc` at cache-introduction time is the prerequisite.
 - **Removal of `Directory` as a trait.** Production and in-memory directories have distinct management semantics. The trait stays.
 - **Changes to the write path.** `DataOutput`, `IndexOutput`, and write-side encoding remain unchanged. This document is read-path only.
