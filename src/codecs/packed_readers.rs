@@ -4,7 +4,7 @@
 
 use std::io;
 
-use crate::store2::IndexInput;
+use crate::store::IndexInput;
 
 /// Reads bit-packed integers written by [`super::packed_writers::DirectWriter`].
 ///

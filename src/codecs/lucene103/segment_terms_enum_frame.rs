@@ -16,7 +16,7 @@ use crate::codecs::lucene103::trie_reader::Node;
 use crate::document::IndexOptions;
 use crate::encoding::{pfor, zigzag};
 use crate::index::terms::SeekStatus;
-use crate::store2::IndexInput;
+use crate::store::IndexInput;
 
 /// File pointers tracking where a block lives in the `.tim` file.
 #[derive(Debug, Default)]

@@ -14,7 +14,7 @@
 
 use std::io;
 
-use crate::store2::IndexInput;
+use crate::store::IndexInput;
 
 // Node type signatures (lowest 2 bits of header)
 const SIGN_NO_CHILDREN: u32 = 0x00;

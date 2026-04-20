@@ -7,12 +7,11 @@
 use std::collections::HashMap;
 use std::io;
 
+use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::codecs::codec_headers::check_index_header;
 use crate::codecs::codec_util;
 use crate::index::index_file_names;
-use crate::store::{Directory, IndexOutput};
-use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::store2::codec_headers::check_index_header;
-use crate::store2::{self, FileBacking};
+use crate::store::{Directory, FileBacking, IndexInput, IndexOutput};
 
 const ENTRIES_EXTENSION: &str = "cfe";
 const DATA_EXTENSION: &str = "cfs";
@@ -72,7 +71,7 @@ impl<'a> CompoundDirectory<'a> {
         {
             let cfs_backing = directory.open_file(&data_file_name)?;
             {
-                let mut input = store2::IndexInput::new(&data_file_name, cfs_backing.as_bytes());
+                let mut input = IndexInput::new(&data_file_name, cfs_backing.as_bytes());
                 check_index_header(&mut input, DATA_CODEC, version, version, segment_id, "")?;
             }
             retrieve_checksum(cfs_backing.as_bytes())?;
@@ -174,7 +173,7 @@ fn read_entries(
 
     let bytes = backing.as_bytes();
     let prefix_len = bytes.len() - FOOTER_LENGTH;
-    let mut input = store2::IndexInput::new(entries_file_name, &bytes[..prefix_len]);
+    let mut input = IndexInput::new(entries_file_name, &bytes[..prefix_len]);
 
     let version = check_index_header(
         &mut input,
@@ -191,7 +190,7 @@ fn read_entries(
 }
 
 /// Reads the entry mapping from the `.cfe` stream.
-fn read_mapping(input: &mut store2::IndexInput<'_>) -> io::Result<HashMap<String, FileEntry>> {
+fn read_mapping(input: &mut IndexInput<'_>) -> io::Result<HashMap<String, FileEntry>> {
     let num_entries = input.read_vint()?;
     let mut mapping = HashMap::with_capacity(num_entries as usize);
 
@@ -336,7 +335,7 @@ mod tests {
 
         for name in ["_0.fnm", "_0.fdt", "_0.nvd"] {
             let backing = compound_dir.open_file(name).unwrap();
-            let mut input = store2::IndexInput::new(name, backing.as_bytes());
+            let mut input = IndexInput::new(name, backing.as_bytes());
             let magic = input.read_be_int().unwrap();
             assert_eq!(magic, codec_util::CODEC_MAGIC, "bad magic for {name}");
         }

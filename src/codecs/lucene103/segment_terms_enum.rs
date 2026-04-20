@@ -19,7 +19,7 @@ use crate::codecs::lucene103::trie_reader::{Node, TrieReader};
 use crate::document::IndexOptions;
 use crate::encoding::{lowercase_ascii, lz4, pfor, zigzag};
 use crate::index::terms::{SeekStatus, TermsEnum};
-use crate::store2::IndexInput;
+use crate::store::IndexInput;
 
 pub(crate) const COMPRESSION_NONE: u32 = 0;
 const COMPRESSION_LOWERCASE_ASCII: u32 = 1;

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Utilities for writing codec headers and footers with CRC32 integrity checks.
 //!
-//! Read-side equivalents live under [`crate::store2::codec_headers`] and
-//! [`crate::store2::codec_footers`].
+//! Read-side equivalents live under `crate::codecs::codec_headers` and
+//! `crate::codecs::codec_footers`.
 
 use std::io;
 

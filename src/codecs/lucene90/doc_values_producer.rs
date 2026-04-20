@@ -14,6 +14,8 @@ use std::io;
 
 use log::debug;
 
+use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::codecs::codec_headers::check_index_header;
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::doc_values::{
     BINARY, DATA_CODEC, DATA_EXTENSION, DIRECT_MONOTONIC_BLOCK_SHIFT, META_CODEC, META_EXTENSION,
@@ -23,10 +25,7 @@ use crate::index::doc_values_iterators::{
     BinaryDocValues, NumericDocValues, SortedDocValues, SortedNumericDocValues, SortedSetDocValues,
 };
 use crate::index::{FieldInfo, FieldInfos, index_file_names};
-use crate::store::Directory;
-use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::store2::codec_headers::check_index_header;
-use crate::store2::{FileBacking, IndexInput};
+use crate::store::{Directory, FileBacking, IndexInput};
 
 // ---------------------------------------------------------------------------
 // Entry types — one per doc values type, stored eagerly in memory

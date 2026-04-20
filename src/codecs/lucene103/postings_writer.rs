@@ -920,7 +920,7 @@ fn bits2words(num_bits: usize) -> usize {
     num_bits.div_ceil(64)
 }
 
-/// Write VInt block to a Vec<u8> buffer (for the tail in block encoding).
+/// Write VInt block to a `Vec<u8>` buffer (for the tail in block encoding).
 fn write_vint_block_to_buf(
     buf: &mut Vec<u8>,
     doc_deltas: &mut [i32],

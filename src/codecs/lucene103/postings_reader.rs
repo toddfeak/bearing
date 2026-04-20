@@ -11,6 +11,8 @@ use std::io;
 
 use log::debug;
 
+use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::codecs::codec_headers::check_index_header;
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::Impact;
 use crate::codecs::lucene103::postings_format::{
@@ -21,10 +23,7 @@ use crate::encoding::pfor::BLOCK_SIZE;
 use crate::index::{FieldInfos, index_file_names};
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
 use crate::search::scorer::{Impacts, ImpactsSource};
-use crate::store::Directory;
-use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::store2::codec_headers::check_index_header;
-use crate::store2::{FileBacking, IndexInput};
+use crate::store::{Directory, FileBacking, IndexInput};
 
 /// Dummy impacts: maximum possible term frequency and lowest possible unsigned norm.
 /// Used on tail blocks that don't record impacts.

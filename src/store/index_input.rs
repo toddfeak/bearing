@@ -16,8 +16,7 @@ use std::io::Cursor;
 
 use crate::encoding::group_vint;
 use crate::encoding::pfor;
-use crate::store2::string;
-use crate::store2::varint;
+use crate::store::{string, varint};
 
 pub(crate) struct IndexInput<'a> {
     name: String,

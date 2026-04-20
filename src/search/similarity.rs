@@ -395,7 +395,7 @@ impl Similarity for BM25Similarity {
 struct BM25Scorer {
     /// weight (idf * boost)
     weight: f32,
-    /// precomputed norm[256] with `k1 * ((1 - b) + b * dl / avgdl)`
+    /// precomputed `norm[256]` with `k1 * ((1 - b) + b * dl / avgdl)`
     cache: [f32; 256],
 }
 

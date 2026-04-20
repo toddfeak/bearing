@@ -18,8 +18,7 @@ use crate::store::fs::{
     fs_create_output, fs_delete_file, fs_file_length, fs_list_all, fs_read_file, fs_rename,
     fs_sync, fs_sync_meta_data, fs_write_file,
 };
-use crate::store::{Directory, IndexOutput};
-use crate::store2::FileBacking;
+use crate::store::{Directory, FileBacking, IndexOutput};
 
 /// Memory-mapped filesystem directory.
 ///

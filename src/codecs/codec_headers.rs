@@ -3,19 +3,11 @@
 //! Codec header validation against [`IndexInput`].
 //!
 //! Mirrors `codecs::codec_util::{check_header, check_index_header}` but reads
-//! through the new [`IndexInput`] struct instead of `&mut dyn DataInput`.
-//!
-//! # Intended final home
-//!
-//! These helpers live under `store2` only during the read-path migration.
-//! The codec header format is codec-specific wire format and its final home
-//! is `src/codecs/codec_util.rs`, alongside `write_header` /
-//! `write_index_header`. See `docs/backlog/read_path_migration.md`
-//! ("Final Cleanup Commit").
+//! through the [`IndexInput`] struct instead of `&mut dyn DataInput`.
 
 use std::io;
 
-use crate::store2::IndexInput;
+use crate::store::IndexInput;
 
 /// Magic number written at the start of every codec header (big-endian).
 const CODEC_MAGIC: i32 = 0x3FD76C17_u32 as i32;

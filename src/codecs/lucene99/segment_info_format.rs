@@ -6,14 +6,13 @@ use std::io;
 
 use log::debug;
 
+use crate::codecs::codec_footers::{FOOTER_LENGTH, verify_checksum};
+use crate::codecs::codec_headers::check_index_header;
 use crate::codecs::codec_util;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
-use crate::store::Directory;
-use crate::store2::IndexInput;
-use crate::store2::codec_footers::{FOOTER_LENGTH, verify_checksum};
-use crate::store2::codec_headers::check_index_header;
+use crate::store::{Directory, IndexInput};
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
 const VERSION_CURRENT: i32 = 0;

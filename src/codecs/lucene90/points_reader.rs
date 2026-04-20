@@ -11,18 +11,17 @@ use std::io;
 
 use log::debug;
 
+use crate::codecs::codec_footers::{
+    FOOTER_LENGTH, retrieve_checksum, retrieve_checksum_with_length, verify_checksum,
+};
+use crate::codecs::codec_headers::{check_header, check_index_header};
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::points::{
     BKD_CODEC, BKD_VERSION, DATA_CODEC, DATA_EXTENSION, FORMAT_VERSION, INDEX_CODEC,
     INDEX_EXTENSION, META_CODEC, META_EXTENSION, PointsFieldData,
 };
 use crate::index::{FieldInfo, FieldInfos, index_file_names};
-use crate::store::Directory;
-use crate::store2::codec_footers::{
-    FOOTER_LENGTH, retrieve_checksum, retrieve_checksum_with_length, verify_checksum,
-};
-use crate::store2::codec_headers::{check_header, check_index_header};
-use crate::store2::{FileBacking, IndexInput};
+use crate::store::{Directory, FileBacking, IndexInput};
 
 /// Per-field BKD tree metadata read eagerly from `.kdm`.
 #[derive(Clone)]
@@ -557,7 +556,7 @@ mod tests {
         // End-to-end check: drive the real indexing pipeline (PointsConsumer)
         // to produce .kdi/.kdd/.kdm files, then open them through the migrated
         // PointsReader::open path. Exercises Directory::open_file +
-        // FileBacking + store2::IndexInput together against bytes produced by
+        // FileBacking + IndexInput together against bytes produced by
         // the indexer, not hand-built fixtures.
         use crate::index::field::int_field;
         use crate::index::pipeline::consumer::FieldConsumer;

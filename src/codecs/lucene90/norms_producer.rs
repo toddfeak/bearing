@@ -12,6 +12,8 @@ use std::io;
 
 use log::debug;
 
+use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::codecs::codec_headers::check_index_header;
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::indexed_disi::IndexedDISI;
 use crate::codecs::lucene90::norms::{
@@ -22,10 +24,7 @@ use crate::index::pipeline::segment_accumulator::PerFieldNormsData;
 use crate::index::{FieldInfo, FieldInfos, index_file_names};
 use crate::search::DocIdSetIterator;
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
-use crate::store::Directory;
-use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::store2::codec_headers::check_index_header;
-use crate::store2::{FileBacking, IndexInput};
+use crate::store::{Directory, FileBacking, IndexInput};
 
 /// Per-field norms metadata entry read from `.nvm`.
 #[derive(Clone)]

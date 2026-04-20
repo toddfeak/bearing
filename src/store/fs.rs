@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_fs_directory_open_file_returns_owned_with_correct_bytes() {
-        use crate::store2::FileBacking;
+        use crate::store::FileBacking;
 
         let dir_path = temp_dir("open_file");
         let dir = FSDirectory::open_with_file_handles(&dir_path).unwrap();

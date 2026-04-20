@@ -6,14 +6,13 @@ use std::io;
 
 use log::debug;
 
+use crate::codecs::codec_footers::{FOOTER_LENGTH, verify_checksum};
+use crate::codecs::codec_headers::check_header;
 use crate::codecs::codec_util;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::segment::FlushedSegment;
-use crate::store::Directory;
-use crate::store2::IndexInput;
-use crate::store2::codec_footers::{FOOTER_LENGTH, verify_checksum};
-use crate::store2::codec_headers::check_header;
+use crate::store::{Directory, IndexInput};
 use crate::util::string_helper;
 
 /// Codec name for the segments_N file header.

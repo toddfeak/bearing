@@ -10,8 +10,7 @@
 
 use std::io;
 
-use crate::store::IndexOutput;
-use crate::store2::IndexInput;
+use crate::store::{IndexInput, IndexOutput};
 
 /// Number of doc IDs per block.
 const BLOCK_SIZE: i32 = 65536;

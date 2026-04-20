@@ -49,6 +49,11 @@ impl FileBacking {
             FileBacking::MmapSlice { length, .. } => *length,
         }
     }
+
+    /// Returns `true` if the file is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl fmt::Debug for FileBacking {

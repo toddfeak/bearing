@@ -12,7 +12,7 @@ use std::io::BufRead;
 use std::io::Cursor;
 use std::str;
 
-use crate::store2::varint;
+use crate::store::varint;
 
 /// Reads a VInt-prefixed UTF-8 string.
 pub(super) fn read_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {

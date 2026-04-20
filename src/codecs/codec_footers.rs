@@ -15,13 +15,6 @@
 //!     open time, matching Java's `CodecUtil.retrieveChecksum`.
 //!   - [`retrieve_checksum_with_length`] — same as [`retrieve_checksum`]
 //!     plus a file-length check.
-//!
-//! # Intended final home
-//!
-//! This module lives under `store2` only during the read-path migration.
-//! The footer format is codec-specific wire format and its final home is
-//! `src/codecs/codec_util.rs`, alongside `write_footer`. See
-//! `docs/backlog/read_path_migration.md` ("Final Cleanup Commit").
 
 use std::io;
 

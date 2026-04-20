@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 
+use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
+use crate::codecs::codec_headers::check_index_header;
 use crate::codecs::codec_util;
 use crate::codecs::lucene103::postings_format::{
     self, BLOCKTREE_VERSION_CURRENT, BLOCKTREE_VERSION_START, TERMS_CODEC, TERMS_CODEC_NAME,
@@ -22,10 +24,7 @@ use crate::codecs::lucene103::postings_format::{
 use crate::document::IndexOptions;
 use crate::index::terms::{Terms, TermsEnum};
 use crate::index::{FieldInfos, index_file_names};
-use crate::store::Directory;
-use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::store2::codec_headers::check_index_header;
-use crate::store2::{FileBacking, IndexInput};
+use crate::store::{Directory, FileBacking, IndexInput};
 
 /// Per-field metadata read from the `.tmd` terms metadata file.
 ///
@@ -83,7 +82,7 @@ impl<'a> FieldReader<'a> {
 
     /// Creates a [`super::trie_reader::TrieReader`] for this field.
     ///
-    /// Constructs an [`IndexInput`] over the field's `.tip` region and loads
+    /// Constructs an `IndexInput` over the field's `.tip` region and loads
     /// the root node (a handful of bytes). `root_fp` is already stored
     /// slice-relative by the writer (see `TrieBuilder::save_nodes`).
     pub fn new_trie_reader(&self) -> io::Result<super::trie_reader::TrieReader<'a>> {
@@ -322,7 +321,7 @@ impl BlockTreeTermsReader {
 
     /// Returns the whole `.tim` terms dictionary bytes. Primarily useful for
     /// low-level frame tests that need to construct their own
-    /// [`IndexInput`] over the dictionary.
+    /// `IndexInput` over the dictionary.
     pub fn terms_bytes(&self) -> &[u8] {
         self.terms_file.as_bytes()
     }

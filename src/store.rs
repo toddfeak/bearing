@@ -10,14 +10,20 @@
 
 pub mod checksum;
 pub mod data_output;
+pub(super) mod file_backing;
 pub mod fs;
+pub(super) mod index_input;
 pub mod index_output;
 pub mod memory;
 pub mod mmap;
+pub(super) mod string;
+pub(super) mod varint;
 
 pub use checksum::CRC32;
 pub use data_output::{DataOutput, VecOutput};
+pub use file_backing::FileBacking;
 pub use fs::FSDirectory;
+pub(crate) use index_input::IndexInput;
 pub use index_output::IndexOutput;
 pub use memory::MemoryDirectory;
 pub use mmap::MmapDirectory;
@@ -27,8 +33,6 @@ pub use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 
 use std::io;
 use std::sync::Arc;
-
-use crate::store2::FileBacking;
 
 /// A named in-memory file produced by codec writers during indexing.
 #[derive(Clone, Debug)]

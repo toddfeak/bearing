@@ -85,16 +85,16 @@ impl<T: Write> WriteEncoding for T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store;
     use crate::store::DataOutput;
     use crate::store::memory::MemoryIndexOutput;
-    use crate::store2;
 
     /// Verifies the blanket impl works on a concrete type (Vec<u8>).
     #[test]
     fn test_vint_roundtrip_on_vec() {
         let mut buf = Vec::new();
         buf.write_vint(16384).unwrap();
-        let mut input = store2::IndexInput::new("test", &buf);
+        let mut input = store::IndexInput::new("test", &buf);
         assert_eq!(input.read_vint().unwrap(), 16384);
     }
 
@@ -103,7 +103,7 @@ mod tests {
     fn test_vlong_on_data_output() {
         let mut out = MemoryIndexOutput::new("test".into());
         out.write_vlong(123456789).unwrap();
-        let mut input = store2::IndexInput::new("test", out.bytes());
+        let mut input = store::IndexInput::new("test", out.bytes());
         assert_eq!(input.read_vlong().unwrap(), 123456789);
     }
 
@@ -113,7 +113,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".into());
         let mut dyn_out: &mut dyn DataOutput = &mut out;
         dyn_out.write_string("hello").unwrap();
-        let mut input = store2::IndexInput::new("test", out.bytes());
+        let mut input = store::IndexInput::new("test", out.bytes());
         assert_eq!(input.read_string().unwrap(), "hello");
     }
 
@@ -123,7 +123,7 @@ mod tests {
         let set = vec!["alpha".to_string(), "beta".to_string()];
         let mut buf = Vec::new();
         buf.write_set_of_strings(&set).unwrap();
-        let mut input = store2::IndexInput::new("test", &buf);
+        let mut input = store::IndexInput::new("test", &buf);
         assert_eq!(input.read_set_of_strings().unwrap(), set);
     }
 }
