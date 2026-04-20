@@ -6,14 +6,13 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_util;
 use crate::document::{DocValuesType, IndexOptions};
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::{FieldInfo, FieldInfos, PointDimensionConfig, SegmentInfo};
-use crate::store::{Directory, IndexInput};
+use crate::store::Directory;
 
 const CODEC_NAME: &str = "Lucene94FieldInfos";
 const FORMAT_CURRENT: i32 = 2; // FORMAT_DOCVALUE_SKIPPER
@@ -155,23 +154,14 @@ pub fn read(
     segment_info: &SegmentInfo,
     segment_suffix: &str,
 ) -> io::Result<FieldInfos> {
-    let file_name =
-        index_file_names::segment_file_name(&segment_info.name, segment_suffix, EXTENSION);
-    let backing = directory.open_file(&file_name)?;
-    verify_checksum(backing.as_bytes())?;
-
-    let bytes = backing.as_bytes();
-    let prefix_len = bytes.len() - FOOTER_LENGTH;
-    let mut input = IndexInput::new(&file_name, &bytes[..prefix_len]);
-
-    check_index_header(
-        &mut input,
-        CODEC_NAME,
-        FORMAT_CURRENT,
-        FORMAT_CURRENT,
+    let handle = CodecFileHandle::open(
+        directory,
+        IndexFile::FieldInfos,
+        &segment_info.name,
         &segment_info.id,
         segment_suffix,
     )?;
+    let mut input = handle.body();
 
     let num_fields = input.read_vint()?;
     if num_fields < 0 {
@@ -251,11 +241,7 @@ pub fn read(
         fields.push(fi);
     }
 
-    debug!(
-        "field_infos: read {} fields from {}",
-        fields.len(),
-        file_name
-    );
+    debug!("field_infos: read {} fields", fields.len());
 
     Ok(FieldInfos::new(fields))
 }

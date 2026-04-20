@@ -13,17 +13,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_util;
-use crate::codecs::lucene103::postings_format::{
-    self, BLOCKTREE_VERSION_CURRENT, BLOCKTREE_VERSION_START, TERMS_CODEC, TERMS_CODEC_NAME,
-    TERMS_INDEX_CODEC_NAME, TERMS_INDEX_EXTENSION, TERMS_META_CODEC_NAME, TERMS_META_EXTENSION,
-    VERSION_CURRENT, VERSION_START,
-};
+use crate::codecs::lucene103::postings_format;
 use crate::document::IndexOptions;
+use crate::index::FieldInfos;
 use crate::index::terms::{Terms, TermsEnum};
-use crate::index::{FieldInfos, index_file_names};
 use crate::store::{Directory, FileBacking, IndexInput};
 
 /// Per-field metadata read from the `.tmd` terms metadata file.
@@ -186,71 +181,45 @@ impl BlockTreeTermsReader {
         segment_id: &[u8; codec_util::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // Open .tim and validate header
-        let terms_name = index_file_names::segment_file_name(
+        let terms_handle = CodecFileHandle::open(
+            directory,
+            IndexFile::TermsData,
             segment_name,
+            segment_id,
             segment_suffix,
-            postings_format::TERMS_EXTENSION,
-        );
-        let terms_file = directory.open_file(&terms_name)?;
-        {
-            let mut terms_in = IndexInput::new(&terms_name, terms_file.as_bytes());
-            check_index_header(
-                &mut terms_in,
-                TERMS_CODEC_NAME,
-                BLOCKTREE_VERSION_START,
-                BLOCKTREE_VERSION_CURRENT,
-                segment_id,
-                segment_suffix,
-            )?;
+        )?;
+        let index_handle = CodecFileHandle::open(
+            directory,
+            IndexFile::TermsIndex,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        let meta_handle = CodecFileHandle::open(
+            directory,
+            IndexFile::TermsMeta,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        // Cross-file version check: .tmd must agree with .tip on the
+        // blocktree version.
+        if meta_handle.version() != index_handle.version() {
+            return Err(io::Error::other(format!(
+                "blocktree version mismatch: meta={}, index={}",
+                meta_handle.version(),
+                index_handle.version()
+            )));
         }
 
-        // Open .tip and validate header
-        let index_name = index_file_names::segment_file_name(
-            segment_name,
-            segment_suffix,
-            TERMS_INDEX_EXTENSION,
-        );
-        let index_file = directory.open_file(&index_name)?;
-        let version = {
-            let mut index_in = IndexInput::new(&index_name, index_file.as_bytes());
-            check_index_header(
-                &mut index_in,
-                TERMS_INDEX_CODEC_NAME,
-                BLOCKTREE_VERSION_START,
-                BLOCKTREE_VERSION_CURRENT,
-                segment_id,
-                segment_suffix,
-            )?
-        };
+        let mut meta_in = meta_handle.body();
 
-        // Open .tmd, verify full CRC, then parse metadata off the prefix.
-        let meta_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, TERMS_META_EXTENSION);
-        let meta_file = directory.open_file(&meta_name)?;
-        verify_checksum(meta_file.as_bytes())?;
-        let meta_bytes = meta_file.as_bytes();
-        let meta_prefix = &meta_bytes[..meta_bytes.len() - FOOTER_LENGTH];
-        let mut meta_in = IndexInput::new(&meta_name, meta_prefix);
-
-        check_index_header(
-            &mut meta_in,
-            TERMS_META_CODEC_NAME,
-            version,
-            version,
-            segment_id,
-            segment_suffix,
-        )?;
-
-        // Postings reader init: validate postings header + block size
-        check_index_header(
-            &mut meta_in,
-            TERMS_CODEC,
-            VERSION_START,
-            VERSION_CURRENT,
-            segment_id,
-            segment_suffix,
-        )?;
+        // Embedded postings header: a second `check_index_header` on the same
+        // .tmd body. The handle abstraction validates the outer terms-meta
+        // header; this inner one stays explicit but its constants live in
+        // postings_format where they belong.
+        postings_format::check_embedded_postings_header(&mut meta_in, segment_id, segment_suffix)?;
         let block_size = meta_in.read_vint()?;
         if block_size != postings_format::BLOCK_SIZE as i32 {
             return Err(io::Error::other(format!(
@@ -280,13 +249,9 @@ impl BlockTreeTermsReader {
         let _index_length = meta_in.read_le_long()?;
         let _terms_length = meta_in.read_le_long()?;
 
-        // O(1) footer sanity on the data files
-        retrieve_checksum(terms_file.as_bytes())?;
-        retrieve_checksum(index_file.as_bytes())?;
-
         Ok(Self {
-            terms_file,
-            index_file,
+            terms_file: terms_handle.into_backing(),
+            index_file: index_handle.into_backing(),
             fields,
         })
     }

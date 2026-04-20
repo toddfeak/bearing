@@ -11,16 +11,11 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_footers::{
-    FOOTER_LENGTH, retrieve_checksum, retrieve_checksum_with_length, verify_checksum,
-};
-use crate::codecs::codec_headers::{check_header, check_index_header};
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
+use crate::codecs::codec_headers::check_header;
 use crate::codecs::codec_util;
-use crate::codecs::lucene90::points::{
-    BKD_CODEC, BKD_VERSION, DATA_CODEC, DATA_EXTENSION, FORMAT_VERSION, INDEX_CODEC,
-    INDEX_EXTENSION, META_CODEC, META_EXTENSION, PointsFieldData,
-};
-use crate::index::{FieldInfo, FieldInfos, index_file_names};
+use crate::codecs::lucene90::points::{BKD_CODEC, BKD_VERSION, PointsFieldData};
+use crate::index::{FieldInfo, FieldInfos};
 use crate::store::{Directory, FileBacking, IndexInput};
 
 /// Per-field BKD tree metadata read eagerly from `.kdm`.
@@ -61,68 +56,37 @@ impl PointsReader {
         segment_id: &[u8; codec_util::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // 1. Open .kdi (index) — keep backing
-        let kdi_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let index_in = directory.open_file(&kdi_name)?;
-        {
-            let mut input = IndexInput::new(&kdi_name, index_in.as_bytes());
-            check_index_header(
-                &mut input,
-                INDEX_CODEC,
-                FORMAT_VERSION,
-                FORMAT_VERSION,
-                segment_id,
-                segment_suffix,
-            )?;
-        }
-        retrieve_checksum(index_in.as_bytes())?;
-
-        // 2. Open .kdd (data) — keep backing
-        let kdd_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
-        let data_in = directory.open_file(&kdd_name)?;
-        {
-            let mut input = IndexInput::new(&kdd_name, data_in.as_bytes());
-            check_index_header(
-                &mut input,
-                DATA_CODEC,
-                FORMAT_VERSION,
-                FORMAT_VERSION,
-                segment_id,
-                segment_suffix,
-            )?;
-        }
-        retrieve_checksum(data_in.as_bytes())?;
-
-        // 3. Open .kdm (meta), verify full CRC over the file, then parse metadata.
-        // verify_checksum covers what Java's ChecksumIndexInput + check_footer
-        // do incrementally (CRC of header + body, plus footer magic/algorithm).
-        let kdm_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let meta_in = directory.open_file(&kdm_name)?;
-        verify_checksum(meta_in.as_bytes())?;
-
-        let meta_bytes = meta_in.as_bytes();
-        let prefix_len = meta_bytes.len() - FOOTER_LENGTH;
-        let mut meta = IndexInput::new(&kdm_name, &meta_bytes[..prefix_len]);
-        check_index_header(
-            &mut meta,
-            META_CODEC,
-            FORMAT_VERSION,
-            FORMAT_VERSION,
+        let index_handle = CodecFileHandle::open(
+            directory,
+            IndexFile::PointsIndex,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        let data_handle = CodecFileHandle::open(
+            directory,
+            IndexFile::PointsData,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        let meta_handle = CodecFileHandle::open(
+            directory,
+            IndexFile::PointsMeta,
+            segment_name,
             segment_id,
             segment_suffix,
         )?;
 
+        let mut meta = meta_handle.body();
         let entries = read_fields(&mut meta, field_infos)?;
 
         let index_length = meta.read_le_long()?;
         let data_length = meta.read_le_long()?;
 
-        // 4. Validate file lengths against what `.kdm` claimed.
-        retrieve_checksum_with_length(index_in.as_bytes(), index_length)?;
-        retrieve_checksum_with_length(data_in.as_bytes(), data_length)?;
+        // Validate sibling file lengths against what .kdm claimed.
+        index_handle.verify_length(index_length)?;
+        data_handle.verify_length(data_length)?;
 
         debug!(
             "points_reader: opened {} entries for segment {segment_name}",
@@ -131,8 +95,8 @@ impl PointsReader {
 
         Ok(Self {
             entries,
-            index_in,
-            data_in,
+            index_in: index_handle.into_backing(),
+            data_in: data_handle.into_backing(),
         })
     }
 

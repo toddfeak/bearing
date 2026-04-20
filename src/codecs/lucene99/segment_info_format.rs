@@ -6,13 +6,12 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_util;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
-use crate::store::{Directory, IndexInput};
+use crate::store::Directory;
 
 const CODEC_NAME: &str = "Lucene90SegmentInfo";
 const VERSION_CURRENT: i32 = 0;
@@ -122,22 +121,14 @@ pub fn read(
     segment_name: &str,
     segment_id: &[u8; codec_util::ID_LENGTH],
 ) -> io::Result<SegmentInfo> {
-    let file_name = index_file_names::segment_file_name(segment_name, "", EXTENSION);
-    let backing = directory.open_file(&file_name)?;
-    verify_checksum(backing.as_bytes())?;
-
-    let bytes = backing.as_bytes();
-    let prefix_len = bytes.len() - FOOTER_LENGTH;
-    let mut input = IndexInput::new(&file_name, &bytes[..prefix_len]);
-
-    check_index_header(
-        &mut input,
-        CODEC_NAME,
-        VERSION_CURRENT,
-        VERSION_CURRENT,
+    let handle = CodecFileHandle::open(
+        directory,
+        IndexFile::SegmentInfo,
+        segment_name,
         segment_id,
         "",
     )?;
+    let mut input = handle.body();
 
     // Lucene version (LE ints)
     let _major = input.read_le_int()?;

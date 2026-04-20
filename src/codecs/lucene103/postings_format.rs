@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Postings format constants and term state for the Lucene 10.3 codec.
 
+use std::io;
+
+use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_util;
+use crate::store::IndexInput;
+
 // --- Postings format constants ---
 
 pub const BLOCK_SIZE: usize = 128;
@@ -37,6 +43,26 @@ pub const BLOCKTREE_VERSION_CURRENT: i32 = BLOCKTREE_VERSION_START;
 
 pub const DEFAULT_MIN_BLOCK_SIZE: usize = 25;
 pub const DEFAULT_MAX_BLOCK_SIZE: usize = 48;
+
+/// Validates the embedded postings header inside `.tmd`. The .tmd outer
+/// header is validated by `CodecFileHandle::open(IndexFile::TermsMeta, ...)`;
+/// this second header lives mid-stream in the .tmd body (Java's
+/// `Lucene103PostingsReader::init` pattern).
+pub(crate) fn check_embedded_postings_header(
+    input: &mut IndexInput<'_>,
+    segment_id: &[u8; codec_util::ID_LENGTH],
+    segment_suffix: &str,
+) -> io::Result<()> {
+    check_index_header(
+        input,
+        TERMS_CODEC,
+        VERSION_START,
+        VERSION_CURRENT,
+        segment_id,
+        segment_suffix,
+    )?;
+    Ok(())
+}
 
 /// Per-term metadata stored in .tim blocks.
 #[derive(Clone, Copy, Debug)]

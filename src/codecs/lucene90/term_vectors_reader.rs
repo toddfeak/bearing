@@ -10,16 +10,10 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::stored_fields_reader::FieldsIndexReader;
-use crate::codecs::lucene90::term_vectors::{
-    DATA_CODEC, INDEX_CODEC_IDX, INDEX_CODEC_META, INDEX_EXTENSION, META_EXTENSION,
-    VECTORS_EXTENSION, VERSION,
-};
-use crate::index::index_file_names;
-use crate::store::{Directory, FileBacking, IndexInput};
+use crate::store::{Directory, FileBacking};
 
 /// Reads term vectors for a segment.
 ///
@@ -69,64 +63,37 @@ impl TermVectorsReader {
         segment_suffix: &str,
         segment_id: &[u8; codec_util::ID_LENGTH],
     ) -> io::Result<Self> {
-        // 1. Open .tvd (data) — keep backing, validate header
-        let tvd_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, VECTORS_EXTENSION);
-        let tvd = directory.open_file(&tvd_name)?;
-        let version = {
-            let mut input = IndexInput::new(&tvd_name, tvd.as_bytes());
-            check_index_header(
-                &mut input,
-                DATA_CODEC,
-                VERSION,
-                VERSION,
-                segment_id,
-                segment_suffix,
-            )?
-        };
-
-        // 2. Open .tvm (meta), verify full-file CRC, then parse metadata.
-        let tvm_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let tvm_backing = directory.open_file(&tvm_name)?;
-        verify_checksum(tvm_backing.as_bytes())?;
-
-        let tvm_bytes = tvm_backing.as_bytes();
-        let prefix_len = tvm_bytes.len() - FOOTER_LENGTH;
-        let mut meta_in = IndexInput::new(&tvm_name, &tvm_bytes[..prefix_len]);
-        check_index_header(
-            &mut meta_in,
-            INDEX_CODEC_META,
-            VERSION,
-            VERSION,
+        let tvd = CodecFileHandle::open(
+            directory,
+            IndexFile::TermVectorsData,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        let tvm = CodecFileHandle::open(
+            directory,
+            IndexFile::TermVectorsMeta,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        let tvx = CodecFileHandle::open(
+            directory,
+            IndexFile::TermVectorsIndex,
+            segment_name,
             segment_id,
             segment_suffix,
         )?;
 
+        let version = tvd.version();
+
+        let mut meta_in = tvm.body();
         let packed_ints_version = meta_in.read_vint()?;
         let chunk_size = meta_in.read_vint()?;
 
-        // Validate .tvd footer structure
-        retrieve_checksum(tvd.as_bytes())?;
-
-        // 3. Open .tvx (index) — keep backing, validate header, then build FieldsIndexReader from .tvm
-        let tvx_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let tvx = directory.open_file(&tvx_name)?;
-        {
-            let mut input = IndexInput::new(&tvx_name, tvx.as_bytes());
-            check_index_header(
-                &mut input,
-                INDEX_CODEC_IDX,
-                VERSION,
-                VERSION,
-                segment_id,
-                segment_suffix,
-            )?;
-        }
         let index_reader = FieldsIndexReader::open(&mut meta_in)?;
 
-        // 4. Read chunk counts
+        // Read chunk counts
         let num_chunks = meta_in.read_vlong()?;
         let num_dirty_chunks = meta_in.read_vlong()?;
         let num_dirty_docs = meta_in.read_vlong()?;
@@ -151,8 +118,8 @@ impl TermVectorsReader {
         debug!("term_vectors_reader: {num_chunks} chunks for segment {segment_name}");
 
         Ok(Self {
-            tvd,
-            tvx,
+            tvd: tvd.into_backing(),
+            tvx: tvx.into_backing(),
             index_reader,
             version,
             packed_ints_version,

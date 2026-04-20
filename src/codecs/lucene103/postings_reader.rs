@@ -11,16 +11,12 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::Impact;
-use crate::codecs::lucene103::postings_format::{
-    self, DOC_CODEC, DOC_EXTENSION, LEVEL1_NUM_DOCS, META_CODEC, META_EXTENSION, POS_CODEC,
-    POS_EXTENSION, VERSION_CURRENT, VERSION_START,
-};
+use crate::codecs::lucene103::postings_format::{self, LEVEL1_NUM_DOCS};
 use crate::encoding::pfor::BLOCK_SIZE;
-use crate::index::{FieldInfos, index_file_names};
+use crate::index::FieldInfos;
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
 use crate::search::scorer::{Impacts, ImpactsSource};
 use crate::store::{Directory, FileBacking, IndexInput};
@@ -77,24 +73,14 @@ impl PostingsReader {
         segment_id: &[u8; codec_util::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // Open .psm (metadata): read into memory, verify CRC over the whole file,
-        // then parse the prefix (file length minus the 16-byte footer).
-        let psm_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let psm = directory.open_file(&psm_name)?;
-        verify_checksum(psm.as_bytes())?;
-        let psm_bytes = psm.as_bytes();
-        let psm_prefix = &psm_bytes[..psm_bytes.len() - FOOTER_LENGTH];
-        let mut meta_in = IndexInput::new(&psm_name, psm_prefix);
-
-        check_index_header(
-            &mut meta_in,
-            META_CODEC,
-            VERSION_START,
-            VERSION_CURRENT,
+        let psm = CodecFileHandle::open(
+            directory,
+            IndexFile::PostingsMeta,
+            segment_name,
             segment_id,
             segment_suffix,
         )?;
+        let mut meta_in = psm.body();
 
         // Read impact statistics
         let max_num_impacts_at_level0 = meta_in.read_le_int()?;
@@ -111,42 +97,24 @@ impl PostingsReader {
             }
         }
 
-        // Open .doc: retain the bytes, validate the header, then check the footer
-        // magic/algorithm without recomputing the CRC.
-        let doc_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, DOC_EXTENSION);
-        let doc = directory.open_file(&doc_name)?;
-        {
-            let mut doc_in = IndexInput::new(&doc_name, doc.as_bytes());
-            check_index_header(
-                &mut doc_in,
-                DOC_CODEC,
-                VERSION_START,
-                VERSION_CURRENT,
+        let doc = CodecFileHandle::open(
+            directory,
+            IndexFile::PostingsData,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+
+        // Validate .pos header if positions exist. The handle is dropped at
+        // the end of this block — positions aren't read yet.
+        if field_infos.has_prox() {
+            let _pos = CodecFileHandle::open(
+                directory,
+                IndexFile::PostingsPositions,
+                segment_name,
                 segment_id,
                 segment_suffix,
             )?;
-        }
-        retrieve_checksum(doc.as_bytes())?;
-
-        // Validate .pos header if positions exist. Positions aren't read yet, so
-        // the `FileBacking` is dropped at the end of this block.
-        if field_infos.has_prox() {
-            let pos_name =
-                index_file_names::segment_file_name(segment_name, segment_suffix, POS_EXTENSION);
-            let pos = directory.open_file(&pos_name)?;
-            {
-                let mut pos_in = IndexInput::new(&pos_name, pos.as_bytes());
-                check_index_header(
-                    &mut pos_in,
-                    POS_CODEC,
-                    VERSION_START,
-                    VERSION_CURRENT,
-                    segment_id,
-                    segment_suffix,
-                )?;
-            }
-            retrieve_checksum(pos.as_bytes())?;
         }
 
         let impact_stats = ImpactStats {
@@ -162,7 +130,10 @@ impl PostingsReader {
              {max_num_impacts_at_level1}, {max_impact_num_bytes_at_level1}]"
         );
 
-        Ok(Self { doc, impact_stats })
+        Ok(Self {
+            doc: doc.into_backing(),
+            impact_stats,
+        })
     }
 
     /// Returns the impact statistics read from segment metadata.

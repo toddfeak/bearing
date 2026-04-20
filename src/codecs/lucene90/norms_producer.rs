@@ -12,16 +12,12 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::indexed_disi::IndexedDISI;
-use crate::codecs::lucene90::norms::{
-    DATA_CODEC, DATA_EXTENSION, META_CODEC, META_EXTENSION, VERSION,
-};
 use crate::index::doc_values_iterators::{DocValuesIterator, NumericDocValues};
 use crate::index::pipeline::segment_accumulator::PerFieldNormsData;
-use crate::index::{FieldInfo, FieldInfos, index_file_names};
+use crate::index::{FieldInfo, FieldInfos};
 use crate::search::DocIdSetIterator;
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
 use crate::store::{Directory, FileBacking, IndexInput};
@@ -96,51 +92,29 @@ impl NormsReader {
         field_infos: &FieldInfos,
         max_doc: i32,
     ) -> io::Result<Self> {
-        // Open .nvm (metadata): read into memory, verify CRC over the whole file,
-        // then parse the prefix (file length minus the 16-byte footer).
-        let nvm_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let nvm = directory.open_file(&nvm_name)?;
-        verify_checksum(nvm.as_bytes())?;
-        let nvm_bytes = nvm.as_bytes();
-        let nvm_prefix = &nvm_bytes[..nvm_bytes.len() - FOOTER_LENGTH];
-        let mut meta_in = IndexInput::new(&nvm_name, nvm_prefix);
-
-        let version = check_index_header(
-            &mut meta_in,
-            META_CODEC,
-            VERSION,
-            VERSION,
+        let nvm = CodecFileHandle::open(
+            directory,
+            IndexFile::NormsMeta,
+            segment_name,
             segment_id,
             segment_suffix,
         )?;
+        let entries = read_fields(&mut nvm.body(), field_infos)?;
 
-        let entries = read_fields(&mut meta_in, field_infos)?;
-
-        // Open .nvd (data): retain the bytes, validate the header, then check
-        // the footer magic/algorithm without recomputing the CRC.
-        let nvd_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
-        let data = directory.open_file(&nvd_name)?;
-        let data_version = {
-            let mut data_in = IndexInput::new(&nvd_name, data.as_bytes());
-            check_index_header(
-                &mut data_in,
-                DATA_CODEC,
-                VERSION,
-                VERSION,
-                segment_id,
-                segment_suffix,
-            )?
-        };
-
-        if version != data_version {
+        let nvd = CodecFileHandle::open(
+            directory,
+            IndexFile::NormsData,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        if nvm.version() != nvd.version() {
             return Err(io::Error::other(format!(
-                "format version mismatch: meta={version}, data={data_version}"
+                "format version mismatch: meta={}, data={}",
+                nvm.version(),
+                nvd.version()
             )));
         }
-
-        retrieve_checksum(data.as_bytes())?;
 
         debug!(
             "norms_reader: opened {} entries for segment {segment_name}",
@@ -150,7 +124,7 @@ impl NormsReader {
         Ok(Self {
             entries,
             max_doc,
-            data,
+            data: nvd.into_backing(),
         })
     }
 

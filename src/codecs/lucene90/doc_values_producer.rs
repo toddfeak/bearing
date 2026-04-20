@@ -14,17 +14,15 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::doc_values::{
-    BINARY, DATA_CODEC, DATA_EXTENSION, DIRECT_MONOTONIC_BLOCK_SHIFT, META_CODEC, META_EXTENSION,
-    NUMERIC, SORTED, SORTED_NUMERIC, SORTED_SET, VERSION,
+    BINARY, DIRECT_MONOTONIC_BLOCK_SHIFT, NUMERIC, SORTED, SORTED_NUMERIC, SORTED_SET,
 };
 use crate::index::doc_values_iterators::{
     BinaryDocValues, NumericDocValues, SortedDocValues, SortedNumericDocValues, SortedSetDocValues,
 };
-use crate::index::{FieldInfo, FieldInfos, index_file_names};
+use crate::index::{FieldInfo, FieldInfos};
 use crate::store::{Directory, FileBacking, IndexInput};
 
 // ---------------------------------------------------------------------------
@@ -117,57 +115,39 @@ impl DocValuesReader {
         segment_id: &[u8; codec_util::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
-        // Open .dvm (metadata): read into memory, verify CRC over the whole file,
-        // then parse the prefix (file length minus the 16-byte footer).
-        let dvm_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let dvm = directory.open_file(&dvm_name)?;
-        verify_checksum(dvm.as_bytes())?;
-        let dvm_bytes = dvm.as_bytes();
-        let dvm_prefix = &dvm_bytes[..dvm_bytes.len() - FOOTER_LENGTH];
-        let mut meta_in = IndexInput::new(&dvm_name, dvm_prefix);
-
-        let version = check_index_header(
-            &mut meta_in,
-            META_CODEC,
-            VERSION,
-            VERSION,
+        let dvm = CodecFileHandle::open(
+            directory,
+            IndexFile::DocValuesMeta,
+            segment_name,
             segment_id,
             segment_suffix,
         )?;
+        let entries = read_fields(&mut dvm.body(), field_infos)?;
 
-        let entries = read_fields(&mut meta_in, field_infos)?;
-
-        // Open .dvd (data): keep backing, validate header, retrieve footer checksum.
-        let dvd_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, DATA_EXTENSION);
-        let data = directory.open_file(&dvd_name)?;
-        let data_version = {
-            let mut input = IndexInput::new(&dvd_name, data.as_bytes());
-            check_index_header(
-                &mut input,
-                DATA_CODEC,
-                VERSION,
-                VERSION,
-                segment_id,
-                segment_suffix,
-            )?
-        };
-
-        if version != data_version {
+        let dvd = CodecFileHandle::open(
+            directory,
+            IndexFile::DocValuesData,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        if dvm.version() != dvd.version() {
             return Err(io::Error::other(format!(
-                "format version mismatch: meta={version}, data={data_version}"
+                "format version mismatch: meta={}, data={}",
+                dvm.version(),
+                dvd.version()
             )));
         }
-
-        retrieve_checksum(data.as_bytes())?;
 
         debug!(
             "doc_values_reader: opened {} entries for segment {segment_name}",
             entries.iter().filter(|e| e.is_some()).count()
         );
 
-        Ok(Self { entries, data })
+        Ok(Self {
+            entries,
+            data: dvd.into_backing(),
+        })
     }
 
     /// Returns the number of documents that have values for the given field.

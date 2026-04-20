@@ -7,18 +7,14 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
+use crate::codecs::codec_footers::FOOTER_LENGTH;
 use crate::codecs::codec_util;
 use crate::index::index_file_names;
 use crate::store::{Directory, FileBacking, IndexInput, IndexOutput};
 
-const ENTRIES_EXTENSION: &str = "cfe";
 const DATA_EXTENSION: &str = "cfs";
 const DATA_CODEC: &str = "Lucene90CompoundData";
-const ENTRY_CODEC: &str = "Lucene90CompoundEntries";
-const VERSION_START: i32 = 0;
-const VERSION_CURRENT: i32 = VERSION_START;
 
 struct FileEntry {
     offset: u64,
@@ -51,9 +47,7 @@ impl<'a> CompoundDirectory<'a> {
         segment_name: &str,
         segment_id: &[u8; codec_util::ID_LENGTH],
     ) -> io::Result<Self> {
-        let entries_file_name =
-            index_file_names::segment_file_name(segment_name, "", ENTRIES_EXTENSION);
-        let (version, entries) = read_entries(directory, &entries_file_name, segment_id)?;
+        let (version, entries) = read_entries(directory, segment_name, segment_id)?;
 
         // Find the last FileEntry (largest offset+length) and add footer length
         let expected_length = entries
@@ -65,23 +59,23 @@ impl<'a> CompoundDirectory<'a> {
 
         let data_file_name = index_file_names::segment_file_name(segment_name, "", DATA_EXTENSION);
 
-        // Validate .cfs header, footer, and length once at open time. The
-        // FileBacking is dropped at the end of this block; each subsequent
+        // Validate .cfs header, footer, and length once at open time.
+        // The handle is dropped at the end of this block; each subsequent
         // sub-file open re-maps the parent via `self.parent.open_file`.
-        {
-            let cfs_backing = directory.open_file(&data_file_name)?;
-            {
-                let mut input = IndexInput::new(&data_file_name, cfs_backing.as_bytes());
-                check_index_header(&mut input, DATA_CODEC, version, version, segment_id, "")?;
-            }
-            retrieve_checksum(cfs_backing.as_bytes())?;
-            if cfs_backing.len() as u64 != expected_length {
-                return Err(io::Error::other(format!(
-                    "length should be {expected_length} bytes, but is {} instead",
-                    cfs_backing.len()
-                )));
-            }
+        let cfs_handle = CodecFileHandle::open(
+            directory,
+            IndexFile::CompoundData,
+            segment_name,
+            segment_id,
+            "",
+        )?;
+        if cfs_handle.version() != version {
+            return Err(io::Error::other(format!(
+                "compound version mismatch: cfe={version}, cfs={}",
+                cfs_handle.version()
+            )));
         }
+        cfs_handle.verify_length(expected_length as i64)?;
 
         Ok(Self {
             parent: directory,
@@ -165,27 +159,19 @@ impl Directory for CompoundDirectory<'_> {
 /// Reads the `.cfe` entry table. Returns `(version, entries)`.
 fn read_entries(
     directory: &dyn Directory,
-    entries_file_name: &str,
+    segment_name: &str,
     segment_id: &[u8; codec_util::ID_LENGTH],
 ) -> io::Result<(i32, HashMap<String, FileEntry>)> {
-    let backing = directory.open_file(entries_file_name)?;
-    verify_checksum(backing.as_bytes())?;
-
-    let bytes = backing.as_bytes();
-    let prefix_len = bytes.len() - FOOTER_LENGTH;
-    let mut input = IndexInput::new(entries_file_name, &bytes[..prefix_len]);
-
-    let version = check_index_header(
-        &mut input,
-        ENTRY_CODEC,
-        VERSION_START,
-        VERSION_CURRENT,
+    let handle = CodecFileHandle::open(
+        directory,
+        IndexFile::CompoundEntries,
+        segment_name,
         segment_id,
         "",
     )?;
-
+    let version = handle.version();
+    let mut input = handle.body();
     let mapping = read_mapping(&mut input)?;
-
     Ok((version, mapping))
 }
 

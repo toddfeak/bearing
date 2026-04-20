@@ -8,20 +8,16 @@
 use std::io;
 use std::str;
 
-use crate::codecs::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
-use crate::codecs::codec_headers::check_index_header;
+use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_util;
 use crate::codecs::lucene90::stored_fields::{
-    DAY, DAY_ENCODING, FDM_VERSION, FDT_VERSION, FDX_VERSION, FIELDS_EXTENSION, FORMAT_NAME, HOUR,
-    HOUR_ENCODING, INDEX_CODEC_NAME_IDX, INDEX_CODEC_NAME_META, INDEX_EXTENSION, META_EXTENSION,
-    SECOND, SECOND_ENCODING, TYPE_BITS, TYPE_BYTE_ARR, TYPE_NUMERIC_DOUBLE, TYPE_NUMERIC_FLOAT,
-    TYPE_NUMERIC_INT, TYPE_NUMERIC_LONG, TYPE_STRING,
+    DAY, DAY_ENCODING, HOUR, HOUR_ENCODING, SECOND, SECOND_ENCODING, TYPE_BITS, TYPE_BYTE_ARR,
+    TYPE_NUMERIC_DOUBLE, TYPE_NUMERIC_FLOAT, TYPE_NUMERIC_INT, TYPE_NUMERIC_LONG, TYPE_STRING,
 };
 use crate::codecs::packed_readers::DirectMonotonicReader;
 use crate::document::StoredValue;
 use crate::encoding::lz4;
 use crate::encoding::zigzag;
-use crate::index::index_file_names;
 use crate::store::{Directory, FileBacking, IndexInput};
 
 const STORED_FIELDS_INTS_BLOCK_SIZE: usize = 128;
@@ -185,63 +181,33 @@ impl StoredFieldsReader {
         segment_suffix: &str,
         segment_id: &[u8; codec_util::ID_LENGTH],
     ) -> io::Result<Self> {
-        // 1. Open .fdt (field data) — validate header, retrieve footer checksum
-        let fdt_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, FIELDS_EXTENSION);
-        let fdt = directory.open_file(&fdt_name)?;
-        {
-            let mut input = IndexInput::new(&fdt_name, fdt.as_bytes());
-            check_index_header(
-                &mut input,
-                FORMAT_NAME,
-                FDT_VERSION,
-                FDT_VERSION,
-                segment_id,
-                segment_suffix,
-            )?;
-        }
-        retrieve_checksum(fdt.as_bytes())?;
-
-        // 2. Open .fdx (index) — validate header, retrieve footer checksum
-        let fdx_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, INDEX_EXTENSION);
-        let fdx = directory.open_file(&fdx_name)?;
-        {
-            let mut input = IndexInput::new(&fdx_name, fdx.as_bytes());
-            check_index_header(
-                &mut input,
-                INDEX_CODEC_NAME_IDX,
-                FDX_VERSION,
-                FDX_VERSION,
-                segment_id,
-                segment_suffix,
-            )?;
-        }
-        retrieve_checksum(fdx.as_bytes())?;
-
-        // 3. Open .fdm (metadata), verify full-file CRC, then parse metadata.
-        let fdm_name =
-            index_file_names::segment_file_name(segment_name, segment_suffix, META_EXTENSION);
-        let fdm = directory.open_file(&fdm_name)?;
-        verify_checksum(fdm.as_bytes())?;
-
-        let meta_bytes = fdm.as_bytes();
-        let prefix_len = meta_bytes.len() - FOOTER_LENGTH;
-        let mut meta = IndexInput::new(&fdm_name, &meta_bytes[..prefix_len]);
-        check_index_header(
-            &mut meta,
-            INDEX_CODEC_NAME_META,
-            FDM_VERSION,
-            FDM_VERSION,
+        let fdt = CodecFileHandle::open(
+            directory,
+            IndexFile::StoredFieldsData,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        let fdx = CodecFileHandle::open(
+            directory,
+            IndexFile::StoredFieldsIndex,
+            segment_name,
+            segment_id,
+            segment_suffix,
+        )?;
+        let fdm = CodecFileHandle::open(
+            directory,
+            IndexFile::StoredFieldsMeta,
+            segment_name,
             segment_id,
             segment_suffix,
         )?;
 
+        let mut meta = fdm.body();
         let chunk_size = meta.read_vint()?;
-
         let index_reader = FieldsIndexReader::open(&mut meta)?;
 
-        // 4. Read and validate dirty chunk counts
+        // Read and validate dirty chunk counts
         let num_chunks = meta.read_vlong()?;
         let num_dirty_chunks = meta.read_vlong()?;
         let num_dirty_docs = meta.read_vlong()?;
@@ -263,8 +229,8 @@ impl StoredFieldsReader {
         }
 
         Ok(Self {
-            fdt,
-            fdx,
+            fdt: fdt.into_backing(),
+            fdx: fdx.into_backing(),
             index_reader,
             chunk_size,
             state: BlockState::new(),
