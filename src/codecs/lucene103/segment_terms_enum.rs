@@ -694,7 +694,7 @@ fn seek_exact_in_block(
         )?;
     }
 
-    let mut input = terms_in.sub_input("seek_exact", 0, terms_in.length())?;
+    let mut input = terms_in.view("seek_exact", 0, terms_in.length())?;
     input.seek(block_fp as usize)?;
 
     let result = scan_block(&mut input, target, prefix_length, index_options)?;
@@ -711,7 +711,7 @@ fn scan_to_floor_block(
     base_fp: i64,
     target_label: u8,
 ) -> io::Result<i64> {
-    let mut input = index_in.sub_input("floor_data", 0, index_in.length())?;
+    let mut input = index_in.view("floor_data", 0, index_in.length())?;
     input.seek(floor_data_fp as usize)?;
 
     let num_follow_blocks = input.read_vint()?;

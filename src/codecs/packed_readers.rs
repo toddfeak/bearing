@@ -20,7 +20,7 @@ impl<'a> DirectReader<'a> {
     /// Creates a reader over `bytes` starting at `offset` with the given bpv.
     pub fn new(bytes: &'a [u8], bits_per_value: u32, offset: u64) -> Self {
         Self {
-            input: IndexInput::new("direct", bytes),
+            input: IndexInput::unnamed(bytes),
             bits_per_value,
             offset,
         }
@@ -308,7 +308,7 @@ mod tests {
 
         let meta_bytes = meta_out.bytes().to_vec();
         let data_bytes = data_out.bytes().to_vec();
-        let mut meta_input = IndexInput::new("meta", &meta_bytes);
+        let mut meta_input = IndexInput::unnamed(&meta_bytes);
 
         let num_values = values.len() as u32;
         let reader =

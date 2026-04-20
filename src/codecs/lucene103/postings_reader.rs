@@ -180,7 +180,7 @@ impl PostingsReader {
         needs_freq: bool,
     ) -> io::Result<BlockPostingsEnum<'_>> {
         BlockPostingsEnum::new(
-            IndexInput::new("doc", self.doc.as_bytes()),
+            IndexInput::unnamed(self.doc.as_bytes()),
             term_state,
             index_features,
             needs_freq,
@@ -197,7 +197,7 @@ impl PostingsReader {
         needs_freq: bool,
     ) -> io::Result<BlockPostingsEnum<'_>> {
         BlockPostingsEnum::new(
-            IndexInput::new("doc", self.doc.as_bytes()),
+            IndexInput::unnamed(self.doc.as_bytes()),
             term_state,
             index_features,
             needs_freq,
@@ -1411,7 +1411,7 @@ mod tests {
     fn test_read_vint15() {
         // Values < 0x8000 are stored as a single LE short
         let data = [0x42u8, 0x00]; // 0x0042 = 66
-        let mut input = IndexInput::new("test", &data);
+        let mut input = IndexInput::unnamed(&data);
         let val = read_vint15(&mut input).unwrap();
         assert_eq!(val, 66);
     }

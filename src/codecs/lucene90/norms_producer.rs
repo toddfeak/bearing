@@ -167,7 +167,7 @@ impl NormsReader {
             None => return Ok(None),
         };
 
-        let data_input = IndexInput::new("nvd", self.data.as_bytes());
+        let data_input = IndexInput::unnamed(self.data.as_bytes());
 
         if entry.docs_with_field_offset == -2 {
             // EMPTY: no documents have norms for this field
@@ -184,8 +184,7 @@ impl NormsReader {
                 })));
             }
             let data_length = entry.num_docs_with_field as usize * entry.bytes_per_norm as usize;
-            let slice =
-                data_input.sub_input("norms data", entry.norms_offset as usize, data_length)?;
+            let slice = data_input.view("norms data", entry.norms_offset as usize, data_length)?;
             return Ok(Some(Box::new(DenseNormsIterator {
                 doc: -1,
                 max_doc: self.max_doc,
@@ -214,7 +213,7 @@ impl NormsReader {
             })));
         }
         let data_length = entry.num_docs_with_field as usize * entry.bytes_per_norm as usize;
-        let slice = data_input.sub_input("norms data", entry.norms_offset as usize, data_length)?;
+        let slice = data_input.view("norms data", entry.norms_offset as usize, data_length)?;
         Ok(Some(Box::new(SparseNormsIterator {
             disi,
             slice: Some(slice),

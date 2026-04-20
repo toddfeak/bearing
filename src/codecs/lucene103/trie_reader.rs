@@ -1089,7 +1089,7 @@ mod tests {
         data[0] = 0x1C | 0x20;
         data[1..9].copy_from_slice(&expected_fp.to_le_bytes());
 
-        let access = IndexInput::new("trie", &data);
+        let access = IndexInput::unnamed(&data);
         let mut node = Node::new();
         let fp = 0i64;
         let term_flags_long = access.read_le_long_at(fp as usize).unwrap();
@@ -1111,7 +1111,7 @@ mod tests {
         data[0] = 0x1C | 0x20 | 0x40;
         data[1..9].copy_from_slice(&expected_fp.to_le_bytes());
 
-        let access = IndexInput::new("trie", &data);
+        let access = IndexInput::unnamed(&data);
         let mut node = Node::new();
         let fp = 0i64;
         let term_flags_long = access.read_le_long_at(fp as usize).unwrap();

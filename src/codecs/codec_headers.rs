@@ -121,18 +121,18 @@ mod tests {
     #[test]
     fn check_header_returns_version_on_match() {
         let bytes = build_header("MyCodec", 7);
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_ok_eq_x!(check_header(&mut input, "MyCodec", 5, 10), 7);
     }
 
     #[test]
     fn check_header_min_max_boundaries() {
         let bytes = build_header("MyCodec", 5);
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_ok!(check_header(&mut input, "MyCodec", 5, 10));
 
         let bytes = build_header("MyCodec", 10);
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_ok!(check_header(&mut input, "MyCodec", 5, 10));
     }
 
@@ -140,28 +140,28 @@ mod tests {
     fn check_header_bad_magic() {
         let mut bytes = build_header("MyCodec", 7);
         bytes[0] ^= 0xFF;
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_err!(check_header(&mut input, "MyCodec", 5, 10));
     }
 
     #[test]
     fn check_header_wrong_codec_name() {
         let bytes = build_header("MyCodec", 7);
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_err!(check_header(&mut input, "OtherCodec", 5, 10));
     }
 
     #[test]
     fn check_header_version_below_min() {
         let bytes = build_header("MyCodec", 4);
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_err!(check_header(&mut input, "MyCodec", 5, 10));
     }
 
     #[test]
     fn check_header_version_above_max() {
         let bytes = build_header("MyCodec", 11);
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_err!(check_header(&mut input, "MyCodec", 5, 10));
     }
 
@@ -169,7 +169,7 @@ mod tests {
     fn check_index_header_returns_version_on_match() {
         let id = [0xABu8; ID_LENGTH];
         let bytes = build_index_header("MyCodec", 7, &id, "suffix1");
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         let version = check_index_header(&mut input, "MyCodec", 5, 10, &id, "suffix1").unwrap();
         assert_eq!(version, 7);
     }
@@ -179,7 +179,7 @@ mod tests {
         let id = [0xABu8; ID_LENGTH];
         let other = [0xCDu8; ID_LENGTH];
         let bytes = build_index_header("MyCodec", 7, &id, "suffix1");
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_err!(check_index_header(
             &mut input, "MyCodec", 5, 10, &other, "suffix1"
         ));
@@ -189,7 +189,7 @@ mod tests {
     fn check_index_header_suffix_mismatch() {
         let id = [0xABu8; ID_LENGTH];
         let bytes = build_index_header("MyCodec", 7, &id, "suffix1");
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_err!(check_index_header(
             &mut input, "MyCodec", 5, 10, &id, "suffix2"
         ));
@@ -199,7 +199,7 @@ mod tests {
     fn check_index_header_empty_suffix() {
         let id = [0u8; ID_LENGTH];
         let bytes = build_index_header("MyCodec", 7, &id, "");
-        let mut input = IndexInput::new("test", &bytes);
+        let mut input = IndexInput::unnamed(&bytes);
         assert_ok!(check_index_header(&mut input, "MyCodec", 5, 10, &id, ""));
     }
 }

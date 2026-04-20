@@ -627,7 +627,7 @@ pub(crate) fn create_block_slice<'a>(
     } else {
         jump_table_entry_count as usize * 8
     };
-    data.sub_input("disi-blocks", offset, length - jump_table_bytes)
+    data.view("disi-blocks", offset, length - jump_table_bytes)
 }
 
 /// Slices the jump table portion from a parent input, or `None` if no jump table.
@@ -642,7 +642,7 @@ pub(crate) fn create_jump_table<'a>(
     } else {
         let jump_table_bytes = jump_table_entry_count as usize * 8;
         let jt_offset = offset + length - jump_table_bytes;
-        let slice = data.sub_input("disi-jumptable", jt_offset, jump_table_bytes)?;
+        let slice = data.view("disi-jumptable", jt_offset, jump_table_bytes)?;
         Ok(Some(slice))
     }
 }
@@ -912,7 +912,7 @@ mod tests {
 
     /// Opens an `IndexedDISI` over `bytes`. Caller must keep `bytes` alive.
     fn disi_over<'a>(bytes: &'a [u8], entry_count: i16, cost: i64) -> IndexedDISI<'a> {
-        let input = IndexInput::new("test", bytes);
+        let input = IndexInput::unnamed(bytes);
         IndexedDISI::new(
             &input,
             0,
@@ -1260,7 +1260,7 @@ mod tests {
     fn test_illegal_dense_rank_power() {
         // Ported from TestIndexedDISI.testIllegalDenseRankPower
         let (bytes, _) = write_and_get_bytes(&[0], 10);
-        let input = IndexInput::new("test", &bytes);
+        let input = IndexInput::unnamed(&bytes);
 
         for bad_power in [0u8, 1, 6, 16] {
             let result = IndexedDISI::new(&input, 0, bytes.len(), 0, bad_power, 1);
@@ -1289,7 +1289,7 @@ mod tests {
         let length = out.file_pointer() as usize - offset;
 
         let bytes = out.bytes().to_vec();
-        let input = IndexInput::new("test", &bytes);
+        let input = IndexInput::unnamed(&bytes);
         let mut disi = IndexedDISI::new(
             &input,
             offset,

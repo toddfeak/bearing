@@ -671,7 +671,7 @@ mod tests {
     fn test_valid_field_metadata_parses() {
         let data = valid_field_metadata_bytes();
         let fi = docs_field_infos();
-        let mut input = IndexInput::new("test", &data);
+        let mut input = IndexInput::unnamed(&data);
         let meta = read_field_metadata(&mut input, &fi).unwrap();
         assert_eq!(meta.field_number, 0);
         assert_eq!(meta.num_terms, 5);
@@ -688,7 +688,7 @@ mod tests {
         out.write_vlong(0).unwrap(); // num_terms = 0 (invalid)
 
         let fi = docs_field_infos();
-        let mut input = IndexInput::new("test", &buf);
+        let mut input = IndexInput::unnamed(&buf);
         let err = read_field_metadata(&mut input, &fi).unwrap_err();
         assert_contains!(err.to_string(), "invalid numTerms");
     }
@@ -701,7 +701,7 @@ mod tests {
         out.write_vlong(1).unwrap(); // num_terms
 
         let fi = docs_field_infos();
-        let mut input = IndexInput::new("test", &buf);
+        let mut input = IndexInput::unnamed(&buf);
         let err = read_field_metadata(&mut input, &fi).unwrap_err();
         assert_contains!(err.to_string(), "invalid field number");
     }
@@ -718,7 +718,7 @@ mod tests {
         out.write_vint(0).unwrap(); // max_term (empty)
 
         let fi = docs_field_infos();
-        let mut input = IndexInput::new("test", &buf);
+        let mut input = IndexInput::unnamed(&buf);
         let err = read_field_metadata(&mut input, &fi).unwrap_err();
         assert_contains!(err.to_string(), "invalid sumDocFreq");
     }
@@ -738,7 +738,7 @@ mod tests {
         out.write_vint(0).unwrap(); // min_term (empty)
         out.write_vint(0).unwrap(); // max_term (empty)
 
-        let mut input = IndexInput::new("test", &buf);
+        let mut input = IndexInput::unnamed(&buf);
         let err = read_field_metadata(&mut input, &fi).unwrap_err();
         assert_contains!(err.to_string(), "invalid sumTotalTermFreq");
     }

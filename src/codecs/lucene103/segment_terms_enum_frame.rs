@@ -1082,7 +1082,7 @@ mod tests {
         let fr = reader.field_reader(0).unwrap();
 
         let terms_bytes = reader.terms_bytes();
-        let mut terms_in = IndexInput::new("test", terms_bytes);
+        let mut terms_in = IndexInput::unnamed(terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"alpha").unwrap().unwrap();
 
@@ -1112,7 +1112,7 @@ mod tests {
         let fr = reader.field_reader(0).unwrap();
 
         let terms_bytes = reader.terms_bytes();
-        let mut terms_in = IndexInput::new("test", terms_bytes);
+        let mut terms_in = IndexInput::unnamed(terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"term_0000").unwrap().unwrap();
 
@@ -1134,7 +1134,7 @@ mod tests {
         let fr = reader.field_reader(0).unwrap();
 
         let terms_bytes = reader.terms_bytes();
-        let mut terms_in = IndexInput::new("test", terms_bytes);
+        let mut terms_in = IndexInput::unnamed(terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"hello").unwrap().unwrap();
 
@@ -1162,7 +1162,7 @@ mod tests {
         let fr = reader.field_reader(0).unwrap();
 
         let terms_bytes = reader.terms_bytes();
-        let mut terms_in = IndexInput::new("test", terms_bytes);
+        let mut terms_in = IndexInput::unnamed(terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"alpha").unwrap().unwrap();
 
@@ -1199,7 +1199,7 @@ mod tests {
         let fr = reader.field_reader(0).unwrap();
 
         let terms_bytes = reader.terms_bytes();
-        let mut terms_in = IndexInput::new("test", terms_bytes);
+        let mut terms_in = IndexInput::unnamed(terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"aaa").unwrap().unwrap();
 
@@ -1231,7 +1231,7 @@ mod tests {
         let fr = reader.field_reader(0).unwrap();
 
         let terms_bytes = reader.terms_bytes();
-        let mut terms_in = IndexInput::new("test", terms_bytes);
+        let mut terms_in = IndexInput::unnamed(terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"hello").unwrap().unwrap();
 
@@ -1267,7 +1267,7 @@ mod tests {
         let fr = reader.field_reader(0).unwrap();
 
         let terms_bytes = reader.terms_bytes();
-        let mut terms_in = IndexInput::new("test", terms_bytes);
+        let mut terms_in = IndexInput::unnamed(terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"alpha").unwrap().unwrap();
 
@@ -1306,7 +1306,7 @@ mod tests {
         let fr = reader.field_reader(0).unwrap();
 
         let terms_bytes = reader.terms_bytes();
-        let mut terms_in = IndexInput::new("test", terms_bytes);
+        let mut terms_in = IndexInput::unnamed(terms_bytes);
         let trie = fr.new_trie_reader().unwrap();
         let trie_result = trie.seek_to_block(b"hello").unwrap().unwrap();
 

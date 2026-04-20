@@ -18,6 +18,11 @@ use crate::encoding::group_vint;
 use crate::encoding::pfor;
 use crate::store::{string, varint};
 
+/// Sentinel name used by [`IndexInput::unnamed`] when the caller has no
+/// meaningful label to attach (e.g. tests, transient parsing buffers). Only
+/// surfaces in the [`fmt::Debug`] output.
+const UNNAMED: &str = "<unnamed>";
+
 pub(crate) struct IndexInput<'a> {
     name: String,
     cursor: Cursor<&'a [u8]>,
@@ -30,6 +35,12 @@ impl<'a> IndexInput<'a> {
             name: name.into(),
             cursor: Cursor::new(bytes),
         }
+    }
+
+    /// Constructs a new input over `bytes` without a meaningful name.
+    /// Equivalent to [`new`](Self::new) with the [`UNNAMED`] sentinel.
+    pub(crate) fn unnamed(bytes: &'a [u8]) -> Self {
+        Self::new(UNNAMED, bytes)
     }
 
     // ---------- identity / cursor state ----------
@@ -219,12 +230,12 @@ impl<'a> IndexInput<'a> {
         Ok(())
     }
 
-    // ---------- sub-view ----------
+    // ---------- derived view ----------
 
     /// Returns a new `IndexInput<'a>` borrowing a range of this input's
     /// bytes. The returned input has a fresh cursor at position 0. Does not
     /// mutate `self`.
-    pub(crate) fn sub_input(
+    pub(crate) fn view(
         &self,
         name: impl Into<String>,
         offset: usize,
@@ -233,10 +244,10 @@ impl<'a> IndexInput<'a> {
         let full: &'a [u8] = self.cursor.get_ref();
         let end = offset
             .checked_add(length)
-            .ok_or_else(|| io::Error::other("sub_input: offset + length overflow"))?;
+            .ok_or_else(|| io::Error::other("view: offset + length overflow"))?;
         if end > full.len() {
             return Err(io::Error::other(format!(
-                "sub_input out of range: offset={offset} length={length} source={}",
+                "view out of range: offset={offset} length={length} source={}",
                 full.len()
             )));
         }
@@ -305,7 +316,7 @@ mod tests {
     use crate::encoding::varint::{write_vint, write_vlong, write_zint};
 
     fn input_over(bytes: &[u8]) -> IndexInput<'_> {
-        IndexInput::new("test", bytes)
+        IndexInput::unnamed(bytes)
     }
 
     // ---------- identity / initial state ----------
@@ -530,7 +541,7 @@ mod tests {
     fn read_slice_returns_borrowed_bytes_with_outer_lifetime() {
         let source = [10u8, 20, 30, 40, 50];
         let slice = {
-            let mut input = IndexInput::new("t", &source[..]);
+            let mut input = IndexInput::unnamed(&source[..]);
             let s = input.read_slice(3).unwrap();
             assert_eq!(input.position(), 3);
             s
@@ -559,12 +570,12 @@ mod tests {
         assert_err!(input.skip_bytes(3));
     }
 
-    // ---------- sub_input ----------
+    // ---------- view ----------
 
     #[test]
-    fn sub_input_valid_bounds() {
+    fn view_valid_bounds() {
         let input = input_over(&[1, 2, 3, 4, 5]);
-        let mut sub = input.sub_input("sub", 1, 3).unwrap();
+        let mut sub = input.view("sub", 1, 3).unwrap();
         assert_eq!(sub.length(), 3);
         assert_eq!(sub.position(), 0);
         assert_eq!(sub.read_byte().unwrap(), 2);
@@ -573,22 +584,22 @@ mod tests {
     }
 
     #[test]
-    fn sub_input_offset_out_of_range_errors() {
+    fn view_offset_out_of_range_errors() {
         let input = input_over(&[1, 2, 3]);
-        assert_err!(input.sub_input("sub", 5, 1));
+        assert_err!(input.view("sub", 5, 1));
     }
 
     #[test]
-    fn sub_input_length_out_of_range_errors() {
+    fn view_length_out_of_range_errors() {
         let input = input_over(&[1, 2, 3]);
-        assert_err!(input.sub_input("sub", 1, 5));
+        assert_err!(input.view("sub", 1, 5));
     }
 
     #[test]
-    fn sub_input_nested() {
+    fn view_nested() {
         let input = input_over(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        let sub = input.sub_input("sub", 2, 5).unwrap();
-        let mut sub_sub = sub.sub_input("sub-sub", 1, 3).unwrap();
+        let sub = input.view("sub", 2, 5).unwrap();
+        let mut sub_sub = sub.view("sub-sub", 1, 3).unwrap();
         assert_eq!(sub_sub.length(), 3);
         assert_eq!(sub_sub.read_byte().unwrap(), 4);
         assert_eq!(sub_sub.read_byte().unwrap(), 5);
@@ -596,10 +607,10 @@ mod tests {
     }
 
     #[test]
-    fn sub_input_does_not_mutate_parent() {
+    fn view_does_not_mutate_parent() {
         let mut input = input_over(&[1, 2, 3, 4, 5]);
         input.seek(3).unwrap();
-        let sub = input.sub_input("sub", 1, 3).unwrap();
+        let sub = input.view("sub", 1, 3).unwrap();
         assert_eq!(sub.position(), 0);
         assert_eq!(input.position(), 3);
     }

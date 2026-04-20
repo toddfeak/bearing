@@ -296,7 +296,7 @@ impl StoredFieldsReader {
             .index_reader
             .block_start_pointer(block, self.fdx.as_bytes())?;
 
-        let mut stream = IndexInput::new("fdt", self.fdt.as_bytes());
+        let mut stream = IndexInput::unnamed(self.fdt.as_bytes());
         stream.seek(start_pointer as usize)?;
 
         // Read chunk header
@@ -441,7 +441,7 @@ fn decompress_lz4_with_dict(
 /// Decodes stored fields from decompressed data.
 fn decode_fields(data: &[u8], num_fields: usize) -> io::Result<Vec<StoredField>> {
     let mut fields = Vec::with_capacity(num_fields);
-    let mut reader = IndexInput::new("doc", data);
+    let mut reader = IndexInput::unnamed(data);
 
     for _ in 0..num_fields {
         let info_and_bits = reader.read_vlong()?;
@@ -782,17 +782,17 @@ mod tests {
         // Small int encoding: header = 0x80 + (1 + val)
         // val=0 -> header=0x81
         let data = [0x81u8];
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         assert_in_delta!(read_zfloat(&mut reader).unwrap(), 0.0, 0.001);
 
         // val=42 -> header=0x80+43=0xAB
         let data = [0xABu8];
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         assert_in_delta!(read_zfloat(&mut reader).unwrap(), 42.0, 0.001);
 
         // val=-1 -> header=0x80+0=0x80
         let data = [0x80u8];
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         assert_in_delta!(read_zfloat(&mut reader).unwrap(), -1.0, 0.001);
     }
 
@@ -800,12 +800,12 @@ mod tests {
     fn test_read_zdouble_small_int() {
         // val=0 -> header=0x81
         let data = [0x81u8];
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         assert_in_delta!(read_zdouble(&mut reader).unwrap(), 0.0, 0.001);
 
         // val=-1 -> header=0x80
         let data = [0x80u8];
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         assert_in_delta!(read_zdouble(&mut reader).unwrap(), -1.0, 0.001);
     }
 
@@ -814,7 +814,7 @@ mod tests {
         // val=5, no time encoding, no upper bits
         // zigzag(5) = 10, header = 0x00 | 10 = 0x0A
         let data = [0x0Au8];
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         assert_eq!(read_tlong(&mut reader).unwrap(), 5);
     }
 
@@ -824,7 +824,7 @@ mod tests {
         // val/SECOND = 5, zigzag(5) = 10
         // header = SECOND_ENCODING | 10 = 0x40 | 0x0A = 0x4A
         let data = [0x4Au8];
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         assert_eq!(read_tlong(&mut reader).unwrap(), 5000);
     }
 
@@ -832,7 +832,7 @@ mod tests {
     fn test_stored_fields_ints_uniform() {
         // All values equal: marker=0, VInt=42
         let data = [0x00u8, 42];
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         let mut values = vec![0i64; 4];
         read_stored_fields_ints(&mut reader, 4, &mut values).unwrap();
         assert_eq!(values, vec![42, 42, 42, 42]);
@@ -842,7 +842,7 @@ mod tests {
     fn test_stored_fields_ints_8bit() {
         // 3 values (< 128 block size), 8-bit packing, remainder path
         let data = [8u8, 10, 20, 30]; // marker=8, then 3 bytes
-        let mut reader = IndexInput::new("t", &data);
+        let mut reader = IndexInput::unnamed(&data);
         let mut values = vec![0i64; 3];
         read_stored_fields_ints(&mut reader, 3, &mut values).unwrap();
         assert_eq!(values, vec![10, 20, 30]);
@@ -858,7 +858,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".to_string());
         stored_fields::write_zfloat_for_test(&mut out, val).unwrap();
         let bytes = out.bytes();
-        let mut reader = IndexInput::new("t", bytes);
+        let mut reader = IndexInput::unnamed(bytes);
         read_zfloat(&mut reader).unwrap()
     }
 
@@ -867,7 +867,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".to_string());
         stored_fields::write_zdouble_for_test(&mut out, val).unwrap();
         let bytes = out.bytes();
-        let mut reader = IndexInput::new("t", bytes);
+        let mut reader = IndexInput::unnamed(bytes);
         read_zdouble(&mut reader).unwrap()
     }
 
@@ -876,7 +876,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".to_string());
         stored_fields::write_tlong_for_test(&mut out, val).unwrap();
         let bytes = out.bytes();
-        let mut reader = IndexInput::new("t", bytes);
+        let mut reader = IndexInput::unnamed(bytes);
         read_tlong(&mut reader).unwrap()
     }
 
@@ -885,7 +885,7 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".to_string());
         stored_fields::save_ints_for_test(values, values.len(), &mut out).unwrap();
         let bytes = out.bytes();
-        let mut reader = IndexInput::new("t", bytes);
+        let mut reader = IndexInput::unnamed(bytes);
         let mut result = vec![0i64; values.len()];
         if values.len() == 1 {
             result[0] = reader.read_vint().unwrap() as i64;
