@@ -11,7 +11,7 @@ use crate::index::field::Field;
 
 /// Specifies what information is stored in the index for a field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, MemSize)]
-#[mem_size_flat]
+#[mem_size(flat)]
 pub enum IndexOptions {
     /// Not indexed.
     None = 0,
@@ -56,7 +56,7 @@ pub struct TermOffset {
 
 /// Specifies the type of doc values stored for a field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, MemSize)]
-#[mem_size_flat]
+#[mem_size(flat)]
 pub enum DocValuesType {
     /// No doc values.
     None = 0,

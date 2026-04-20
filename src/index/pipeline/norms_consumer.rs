@@ -25,7 +25,7 @@ use crate::util::small_float;
 /// At flush time, reads norms from the accumulator and writes `.nvm`
 /// and `.nvd` via the norms codec.
 #[derive(Debug, Default, mem_dbg::MemSize)]
-#[mem_size_flat]
+#[mem_size(flat)]
 pub struct NormsConsumer {
     current_token_count: i32,
     current_has_norms: bool,

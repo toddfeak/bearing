@@ -24,7 +24,7 @@ use crate::util::string_helper;
 
 /// A single numeric doc value entry.
 #[derive(mem_dbg::MemSize)]
-#[mem_size_flat]
+#[mem_size(flat)]
 pub(crate) struct NumericDocValue {
     pub doc_id: i32,
     pub value: i64,

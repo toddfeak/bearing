@@ -14,7 +14,7 @@ use crate::document::{DocValuesType, IndexOptions};
 
 /// Configuration for point (BKD tree) dimensions.
 #[derive(Clone, Copy, Debug, Default, MemSize)]
-#[mem_size_flat]
+#[mem_size(flat)]
 pub struct PointDimensionConfig {
     pub dimension_count: u32,
     pub index_dimension_count: u32,
