@@ -6,8 +6,8 @@ use std::mem;
 
 use log::debug;
 
-use crate::codecs::codec_util;
 use crate::codecs::lucene90::points_reader::PointsProducer;
+use crate::codecs::{codec_footers, codec_headers};
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::FieldInfo;
 use crate::index::index_file_names;
@@ -82,21 +82,21 @@ pub(crate) fn write(
     let mut meta = directory.create_output(&kdm_name)?;
 
     // Write index headers to all 3 files
-    codec_util::write_index_header(
+    codec_headers::write_index_header(
         &mut *data,
         DATA_CODEC,
         FORMAT_VERSION,
         segment_id,
         segment_suffix,
     )?;
-    codec_util::write_index_header(
+    codec_headers::write_index_header(
         &mut *index,
         INDEX_CODEC,
         FORMAT_VERSION,
         segment_id,
         segment_suffix,
     )?;
-    codec_util::write_index_header(
+    codec_headers::write_index_header(
         &mut *meta,
         META_CODEC,
         FORMAT_VERSION,
@@ -139,15 +139,15 @@ pub(crate) fn write(
     meta.write_le_int(-1)?;
 
     // Write footers for index and data first (order matters for meta pointers)
-    codec_util::write_footer(&mut *index)?;
-    codec_util::write_footer(&mut *data)?;
+    codec_footers::write_footer(&mut *index)?;
+    codec_footers::write_footer(&mut *data)?;
 
     // Write total file sizes to meta
     meta.write_le_long(index.file_pointer() as i64)?;
     meta.write_le_long(data.file_pointer() as i64)?;
 
     // Write footer for meta
-    codec_util::write_footer(&mut *meta)?;
+    codec_footers::write_footer(&mut *meta)?;
 
     Ok(vec![kdd_name, kdi_name, kdm_name])
 }
@@ -223,7 +223,7 @@ fn write_bkd_field(
 
     // Write BKD metadata to .kdm
     // Simple header (NOT index header!)
-    codec_util::write_header(meta, BKD_CODEC, BKD_VERSION)?;
+    codec_headers::write_header(meta, BKD_CODEC, BKD_VERSION)?;
     meta.write_vint(num_dims as i32)?;
     meta.write_vint(num_index_dims as i32)?;
     meta.write_vint(MAX_POINTS_IN_LEAF)?;
@@ -912,7 +912,8 @@ fn recurse_pack_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::codec_util::{FOOTER_LENGTH, header_length, index_header_length};
+    use crate::codecs::codec_footers::FOOTER_LENGTH;
+    use crate::codecs::codec_headers::{header_length, index_header_length};
     use crate::codecs::lucene90::points_reader::BufferedPointsProducer;
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::{FieldInfo, PointDimensionConfig};

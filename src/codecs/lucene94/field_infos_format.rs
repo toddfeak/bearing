@@ -7,7 +7,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
-use crate::codecs::codec_util;
+use crate::codecs::{codec_footers, codec_headers};
 use crate::document::{DocValuesType, IndexOptions};
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
@@ -59,7 +59,7 @@ pub(crate) fn write(
     let file_name = index_file_names::segment_file_name(segment_name, segment_suffix, EXTENSION);
     let mut output = directory.create_output(&file_name)?;
 
-    codec_util::write_index_header(
+    codec_headers::write_index_header(
         &mut *output,
         CODEC_NAME,
         FORMAT_CURRENT,
@@ -141,7 +141,7 @@ pub(crate) fn write(
         output.write_byte(0)?;
     }
 
-    codec_util::write_footer(&mut *output)?;
+    codec_footers::write_footer(&mut *output)?;
 
     Ok(file_name)
 }

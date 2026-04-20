@@ -24,7 +24,7 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_util;
+use crate::codecs::codec_headers;
 use crate::codecs::lucene90::compound_reader::CompoundDirectory;
 use crate::codecs::lucene90::doc_values_producer::DocValuesReader;
 use crate::codecs::lucene90::norms_producer::NormsReader;
@@ -83,7 +83,7 @@ impl SegmentReader {
     pub fn open(
         directory: &dyn Directory,
         segment_name: &str,
-        segment_id: &[u8; codec_util::ID_LENGTH],
+        segment_id: &[u8; codec_headers::ID_LENGTH],
     ) -> io::Result<Self> {
         let si = segment_info_format::read(directory, segment_name, segment_id)?;
 

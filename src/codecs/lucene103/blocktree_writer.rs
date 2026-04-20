@@ -8,7 +8,6 @@ use std::str;
 
 use log::debug;
 
-use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::NormsLookup;
 use crate::codecs::fields_producer::{FieldTerms, PostingsEnumProducer};
 use crate::codecs::lucene103::postings_format::{
@@ -16,6 +15,7 @@ use crate::codecs::lucene103::postings_format::{
     IntBlockTermState, TERMS_CODEC, TERMS_CODEC_NAME, TERMS_EXTENSION, TERMS_INDEX_CODEC_NAME,
     TERMS_INDEX_EXTENSION, TERMS_META_CODEC_NAME, TERMS_META_EXTENSION, VERSION_CURRENT,
 };
+use crate::codecs::{codec_footers, codec_headers};
 use crate::document::IndexOptions;
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::encoding::{lowercase_ascii, lz4};
@@ -162,21 +162,21 @@ impl BlockTreeTermsWriter {
         let mut index_out = directory.create_output(&tip_name)?;
         let mut meta_out = directory.create_output(&tmd_name)?;
 
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *terms_out,
             TERMS_CODEC_NAME,
             BLOCKTREE_VERSION_CURRENT,
             id,
             suffix,
         )?;
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *index_out,
             TERMS_INDEX_CODEC_NAME,
             BLOCKTREE_VERSION_CURRENT,
             id,
             suffix,
         )?;
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *meta_out,
             TERMS_META_CODEC_NAME,
             BLOCKTREE_VERSION_CURRENT,
@@ -191,7 +191,13 @@ impl BlockTreeTermsWriter {
         // Write postings header into .tmd
         // In Java: postingsWriter.init(metaOut, state) writes TERMS_CODEC header + BLOCK_SIZE
         // to the metaOut (.tmd), not termsOut (.tim).
-        codec_util::write_index_header(&mut *meta_out, TERMS_CODEC, VERSION_CURRENT, id, suffix)?;
+        codec_headers::write_index_header(
+            &mut *meta_out,
+            TERMS_CODEC,
+            VERSION_CURRENT,
+            id,
+            suffix,
+        )?;
         meta_out.write_vint(postings_format::BLOCK_SIZE as i32)?;
 
         Ok(Self {
@@ -278,19 +284,19 @@ impl BlockTreeTermsWriter {
         }
 
         // Write .tip footer
-        codec_util::write_footer(&mut *self.index_out)?;
+        codec_footers::write_footer(&mut *self.index_out)?;
         // Write .tip end pointer to .tmd
         self.meta_out
             .write_le_long(self.index_out.file_pointer() as i64)?;
 
         // Write .tim footer
-        codec_util::write_footer(&mut *self.terms_out)?;
+        codec_footers::write_footer(&mut *self.terms_out)?;
         // Write .tim end pointer to .tmd
         self.meta_out
             .write_le_long(self.terms_out.file_pointer() as i64)?;
 
         // Write .tmd footer
-        codec_util::write_footer(&mut *self.meta_out)?;
+        codec_footers::write_footer(&mut *self.meta_out)?;
 
         // Collect file names
         all_names.push(self.terms_out.name().to_string());
@@ -1704,8 +1710,8 @@ mod tests {
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
         let tmd_bytes = dir.read_file(tmd_name).unwrap();
 
-        let meta_hdr_len = codec_util::index_header_length(TERMS_META_CODEC_NAME, "");
-        let terms_hdr_len = codec_util::index_header_length(TERMS_CODEC, "");
+        let meta_hdr_len = codec_headers::index_header_length(TERMS_META_CODEC_NAME, "");
+        let terms_hdr_len = codec_headers::index_header_length(TERMS_CODEC, "");
         let mut pos = meta_hdr_len + terms_hdr_len;
         let (_, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;
@@ -1753,8 +1759,8 @@ mod tests {
         let tmd_name = names.iter().find(|n| n.ends_with(".tmd")).unwrap();
         let tmd_bytes = dir.read_file(tmd_name).unwrap();
 
-        let meta_hdr_len = codec_util::index_header_length(TERMS_META_CODEC_NAME, "");
-        let terms_hdr_len = codec_util::index_header_length(TERMS_CODEC, "");
+        let meta_hdr_len = codec_headers::index_header_length(TERMS_META_CODEC_NAME, "");
+        let terms_hdr_len = codec_headers::index_header_length(TERMS_CODEC, "");
         let mut pos = meta_hdr_len + terms_hdr_len;
         let (_, n) = read_vint(&tmd_bytes[pos..]);
         pos += n;

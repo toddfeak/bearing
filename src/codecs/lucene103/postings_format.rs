@@ -3,8 +3,8 @@
 
 use std::io;
 
+use crate::codecs::codec_headers;
 use crate::codecs::codec_headers::check_index_header;
-use crate::codecs::codec_util;
 use crate::store::IndexInput;
 
 // --- Postings format constants ---
@@ -50,7 +50,7 @@ pub const DEFAULT_MAX_BLOCK_SIZE: usize = 48;
 /// `Lucene103PostingsReader::init` pattern).
 pub(crate) fn check_embedded_postings_header(
     input: &mut IndexInput<'_>,
-    segment_id: &[u8; codec_util::ID_LENGTH],
+    segment_id: &[u8; codec_headers::ID_LENGTH],
     segment_suffix: &str,
 ) -> io::Result<()> {
     check_index_header(

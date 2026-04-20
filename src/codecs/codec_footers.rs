@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Codec footer validation for codec-framed files.
+//! Codec footer read + write helpers.
+//!
+//! Owns everything related to the codec footer wire format:
+//!   - [`FOOTER_MAGIC`] / [`FOOTER_LENGTH`] constants
+//!   - [`write_footer`] (write side)
+//!   - [`verify_checksum`] / [`retrieve_checksum`] / [`retrieve_checksum_with_length`] (read side)
 //!
 //! Every codec-framed file ends with a 16-byte footer:
 //!   - 4 bytes: footer magic (big-endian [`FOOTER_MAGIC`])
 //!   - 4 bytes: algorithm ID (big-endian `0` = zlib CRC32)
 //!   - 8 bytes: stored CRC32 (big-endian) over every preceding byte
-//!
-//! Three entry points cover the validation strategies needed by codec readers:
-//!   - [`verify_checksum`] — full-file integrity (CRC over the body, then
-//!     compare to the stored value). Use for small metadata files.
-//!   - [`retrieve_checksum`] — O(1) footer-only check (magic + algorithm,
-//!     read stored CRC without recomputing). Use for large data files at
-//!     open time, matching Java's `CodecUtil.retrieveChecksum`.
-//!   - [`retrieve_checksum_with_length`] — same as [`retrieve_checksum`]
-//!     plus a file-length check.
 
 use std::io;
 
+use log::debug;
+
+use crate::store::IndexOutput;
 use crate::store::checksum::CRC32;
 
 /// Footer length in bytes: 4 (magic) + 4 (algorithm ID) + 8 (stored CRC).
@@ -25,7 +24,19 @@ pub(crate) const FOOTER_LENGTH: usize = 16;
 
 /// Footer magic (big-endian `i32`). Bitwise NOT of the codec header magic
 /// (`0x3FD76C17`).
-const FOOTER_MAGIC: i32 = !(0x3FD76C17_u32 as i32);
+pub(crate) const FOOTER_MAGIC: i32 = !(0x3FD76C17_u32 as i32);
+
+/// Writes the codec footer: magic (BE), algorithm ID 0 (BE), CRC32 (BE long).
+/// The CRC32 covers all bytes written to the output before the footer, plus
+/// the first 8 bytes of the footer itself (magic + algorithm).
+pub(crate) fn write_footer(out: &mut dyn IndexOutput) -> io::Result<()> {
+    out.write_be_int(FOOTER_MAGIC)?;
+    out.write_be_int(0)?; // algorithm ID = 0 (zlib crc32)
+    let checksum = out.checksum();
+    debug!("write_footer: checksum=0x{checksum:08x}");
+    out.write_be_long(checksum as i64)?;
+    Ok(())
+}
 
 /// Verifies the trailing codec footer of `bytes`.
 ///
@@ -286,5 +297,67 @@ mod tests {
     fn retrieve_checksum_with_length_below_footer_errors() {
         let bytes = with_valid_footer(b"hello");
         assert_err!(retrieve_checksum_with_length(&bytes, 8));
+    }
+
+    // Write-side tests
+
+    use std::io::Write;
+
+    use crate::store::DataOutput;
+    use crate::store::memory::MemoryIndexOutput;
+
+    #[test]
+    fn test_write_footer() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+
+        // Write some data first
+        out.write_all(b"hello").unwrap();
+
+        write_footer(&mut out).unwrap();
+        let bytes = out.bytes();
+
+        // Total: 5 (data) + 16 (footer) = 21
+        assert_len_eq_x!(&bytes, 21);
+
+        // Footer magic (BE): ~0x3fd76c17 = 0xC02893E8
+        let footer_start = 5;
+        assert_eq!(bytes[footer_start], 0xc0);
+        assert_eq!(bytes[footer_start + 1], 0x28);
+        assert_eq!(bytes[footer_start + 2], 0x93);
+        assert_eq!(bytes[footer_start + 3], 0xe8);
+
+        // Algorithm ID (BE): 0
+        assert_eq!(&bytes[footer_start + 4..footer_start + 8], &[0, 0, 0, 0]);
+
+        // CRC32 is a BE long (8 bytes) — upper 32 bits should be 0
+        assert_eq!(&bytes[footer_start + 8..footer_start + 12], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_footer_covers_preceding_bytes() {
+        // The CRC in the footer covers all bytes up to and including
+        // the first 8 bytes of the footer (magic + algorithm ID)
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        out.write_all(b"test data").unwrap();
+
+        let checksum_before_crc = {
+            let mut out2 = MemoryIndexOutput::new("test2".to_string());
+            out2.write_all(b"test data").unwrap();
+            out2.write_be_int(FOOTER_MAGIC).unwrap();
+            out2.write_be_int(0).unwrap();
+            out2.checksum()
+        };
+
+        write_footer(&mut out).unwrap();
+        let bytes = out.bytes();
+
+        let footer_crc_offset = bytes.len() - 8;
+        let written_crc = u64::from_be_bytes(
+            bytes[footer_crc_offset..footer_crc_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
+
+        assert_eq!(written_crc, checksum_before_crc);
     }
 }

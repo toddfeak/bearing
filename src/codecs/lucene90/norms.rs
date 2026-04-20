@@ -5,9 +5,9 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_util;
 use crate::codecs::lucene90::indexed_disi;
 use crate::codecs::lucene90::norms_producer::NormsProducer;
+use crate::codecs::{codec_footers, codec_headers};
 use crate::index::FieldInfo;
 use crate::index::index_file_names;
 use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
@@ -62,8 +62,8 @@ pub(crate) fn write(
     let mut nvm = directory.create_output(&nvm_name)?;
     let mut nvd = directory.create_output(&nvd_name)?;
 
-    codec_util::write_index_header(&mut *nvm, META_CODEC, VERSION, segment_id, segment_suffix)?;
-    codec_util::write_index_header(&mut *nvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_headers::write_index_header(&mut *nvm, META_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_headers::write_index_header(&mut *nvd, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
 
     for &field_info in field_infos {
         add_norms_field(field_info, producer, max_doc, &mut *nvm, &mut *nvd)?;
@@ -72,8 +72,8 @@ pub(crate) fn write(
     // EOF marker
     nvm.write_le_int(-1)?;
 
-    codec_util::write_footer(&mut *nvm)?;
-    codec_util::write_footer(&mut *nvd)?;
+    codec_footers::write_footer(&mut *nvm)?;
+    codec_footers::write_footer(&mut *nvd)?;
 
     Ok(vec![nvm_name, nvd_name])
 }
@@ -217,7 +217,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::codecs::codec_util::{FOOTER_LENGTH, index_header_length};
+    use crate::codecs::codec_footers::FOOTER_LENGTH;
+    use crate::codecs::codec_headers::index_header_length;
     use crate::codecs::lucene90::norms_producer::BufferedNormsProducer;
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::field_infos::PointDimensionConfig;

@@ -7,13 +7,13 @@ use std::mem;
 
 use log::debug;
 
-use crate::codecs::codec_util;
 use crate::codecs::competitive_impact::{CompetitiveImpactAccumulator, Impact, NormsLookup};
 use crate::codecs::fields_producer::{NO_MORE_DOCS, PostingsEnumProducer};
 use crate::codecs::lucene103::postings_format::{
     self, DOC_CODEC, DOC_EXTENSION, IntBlockTermState, META_CODEC, META_EXTENSION, PAY_CODEC,
     PAY_EXTENSION, POS_CODEC, POS_EXTENSION, VERSION_CURRENT,
 };
+use crate::codecs::{codec_footers, codec_headers};
 use crate::document::{IndexOptions, TermOffset};
 use crate::encoding::pfor::{self, BLOCK_SIZE};
 use crate::encoding::write_encoding::WriteEncoding;
@@ -413,14 +413,26 @@ impl PostingsWriter {
             None
         };
 
-        codec_util::write_index_header(&mut *doc_out, DOC_CODEC, VERSION_CURRENT, id, suffix)?;
-        codec_util::write_index_header(&mut *meta_out, META_CODEC, VERSION_CURRENT, id, suffix)?;
+        codec_headers::write_index_header(&mut *doc_out, DOC_CODEC, VERSION_CURRENT, id, suffix)?;
+        codec_headers::write_index_header(&mut *meta_out, META_CODEC, VERSION_CURRENT, id, suffix)?;
 
         if let Some(ref mut pos_out) = pos_out {
-            codec_util::write_index_header(&mut **pos_out, POS_CODEC, VERSION_CURRENT, id, suffix)?;
+            codec_headers::write_index_header(
+                &mut **pos_out,
+                POS_CODEC,
+                VERSION_CURRENT,
+                id,
+                suffix,
+            )?;
         }
         if let Some(ref mut pay_out) = pay_out {
-            codec_util::write_index_header(&mut **pay_out, PAY_CODEC, VERSION_CURRENT, id, suffix)?;
+            codec_headers::write_index_header(
+                &mut **pay_out,
+                PAY_CODEC,
+                VERSION_CURRENT,
+                id,
+                suffix,
+            )?;
         }
 
         Ok(Self {
@@ -816,16 +828,16 @@ impl PostingsWriter {
         let mut names = Vec::new();
 
         // Write .doc footer
-        codec_util::write_footer(&mut *self.doc_out)?;
+        codec_footers::write_footer(&mut *self.doc_out)?;
 
         // Write .pos footer if present
         if let Some(ref mut pos_out) = self.pos_out {
-            codec_util::write_footer(&mut **pos_out)?;
+            codec_footers::write_footer(&mut **pos_out)?;
         }
 
         // Write .pay footer if present
         if let Some(ref mut pay_out) = self.pay_out {
-            codec_util::write_footer(&mut **pay_out)?;
+            codec_footers::write_footer(&mut **pay_out)?;
         }
 
         // Write .psm metadata: impact stats + file lengths + footer
@@ -843,7 +855,7 @@ impl PostingsWriter {
                 self.meta_out.write_le_long(pay_out.file_pointer() as i64)?;
             }
         }
-        codec_util::write_footer(&mut *self.meta_out)?;
+        codec_footers::write_footer(&mut *self.meta_out)?;
 
         names.push(self.doc_out.name().to_string());
         if let Some(ref pos_out) = self.pos_out {
@@ -1029,7 +1041,7 @@ mod tests {
         assert_eq!(state.doc_freq, 1);
         assert_eq!(state.singleton_doc_id, 5);
         // Nothing written to .doc beyond the header
-        let header_size = codec_util::index_header_length(DOC_CODEC, "");
+        let header_size = codec_headers::index_header_length(DOC_CODEC, "");
         assert_eq!(pw.doc_out.file_pointer() as usize, header_size);
     }
 
@@ -1112,8 +1124,8 @@ mod tests {
         let names = pw.finish().unwrap();
         let pos_name = names.iter().find(|n| n.ends_with(".pos")).unwrap();
         let pos_data = dir.read_file(pos_name).unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
-        let footer_size = codec_util::FOOTER_LENGTH;
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
+        let footer_size = codec_footers::FOOTER_LENGTH;
         let pos_bytes = &pos_data[pos_header_size..pos_data.len() - footer_size];
         // 4 positions with deltas: [0, 5, 10] -> deltas [0, 5, 5], [3] -> delta [3]
         // VInt encoding: 0, 5, 5, 3 = 4 bytes (all single-byte VInts)
@@ -1161,7 +1173,7 @@ mod tests {
 
         // Verify PFOR block was written (pos data starts with a PFOR token byte)
         let pos_out = pw.pos_out.as_ref().unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
         // Must have written something (PFOR block, not empty)
         assert_gt!(pos_data_len, 0);
@@ -1203,7 +1215,7 @@ mod tests {
 
         // Verify the .pos file has data (PFOR block + VInt tail)
         let pos_out = pw.pos_out.as_ref().unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
         assert_gt!(
             pos_data_len,
@@ -1254,7 +1266,7 @@ mod tests {
         assert_ne!(state.last_pos_block_offset, -1);
 
         let pos_out = pw.pos_out.as_ref().unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
 
         // Must have written data (2 PFOR blocks + 44 VInt tail)
@@ -1304,7 +1316,7 @@ mod tests {
         assert_ne!(state.last_pos_block_offset, -1);
 
         let pos_out = pw.pos_out.as_ref().unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
 
         // 2 PFOR blocks, no VInt tail
@@ -1352,7 +1364,7 @@ mod tests {
 
         // Verify positions were written (no panic from negative deltas)
         let pos_out = pw.pos_out.as_ref().unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
         assert_gt!(pos_out.file_pointer() as usize, pos_header_size);
     }
 
@@ -1388,7 +1400,7 @@ mod tests {
         assert_eq!(state.last_pos_block_offset, -1);
 
         let pos_out = pw.pos_out.as_ref().unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
 
         // Deltas are all 1000 (except first which is 0). bits_required(1000) = 10.
@@ -1442,7 +1454,7 @@ mod tests {
         assert_ne!(state.last_pos_block_offset, -1);
 
         let pos_out = pw.pos_out.as_ref().unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
         let pos_data_len = pos_out.file_pointer() as usize - pos_header_size;
 
         // With varied deltas (max ~15, ~4 bpv), PFOR should be much smaller than VInt.
@@ -1507,7 +1519,7 @@ mod tests {
             let data = dir.read_file(name).unwrap();
             assert_ge!(
                 data.len(),
-                codec_util::FOOTER_LENGTH,
+                codec_footers::FOOTER_LENGTH,
                 "file {name} too small: {} bytes",
                 data.len()
             );
@@ -1714,7 +1726,7 @@ mod tests {
 
         // Verify pos data was written
         let pos_out = pw.pos_out.as_ref().unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
         assert_gt!(pos_out.file_pointer() as usize, pos_header_size);
     }
 
@@ -1827,7 +1839,7 @@ mod tests {
         let psm_data = dir.read_file(psm_name).unwrap();
 
         // Parse the 4 LE i32 metadata fields after the codec header
-        let header_size = codec_util::index_header_length(META_CODEC, "");
+        let header_size = codec_headers::index_header_length(META_CODEC, "");
         let meta = &psm_data[header_size..];
         let max_num_impacts_l0 = i32::from_le_bytes(meta[0..4].try_into().unwrap());
         let max_impact_bytes_l0 = i32::from_le_bytes(meta[4..8].try_into().unwrap());
@@ -1984,7 +1996,7 @@ mod tests {
         let psm_name = names.iter().find(|n| n.ends_with(".psm")).unwrap();
         let psm_data = dir.read_file(psm_name).unwrap();
 
-        let header_size = codec_util::index_header_length(META_CODEC, "");
+        let header_size = codec_headers::index_header_length(META_CODEC, "");
         let meta = &psm_data[header_size..];
         let max_num_impacts_l1 = i32::from_le_bytes(meta[8..12].try_into().unwrap());
         let max_impact_bytes_l1 = i32::from_le_bytes(meta[12..16].try_into().unwrap());
@@ -2084,8 +2096,8 @@ mod tests {
         let names = pw.finish().unwrap();
         let pos_name = names.iter().find(|n| n.ends_with(".pos")).unwrap();
         let pos_data = dir.read_file(pos_name).unwrap();
-        let pos_header_size = codec_util::index_header_length(POS_CODEC, "");
-        let footer_size = codec_util::FOOTER_LENGTH;
+        let pos_header_size = codec_headers::index_header_length(POS_CODEC, "");
+        let footer_size = codec_footers::FOOTER_LENGTH;
         let pos_bytes = &pos_data[pos_header_size..pos_data.len() - footer_size];
         // 4 positions + offset VInts: must be > 4 bytes (positions alone would be 4)
         assert_gt!(
@@ -2141,8 +2153,8 @@ mod tests {
         let pay_name = names.iter().find(|n| n.ends_with(".pay"));
         assert_some!(&pay_name);
         let pay_data = dir.read_file(pay_name.unwrap()).unwrap();
-        let pay_header_size = codec_util::index_header_length(PAY_CODEC, "");
-        let footer_size = codec_util::FOOTER_LENGTH;
+        let pay_header_size = codec_headers::index_header_length(PAY_CODEC, "");
+        let footer_size = codec_footers::FOOTER_LENGTH;
         let pay_bytes = &pay_data[pay_header_size..pay_data.len() - footer_size];
         // PFOR offset blocks should have produced data
         assert_gt!(

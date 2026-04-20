@@ -7,7 +7,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
-use crate::codecs::codec_util;
+use crate::codecs::{codec_footers, codec_headers};
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::SegmentInfo;
 use crate::index::index_file_names;
@@ -60,7 +60,7 @@ pub(crate) fn write(
         files.len()
     );
 
-    codec_util::write_index_header(
+    codec_headers::write_index_header(
         &mut *output,
         CODEC_NAME,
         VERSION_CURRENT,
@@ -108,7 +108,7 @@ pub(crate) fn write(
     // numSortFields = 0
     output.write_vint(0)?;
 
-    codec_util::write_footer(&mut *output)?;
+    codec_footers::write_footer(&mut *output)?;
 
     Ok(file_name)
 }
@@ -119,7 +119,7 @@ pub(crate) fn write(
 pub fn read(
     directory: &dyn Directory,
     segment_name: &str,
-    segment_id: &[u8; codec_util::ID_LENGTH],
+    segment_id: &[u8; codec_headers::ID_LENGTH],
 ) -> io::Result<SegmentInfo> {
     let handle = CodecFileHandle::open(
         directory,

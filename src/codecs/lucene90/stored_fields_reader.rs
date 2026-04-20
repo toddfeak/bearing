@@ -9,7 +9,7 @@ use std::io;
 use std::str;
 
 use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
-use crate::codecs::codec_util;
+use crate::codecs::codec_headers;
 use crate::codecs::lucene90::stored_fields::{
     DAY, DAY_ENCODING, HOUR, HOUR_ENCODING, SECOND, SECOND_ENCODING, TYPE_BITS, TYPE_BYTE_ARR,
     TYPE_NUMERIC_DOUBLE, TYPE_NUMERIC_FLOAT, TYPE_NUMERIC_INT, TYPE_NUMERIC_LONG, TYPE_STRING,
@@ -179,7 +179,7 @@ impl StoredFieldsReader {
         directory: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
-        segment_id: &[u8; codec_util::ID_LENGTH],
+        segment_id: &[u8; codec_headers::ID_LENGTH],
     ) -> io::Result<Self> {
         let fdt = CodecFileHandle::open(
             directory,

@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Codec header validation against [`IndexInput`].
+//! Codec header read + write helpers and the segment-ID type alias.
 //!
-//! Mirrors `codecs::codec_util::{check_header, check_index_header}` but reads
-//! through the [`IndexInput`] struct instead of `&mut dyn DataInput`.
+//! Owns everything related to the codec header wire format:
+//!   - [`CODEC_MAGIC`] / [`ID_LENGTH`] constants
+//!   - [`write_header`] / [`write_index_header`] (write side)
+//!   - [`check_header`] / [`check_index_header`] (read side, against [`IndexInput`])
+//!   - [`header_length`] / [`index_header_length`] (sizing helpers used by both)
 
 use std::io;
 
-use crate::store::IndexInput;
+use log::debug;
+
+use crate::encoding::write_encoding::WriteEncoding;
+use crate::store::{DataOutput, IndexInput};
 
 /// Magic number written at the start of every codec header (big-endian).
-const CODEC_MAGIC: i32 = 0x3FD76C17_u32 as i32;
+pub(crate) const CODEC_MAGIC: i32 = 0x3FD76C17_u32 as i32;
 
 /// Length of the segment ID in bytes.
-const ID_LENGTH: usize = 16;
+pub(crate) const ID_LENGTH: usize = 16;
 
 /// Reads and validates a codec header, returning the version.
 ///
@@ -82,6 +88,98 @@ pub(crate) fn check_index_header(
     }
 
     Ok(version)
+}
+
+/// Writes a codec header.
+///
+/// Format (all big-endian):
+///   - 4 bytes: `CODEC_MAGIC` (BE int)
+///   - N bytes: codec name (VInt length + UTF-8 string)
+///   - 4 bytes: version (BE int)
+///
+/// Returns the number of bytes written (= 9 + codec.len()).
+pub(crate) fn write_header(
+    mut out: &mut dyn DataOutput,
+    codec: &str,
+    version: i32,
+) -> io::Result<usize> {
+    validate_codec_name(codec)?;
+    out.write_be_int(CODEC_MAGIC)?;
+    out.write_string(codec)?;
+    out.write_be_int(version)?;
+    Ok(header_length(codec))
+}
+
+/// Writes an index header (header + segment ID + suffix).
+///
+/// Format:
+///   - header (`write_header`)
+///   - 16 bytes: segment ID
+///   - 1 byte: suffix length
+///   - N bytes: suffix bytes
+///
+/// Returns the number of bytes written.
+pub(crate) fn write_index_header(
+    out: &mut dyn DataOutput,
+    codec: &str,
+    version: i32,
+    id: &[u8; ID_LENGTH],
+    suffix: &str,
+) -> io::Result<usize> {
+    write_header(out, codec, version)?;
+    out.write_all(id)?;
+    let suffix_bytes = suffix.as_bytes();
+    if suffix_bytes.len() > 255 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("suffix too long: {}", suffix_bytes.len()),
+        ));
+    }
+    out.write_byte(suffix_bytes.len() as u8)?;
+    out.write_all(suffix_bytes)?;
+    debug!(
+        "write_index_header: codec={codec:?}, version={version}, suffix={suffix:?}, id={id:02x?}"
+    );
+    Ok(index_header_length(codec, suffix))
+}
+
+/// Returns the byte length of a codec header for the given codec name.
+/// 4 (magic) + 1+ (vint string length) + codec.len() + 4 (version).
+/// For ASCII codec names < 128 chars, the VInt is 1 byte.
+pub(crate) fn header_length(codec: &str) -> usize {
+    4 + vint_size(codec.len() as u32) + codec.len() + 4
+}
+
+/// Returns the byte length of an index header.
+pub(crate) fn index_header_length(codec: &str, suffix: &str) -> usize {
+    header_length(codec) + ID_LENGTH + 1 + suffix.len()
+}
+
+/// Returns the number of bytes needed to encode a value as a VInt.
+fn vint_size(mut val: u32) -> usize {
+    let mut size = 1;
+    while val > 0x7F {
+        val >>= 7;
+        size += 1;
+    }
+    size
+}
+
+/// Validates that a codec name is simple ASCII and not too long.
+fn validate_codec_name(codec: &str) -> io::Result<()> {
+    if codec.len() >= 128 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("codec name too long: {}", codec.len()),
+        ));
+    }
+    if !codec.bytes().all(|b| b.is_ascii_graphic() || b == b' ') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "codec name must be simple ASCII",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -201,5 +299,98 @@ mod tests {
         let bytes = build_index_header("MyCodec", 7, &id, "");
         let mut input = IndexInput::unnamed(&bytes);
         assert_ok!(check_index_header(&mut input, "MyCodec", 5, 10, &id, ""));
+    }
+
+    // Write-side tests
+
+    use crate::store::memory::MemoryIndexOutput;
+
+    #[test]
+    fn test_header_length() {
+        assert_eq!(header_length("FooBar"), 9 + 6);
+    }
+
+    #[test]
+    fn test_write_header() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let len = write_header(&mut out, "FooBar", 5).unwrap();
+        let bytes = out.bytes();
+
+        assert_eq!(len, 15);
+        assert_len_eq_x!(&bytes, 15);
+
+        // Magic (BE): 0x3fd76c17
+        assert_eq!(bytes[0], 0x3f);
+        assert_eq!(bytes[1], 0xd7);
+        assert_eq!(bytes[2], 0x6c);
+        assert_eq!(bytes[3], 0x17);
+
+        // String: VInt(6) = 0x06, then "FooBar"
+        assert_eq!(bytes[4], 6);
+        assert_eq!(&bytes[5..11], b"FooBar");
+
+        // Version (BE): 5
+        assert_eq!(bytes[11], 0);
+        assert_eq!(bytes[12], 0);
+        assert_eq!(bytes[13], 0);
+        assert_eq!(bytes[14], 5);
+    }
+
+    #[test]
+    fn test_write_index_header() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let id = [1u8; 16];
+        let len = write_index_header(&mut out, "FooBar", 5, &id, "xyz").unwrap();
+        let bytes = out.bytes();
+
+        // header(15) + 16(id) + 1(suffix len) + 3(suffix) = 35
+        assert_eq!(len, 35);
+        assert_len_eq_x!(&bytes, 35);
+
+        // ID starts at byte 15
+        assert_eq!(&bytes[15..31], &[1u8; 16]);
+
+        // Suffix length at byte 31
+        assert_eq!(bytes[31], 3);
+
+        // Suffix at bytes 32..35
+        assert_eq!(&bytes[32..35], b"xyz");
+    }
+
+    #[test]
+    fn test_validate_codec_name_empty() {
+        // Empty codec name is valid in Java
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        assert_ok!(write_header(&mut out, "", 0));
+    }
+
+    #[test]
+    fn test_validate_codec_name_too_long() {
+        let long_name: String = "a".repeat(128);
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        assert_err!(write_header(&mut out, &long_name, 0));
+    }
+
+    #[test]
+    fn test_validate_codec_name_non_ascii() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        assert_err!(write_header(&mut out, "bad\x01name", 0));
+    }
+
+    #[test]
+    fn test_index_header_suffix_too_long() {
+        let mut out = MemoryIndexOutput::new("test".to_string());
+        let id = [0u8; 16];
+        let long_suffix: String = "x".repeat(256);
+        assert_err!(write_index_header(&mut out, "Test", 1, &id, &long_suffix));
+    }
+
+    #[test]
+    fn test_vint_size_multi_byte() {
+        // header_length uses vint_size internally. A codec name of length 128+
+        // would need 2 vint bytes, but validate_codec_name rejects >= 128.
+        // So test via header_length with a 127-char name (vint = 1 byte).
+        let name = "a".repeat(127);
+        assert_eq!(header_length(&name), 4 + 1 + 127 + 4);
     }
 }

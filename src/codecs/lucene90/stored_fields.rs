@@ -8,8 +8,8 @@ use std::io::Write;
 
 use log::debug;
 
-use crate::codecs::codec_util;
 use crate::codecs::packed_writers::DirectMonotonicWriter;
+use crate::codecs::{codec_footers, codec_headers};
 use crate::document::StoredValue;
 use crate::encoding::lz4;
 use crate::encoding::write_encoding::WriteEncoding;
@@ -225,21 +225,21 @@ impl Lucene90StoredFieldsWriter {
         let mut fdx = directory.create_output(&fdx_name)?;
         let mut fdm = directory.create_output(&fdm_name)?;
 
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *fields_stream,
             FORMAT_NAME,
             FDT_VERSION,
             segment_id,
             segment_suffix,
         )?;
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *fdx,
             INDEX_CODEC_NAME_IDX,
             FDX_VERSION,
             segment_id,
             segment_suffix,
         )?;
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *fdm,
             INDEX_CODEC_NAME_META,
             FDM_VERSION,
@@ -443,7 +443,7 @@ impl StoredFieldsWriter for Lucene90StoredFieldsWriter {
             &mut **self.fdm.as_mut().unwrap(),
         )?;
 
-        codec_util::write_footer(&mut **self.fdx.as_mut().unwrap())?;
+        codec_footers::write_footer(&mut **self.fdx.as_mut().unwrap())?;
 
         self.fdm.as_mut().unwrap().write_le_long(max_pointer)?;
 
@@ -462,8 +462,8 @@ impl StoredFieldsWriter for Lucene90StoredFieldsWriter {
             .unwrap()
             .write_vlong(self.num_dirty_docs)?;
 
-        codec_util::write_footer(&mut **self.fdm.as_mut().unwrap())?;
-        codec_util::write_footer(&mut **self.fields_stream.as_mut().unwrap())?;
+        codec_footers::write_footer(&mut **self.fdm.as_mut().unwrap())?;
+        codec_footers::write_footer(&mut **self.fields_stream.as_mut().unwrap())?;
 
         assert!(self.buffered_docs.is_empty());
 
@@ -893,7 +893,7 @@ mod tests {
         let fdm = dir.read_file(&names[2]).unwrap();
         let fdx = dir.read_file(&names[1]).unwrap();
 
-        let hdr_len = codec_util::index_header_length(INDEX_CODEC_NAME_META, "");
+        let hdr_len = codec_headers::index_header_length(INDEX_CODEC_NAME_META, "");
         let mut pos = hdr_len;
 
         // chunkSize (VInt)
@@ -922,7 +922,7 @@ mod tests {
 
         // docsStartPointer
         let docs_start = i64::from_le_bytes(fdm[pos..pos + 8].try_into().unwrap());
-        let fdx_hdr_len = codec_util::index_header_length(INDEX_CODEC_NAME_IDX, "") as i64;
+        let fdx_hdr_len = codec_headers::index_header_length(INDEX_CODEC_NAME_IDX, "") as i64;
         assert_eq!(
             docs_start, fdx_hdr_len,
             "docsStartPointer should point right after .fdx header"

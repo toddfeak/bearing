@@ -15,8 +15,8 @@ use std::io;
 use crate::codecs::codec_footers::{
     FOOTER_LENGTH, retrieve_checksum, retrieve_checksum_with_length, verify_checksum,
 };
+use crate::codecs::codec_headers;
 use crate::codecs::codec_headers::check_index_header;
-use crate::codecs::codec_util;
 use crate::index::index_file_names;
 use crate::store::{Directory, FileBacking, IndexInput};
 
@@ -294,7 +294,7 @@ impl CodecFileHandle {
         directory: &dyn Directory,
         kind: IndexFile,
         segment_name: &str,
-        segment_id: &[u8; codec_util::ID_LENGTH],
+        segment_id: &[u8; codec_headers::ID_LENGTH],
         segment_suffix: &str,
     ) -> io::Result<Self> {
         let meta = kind.metadata();
@@ -331,7 +331,7 @@ impl CodecFileHandle {
             segment_suffix,
         )?;
 
-        let header_len = codec_util::index_header_length(meta.codec_name, segment_suffix);
+        let header_len = codec_headers::index_header_length(meta.codec_name, segment_suffix);
 
         Ok(Self {
             kind,

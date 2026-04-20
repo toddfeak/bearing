@@ -9,7 +9,7 @@ use std::io;
 
 use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_footers::FOOTER_LENGTH;
-use crate::codecs::codec_util;
+use crate::codecs::codec_headers;
 use crate::index::index_file_names;
 use crate::store::{Directory, FileBacking, IndexInput, IndexOutput};
 
@@ -45,7 +45,7 @@ impl<'a> CompoundDirectory<'a> {
     pub fn open(
         directory: &'a dyn Directory,
         segment_name: &str,
-        segment_id: &[u8; codec_util::ID_LENGTH],
+        segment_id: &[u8; codec_headers::ID_LENGTH],
     ) -> io::Result<Self> {
         let (version, entries) = read_entries(directory, segment_name, segment_id)?;
 
@@ -54,7 +54,7 @@ impl<'a> CompoundDirectory<'a> {
             .values()
             .map(|e| e.offset + e.length)
             .max()
-            .unwrap_or(codec_util::index_header_length(DATA_CODEC, "") as u64)
+            .unwrap_or(codec_headers::index_header_length(DATA_CODEC, "") as u64)
             + FOOTER_LENGTH as u64;
 
         let data_file_name = index_file_names::segment_file_name(segment_name, "", DATA_EXTENSION);
@@ -160,7 +160,7 @@ impl Directory for CompoundDirectory<'_> {
 fn read_entries(
     directory: &dyn Directory,
     segment_name: &str,
-    segment_id: &[u8; codec_util::ID_LENGTH],
+    segment_id: &[u8; codec_headers::ID_LENGTH],
 ) -> io::Result<(i32, HashMap<String, FileEntry>)> {
     let handle = CodecFileHandle::open(
         directory,
@@ -203,6 +203,7 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+    use crate::codecs::codec_footers;
     use crate::codecs::lucene90::compound;
     use crate::store::SharedDirectory;
     use crate::store::memory::MemoryIndexOutput;
@@ -211,9 +212,9 @@ mod tests {
 
     fn make_test_file(name: &str, segment_id: &[u8; 16], body: &[u8]) -> SegmentFile {
         let mut out = MemoryIndexOutput::new(name.to_string());
-        codec_util::write_index_header(&mut out, "TestCodec", 1, segment_id, "").unwrap();
+        codec_headers::write_index_header(&mut out, "TestCodec", 1, segment_id, "").unwrap();
         out.write_all(body).unwrap();
-        codec_util::write_footer(&mut out).unwrap();
+        codec_footers::write_footer(&mut out).unwrap();
         out.into_inner()
     }
 
@@ -277,9 +278,9 @@ mod tests {
         let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         let len = compound_dir.file_length("_0.fnm").unwrap();
-        let expected = codec_util::index_header_length("TestCodec", "") as u64
+        let expected = codec_headers::index_header_length("TestCodec", "") as u64
             + body.len() as u64
-            + codec_util::FOOTER_LENGTH as u64;
+            + codec_footers::FOOTER_LENGTH as u64;
         assert_eq!(len, expected);
     }
 
@@ -323,7 +324,7 @@ mod tests {
             let backing = compound_dir.open_file(name).unwrap();
             let mut input = IndexInput::new(name, backing.as_bytes());
             let magic = input.read_be_int().unwrap();
-            assert_eq!(magic, codec_util::CODEC_MAGIC, "bad magic for {name}");
+            assert_eq!(magic, codec_headers::CODEC_MAGIC, "bad magic for {name}");
         }
     }
 

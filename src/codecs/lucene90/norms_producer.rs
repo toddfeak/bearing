@@ -13,7 +13,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
-use crate::codecs::codec_util;
+use crate::codecs::codec_headers;
 use crate::codecs::lucene90::indexed_disi::IndexedDISI;
 use crate::index::doc_values_iterators::{DocValuesIterator, NumericDocValues};
 use crate::index::pipeline::segment_accumulator::PerFieldNormsData;
@@ -88,7 +88,7 @@ impl NormsReader {
         directory: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
-        segment_id: &[u8; codec_util::ID_LENGTH],
+        segment_id: &[u8; codec_headers::ID_LENGTH],
         field_infos: &FieldInfos,
         max_doc: i32,
     ) -> io::Result<Self> {

@@ -7,10 +7,10 @@ use std::mem;
 
 use log::debug;
 
-use crate::codecs::codec_util;
 use crate::codecs::lucene90::doc_values_producer::DocValuesProducer;
 use crate::codecs::lucene90::indexed_disi;
 use crate::codecs::packed_writers::{DirectMonotonicWriter, DirectWriter};
+use crate::codecs::{codec_footers, codec_headers};
 use crate::document::DocValuesType;
 use crate::encoding::lz4::{self, FastHashTable};
 use crate::encoding::packed::unsigned_bits_required;
@@ -121,8 +121,8 @@ pub(crate) fn write(
     let mut meta = directory.create_output(&dvm_name)?;
     let mut data = directory.create_output(&dvd_name)?;
 
-    codec_util::write_index_header(&mut *meta, META_CODEC, VERSION, segment_id, segment_suffix)?;
-    codec_util::write_index_header(&mut *data, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_headers::write_index_header(&mut *meta, META_CODEC, VERSION, segment_id, segment_suffix)?;
+    codec_headers::write_index_header(&mut *data, DATA_CODEC, VERSION, segment_id, segment_suffix)?;
 
     for &field_info in field_infos {
         meta.write_le_int(field_info.number() as i32)?;
@@ -187,8 +187,8 @@ pub(crate) fn write(
     meta.write_le_int(-1)?;
 
     // Write footers
-    codec_util::write_footer(&mut *meta)?;
-    codec_util::write_footer(&mut *data)?;
+    codec_footers::write_footer(&mut *meta)?;
+    codec_footers::write_footer(&mut *data)?;
 
     Ok(vec![dvm_name, dvd_name])
 }
@@ -991,7 +991,8 @@ fn write_terms_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::codec_util::{FOOTER_LENGTH, index_header_length};
+    use crate::codecs::codec_footers::FOOTER_LENGTH;
+    use crate::codecs::codec_headers::index_header_length;
     use crate::codecs::lucene90::doc_values_producer::BufferedDocValuesProducer;
     use crate::document::{DocValuesType, IndexOptions};
     use crate::index::FieldInfo;

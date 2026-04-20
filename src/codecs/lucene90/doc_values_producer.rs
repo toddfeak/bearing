@@ -15,7 +15,7 @@ use std::io;
 use log::debug;
 
 use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
-use crate::codecs::codec_util;
+use crate::codecs::codec_headers;
 use crate::codecs::lucene90::doc_values::{
     BINARY, DIRECT_MONOTONIC_BLOCK_SHIFT, NUMERIC, SORTED, SORTED_NUMERIC, SORTED_SET,
 };
@@ -112,7 +112,7 @@ impl DocValuesReader {
         directory: &dyn Directory,
         segment_name: &str,
         segment_suffix: &str,
-        segment_id: &[u8; codec_util::ID_LENGTH],
+        segment_id: &[u8; codec_headers::ID_LENGTH],
         field_infos: &FieldInfos,
     ) -> io::Result<Self> {
         let dvm = CodecFileHandle::open(

@@ -5,7 +5,7 @@ use std::io;
 
 use log::debug;
 
-use crate::codecs::codec_util;
+use crate::codecs::{codec_footers, codec_headers};
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::store::memory::MemoryIndexOutput;
@@ -36,8 +36,8 @@ pub(crate) fn write_to(
     let mut entries = MemoryIndexOutput::new(entries_file);
 
     // Write headers
-    codec_util::write_index_header(cfs_out, DATA_CODEC, VERSION_CURRENT, segment_id, "")?;
-    codec_util::write_index_header(&mut entries, ENTRY_CODEC, VERSION_CURRENT, segment_id, "")?;
+    codec_headers::write_index_header(cfs_out, DATA_CODEC, VERSION_CURRENT, segment_id, "")?;
+    codec_headers::write_index_header(&mut entries, ENTRY_CODEC, VERSION_CURRENT, segment_id, "")?;
 
     // Write file count
     entries.write_vint(files.len() as i32)?;
@@ -58,7 +58,7 @@ pub(crate) fn write_to(
         let file_bytes = &f.data;
         let file_len = file_bytes.len();
 
-        if file_len < codec_util::FOOTER_LENGTH {
+        if file_len < codec_footers::FOOTER_LENGTH {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("file too small to contain footer: {filename}"),
@@ -69,14 +69,14 @@ pub(crate) fn write_to(
         let start_offset = cfs_out.align_file_pointer(8)?;
 
         // Copy all bytes except the 16-byte footer
-        let body_len = file_len - codec_util::FOOTER_LENGTH;
+        let body_len = file_len - codec_footers::FOOTER_LENGTH;
         cfs_out.write_all(&file_bytes[..body_len])?;
 
         // Extract original checksum from footer (last 8 bytes, BE long)
         let checksum = i64::from_be_bytes(file_bytes[file_len - 8..file_len].try_into().unwrap());
 
         // Write custom footer with original checksum (not the compound file's running CRC)
-        cfs_out.write_be_int(codec_util::FOOTER_MAGIC)?;
+        cfs_out.write_be_int(codec_footers::FOOTER_MAGIC)?;
         cfs_out.write_be_int(0)?;
         cfs_out.write_be_long(checksum)?;
 
@@ -95,8 +95,8 @@ pub(crate) fn write_to(
     }
 
     // Write footers
-    codec_util::write_footer(cfs_out)?;
-    codec_util::write_footer(&mut entries)?;
+    codec_footers::write_footer(cfs_out)?;
+    codec_footers::write_footer(&mut entries)?;
 
     Ok(entries.into_inner())
 }
@@ -122,22 +122,23 @@ mod tests {
         Ok(vec![data.into_inner(), cfe])
     }
     use super::*;
-    use crate::codecs::codec_util::{CODEC_MAGIC, FOOTER_LENGTH, FOOTER_MAGIC};
+    use crate::codecs::codec_footers::{FOOTER_LENGTH, FOOTER_MAGIC};
+    use crate::codecs::codec_headers::CODEC_MAGIC;
     use crate::store::memory::MemoryIndexOutput;
     use crate::test_util::TestDataReader;
 
     /// Creates a fake segment file with a proper index header, body data, and footer.
     fn make_test_file(name: &str, segment_id: &[u8; 16], body: &[u8]) -> SegmentFile {
         let mut out = MemoryIndexOutput::new(name.to_string());
-        codec_util::write_index_header(&mut out, "TestCodec", 1, segment_id, "").unwrap();
+        codec_headers::write_index_header(&mut out, "TestCodec", 1, segment_id, "").unwrap();
         out.write_all(body).unwrap();
-        codec_util::write_footer(&mut out).unwrap();
+        codec_footers::write_footer(&mut out).unwrap();
         out.into_inner()
     }
 
     /// Returns the index header length for a given codec name and empty suffix.
     fn index_header_len(codec: &str) -> usize {
-        codec_util::index_header_length(codec, "")
+        codec_headers::index_header_length(codec, "")
     }
 
     // Ported from org.apache.lucene.codecs.lucene90.TestLucene90CompoundFormat

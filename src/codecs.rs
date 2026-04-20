@@ -4,7 +4,6 @@
 pub(crate) mod codec_file_handle;
 pub(crate) mod codec_footers;
 pub(crate) mod codec_headers;
-pub mod codec_util;
 pub mod competitive_impact;
 pub mod fields_producer;
 pub mod lucene103;

@@ -8,7 +8,7 @@ use log::debug;
 
 use crate::codecs::codec_footers::{FOOTER_LENGTH, verify_checksum};
 use crate::codecs::codec_headers::check_header;
-use crate::codecs::codec_util;
+use crate::codecs::{codec_footers, codec_headers};
 use crate::encoding::write_encoding::WriteEncoding;
 use crate::index::index_file_names;
 use crate::index::segment::FlushedSegment;
@@ -40,7 +40,7 @@ pub struct SegmentEntry {
     /// Segment name (e.g., "_0").
     pub name: String,
     /// Segment ID (16 bytes).
-    pub id: [u8; codec_util::ID_LENGTH],
+    pub id: [u8; codec_headers::ID_LENGTH],
     /// Codec name (e.g., "Lucene103").
     pub codec: String,
     /// Delete generation.
@@ -54,7 +54,7 @@ pub struct SegmentEntry {
     /// Number of soft-deleted documents.
     pub soft_del_count: i32,
     /// Segment commit info ID (optional).
-    pub sci_id: Option<[u8; codec_util::ID_LENGTH]>,
+    pub sci_id: Option<[u8; codec_headers::ID_LENGTH]>,
 }
 
 /// Result of reading a `segments_N` file.
@@ -136,7 +136,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
     check_header(&mut input, CODEC_NAME, VERSION_CURRENT, VERSION_CURRENT)?;
 
     // Read segment infos ID (16 bytes) — we discover it here
-    let mut _id = [0u8; codec_util::ID_LENGTH];
+    let mut _id = [0u8; codec_headers::ID_LENGTH];
     input.read_bytes(&mut _id)?;
 
     // Read and validate suffix (should match generation in base-36)
@@ -184,7 +184,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
     for _ in 0..num_segments {
         let seg_name = input.read_string()?;
 
-        let mut seg_id = [0u8; codec_util::ID_LENGTH];
+        let mut seg_id = [0u8; codec_headers::ID_LENGTH];
         input.read_bytes(&mut seg_id)?;
 
         let codec_name = input.read_string()?;
@@ -197,7 +197,7 @@ pub fn read(directory: &dyn Directory, segment_file_name: &str) -> io::Result<Se
 
         let sci_id = match input.read_byte()? {
             1 => {
-                let mut id = [0u8; codec_util::ID_LENGTH];
+                let mut id = [0u8; codec_headers::ID_LENGTH];
                 input.read_bytes(&mut id)?;
                 Some(id)
             }
@@ -281,7 +281,7 @@ fn write_flushed_segments(
     let mut output = directory.create_output(&pending_name)?;
 
     // Index header
-    codec_util::write_index_header(&mut *output, CODEC_NAME, VERSION_CURRENT, &id, &gen_suffix)?;
+    codec_headers::write_index_header(&mut *output, CODEC_NAME, VERSION_CURRENT, &id, &gen_suffix)?;
 
     // Lucene version
     output.write_vint(LUCENE_VERSION_MAJOR)?;
@@ -349,7 +349,7 @@ fn write_flushed_segments(
     output.write_map_of_strings(&HashMap::new())?;
 
     // Footer
-    codec_util::write_footer(&mut *output)?;
+    codec_footers::write_footer(&mut *output)?;
 
     // Flush the output before syncing
     drop(output);

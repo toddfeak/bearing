@@ -10,8 +10,8 @@ use mem_dbg::MemSize;
 
 use log::debug;
 
-use crate::codecs::codec_util;
 use crate::codecs::packed_writers::{BlockPackedWriter, DirectMonotonicWriter, DirectWriter};
+use crate::codecs::{codec_footers, codec_headers};
 use crate::encoding::lz4;
 use crate::encoding::packed::{packed_bits_required, packed_ints_write, unsigned_bits_required};
 use crate::encoding::write_encoding::WriteEncoding;
@@ -291,21 +291,21 @@ impl CompressingTermVectorsWriter {
         let mut index_stream = directory.create_output(&names[1])?;
         let mut meta_stream = directory.create_output(&names[2])?;
 
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *data_stream,
             DATA_CODEC,
             VERSION,
             segment_id,
             segment_suffix,
         )?;
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *index_stream,
             INDEX_CODEC_IDX,
             VERSION,
             segment_id,
             segment_suffix,
         )?;
-        codec_util::write_index_header(
+        codec_headers::write_index_header(
             &mut *meta_stream,
             INDEX_CODEC_META,
             VERSION,
@@ -570,7 +570,7 @@ impl CompressingTermVectorsWriter {
 
         self.meta_stream
             .write_le_long(self.index_stream.file_pointer() as i64)?;
-        codec_util::write_footer(&mut *self.index_stream)?;
+        codec_footers::write_footer(&mut *self.index_stream)?;
 
         self.meta_stream.write_le_long(max_pointer)?;
 
@@ -582,8 +582,8 @@ impl CompressingTermVectorsWriter {
         self.meta_stream.write_vlong(self.num_dirty_chunks)?;
         self.meta_stream.write_vlong(self.num_dirty_docs)?;
 
-        codec_util::write_footer(&mut *self.meta_stream)?;
-        codec_util::write_footer(&mut *self.data_stream)?;
+        codec_footers::write_footer(&mut *self.meta_stream)?;
+        codec_footers::write_footer(&mut *self.data_stream)?;
 
         Ok(())
     }
