@@ -29,13 +29,6 @@ This project exists at the intersection of learning and building. It's an exerci
 
 ## Quick Start
 
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-bearing = "0.1.0-alpha.4"
-```
-
 ### Indexing
 
 ```rust
