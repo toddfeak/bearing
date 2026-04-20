@@ -75,8 +75,7 @@ To add a new Java utility:
 Compare indexing speed, memory usage, and correctness between Java Lucene and Rust:
 
 ```bash
-./tests/compare_index_perf.sh                                  # default: MT, release, verify
-./tests/compare_index_perf.sh --1t                             # also run single-threaded
+./tests/compare_index_perf.sh                                  # default: release, verify
 ./tests/compare_index_perf.sh --debug                          # debug build
 ./tests/compare_index_perf.sh -docs /tmp/perf-docs --no-verify # large corpus, skip verify
 ```
@@ -85,8 +84,7 @@ Compare indexing speed, memory usage, and correctness between Java Lucene and Ru
 |---|---|---|
 | `-docs DIR` | `testdata/docs` | Documents directory |
 | `--debug` | release | Build Rust in debug mode |
-| `--threads N` | `12` | Thread count for multi-threaded runs |
-| `--1t` | off | Also run single-threaded (1T) for both Java and Rust |
+| `--threads N` | `8` | Thread count for indexing |
 | `--no-verify` | verify on | Skip VerifyIndex validation |
 | `--compound` | off | Use compound file format (.cfs/.cfe) |
 
@@ -106,7 +104,7 @@ average query time.
 | Flag | Default | Description |
 |---|---|---|
 | `-docs DIR` | *(required)* | Documents directory |
-| `--threads N` | `12` | Thread count for indexing |
+| `--threads N` | `8` | Thread count for indexing |
 
 ## CLI Reference
 
@@ -122,7 +120,7 @@ cargo run --bin indexfiles -- -docs <DOCS_PATH> [OPTIONS]
 | `-index PATH` | `index` | Output directory for the index |
 | `--max-buffered-docs N` | disabled | Flush after N documents per segment |
 | `--ram-buffer-size MB` | `64.0` | RAM buffer size in MB |
-| `--threads N` | `1` | Number of indexing threads |
+| `--threads N` | `8` | Number of indexing threads |
 | `--compound` | off | Package segment files into .cfs/.cfe |
 
 ## Test Data
@@ -151,6 +149,6 @@ Always run heaptrack on the compiled binary directly — not via `cargo run`:
 
 ```bash
 cargo build --release
-heaptrack --record-only -o /tmp/heaptrack_%p target/release/indexfiles -docs <DOCS_PATH> -index /tmp/heap-idx --threads 12
+heaptrack --record-only -o /tmp/heaptrack_%p target/release/indexfiles -docs <DOCS_PATH> -index /tmp/heap-idx --threads 8
 heaptrack_print /tmp/heaptrack_<PID>.zst
 ```

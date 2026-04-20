@@ -25,7 +25,7 @@ fn test_index_writer_files_readable() {
     use bearing::index::field::{keyword, text};
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -56,7 +56,7 @@ fn test_index_writer_codec_files_have_valid_headers() {
     use bearing::index::field::{keyword, text};
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -93,7 +93,7 @@ fn test_read_segments_from_index_writer() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -124,7 +124,7 @@ fn test_read_segments_multiple_docs() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -157,7 +157,7 @@ fn test_read_segments_memory_directory() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -187,7 +187,9 @@ fn test_read_segments_compound_mode() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default().use_compound_file(true);
+    let config = IndexWriterConfig::default()
+        .num_threads(1)
+        .use_compound_file(true);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -218,7 +220,9 @@ fn test_compound_directory_list_files() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default().use_compound_file(true);
+    let config = IndexWriterConfig::default()
+        .num_threads(1)
+        .use_compound_file(true);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -250,7 +254,9 @@ fn test_compound_directory_read_embedded_file() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default().use_compound_file(true);
+    let config = IndexWriterConfig::default()
+        .num_threads(1)
+        .use_compound_file(true);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -286,7 +292,9 @@ fn test_compound_directory_memory() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default().use_compound_file(true);
+    let config = IndexWriterConfig::default()
+        .num_threads(1)
+        .use_compound_file(true);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -326,7 +334,7 @@ fn test_stored_fields_reader_round_trip() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -394,7 +402,7 @@ fn test_stored_fields_reader_all_types() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -470,7 +478,7 @@ fn test_stored_fields_reader_many_docs() {
     use bearing::index::segment_infos;
     use bearing::index::writer::IndexWriter;
 
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 

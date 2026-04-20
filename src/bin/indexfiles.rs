@@ -38,7 +38,7 @@ fn parse_args() -> CliArgs {
     let mut docs_path: Option<String> = None;
     let mut max_buffered_docs: i32 = -1;
     let mut ram_buffer_size_mb: f64 = -1.0;
-    let mut num_threads: usize = 1;
+    let mut num_threads: usize = 8;
     let mut use_compound_file: bool = false;
 
     let mut i = 1;
@@ -382,7 +382,7 @@ fn print_usage() {
          Options:\n\
          \t--max-buffered-docs N  Flush after N docs per segment (-1 = disabled)\n\
          \t--ram-buffer-size MB   RAM buffer size in MB (default: 64.0)\n\
-         \t--threads N            Number of indexing threads (default: 1)\n\
+         \t--threads N            Number of indexing threads (default: 8)\n\
          \t--compound             Package segment files into .cfs/.cfe (default: non-compound)"
     );
 }

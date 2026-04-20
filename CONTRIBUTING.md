@@ -66,7 +66,7 @@ Requires Java 21+. Gradle handles the Lucene dependency automatically.
 Compare indexing speed and correctness between Java Lucene and Rust:
 
 ```bash
-./tests/compare_index_perf.sh -release --threads 12
+./tests/compare_index_perf.sh -release --threads 8
 ./tests/compare_index_perf.sh -docs /tmp/perf-docs -release
 ```
 

@@ -291,7 +291,9 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn write_test_index(compound: bool) -> (SharedDirectory, String, [u8; 16]) {
-        let config = IndexWriterConfig::default().use_compound_file(compound);
+        let config = IndexWriterConfig::default()
+            .num_threads(1)
+            .use_compound_file(compound);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -506,7 +508,7 @@ mod tests {
     #[test]
     fn test_postings_many_docs() {
         // Write 200 docs to exercise full block + VInt tail
-        let config = IndexWriterConfig::default();
+        let config = IndexWriterConfig::default().num_threads(1);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -573,7 +575,7 @@ mod tests {
         // KeywordField has omit_norms=true, no TextField => no norms
         use crate::index::field::keyword;
 
-        let config = IndexWriterConfig::default();
+        let config = IndexWriterConfig::default().num_threads(1);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 

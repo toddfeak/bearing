@@ -530,7 +530,7 @@ mod tests {
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn build_test_index() -> (SharedDirectory, DirectoryReader) {
-        let config = IndexWriterConfig::default();
+        let config = IndexWriterConfig::default().num_threads(1);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 

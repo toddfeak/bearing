@@ -623,7 +623,7 @@ mod tests {
     /// Write a simple index and read stored fields back via StoredFieldsReader.
     fn write_and_read_stored(docs: Vec<Document>) -> (SharedDirectory, Vec<Vec<StoredField>>) {
         let num_docs = docs.len();
-        let config = IndexWriterConfig::default();
+        let config = IndexWriterConfig::default().num_threads(1);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
@@ -1016,7 +1016,7 @@ mod tests {
             docs.push(doc);
         }
 
-        let config = IndexWriterConfig::default();
+        let config = IndexWriterConfig::default().num_threads(1);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {
@@ -1065,7 +1065,7 @@ mod tests {
             docs.push(doc);
         }
 
-        let config = IndexWriterConfig::default();
+        let config = IndexWriterConfig::default().num_threads(1);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
         for doc in docs {

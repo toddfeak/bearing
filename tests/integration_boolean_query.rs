@@ -26,7 +26,7 @@ use bearing::store::{MemoryDirectory, SharedDirectory};
 /// Indexes golden-docs into an in-memory directory, returning the directory and reader.
 /// Files are indexed in sorted filename order to match the Java indexing order.
 fn build_golden_docs_index() -> (SharedDirectory, DirectoryReader) {
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 
@@ -619,7 +619,7 @@ fn test_boolean_mixed_memory_performance() {
 /// Builds an in-memory index with `doc_count` documents, each containing
 /// the given terms in a "content" text field.
 fn build_large_index(doc_count: usize, terms: &[&str]) -> (SharedDirectory, DirectoryReader) {
-    let config = IndexWriterConfig::default();
+    let config = IndexWriterConfig::default().num_threads(1);
     let directory: SharedDirectory = MemoryDirectory::create();
     let writer = IndexWriter::new(config, Arc::clone(&directory));
 

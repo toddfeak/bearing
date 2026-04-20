@@ -18,7 +18,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 GRADLE="$SCRIPT_DIR/java/gradlew --project-dir=$SCRIPT_DIR/java"
 DOCS_DIR=""
-INDEX_THREADS=12
+INDEX_THREADS=8
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

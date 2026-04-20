@@ -84,6 +84,7 @@ INDEX_DIR=$(make_temp_dir)
 "$PROJECT_DIR/target/debug/indexfiles" \
     -docs "$GOLDEN_DOCS" \
     -index "$INDEX_DIR" \
+    --threads 1 \
     > /dev/null 2>&1
 check_summary "Rust non-compound" "$INDEX_DIR"
 
@@ -108,6 +109,7 @@ INDEX_DIR=$(make_temp_dir)
     -docs "$GOLDEN_DOCS" \
     -index "$INDEX_DIR" \
     --compound \
+    --threads 1 \
     > /dev/null 2>&1
 check_summary "Rust compound" "$INDEX_DIR"
 

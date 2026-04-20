@@ -1150,7 +1150,7 @@ mod tests {
 
     #[test]
     fn test_open_postings_reader() {
-        let config = IndexWriterConfig::default();
+        let config = IndexWriterConfig::default().num_threads(1);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
 
