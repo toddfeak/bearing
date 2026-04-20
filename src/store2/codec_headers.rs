@@ -18,10 +18,10 @@ use std::io;
 use crate::store2::IndexInput;
 
 /// Magic number written at the start of every codec header (big-endian).
-pub const CODEC_MAGIC: i32 = 0x3FD76C17_u32 as i32;
+const CODEC_MAGIC: i32 = 0x3FD76C17_u32 as i32;
 
 /// Length of the segment ID in bytes.
-pub const ID_LENGTH: usize = 16;
+const ID_LENGTH: usize = 16;
 
 /// Reads and validates a codec header, returning the version.
 ///
@@ -29,7 +29,7 @@ pub const ID_LENGTH: usize = 16;
 ///   1. Magic matches [`CODEC_MAGIC`].
 ///   2. Codec name matches `codec`.
 ///   3. Version is in `[min_version, max_version]`.
-pub fn check_header(
+pub(crate) fn check_header(
     input: &mut IndexInput<'_>,
     codec: &str,
     min_version: i32,
@@ -60,7 +60,7 @@ pub fn check_header(
 }
 
 /// Reads and validates an index header (header + segment ID + suffix), returning the version.
-pub fn check_index_header(
+pub(crate) fn check_index_header(
     input: &mut IndexInput<'_>,
     codec: &str,
     min_version: i32,

@@ -148,7 +148,7 @@ impl<'a> TrieReader<'a> {
     /// `access` borrows the `.tip` bytes for this field (from `index_start`
     /// to `index_end`). `root_fp` is the file pointer to the root node,
     /// rebased to be relative to the start of `access`.
-    pub fn new(access: IndexInput<'a>, root_fp: i64) -> io::Result<Self> {
+    pub(crate) fn new(access: IndexInput<'a>, root_fp: i64) -> io::Result<Self> {
         let mut root = Node::new();
         load(&access, &mut root, root_fp)?;
         Ok(Self { access, root })

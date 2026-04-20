@@ -15,7 +15,7 @@ use std::str;
 use crate::store2::varint;
 
 /// Reads a VInt-prefixed UTF-8 string.
-pub fn read_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
+pub(super) fn read_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
     let len = varint::read_vint(cursor)?;
     let len = usize::try_from(len).map_err(|_| io::Error::other("negative string length"))?;
     let buf = cursor.fill_buf()?;
@@ -33,7 +33,7 @@ pub fn read_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
 }
 
 /// Reads a VInt count followed by that many UTF-8 strings.
-pub fn read_set_of_strings(cursor: &mut Cursor<&[u8]>) -> io::Result<Vec<String>> {
+pub(super) fn read_set_of_strings(cursor: &mut Cursor<&[u8]>) -> io::Result<Vec<String>> {
     let count = read_count(cursor, "set")?;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
@@ -43,7 +43,9 @@ pub fn read_set_of_strings(cursor: &mut Cursor<&[u8]>) -> io::Result<Vec<String>
 }
 
 /// Reads a VInt count followed by that many key/value UTF-8 string pairs.
-pub fn read_map_of_strings(cursor: &mut Cursor<&[u8]>) -> io::Result<HashMap<String, String>> {
+pub(super) fn read_map_of_strings(
+    cursor: &mut Cursor<&[u8]>,
+) -> io::Result<HashMap<String, String>> {
     let count = read_count(cursor, "map")?;
     let mut out = HashMap::with_capacity(count);
     for _ in 0..count {

@@ -263,7 +263,7 @@ pub struct IndexedDISI<'a> {
 
 impl<'a> IndexedDISI<'a> {
     /// Creates an `IndexedDISI` by slicing block data and jump table from a parent input.
-    pub fn new(
+    pub(crate) fn new(
         data: &IndexInput<'a>,
         offset: usize,
         length: usize,

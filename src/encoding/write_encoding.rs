@@ -117,17 +117,6 @@ mod tests {
         assert_eq!(input.read_string().unwrap(), "hello");
     }
 
-    /// Verifies zigzag write roundtrip.
-    #[test]
-    fn test_zigzag_roundtrip() {
-        for &val in &[0i64, 1, -1, i64::MIN, i64::MAX] {
-            let mut buf = Vec::new();
-            buf.write_zlong(val).unwrap();
-            let mut input = store2::IndexInput::new("test", &buf);
-            assert_eq!(input.read_zlong().unwrap(), val);
-        }
-    }
-
     /// Verifies set/map of strings roundtrip.
     #[test]
     fn test_set_of_strings_roundtrip() {

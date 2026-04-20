@@ -1,115 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for store-level read functionality (Directory::open_file, store2::IndexInput).
+//! Integration tests for store-level read functionality through the public API.
+//!
+//! These tests exercise `Directory` (read_file, file_length, list_all),
+//! `CompoundDirectory`, `segment_infos::read`, and `StoredFieldsReader` —
+//! the publicly-visible read surface. They do not reach into the crate-private
+//! `store2` byte-cursor types; primitive read coverage lives in the
+//! per-encoding and per-module unit tests inside `src/`.
 
 #[macro_use]
 extern crate assertables;
 
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::Arc;
 
-use bearing::encoding::write_encoding::WriteEncoding;
-use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory, SharedDirectory};
-use bearing::store2::IndexInput;
+use bearing::store::{CompoundDirectory, Directory, MemoryDirectory, SharedDirectory};
 
-#[test]
-fn test_memory_directory_write_then_read() {
-    let dir = MemoryDirectory::create();
-
-    {
-        let mut out = dir.create_output("test.bin").unwrap();
-        out.write_le_int(0x04030201).unwrap();
-        out.write_string("hello").unwrap();
-        out.write_vint(42).unwrap();
-        out.write_be_long(0x0807060504030201).unwrap();
-        out.write_zint(-100).unwrap();
-    }
-
-    let backing = dir.open_file("test.bin").unwrap();
-    let mut input = IndexInput::new("test.bin", backing.as_bytes());
-    assert_eq!(input.read_le_int().unwrap(), 0x04030201);
-    assert_eq!(input.read_string().unwrap(), "hello");
-    assert_eq!(input.read_vint().unwrap(), 42);
-    assert_eq!(input.read_be_long().unwrap(), 0x0807060504030201);
-    assert_eq!(input.read_zint().unwrap(), -100);
-}
-
-#[test]
-fn test_fs_directory_write_then_read() {
-    let dir_path = temp_dir("integration_store_input");
-    let dir = FSDirectory::open(&dir_path).unwrap();
-    let _cleanup = DirCleanup(&dir_path);
-
-    {
-        let mut out = dir.create_output("test.bin").unwrap();
-        out.write_le_int(0x04030201).unwrap();
-        out.write_string("world").unwrap();
-        out.write_vlong(123456789).unwrap();
-    }
-
-    let backing = dir.open_file("test.bin").unwrap();
-    let mut input = IndexInput::new("test.bin", backing.as_bytes());
-    assert_eq!(input.read_le_int().unwrap(), 0x04030201);
-    assert_eq!(input.read_string().unwrap(), "world");
-    assert_eq!(input.read_vlong().unwrap(), 123456789);
-}
-
-#[test]
-fn test_index_input_seek_and_reread() {
-    let dir = MemoryDirectory::create();
-
-    {
-        let mut out = dir.create_output("seek.bin").unwrap();
-        out.write_all(&[10, 20, 30, 40, 50]).unwrap();
-    }
-
-    let backing = dir.open_file("seek.bin").unwrap();
-    let mut input = IndexInput::new("seek.bin", backing.as_bytes());
-    assert_eq!(input.length(), 5);
-
-    assert_eq!(input.read_byte().unwrap(), 10);
-    assert_eq!(input.read_byte().unwrap(), 20);
-    assert_eq!(input.position(), 2);
-
-    input.seek(0).unwrap();
-    assert_eq!(input.read_byte().unwrap(), 10);
-
-    input.seek(4).unwrap();
-    assert_eq!(input.read_byte().unwrap(), 50);
-}
-
-#[test]
-fn test_index_input_skip_bytes() {
-    let dir = MemoryDirectory::create();
-
-    {
-        let mut out = dir.create_output("skip.bin").unwrap();
-        out.write_all(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
-    }
-
-    let backing = dir.open_file("skip.bin").unwrap();
-    let mut input = IndexInput::new("skip.bin", backing.as_bytes());
-    input.skip_bytes(5).unwrap();
-    assert_eq!(input.position(), 5);
-    assert_eq!(input.read_byte().unwrap(), 6);
-}
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("bearing_test_{name}_{}", process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    dir
-}
-
-struct DirCleanup<'a>(&'a Path);
-
-impl Drop for DirCleanup<'_> {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(self.0);
-    }
-}
+/// First 4 bytes of every codec file are the BE-encoded codec magic.
+const CODEC_MAGIC_BYTES: [u8; 4] = [0x3F, 0xD7, 0x6C, 0x17];
 
 #[test]
 fn test_index_writer_files_readable() {
@@ -134,8 +41,11 @@ fn test_index_writer_files_readable() {
     assert_not_empty!(files);
 
     for file in &files {
-        let backing = dir.open_file(file).unwrap();
-        assert_gt!(backing.len(), 0, "file {file} has zero length");
+        assert_gt!(
+            dir.file_length(file).unwrap(),
+            0,
+            "file {file} has zero length"
+        );
     }
 }
 
@@ -157,8 +67,6 @@ fn test_index_writer_codec_files_have_valid_headers() {
     writer.add_document(doc).unwrap();
     writer.commit().unwrap();
 
-    // Codec files (not segments_N) start with CODEC_MAGIC (0x3FD76C17 BE)
-    let codec_magic: i32 = 0x3FD76C17_u32 as i32;
     let dir = &*directory;
     let files = dir.list_all().unwrap();
 
@@ -167,16 +75,13 @@ fn test_index_writer_codec_files_have_valid_headers() {
             continue; // segments_N has its own format
         }
 
-        let backing = dir.open_file(file).unwrap();
-        let mut input = IndexInput::new(file, backing.as_bytes());
-        let magic = input.read_be_int().unwrap();
+        let bytes = dir.read_file(file).unwrap();
+        assert_ge!(bytes.len(), 4, "file {file} too short for codec magic");
         assert_eq!(
-            magic, codec_magic,
+            &bytes[..4],
+            &CODEC_MAGIC_BYTES,
             "file {file} does not start with CODEC_MAGIC"
         );
-
-        let codec_name = input.read_string().unwrap();
-        assert_not_empty!(codec_name, "file {file} has empty codec name");
     }
 }
 
@@ -364,16 +269,13 @@ fn test_compound_directory_read_embedded_file() {
 
     let compound_dir = CompoundDirectory::open(dir, &seg.name, &seg.id).unwrap();
 
-    let backing = compound_dir.open_file(".fnm").unwrap();
-    let mut input = IndexInput::new(".fnm", backing.as_bytes());
-    let magic = input.read_be_int().unwrap();
+    let bytes = compound_dir.read_file(".fnm").unwrap();
+    assert_ge!(bytes.len(), 4, ".fnm too short for codec magic");
     assert_eq!(
-        magic, 0x3FD76C17_u32 as i32,
+        &bytes[..4],
+        &CODEC_MAGIC_BYTES,
         ".fnm in compound should start with CODEC_MAGIC"
     );
-
-    let codec_name = input.read_string().unwrap();
-    assert_eq!(codec_name, "Lucene94FieldInfos");
 }
 
 #[test]
@@ -405,10 +307,9 @@ fn test_compound_directory_memory() {
     let compound_files = compound_dir.list_all().unwrap();
     assert_not_empty!(compound_files);
 
-    let backing = compound_dir.open_file(".fnm").unwrap();
-    let mut input = IndexInput::new(".fnm", backing.as_bytes());
-    let magic = input.read_be_int().unwrap();
-    assert_eq!(magic, 0x3FD76C17_u32 as i32);
+    let bytes = compound_dir.read_file(".fnm").unwrap();
+    assert_ge!(bytes.len(), 4);
+    assert_eq!(&bytes[..4], &CODEC_MAGIC_BYTES);
 }
 
 // ============================================================

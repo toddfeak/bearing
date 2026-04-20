@@ -28,11 +28,11 @@ use std::io;
 use crate::store::checksum::CRC32;
 
 /// Footer length in bytes: 4 (magic) + 4 (algorithm ID) + 8 (stored CRC).
-pub const FOOTER_LENGTH: usize = 16;
+pub(crate) const FOOTER_LENGTH: usize = 16;
 
 /// Footer magic (big-endian `i32`). Bitwise NOT of the codec header magic
 /// (`0x3FD76C17`).
-pub const FOOTER_MAGIC: i32 = !(0x3FD76C17_u32 as i32);
+const FOOTER_MAGIC: i32 = !(0x3FD76C17_u32 as i32);
 
 /// Verifies the trailing codec footer of `bytes`.
 ///
@@ -43,7 +43,7 @@ pub const FOOTER_MAGIC: i32 = !(0x3FD76C17_u32 as i32);
 ///   4. The stored CRC equals a CRC32 computed over `bytes[..bytes.len() - 8]`.
 ///
 /// Returns `Ok(())` on success. Returns the first failing check as `Err`.
-pub fn verify_checksum(bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn verify_checksum(bytes: &[u8]) -> io::Result<()> {
     if bytes.len() < FOOTER_LENGTH {
         return Err(io::Error::other(format!(
             "file too short for footer: {} < {FOOTER_LENGTH}",
@@ -93,7 +93,7 @@ pub fn verify_checksum(bytes: &[u8]) -> io::Result<()> {
 /// Returns the stored CRC value on success. This is a cheap O(1) sanity
 /// check on the footer — it does NOT compute the CRC over the file body.
 /// Use [`verify_checksum`] for full integrity validation.
-pub fn retrieve_checksum(bytes: &[u8]) -> io::Result<i64> {
+pub(crate) fn retrieve_checksum(bytes: &[u8]) -> io::Result<i64> {
     if bytes.len() < FOOTER_LENGTH {
         return Err(io::Error::other(format!(
             "misplaced codec footer (file truncated?): length={} but footerLength=={FOOTER_LENGTH}",
@@ -129,7 +129,7 @@ pub fn retrieve_checksum(bytes: &[u8]) -> io::Result<i64> {
 
 /// Reads the stored CRC from the footer, also verifying that the file length
 /// matches `expected_length`.
-pub fn retrieve_checksum_with_length(bytes: &[u8], expected_length: i64) -> io::Result<i64> {
+pub(crate) fn retrieve_checksum_with_length(bytes: &[u8], expected_length: i64) -> io::Result<i64> {
     if expected_length < FOOTER_LENGTH as i64 {
         return Err(io::Error::other(
             "expectedLength cannot be less than the footer length",

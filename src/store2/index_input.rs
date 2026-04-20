@@ -19,14 +19,14 @@ use crate::encoding::pfor;
 use crate::store2::string;
 use crate::store2::varint;
 
-pub struct IndexInput<'a> {
+pub(crate) struct IndexInput<'a> {
     name: String,
     cursor: Cursor<&'a [u8]>,
 }
 
 impl<'a> IndexInput<'a> {
     /// Constructs a new input named `name` over `bytes`. Position starts at 0.
-    pub fn new(name: impl Into<String>, bytes: &'a [u8]) -> Self {
+    pub(crate) fn new(name: impl Into<String>, bytes: &'a [u8]) -> Self {
         Self {
             name: name.into(),
             cursor: Cursor::new(bytes),
@@ -35,21 +35,17 @@ impl<'a> IndexInput<'a> {
 
     // ---------- identity / cursor state ----------
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn length(&self) -> usize {
+    pub(crate) fn length(&self) -> usize {
         self.cursor.get_ref().len()
     }
 
-    pub fn position(&self) -> usize {
+    pub(crate) fn position(&self) -> usize {
         self.cursor.position() as usize
     }
 
     /// Moves the cursor to `pos`. Seeking exactly to `length()` is allowed;
     /// seeking past the end is an error.
-    pub fn seek(&mut self, pos: usize) -> io::Result<()> {
+    pub(crate) fn seek(&mut self, pos: usize) -> io::Result<()> {
         if pos > self.length() {
             return Err(io::Error::other(format!(
                 "seek past end: pos={pos} length={}",
@@ -63,28 +59,28 @@ impl<'a> IndexInput<'a> {
     // ---------- fixed-width reads (little-endian, data path) ----------
 
     #[inline]
-    pub fn read_byte(&mut self) -> io::Result<u8> {
+    pub(crate) fn read_byte(&mut self) -> io::Result<u8> {
         let mut buf = [0u8; 1];
         self.read_bytes(&mut buf)?;
         Ok(buf[0])
     }
 
     #[inline]
-    pub fn read_le_short(&mut self) -> io::Result<i16> {
+    pub(crate) fn read_le_short(&mut self) -> io::Result<i16> {
         let mut buf = [0u8; 2];
         self.read_bytes(&mut buf)?;
         Ok(i16::from_le_bytes(buf))
     }
 
     #[inline]
-    pub fn read_le_int(&mut self) -> io::Result<i32> {
+    pub(crate) fn read_le_int(&mut self) -> io::Result<i32> {
         let mut buf = [0u8; 4];
         self.read_bytes(&mut buf)?;
         Ok(i32::from_le_bytes(buf))
     }
 
     #[inline]
-    pub fn read_le_long(&mut self) -> io::Result<i64> {
+    pub(crate) fn read_le_long(&mut self) -> io::Result<i64> {
         let mut buf = [0u8; 8];
         self.read_bytes(&mut buf)?;
         Ok(i64::from_le_bytes(buf))
@@ -93,14 +89,14 @@ impl<'a> IndexInput<'a> {
     // ---------- fixed-width reads (big-endian, codec headers/footers) ----------
 
     #[inline]
-    pub fn read_be_int(&mut self) -> io::Result<i32> {
+    pub(crate) fn read_be_int(&mut self) -> io::Result<i32> {
         let mut buf = [0u8; 4];
         self.read_bytes(&mut buf)?;
         Ok(i32::from_be_bytes(buf))
     }
 
     #[inline]
-    pub fn read_be_long(&mut self) -> io::Result<i64> {
+    pub(crate) fn read_be_long(&mut self) -> io::Result<i64> {
         let mut buf = [0u8; 8];
         self.read_bytes(&mut buf)?;
         Ok(i64::from_be_bytes(buf))
@@ -110,64 +106,59 @@ impl<'a> IndexInput<'a> {
     /// codec-level adapters that delegate to `std::io::Read`-based encoding
     /// helpers without introducing per-helper wrappers on [`IndexInput`].
     #[inline]
-    pub fn cursor_mut(&mut self) -> &mut Cursor<&'a [u8]> {
+    pub(crate) fn cursor_mut(&mut self) -> &mut Cursor<&'a [u8]> {
         &mut self.cursor
     }
 
     // ---------- variable-length integer reads ----------
 
     #[inline]
-    pub fn read_vint(&mut self) -> io::Result<i32> {
+    pub(crate) fn read_vint(&mut self) -> io::Result<i32> {
         varint::read_vint(&mut self.cursor)
     }
 
     #[inline]
-    pub fn read_vlong(&mut self) -> io::Result<i64> {
+    pub(crate) fn read_vlong(&mut self) -> io::Result<i64> {
         varint::read_vlong(&mut self.cursor)
     }
 
     #[inline]
-    pub fn read_zint(&mut self) -> io::Result<i32> {
+    pub(crate) fn read_zint(&mut self) -> io::Result<i32> {
         varint::read_zint(&mut self.cursor)
-    }
-
-    #[inline]
-    pub fn read_zlong(&mut self) -> io::Result<i64> {
-        varint::read_zlong(&mut self.cursor)
     }
 
     // ---------- string / collection reads ----------
 
     #[inline]
-    pub fn read_string(&mut self) -> io::Result<String> {
+    pub(crate) fn read_string(&mut self) -> io::Result<String> {
         string::read_string(&mut self.cursor)
     }
 
     #[inline]
-    pub fn read_set_of_strings(&mut self) -> io::Result<Vec<String>> {
+    pub(crate) fn read_set_of_strings(&mut self) -> io::Result<Vec<String>> {
         string::read_set_of_strings(&mut self.cursor)
     }
 
     #[inline]
-    pub fn read_map_of_strings(&mut self) -> io::Result<HashMap<String, String>> {
+    pub(crate) fn read_map_of_strings(&mut self) -> io::Result<HashMap<String, String>> {
         string::read_map_of_strings(&mut self.cursor)
     }
 
     /// Reads `limit` group-varint-encoded integers into `values`.
     #[inline]
-    pub fn read_group_vints(&mut self, values: &mut [i32], limit: usize) -> io::Result<()> {
+    pub(crate) fn read_group_vints(&mut self, values: &mut [i32], limit: usize) -> io::Result<()> {
         group_vint::read_group_vints(&mut self.cursor, values, limit)
     }
 
     /// Decodes a block of PFOR-encoded values.
     #[inline]
-    pub fn pfor_decode(&mut self, longs: &mut [i64; pfor::BLOCK_SIZE]) -> io::Result<()> {
+    pub(crate) fn pfor_decode(&mut self, longs: &mut [i64; pfor::BLOCK_SIZE]) -> io::Result<()> {
         pfor::pfor_decode(&mut self.cursor, longs)
     }
 
     /// Decodes a block of FOR-delta-encoded doc ID deltas with prefix-sum.
     #[inline]
-    pub fn for_delta_decode(
+    pub(crate) fn for_delta_decode(
         &mut self,
         bpv: u32,
         base: i32,
@@ -180,7 +171,7 @@ impl<'a> IndexInput<'a> {
 
     /// Copies the next `dst.len()` bytes into `dst`.
     #[inline]
-    pub fn read_bytes(&mut self, dst: &mut [u8]) -> io::Result<()> {
+    pub(crate) fn read_bytes(&mut self, dst: &mut [u8]) -> io::Result<()> {
         let buf = self.cursor.fill_buf()?;
         if buf.len() < dst.len() {
             return Err(io::Error::new(
@@ -196,7 +187,7 @@ impl<'a> IndexInput<'a> {
     /// Returns a zero-copy borrow of the next `len` bytes with lifetime `'a`
     /// and advances the cursor. The returned slice outlives the input.
     #[inline]
-    pub fn read_slice(&mut self, len: usize) -> io::Result<&'a [u8]> {
+    pub(crate) fn read_slice(&mut self, len: usize) -> io::Result<&'a [u8]> {
         let pos = self.position();
         let full: &'a [u8] = self.cursor.get_ref();
         let end = pos
@@ -214,7 +205,7 @@ impl<'a> IndexInput<'a> {
     }
 
     /// Advances the cursor by `n` bytes without copying.
-    pub fn skip_bytes(&mut self, n: usize) -> io::Result<()> {
+    pub(crate) fn skip_bytes(&mut self, n: usize) -> io::Result<()> {
         let pos = self.position();
         let end = pos
             .checked_add(n)
@@ -234,7 +225,7 @@ impl<'a> IndexInput<'a> {
     /// Returns a new `IndexInput<'a>` borrowing a range of this input's
     /// bytes. The returned input has a fresh cursor at position 0. Does not
     /// mutate `self`.
-    pub fn sub_input(
+    pub(crate) fn sub_input(
         &self,
         name: impl Into<String>,
         offset: usize,
@@ -258,7 +249,7 @@ impl<'a> IndexInput<'a> {
     /// Reads a single byte at absolute position `pos`. Does not mutate the
     /// cursor.
     #[inline]
-    pub fn read_byte_at(&self, pos: usize) -> io::Result<u8> {
+    pub(crate) fn read_byte_at(&self, pos: usize) -> io::Result<u8> {
         self.cursor.get_ref().get(pos).copied().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -268,17 +259,17 @@ impl<'a> IndexInput<'a> {
     }
 
     #[inline]
-    pub fn read_le_short_at(&self, pos: usize) -> io::Result<i16> {
+    pub(crate) fn read_le_short_at(&self, pos: usize) -> io::Result<i16> {
         Ok(i16::from_le_bytes(self.bytes_at(pos)?))
     }
 
     #[inline]
-    pub fn read_le_int_at(&self, pos: usize) -> io::Result<i32> {
+    pub(crate) fn read_le_int_at(&self, pos: usize) -> io::Result<i32> {
         Ok(i32::from_le_bytes(self.bytes_at(pos)?))
     }
 
     #[inline]
-    pub fn read_le_long_at(&self, pos: usize) -> io::Result<i64> {
+    pub(crate) fn read_le_long_at(&self, pos: usize) -> io::Result<i64> {
         Ok(i64::from_le_bytes(self.bytes_at(pos)?))
     }
 
@@ -312,7 +303,7 @@ impl fmt::Debug for IndexInput<'_> {
 mod tests {
     use super::*;
     use crate::encoding::string::{write_map_of_strings, write_set_of_strings, write_string};
-    use crate::encoding::varint::{write_vint, write_vlong, write_zint, write_zlong};
+    use crate::encoding::varint::{write_vint, write_vlong, write_zint};
 
     fn input_over(bytes: &[u8]) -> IndexInput<'_> {
         IndexInput::new("test", bytes)
@@ -323,7 +314,6 @@ mod tests {
     #[test]
     fn new_initial_state() {
         let input = IndexInput::new("foo", &[1u8, 2, 3, 4, 5][..]);
-        assert_eq!(input.name(), "foo");
         assert_eq!(input.length(), 5);
         assert_eq!(input.position(), 0);
     }
@@ -331,7 +321,6 @@ mod tests {
     #[test]
     fn empty_input_state() {
         let input = IndexInput::new("empty", &[][..]);
-        assert_eq!(input.name(), "empty");
         assert_eq!(input.length(), 0);
         assert_eq!(input.position(), 0);
     }
@@ -491,14 +480,6 @@ mod tests {
         assert_eq!(input.read_zint().unwrap(), -42);
     }
 
-    #[test]
-    fn read_zlong_delegates() {
-        let mut buf = Vec::new();
-        write_zlong(&mut buf, i64::MIN).unwrap();
-        let mut input = input_over(&buf);
-        assert_eq!(input.read_zlong().unwrap(), i64::MIN);
-    }
-
     // ---------- strings / collections (smoke — heavy coverage in string module) ----------
 
     #[test]
@@ -584,13 +565,12 @@ mod tests {
     #[test]
     fn sub_input_valid_bounds() {
         let input = input_over(&[1, 2, 3, 4, 5]);
-        let sub = input.sub_input("sub", 1, 3).unwrap();
-        assert_eq!(sub.name(), "sub");
+        let mut sub = input.sub_input("sub", 1, 3).unwrap();
         assert_eq!(sub.length(), 3);
         assert_eq!(sub.position(), 0);
-        assert_eq!(sub.read_byte_at(0).unwrap(), 2);
-        assert_eq!(sub.read_byte_at(1).unwrap(), 3);
-        assert_eq!(sub.read_byte_at(2).unwrap(), 4);
+        assert_eq!(sub.read_byte().unwrap(), 2);
+        assert_eq!(sub.read_byte().unwrap(), 3);
+        assert_eq!(sub.read_byte().unwrap(), 4);
     }
 
     #[test]
@@ -609,11 +589,11 @@ mod tests {
     fn sub_input_nested() {
         let input = input_over(&[1, 2, 3, 4, 5, 6, 7, 8]);
         let sub = input.sub_input("sub", 2, 5).unwrap();
-        let sub_sub = sub.sub_input("sub-sub", 1, 3).unwrap();
+        let mut sub_sub = sub.sub_input("sub-sub", 1, 3).unwrap();
         assert_eq!(sub_sub.length(), 3);
-        assert_eq!(sub_sub.read_byte_at(0).unwrap(), 4);
-        assert_eq!(sub_sub.read_byte_at(1).unwrap(), 5);
-        assert_eq!(sub_sub.read_byte_at(2).unwrap(), 6);
+        assert_eq!(sub_sub.read_byte().unwrap(), 4);
+        assert_eq!(sub_sub.read_byte().unwrap(), 5);
+        assert_eq!(sub_sub.read_byte().unwrap(), 6);
     }
 
     #[test]

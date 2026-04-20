@@ -3,12 +3,12 @@
 //! Read path: byte-backed [`IndexInput`] over borrowed bytes, with
 //! [`FileBacking`] owning the bytes at the segment level.
 
-pub mod codec_footers;
-pub mod codec_headers;
-pub mod file_backing;
-pub mod index_input;
-pub mod string;
-pub mod varint;
+pub(crate) mod codec_footers;
+pub(crate) mod codec_headers;
+pub(crate) mod file_backing;
+pub(crate) mod index_input;
+pub(super) mod string;
+pub(super) mod varint;
 
-pub use file_backing::FileBacking;
-pub use index_input::IndexInput;
+pub(crate) use file_backing::FileBacking;
+pub(crate) use index_input::IndexInput;

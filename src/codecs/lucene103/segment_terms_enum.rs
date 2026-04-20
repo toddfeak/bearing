@@ -62,7 +62,7 @@ pub struct SegmentTermsEnum<'a> {
 
 impl<'a> SegmentTermsEnum<'a> {
     /// Creates a new `SegmentTermsEnum` for a field.
-    pub fn new(
+    pub(crate) fn new(
         terms_in: IndexInput<'a>,
         index_in: IndexInput<'a>,
         trie: TrieReader<'a>,

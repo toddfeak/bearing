@@ -16,7 +16,7 @@ const VINT_MAX_BYTES: usize = 5;
 const VLONG_MAX_BYTES: usize = 10;
 
 /// Reads a variable-length 32-bit integer (1-5 bytes, 7 bits per byte).
-pub fn read_vint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
+pub(super) fn read_vint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
     let buf = cursor.fill_buf()?;
     let mut result: i32 = 0;
     let mut shift = 0;
@@ -32,7 +32,7 @@ pub fn read_vint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
 }
 
 /// Reads a variable-length 64-bit integer (1-10 bytes, 7 bits per byte).
-pub fn read_vlong(cursor: &mut Cursor<&[u8]>) -> io::Result<i64> {
+pub(super) fn read_vlong(cursor: &mut Cursor<&[u8]>) -> io::Result<i64> {
     let buf = cursor.fill_buf()?;
     let mut result: i64 = 0;
     let mut shift = 0;
@@ -48,13 +48,8 @@ pub fn read_vlong(cursor: &mut Cursor<&[u8]>) -> io::Result<i64> {
 }
 
 /// Reads a zigzag-encoded variable-length 32-bit integer.
-pub fn read_zint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
+pub(super) fn read_zint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
     Ok(zigzag::decode_i32(read_vint(cursor)?))
-}
-
-/// Reads a zigzag-encoded variable-length 64-bit integer.
-pub fn read_zlong(cursor: &mut Cursor<&[u8]>) -> io::Result<i64> {
-    Ok(zigzag::decode_i64(read_vlong(cursor)?))
 }
 
 fn truncated_or_malformed(buf_len: usize, limit: usize, label: &str) -> io::Error {
@@ -68,7 +63,7 @@ fn truncated_or_malformed(buf_len: usize, limit: usize, label: &str) -> io::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::varint::{write_vint, write_vlong, write_zint, write_zlong};
+    use crate::encoding::varint::{write_vint, write_vlong, write_zint};
 
     fn encode<F>(f: F) -> Vec<u8>
     where
@@ -199,29 +194,6 @@ mod tests {
     fn zint_propagates_vint_error() {
         let mut cursor = Cursor::new(&[][..]);
         assert_err!(read_zint(&mut cursor));
-        assert_eq!(cursor.position(), 0);
-    }
-
-    // read_zlong
-
-    #[test]
-    fn zlong_roundtrip_values() {
-        for &value in &[0i64, 1, -1, 127, -128, i64::MIN, i64::MAX, 42, -42] {
-            let buf = encode(|b| write_zlong(b, value));
-            let mut cursor = Cursor::new(&buf[..]);
-            assert_eq!(read_zlong(&mut cursor).unwrap(), value, "value = {value}");
-            assert_eq!(
-                cursor.position() as usize,
-                buf.len(),
-                "cursor fully consumed for {value}"
-            );
-        }
-    }
-
-    #[test]
-    fn zlong_propagates_vlong_error() {
-        let mut cursor = Cursor::new(&[][..]);
-        assert_err!(read_zlong(&mut cursor));
         assert_eq!(cursor.position(), 0);
     }
 }

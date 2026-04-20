@@ -94,13 +94,13 @@ impl<'a> FieldReader<'a> {
 
     /// Returns an [`IndexInput`] over the field's `.tip` region (for floor
     /// data reads in [`super::segment_terms_enum::SegmentTermsEnum`]).
-    pub fn index_input(&self) -> IndexInput<'a> {
+    pub(crate) fn index_input(&self) -> IndexInput<'a> {
         let slice = &self.index_bytes[self.meta.index_start as usize..self.meta.index_end as usize];
         IndexInput::new("index input", slice)
     }
 
     /// Returns an [`IndexInput`] over the whole `.tim` terms dictionary.
-    pub fn terms_input(&self) -> IndexInput<'a> {
+    pub(crate) fn terms_input(&self) -> IndexInput<'a> {
         IndexInput::new("terms_in", self.terms_bytes)
     }
 }

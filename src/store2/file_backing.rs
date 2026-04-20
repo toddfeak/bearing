@@ -49,11 +49,6 @@ impl FileBacking {
             FileBacking::MmapSlice { length, .. } => *length,
         }
     }
-
-    /// Returns `true` if the file is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 impl fmt::Debug for FileBacking {
@@ -131,7 +126,7 @@ mod tests {
 
     #[test]
     fn len_owned_empty() {
-        assert_is_empty!(owned(&[]));
+        assert_len_eq_x!(owned(&[]), 0);
     }
 
     #[test]
@@ -143,31 +138,7 @@ mod tests {
     #[test]
     fn len_mmap_empty() {
         let (backing, _dir) = mmap_of(&[]);
-        assert_is_empty!(backing);
-    }
-
-    // is_empty
-
-    #[test]
-    fn is_empty_owned_nonempty() {
-        assert!(!owned(&[1]).is_empty());
-    }
-
-    #[test]
-    fn is_empty_owned_empty() {
-        assert!(owned(&[]).is_empty());
-    }
-
-    #[test]
-    fn is_empty_mmap_nonempty() {
-        let (backing, _dir) = mmap_of(&[1]);
-        assert!(!backing.is_empty());
-    }
-
-    #[test]
-    fn is_empty_mmap_empty() {
-        let (backing, _dir) = mmap_of(&[]);
-        assert!(backing.is_empty());
+        assert_len_eq_x!(backing, 0);
     }
 
     // debug
@@ -237,20 +208,6 @@ mod tests {
         let parent = vec![0u8; 1024];
         let (backing, _dir) = mmap_slice_of(&parent, 100, 50);
         assert_len_eq_x!(backing, 50);
-    }
-
-    #[test]
-    fn mmap_slice_is_empty_when_length_zero() {
-        let parent = vec![0u8; 1024];
-        let (backing, _dir) = mmap_slice_of(&parent, 10, 0);
-        assert!(backing.is_empty());
-    }
-
-    #[test]
-    fn mmap_slice_is_not_empty_when_length_positive() {
-        let parent = vec![0u8; 1024];
-        let (backing, _dir) = mmap_slice_of(&parent, 0, 1);
-        assert!(!backing.is_empty());
     }
 
     #[test]
