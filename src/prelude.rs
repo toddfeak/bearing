@@ -20,6 +20,10 @@
 //!
 //! - **Index reader**: [`DirectoryReader`], [`LeafReaderContext`]
 //! - **Terms**: [`Terms`], [`TermsEnum`], [`SeekStatus`]
+//! - **Searcher**: [`IndexSearcher`]
+//! - **Queries**: [`Query`], [`TermQuery`], [`BooleanQuery`], [`BooleanClause`],
+//!   [`Occur`]
+//! - **Results**: [`TopDocs`], [`ScoreDoc`], [`TotalHits`]
 
 pub use crate::analysis::{AnalyzerFactory, StandardAnalyzerFactory, UnicodeAnalyzerFactory};
 pub use crate::document::{Document, DocumentBuilder};
@@ -32,4 +36,8 @@ pub use crate::index::field::{
 };
 pub use crate::index::terms::{SeekStatus, Terms, TermsEnum};
 pub use crate::index::writer::IndexWriter;
+pub use crate::search::{
+    BooleanClause, BooleanQuery, IndexSearcher, Occur, Query, ScoreDoc, TermQuery, TopDocs,
+    TotalHits,
+};
 pub use crate::store::{Directory, FSDirectory, MemoryDirectory, SharedDirectory};

@@ -1,12 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Storage abstraction layer: directories, data I/O, and index I/O.
+//! Storage abstraction layer: directories, file backing, and I/O primitives.
 //!
 //! The [`Directory`] trait abstracts file storage. [`FSDirectory`] opens a
 //! filesystem directory; by default it returns an [`MmapDirectory`] for
 //! zero-copy reads. [`MemoryDirectory`] holds files in memory (for tests).
+//! [`CompoundDirectory`] exposes a `.cfs` compound file's sub-files as a
+//! read-only directory.
+//!
+//! # Write side
+//!
 //! [`DataOutput`] and [`IndexOutput`] define the byte-level writing interface
 //! used by codec writers.
+//!
+//! # Read side
+//!
+//! Codec readers open files through [`Directory::open_file`], which returns a
+//! [`FileBacking`] owning the file's bytes — either a memory-mapped region
+//! ([`FileBacking::Mmap`] / [`FileBacking::MmapSlice`]) or an owned byte vector
+//! ([`FileBacking::Owned`]). Readers then construct positioned views over the
+//! backing's bytes for sequential and random access.
 
 pub mod checksum;
 pub mod data_output;

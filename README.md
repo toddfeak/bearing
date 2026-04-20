@@ -36,6 +36,8 @@ Add to your `Cargo.toml`:
 bearing = "0.1.0-alpha.4"
 ```
 
+### Indexing
+
 ```rust
 use bearing::prelude::{
     DocumentBuilder, FSDirectory, IndexWriter, IndexWriterConfig,
@@ -54,7 +56,24 @@ writer.add_document(doc).unwrap();
 writer.commit().unwrap();
 ```
 
-See the [`prelude`](https://docs.rs/bearing/latest/bearing/prelude/) module for all available field types.
+### Searching
+
+```rust
+use bearing::prelude::{DirectoryReader, FSDirectory, IndexSearcher, TermQuery};
+
+let directory = FSDirectory::open(std::path::Path::new("/tmp/my-index")).unwrap();
+let reader = DirectoryReader::open(&*directory).unwrap();
+let searcher = IndexSearcher::new(&reader);
+
+let query = TermQuery::new("body", b"fox");
+let top_docs = searcher.search(&query, 10).unwrap();
+
+for hit in &top_docs.score_docs {
+    println!("doc={} score={}", hit.doc, hit.score);
+}
+```
+
+See the [`prelude`](https://docs.rs/bearing/latest/bearing/prelude/) module for all available types.
 
 ## Why "Bearing"?
 
