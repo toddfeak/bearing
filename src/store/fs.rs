@@ -9,13 +9,13 @@
 
 use std::fs;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::mmap::MmapDirectory;
 use crate::store::checksum::CRC32;
-use crate::store::{DataInput, DataOutput, Directory, IndexInput, IndexOutput, RandomAccessInput};
+use crate::store::{DataOutput, Directory, IndexOutput};
 
 // ============================================================
 // Shared filesystem helpers used by both FSDirectory and MmapDirectory
@@ -123,19 +123,6 @@ impl FSDirectory {
 impl Directory for FSDirectory {
     fn create_output(&self, name: &str) -> io::Result<Box<dyn IndexOutput>> {
         fs_create_output(&self.path, name)
-    }
-
-    fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>> {
-        let file_path = self.path.join(name);
-        let file = File::open(&file_path)?;
-        let len = file.metadata()?.len();
-        let reader = BufReader::new(file);
-        Ok(Box::new(FSIndexInput::new(
-            name.to_string(),
-            reader,
-            len,
-            file_path,
-        )))
     }
 
     fn list_all(&self) -> io::Result<Vec<String>> {
@@ -251,193 +238,6 @@ impl IndexOutput for FSIndexOutput {
     }
 }
 
-/// Filesystem-backed IndexInput wrapping a `BufReader<File>` with seek support.
-///
-/// Supports slicing: `offset` marks the start of this input's view within the
-/// file, and `len` bounds it. Reads and seeks are relative to the slice.
-struct FSIndexInput {
-    name: String,
-    reader: BufReader<File>,
-    /// Current position within this slice (0-based).
-    pos: u64,
-    /// Absolute byte offset of the slice start within the file.
-    offset: u64,
-    /// Length of this slice in bytes.
-    len: u64,
-    /// Path to the underlying file (for creating slices).
-    path: PathBuf,
-}
-
-impl FSIndexInput {
-    fn new(name: String, reader: BufReader<File>, len: u64, path: PathBuf) -> Self {
-        Self {
-            name,
-            reader,
-            pos: 0,
-            offset: 0,
-            len,
-            path,
-        }
-    }
-}
-
-impl io::Read for FSIndexInput {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        buf[0] = self.read_byte()?;
-        Ok(1)
-    }
-
-    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        if self.pos + buf.len() as u64 > self.len {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-        }
-        self.reader.read_exact(buf)?;
-        self.pos += buf.len() as u64;
-        Ok(())
-    }
-}
-
-impl DataInput for FSIndexInput {
-    fn read_byte(&mut self) -> io::Result<u8> {
-        if self.pos >= self.len {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "end of input"));
-        }
-        let mut buf = [0u8; 1];
-        self.reader.read_exact(&mut buf)?;
-        self.pos += 1;
-        Ok(buf[0])
-    }
-
-    fn skip_bytes(&mut self, num_bytes: u64) -> io::Result<()> {
-        self.seek(self.pos + num_bytes)
-    }
-}
-
-impl IndexInput for FSIndexInput {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn file_pointer(&self) -> u64 {
-        self.pos
-    }
-
-    fn seek(&mut self, pos: u64) -> io::Result<()> {
-        if pos > self.len {
-            return Err(io::Error::other(format!(
-                "seek past end: {pos} > {}",
-                self.len
-            )));
-        }
-        self.reader.seek(io::SeekFrom::Start(self.offset + pos))?;
-        self.pos = pos;
-        Ok(())
-    }
-
-    fn length(&self) -> u64 {
-        self.len
-    }
-
-    fn slice(
-        &self,
-        description: &str,
-        offset: u64,
-        length: u64,
-    ) -> io::Result<Box<dyn IndexInput>> {
-        if offset + length > self.len {
-            return Err(io::Error::other(format!(
-                "slice [{offset}..{}] out of bounds (length {})",
-                offset + length,
-                self.len
-            )));
-        }
-        let abs_offset = self.offset + offset;
-        let file = File::open(&self.path)?;
-        let mut reader = BufReader::new(file);
-        reader.seek(io::SeekFrom::Start(abs_offset))?;
-        Ok(Box::new(FSIndexInput {
-            name: description.to_string(),
-            reader,
-            pos: 0,
-            offset: abs_offset,
-            len: length,
-            path: self.path.clone(),
-        }))
-    }
-
-    fn random_access(&self) -> io::Result<Box<dyn RandomAccessInput>> {
-        let mut input = FSIndexInput::new(
-            format!("{} [random]", self.name),
-            BufReader::new(File::open(&self.path)?),
-            self.len,
-            self.path.clone(),
-        );
-        input.offset = self.offset;
-        Ok(Box::new(input))
-    }
-}
-
-impl RandomAccessInput for FSIndexInput {
-    fn read_byte_at(&self, pos: u64) -> io::Result<u8> {
-        if pos >= self.len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("read_byte_at({pos}) past end (len={})", self.len),
-            ));
-        }
-        let mut file = File::open(&self.path)?;
-        file.seek(io::SeekFrom::Start(self.offset + pos))?;
-        let mut buf = [0u8; 1];
-        file.read_exact(&mut buf)?;
-        Ok(buf[0])
-    }
-
-    fn read_le_short_at(&self, pos: u64) -> io::Result<i16> {
-        if pos + 2 > self.len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("read_le_short_at({pos}) past end (len={})", self.len),
-            ));
-        }
-        let mut file = File::open(&self.path)?;
-        file.seek(io::SeekFrom::Start(self.offset + pos))?;
-        let mut buf = [0u8; 2];
-        file.read_exact(&mut buf)?;
-        Ok(i16::from_le_bytes(buf))
-    }
-
-    fn read_le_int_at(&self, pos: u64) -> io::Result<i32> {
-        if pos + 4 > self.len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("read_le_int_at({pos}) past end (len={})", self.len),
-            ));
-        }
-        let mut file = File::open(&self.path)?;
-        file.seek(io::SeekFrom::Start(self.offset + pos))?;
-        let mut buf = [0u8; 4];
-        file.read_exact(&mut buf)?;
-        Ok(i32::from_le_bytes(buf))
-    }
-
-    fn read_le_long_at(&self, pos: u64) -> io::Result<i64> {
-        if pos + 8 > self.len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!("read_le_long_at({pos}) past end (len={})", self.len),
-            ));
-        }
-        let mut file = File::open(&self.path)?;
-        file.seek(io::SeekFrom::Start(self.offset + pos))?;
-        let mut buf = [0u8; 8];
-        file.read_exact(&mut buf)?;
-        Ok(i64::from_le_bytes(buf))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -446,8 +246,6 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use crate::encoding::read_encoding::ReadEncoding;
-    use crate::encoding::write_encoding::WriteEncoding;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("rustlucene_test_fs_{name}_{}", process::id()));
@@ -606,157 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fs_directory_open_input() {
-        let dir_path = temp_dir("open_input");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        dir.write_file("test.bin", b"hello world").unwrap();
-
-        let mut input = dir.open_input("test.bin").unwrap();
-        assert_eq!(input.name(), "test.bin");
-        assert_eq!(input.length(), 11);
-
-        let mut buf = [0u8; 5];
-        input.read_exact(&mut buf).unwrap();
-        assert_eq!(&buf, b"hello");
-        assert_eq!(input.file_pointer(), 5);
-
-        input.seek(0).unwrap();
-        input.read_exact(&mut buf).unwrap();
-        assert_eq!(&buf, b"hello");
-    }
-
-    #[test]
-    fn test_fs_directory_open_input_missing() {
-        let dir_path = temp_dir("open_input_missing");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        assert!(dir.open_input("nonexistent.bin").is_err());
-    }
-
-    #[test]
-    fn test_fs_directory_open_input_roundtrip() {
-        let dir_path = temp_dir("open_input_roundtrip");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        {
-            let mut out = dir.create_output("roundtrip.bin").unwrap();
-            out.write_le_int(0x04030201).unwrap();
-            out.write_string("hello").unwrap();
-            out.write_be_long(0x0807060504030201).unwrap();
-        }
-
-        let mut input = dir.open_input("roundtrip.bin").unwrap();
-        assert_eq!(input.read_le_int().unwrap(), 0x04030201);
-        assert_eq!(input.read_string().unwrap(), "hello");
-        assert_eq!(input.read_be_long().unwrap(), 0x0807060504030201);
-    }
-
-    #[test]
-    fn test_fs_index_input_slice() {
-        let dir_path = temp_dir("slice");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
-            .unwrap();
-
-        let input = dir.open_input("test.bin").unwrap();
-        let mut sliced = input.slice("slice", 2, 4).unwrap();
-
-        assert_eq!(sliced.length(), 4);
-        assert_eq!(sliced.file_pointer(), 0);
-        assert_eq!(sliced.read_byte().unwrap(), 30);
-        assert_eq!(sliced.read_byte().unwrap(), 40);
-        assert_eq!(sliced.read_byte().unwrap(), 50);
-        assert_eq!(sliced.read_byte().unwrap(), 60);
-        assert!(sliced.read_byte().is_err());
-    }
-
-    #[test]
-    fn test_fs_index_input_slice_seek() {
-        let dir_path = temp_dir("slice_seek");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        dir.write_file("test.bin", &[10, 20, 30, 40, 50]).unwrap();
-
-        let input = dir.open_input("test.bin").unwrap();
-        let mut sliced = input.slice("slice", 1, 3).unwrap();
-
-        sliced.seek(2).unwrap();
-        assert_eq!(sliced.read_byte().unwrap(), 40);
-
-        sliced.seek(0).unwrap();
-        assert_eq!(sliced.read_byte().unwrap(), 20);
-
-        assert!(sliced.seek(4).is_err());
-    }
-
-    #[test]
-    fn test_fs_index_input_slice_of_slice() {
-        let dir_path = temp_dir("slice_of_slice");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
-            .unwrap();
-
-        let input = dir.open_input("test.bin").unwrap();
-        let outer = input.slice("outer", 1, 6).unwrap(); // bytes 20..70
-        let mut inner = outer.slice("inner", 2, 3).unwrap(); // bytes 40..60
-
-        assert_eq!(inner.length(), 3);
-        assert_eq!(inner.read_byte().unwrap(), 40);
-        assert_eq!(inner.read_byte().unwrap(), 50);
-        assert_eq!(inner.read_byte().unwrap(), 60);
-        assert!(inner.read_byte().is_err());
-    }
-
-    #[test]
-    fn test_fs_random_access_on_slice_preserves_offset() {
-        let dir_path = temp_dir("ra_slice_offset");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
-            .unwrap();
-
-        let input = dir.open_input("test.bin").unwrap();
-        // Slice covering bytes [2..6) = [30, 40, 50, 60]
-        let sliced = input.slice("slice", 2, 4).unwrap();
-        let ra = sliced.random_access().unwrap();
-
-        // random_access reads must be relative to the slice, not the file
-        assert_eq!(ra.read_byte_at(0).unwrap(), 30);
-        assert_eq!(ra.read_byte_at(1).unwrap(), 40);
-        assert_eq!(ra.read_byte_at(2).unwrap(), 50);
-        assert_eq!(ra.read_byte_at(3).unwrap(), 60);
-    }
-
-    #[test]
-    fn test_fs_random_access_on_nested_slice_preserves_offset() {
-        let dir_path = temp_dir("ra_nested_offset");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        dir.write_file("test.bin", &[10, 20, 30, 40, 50, 60, 70, 80])
-            .unwrap();
-
-        let input = dir.open_input("test.bin").unwrap();
-        let outer = input.slice("outer", 1, 6).unwrap(); // [20..70]
-        let inner = outer.slice("inner", 2, 3).unwrap(); // [40, 50, 60]
-        let ra = inner.random_access().unwrap();
-
-        assert_eq!(ra.read_byte_at(0).unwrap(), 40);
-        assert_eq!(ra.read_byte_at(1).unwrap(), 50);
-        assert_eq!(ra.read_byte_at(2).unwrap(), 60);
-    }
-
-    #[test]
     fn test_fs_directory_open_file_returns_owned_with_correct_bytes() {
         use crate::store2::FileBacking;
 
@@ -779,18 +426,6 @@ mod tests {
         let _cleanup = DirCleanup(&dir_path);
 
         assert_err!(dir.open_file("nonexistent.bin"));
-    }
-
-    #[test]
-    fn test_fs_index_input_slice_out_of_bounds() {
-        let dir_path = temp_dir("slice_oob");
-        let dir = FSDirectory::open(&dir_path).unwrap();
-        let _cleanup = DirCleanup(&dir_path);
-
-        dir.write_file("test.bin", &[1, 2, 3]).unwrap();
-
-        let input = dir.open_input("test.bin").unwrap();
-        assert!(input.slice("bad", 2, 5).is_err());
     }
 
     /// RAII helper to clean up temp directories after tests.

@@ -7,9 +7,8 @@ use std::io;
 use std::mem;
 use std::sync::{Arc, RwLock};
 
-use crate::store::byte_slice_input::ByteSliceIndexInput;
 use crate::store::checksum::CRC32;
-use crate::store::{DataOutput, Directory, IndexInput, IndexOutput, SegmentFile, SharedDirectory};
+use crate::store::{DataOutput, Directory, IndexOutput, SegmentFile, SharedDirectory};
 
 /// In-memory directory backed by a shared HashMap of byte vectors.
 ///
@@ -42,20 +41,6 @@ impl Directory for MemoryDirectory {
             name.to_string(),
             Arc::clone(&self.files),
         )))
-    }
-
-    fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>> {
-        let files = self.files.read().unwrap();
-        match files.get(name) {
-            Some(data) => Ok(Box::new(ByteSliceIndexInput::new(
-                name.to_string(),
-                data.clone(),
-            ))),
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("file not found: {name}"),
-            )),
-        }
     }
 
     fn list_all(&self) -> io::Result<Vec<String>> {
@@ -257,8 +242,6 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use crate::encoding::read_encoding::ReadEncoding;
-    use crate::encoding::write_encoding::WriteEncoding;
 
     #[test]
     fn test_memory_output_write_and_checksum() {
@@ -356,28 +339,6 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_directory_open_input() {
-        let dir = MemoryDirectory::create();
-        dir.write_file("test.bin", b"hello world").unwrap();
-
-        let mut input = dir.open_input("test.bin").unwrap();
-        assert_eq!(input.name(), "test.bin");
-        assert_eq!(input.length(), 11);
-        assert_eq!(input.file_pointer(), 0);
-
-        let mut buf = [0u8; 5];
-        input.read_exact(&mut buf).unwrap();
-        assert_eq!(&buf, b"hello");
-        assert_eq!(input.file_pointer(), 5);
-    }
-
-    #[test]
-    fn test_memory_directory_open_input_missing() {
-        let dir = MemoryDirectory::create();
-        assert!(dir.open_input("nonexistent").is_err());
-    }
-
-    #[test]
     fn test_memory_directory_open_file_returns_owned_with_correct_bytes() {
         use crate::store2::FileBacking;
 
@@ -396,22 +357,6 @@ mod tests {
     fn test_memory_directory_open_file_missing() {
         let dir = MemoryDirectory::create();
         assert_err!(dir.open_file("nonexistent.bin"));
-    }
-
-    #[test]
-    fn test_memory_directory_open_input_roundtrip() {
-        let dir = MemoryDirectory::create();
-        {
-            let mut out = dir.create_output("roundtrip.bin").unwrap();
-            out.write_le_int(0x04030201).unwrap();
-            out.write_string("hello").unwrap();
-            out.write_be_long(0x0807060504030201).unwrap();
-        }
-
-        let mut input = dir.open_input("roundtrip.bin").unwrap();
-        assert_eq!(input.read_le_int().unwrap(), 0x04030201);
-        assert_eq!(input.read_string().unwrap(), "hello");
-        assert_eq!(input.read_be_long().unwrap(), 0x0807060504030201);
     }
 
     #[test]

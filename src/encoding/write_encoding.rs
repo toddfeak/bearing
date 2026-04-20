@@ -85,17 +85,17 @@ impl<T: Write> WriteEncoding for T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::read_encoding::ReadEncoding;
     use crate::store::DataOutput;
     use crate::store::memory::MemoryIndexOutput;
+    use crate::store2;
 
     /// Verifies the blanket impl works on a concrete type (Vec<u8>).
     #[test]
     fn test_vint_roundtrip_on_vec() {
         let mut buf = Vec::new();
         buf.write_vint(16384).unwrap();
-        let mut cursor = &buf[..];
-        assert_eq!(cursor.read_vint().unwrap(), 16384);
+        let mut input = store2::IndexInput::new("test", &buf);
+        assert_eq!(input.read_vint().unwrap(), 16384);
     }
 
     /// Verifies the blanket impl works on a DataOutput implementor.
@@ -103,8 +103,8 @@ mod tests {
     fn test_vlong_on_data_output() {
         let mut out = MemoryIndexOutput::new("test".into());
         out.write_vlong(123456789).unwrap();
-        let mut cursor = out.bytes();
-        assert_eq!(cursor.read_vlong().unwrap(), 123456789);
+        let mut input = store2::IndexInput::new("test", out.bytes());
+        assert_eq!(input.read_vlong().unwrap(), 123456789);
     }
 
     /// Verifies the blanket impl works on a trait object (&mut dyn DataOutput).
@@ -113,8 +113,8 @@ mod tests {
         let mut out = MemoryIndexOutput::new("test".into());
         let mut dyn_out: &mut dyn DataOutput = &mut out;
         dyn_out.write_string("hello").unwrap();
-        let mut cursor = out.bytes();
-        assert_eq!(cursor.read_string().unwrap(), "hello");
+        let mut input = store2::IndexInput::new("test", out.bytes());
+        assert_eq!(input.read_string().unwrap(), "hello");
     }
 
     /// Verifies zigzag write roundtrip.
@@ -123,8 +123,8 @@ mod tests {
         for &val in &[0i64, 1, -1, i64::MIN, i64::MAX] {
             let mut buf = Vec::new();
             buf.write_zlong(val).unwrap();
-            let mut cursor = &buf[..];
-            assert_eq!(cursor.read_zlong().unwrap(), val);
+            let mut input = store2::IndexInput::new("test", &buf);
+            assert_eq!(input.read_zlong().unwrap(), val);
         }
     }
 
@@ -134,7 +134,7 @@ mod tests {
         let set = vec!["alpha".to_string(), "beta".to_string()];
         let mut buf = Vec::new();
         buf.write_set_of_strings(&set).unwrap();
-        let mut cursor = &buf[..];
-        assert_eq!(cursor.read_set_of_strings().unwrap(), set);
+        let mut input = store2::IndexInput::new("test", &buf);
+        assert_eq!(input.read_set_of_strings().unwrap(), set);
     }
 }

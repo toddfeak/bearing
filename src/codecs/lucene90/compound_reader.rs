@@ -9,8 +9,7 @@ use std::io;
 
 use crate::codecs::codec_util;
 use crate::index::index_file_names;
-use crate::store::byte_slice_input::ByteSliceIndexInput;
-use crate::store::{Directory, IndexInput, IndexOutput};
+use crate::store::{Directory, IndexOutput};
 use crate::store2::codec_footers::{FOOTER_LENGTH, retrieve_checksum, verify_checksum};
 use crate::store2::codec_headers::check_index_header;
 use crate::store2::{self, FileBacking};
@@ -100,13 +99,6 @@ impl Directory for CompoundDirectory<'_> {
         Err(io::Error::other(
             "CompoundDirectory is read-only: cannot create output",
         ))
-    }
-
-    fn open_input(&self, name: &str) -> io::Result<Box<dyn IndexInput>> {
-        // Old-path compat: codec readers now use `open_file`; this path is
-        // exercised only by legacy tests and the `Directory` trait contract.
-        let bytes = self.read_file(name)?;
-        Ok(Box::new(ByteSliceIndexInput::new(name.to_string(), bytes)))
     }
 
     fn open_file(&self, name: &str) -> io::Result<FileBacking> {
@@ -280,30 +272,15 @@ mod tests {
     }
 
     #[test]
-    fn test_open_input_and_read() {
-        let seg_id = [0xABu8; 16];
-        let body = b"hello compound world";
-        let files = vec![make_test_file("_0.fnm", &seg_id, body)];
-        let dir = setup_compound_files("_0", &seg_id, &files);
-        let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
-
-        let mut input = compound_dir.open_input("_0.fnm").unwrap();
-        assert_gt!(input.length(), 0);
-
-        let magic = input.read_be_int().unwrap();
-        assert_eq!(magic, codec_util::CODEC_MAGIC);
-    }
-
-    #[test]
-    fn test_open_input_strips_segment_name() {
+    fn test_open_file_strips_segment_name() {
         let seg_id = [0xABu8; 16];
         let files = vec![make_test_file("_0.fnm", &seg_id, b"data")];
         let dir = setup_compound_files("_0", &seg_id, &files);
         let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
         // Both full name and stripped name resolve via strip_segment_name
-        assert!(compound_dir.open_input("_0.fnm").is_ok());
-        assert!(compound_dir.open_input(".fnm").is_ok());
+        assert!(compound_dir.open_file("_0.fnm").is_ok());
+        assert!(compound_dir.open_file(".fnm").is_ok());
     }
 
     #[test]
@@ -322,13 +299,13 @@ mod tests {
     }
 
     #[test]
-    fn test_open_input_missing() {
+    fn test_open_file_missing() {
         let seg_id = [0xABu8; 16];
         let files = vec![make_test_file("_0.fnm", &seg_id, b"data")];
         let dir = setup_compound_files("_0", &seg_id, &files);
         let compound_dir = CompoundDirectory::open(&dir, "_0", &seg_id).unwrap();
 
-        assert!(compound_dir.open_input("_0.xxx").is_err());
+        assert!(compound_dir.open_file("_0.xxx").is_err());
     }
 
     #[test]
@@ -357,8 +334,9 @@ mod tests {
         let listed = compound_dir.list_all().unwrap();
         assert_len_eq_x!(&listed, 3);
 
-        for name in &["_0.fnm", "_0.fdt", "_0.nvd"] {
-            let mut input = compound_dir.open_input(name).unwrap();
+        for name in ["_0.fnm", "_0.fdt", "_0.nvd"] {
+            let backing = compound_dir.open_file(name).unwrap();
+            let mut input = store2::IndexInput::new(name, backing.as_bytes());
             let magic = input.read_be_int().unwrap();
             assert_eq!(magic, codec_util::CODEC_MAGIC, "bad magic for {name}");
         }

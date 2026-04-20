@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for store-level read functionality (DataInput, IndexInput, Directory::open_input).
+//! Integration tests for store-level read functionality (Directory::open_file, store2::IndexInput).
 
 #[macro_use]
 extern crate assertables;
@@ -11,15 +11,14 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 
-use bearing::encoding::read_encoding::ReadEncoding;
 use bearing::encoding::write_encoding::WriteEncoding;
 use bearing::store::{CompoundDirectory, Directory, FSDirectory, MemoryDirectory, SharedDirectory};
+use bearing::store2::IndexInput;
 
 #[test]
 fn test_memory_directory_write_then_read() {
     let dir = MemoryDirectory::create();
 
-    // Write via create_output
     {
         let mut out = dir.create_output("test.bin").unwrap();
         out.write_le_int(0x04030201).unwrap();
@@ -29,8 +28,8 @@ fn test_memory_directory_write_then_read() {
         out.write_zint(-100).unwrap();
     }
 
-    // Read via open_input
-    let mut input = dir.open_input("test.bin").unwrap();
+    let backing = dir.open_file("test.bin").unwrap();
+    let mut input = IndexInput::new("test.bin", backing.as_bytes());
     assert_eq!(input.read_le_int().unwrap(), 0x04030201);
     assert_eq!(input.read_string().unwrap(), "hello");
     assert_eq!(input.read_vint().unwrap(), 42);
@@ -51,14 +50,15 @@ fn test_fs_directory_write_then_read() {
         out.write_vlong(123456789).unwrap();
     }
 
-    let mut input = dir.open_input("test.bin").unwrap();
+    let backing = dir.open_file("test.bin").unwrap();
+    let mut input = IndexInput::new("test.bin", backing.as_bytes());
     assert_eq!(input.read_le_int().unwrap(), 0x04030201);
     assert_eq!(input.read_string().unwrap(), "world");
     assert_eq!(input.read_vlong().unwrap(), 123456789);
 }
 
 #[test]
-fn test_open_input_seek_and_reread() {
+fn test_index_input_seek_and_reread() {
     let dir = MemoryDirectory::create();
 
     {
@@ -66,25 +66,23 @@ fn test_open_input_seek_and_reread() {
         out.write_all(&[10, 20, 30, 40, 50]).unwrap();
     }
 
-    let mut input = dir.open_input("seek.bin").unwrap();
+    let backing = dir.open_file("seek.bin").unwrap();
+    let mut input = IndexInput::new("seek.bin", backing.as_bytes());
     assert_eq!(input.length(), 5);
 
-    // Read first two bytes
     assert_eq!(input.read_byte().unwrap(), 10);
     assert_eq!(input.read_byte().unwrap(), 20);
-    assert_eq!(input.file_pointer(), 2);
+    assert_eq!(input.position(), 2);
 
-    // Seek back to start and re-read
     input.seek(0).unwrap();
     assert_eq!(input.read_byte().unwrap(), 10);
 
-    // Seek to end-1
     input.seek(4).unwrap();
     assert_eq!(input.read_byte().unwrap(), 50);
 }
 
 #[test]
-fn test_open_input_skip_bytes() {
+fn test_index_input_skip_bytes() {
     let dir = MemoryDirectory::create();
 
     {
@@ -92,9 +90,10 @@ fn test_open_input_skip_bytes() {
         out.write_all(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
     }
 
-    let mut input = dir.open_input("skip.bin").unwrap();
+    let backing = dir.open_file("skip.bin").unwrap();
+    let mut input = IndexInput::new("skip.bin", backing.as_bytes());
     input.skip_bytes(5).unwrap();
-    assert_eq!(input.file_pointer(), 5);
+    assert_eq!(input.position(), 5);
     assert_eq!(input.read_byte().unwrap(), 6);
 }
 
@@ -130,14 +129,13 @@ fn test_index_writer_files_readable() {
     writer.add_document(doc).unwrap();
     writer.commit().unwrap();
 
-    // Every file should be openable and have non-zero length
     let dir = &*directory;
     let files = dir.list_all().unwrap();
     assert_not_empty!(files);
 
     for file in &files {
-        let input = dir.open_input(file).unwrap();
-        assert_gt!(input.length(), 0, "file {file} has zero length");
+        let backing = dir.open_file(file).unwrap();
+        assert_gt!(backing.len(), 0, "file {file} has zero length");
     }
 }
 
@@ -160,7 +158,7 @@ fn test_index_writer_codec_files_have_valid_headers() {
     writer.commit().unwrap();
 
     // Codec files (not segments_N) start with CODEC_MAGIC (0x3FD76C17 BE)
-    let codec_magic_bytes: [u8; 4] = [0x3F, 0xD7, 0x6C, 0x17];
+    let codec_magic: i32 = 0x3FD76C17_u32 as i32;
     let dir = &*directory;
     let files = dir.list_all().unwrap();
 
@@ -169,15 +167,14 @@ fn test_index_writer_codec_files_have_valid_headers() {
             continue; // segments_N has its own format
         }
 
-        let mut input = dir.open_input(file).unwrap();
-        let mut header = [0u8; 4];
-        input.read_exact(&mut header).unwrap();
+        let backing = dir.open_file(file).unwrap();
+        let mut input = IndexInput::new(file, backing.as_bytes());
+        let magic = input.read_be_int().unwrap();
         assert_eq!(
-            header, codec_magic_bytes,
+            magic, codec_magic,
             "file {file} does not start with CODEC_MAGIC"
         );
 
-        // Read past magic, read codec name string
         let codec_name = input.read_string().unwrap();
         assert_not_empty!(codec_name, "file {file} has empty codec name");
     }
@@ -202,15 +199,12 @@ fn test_read_segments_from_index_writer() {
     writer.add_document(doc).unwrap();
     writer.commit().unwrap();
 
-    // Find the segments_N file
     let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
 
-    // Read segments_N
     let infos = segment_infos::read(dir, segments_file).unwrap();
 
-    // Should have exactly 1 segment
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
     assert_eq!(infos.segments[0].codec, "Lucene103");
@@ -299,7 +293,6 @@ fn test_read_segments_compound_mode() {
     writer.add_document(doc).unwrap();
     writer.commit().unwrap();
 
-    // segments_N should be readable even in compound mode
     let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
@@ -308,7 +301,6 @@ fn test_read_segments_compound_mode() {
     assert_eq!(infos.segments.len(), 1);
     assert_eq!(infos.segments[0].name, "_0");
 
-    // Should have .cfs and .cfe files
     assert_any!(files.iter(), |f: &String| f.ends_with(".cfs"));
     assert_any!(files.iter(), |f: &String| f.ends_with(".cfe"));
 }
@@ -332,18 +324,15 @@ fn test_compound_directory_list_files() {
     writer.add_document(doc).unwrap();
     writer.commit().unwrap();
 
-    // Read segments to get segment ID
     let dir = &*directory;
     let files = dir.list_all().unwrap();
     let segments_file = files.iter().find(|f| f.starts_with("segments_")).unwrap();
     let infos = segment_infos::read(dir, segments_file).unwrap();
     let seg = &infos.segments[0];
 
-    // Open compound directory
     let compound_dir = CompoundDirectory::open(dir, &seg.name, &seg.id).unwrap();
     let compound_files = compound_dir.list_all().unwrap();
 
-    // Should contain segment files like .fnm, .fdt, .fdm, etc.
     assert_not_empty!(compound_files);
     assert_any!(compound_files.iter(), |f: &String| f.ends_with(".fnm"));
 }
@@ -375,15 +364,14 @@ fn test_compound_directory_read_embedded_file() {
 
     let compound_dir = CompoundDirectory::open(dir, &seg.name, &seg.id).unwrap();
 
-    // Read a .fnm file from compound — should start with codec magic
-    let mut input = compound_dir.open_input(".fnm").unwrap();
+    let backing = compound_dir.open_file(".fnm").unwrap();
+    let mut input = IndexInput::new(".fnm", backing.as_bytes());
     let magic = input.read_be_int().unwrap();
     assert_eq!(
         magic, 0x3FD76C17_u32 as i32,
         ".fnm in compound should start with CODEC_MAGIC"
     );
 
-    // Read codec name after magic
     let codec_name = input.read_string().unwrap();
     assert_eq!(codec_name, "Lucene94FieldInfos");
 }
@@ -417,8 +405,8 @@ fn test_compound_directory_memory() {
     let compound_files = compound_dir.list_all().unwrap();
     assert_not_empty!(compound_files);
 
-    // Verify an embedded file is readable
-    let mut input = compound_dir.open_input(".fnm").unwrap();
+    let backing = compound_dir.open_file(".fnm").unwrap();
+    let mut input = IndexInput::new(".fnm", backing.as_bytes());
     let magic = input.read_be_int().unwrap();
     assert_eq!(magic, 0x3FD76C17_u32 as i32);
 }
@@ -466,7 +454,6 @@ fn test_stored_fields_reader_round_trip() {
 
     let mut reader = StoredFieldsReader::open(dir, &seg.name, "", &seg.id).unwrap();
 
-    // Doc 0
     let fields = reader.document(0).unwrap();
     assert!(
         fields
@@ -481,7 +468,6 @@ fn test_stored_fields_reader_round_trip() {
         "missing Int(42)"
     );
 
-    // Doc 1
     let fields1 = reader.document(1).unwrap();
     assert!(
         fields1

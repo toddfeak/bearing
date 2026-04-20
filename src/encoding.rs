@@ -16,7 +16,6 @@ pub mod lz4;
 pub mod packed;
 pub mod pfor;
 pub mod range;
-pub mod read_encoding;
 pub mod sortable_bytes;
 pub mod string;
 pub mod varint;
