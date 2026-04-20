@@ -63,16 +63,26 @@ Suggested order (simplest first to validate the pattern, complex last):
 
 8. ~~`compound_reader`~~ — migrated; new `FileBacking::MmapSlice { mmap, offset, length }` variant added to `store2/file_backing.rs` to express a sub-range view into a parent `Mmap` without `Arc` or a lifetime parameter on `FileBacking`. `CompoundDirectory` gained an `'a` lifetime borrowing the parent `&'a dyn Directory`; the old `handle: Box<dyn IndexInput>` field is gone. `Directory::open_file(sub_name)` calls `parent.open_file(.cfs)` to obtain a fresh `FileBacking::Mmap` and rewraps it as `FileBacking::MmapSlice` with the entry's offset/length (or copies the sub-range out of `FileBacking::Owned` for in-memory tests). `.cfe` is parsed via `verify_checksum` + `IndexInput` + `check_index_header`; `.cfs` is validated once at open time via `check_index_header` + `retrieve_checksum` + length check, then dropped — each sub-file access re-mmaps. Measured cost on a 186-segment, 2.2 GB Rust-shape index: ~30 ms total mmap overhead at index open, ~24 GB VIRT (zero added physical RSS — all mmaps share the kernel page cache). **Deferred to final cleanup:** `CompoundDirectory::open_input` is now a compat shim (delegates to `read_file` + `ByteSliceIndexInput`) kept only because the `Directory` trait still requires it; remove together with the trait method.
 
+## Preliminary Cleanup (post-step-8)
+
+Before the final cleanup can drop the old-trait types, two leftovers had to be resolved:
+
+- **Blocktree block-body parsers finished migration.** Step 6 migrated blocktree at the `.tim` / `.tip` file-handle level, but `SegmentTermsEnumFrame` and the helpers `segment_terms_enum::read_compressed` / `decode_term_state` still parsed decompressed block bodies through `SliceReader`. Swapped the 16 `SliceReader::new(&bytes)` sites to `IndexInput::new(name, &bytes)` over the same owned `Vec<u8>` buffers (decompressed suffixes, suffix lengths, stats, meta, floor nav data) with matching `pos()` → `position()` and `skip(n)` → `skip_bytes(n)?` adjustments. `SliceReader` deleted.
+- **`ByteSliceReader` got its own inherent `read_vint`.** The indexing-path `ByteSliceReader` (chained byte-pool slices with forwarding addresses) cannot be replaced by `store2::IndexInput<'a>` without redesigning the byte pool, so instead it gained a `read_vint` inherent method delegating to `encoding::varint::read_vint(self)` — matching the pattern `store2::IndexInput` uses. The `use crate::encoding::read_encoding::ReadEncoding;` imports in `index/pipeline/terms_hash.rs`, `codecs/lucene90/term_vectors.rs`, and `index/pipeline/term_vectors_consumer_per_field.rs` were dropped; `ByteSliceReader` keeps its `impl io::Read` for payload byte reads. After this, `ReadEncoding` has zero production callers — only test modules on old-trait types still touch it, and those tests fall out with the types in the final cleanup.
+- **Dead code around `ChecksumIndexInput` removed.** The read-side halves of `codec_util.rs` (`check_header` / `check_index_header` / `check_footer` / `retrieve_checksum` / `retrieve_checksum_with_length` / `checksum_entire_file` / `validate_footer` / `read_crc`) and their tests had zero production callers — every codec reader already imported from `store2::codec_headers` / `store2::codec_footers`. Deleting them made `ChecksumIndexInput` fully dead (its only remaining consumer was `check_footer`), so `src/store/checksum_input.rs` was also deleted. `codec_util.rs` is now write-side only; the read-side migration doc bullets above reflect this.
+
 ## Final Cleanup Commit
 
 Once every codec reader is migrated:
 
 - Delete old `DataInput`, `IndexInput`, `RandomAccessInput` traits
-- Delete `MmapIndexInput`, `ByteSliceIndexInput`, `FSIndexInput`, `SliceReader`, `ChecksumIndexInput`
+- Delete `MmapIndexInput`, `ByteSliceIndexInput`, `FSIndexInput`
+  - `SliceReader` and `ChecksumIndexInput` already deleted in the preliminary cleanup (see below).
 - Delete the old `Directory::open_input` method (and the matching impls on `FSDirectory`, `MmapDirectory`, `MemoryDirectory`, and the blanket impl on `Arc<dyn Directory>` in `src/store.rs`)
 - Delete the `CompoundDirectory::open_input` compat shim added during step 8 (it exists only to satisfy the `Directory` trait contract; codec readers use `open_file`). Drops together with the trait method above.
 - Rewrite or delete the `open_input`-exercising tests in `src/store/{fs,mmap,memory}.rs` and `src/codecs/lucene90/compound_reader.rs`; retarget store-level tests to `open_file` or remove if redundant with `MmapIndexInput`/`FSIndexInput`/`ByteSliceIndexInput` deletion
-- Delete the old `ReadEncoding` blanket trait if no longer used
+- Delete the old `ReadEncoding` blanket trait. After the preliminary cleanup, its only remaining callers are the unit-test modules on the old-trait types above (`ByteSliceIndexInput`, `FSIndexInput`, `MmapIndexInput`) — it falls out together with their deletion.
+- `codec_util.rs` now holds only write-side helpers (`write_header`, `write_index_header`, `write_footer`, constants, `header_length`, `index_header_length`, `validate_codec_name`); the read-side halves (`check_header` / `check_index_header` / `check_footer` / `retrieve_checksum*` / `checksum_entire_file`) were already removed in the preliminary cleanup.
 - Move `verify_checksum` from `src/store2/checksum.rs` into `src/codecs/codec_util.rs` alongside `write_footer`; drop the local `FOOTER_MAGIC` / `FOOTER_LENGTH` copies in favor of the existing `codec_util` constants. The footer format is codec-specific wire format, not generic byte I/O, and belongs next to its writer.
 - Move new module contents to `src/store/`, rename types if temporary names were used
 - Update imports across the codebase

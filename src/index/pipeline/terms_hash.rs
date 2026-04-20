@@ -14,7 +14,6 @@
 //! Implementors:
 //! - [`FreqProxTermsWriterPerField`] — doc/freq/position/offset encoding
 
-use crate::encoding::read_encoding::ReadEncoding;
 use std::fmt;
 use std::io;
 use std::mem;

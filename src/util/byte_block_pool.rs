@@ -11,6 +11,8 @@ use std::io;
 
 use mem_dbg::MemSize;
 
+use crate::encoding::varint;
+
 // ---------------------------------------------------------------------------
 // ByteBlockPool
 // ---------------------------------------------------------------------------
@@ -204,6 +206,11 @@ impl<'a> ByteSliceReader<'a> {
                 break;
             }
         }
+    }
+
+    /// Reads a variable-length integer from the current position.
+    pub fn read_vint(&mut self) -> io::Result<i32> {
+        varint::read_vint(self)
     }
 
     /// Follow the forwarding address to the next slice.

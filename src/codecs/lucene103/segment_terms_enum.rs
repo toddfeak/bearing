@@ -17,10 +17,8 @@ use crate::codecs::lucene103::postings_format::IntBlockTermState;
 use crate::codecs::lucene103::segment_terms_enum_frame::SegmentTermsEnumFrame;
 use crate::codecs::lucene103::trie_reader::{Node, TrieReader};
 use crate::document::IndexOptions;
-use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::{lowercase_ascii, lz4, pfor, zigzag};
 use crate::index::terms::{SeekStatus, TermsEnum};
-use crate::store::slice_reader::SliceReader;
 use crate::store2::IndexInput;
 
 pub(crate) const COMPRESSION_NONE: u32 = 0;
@@ -785,8 +783,8 @@ fn scan_block(
 
     let target_suffix = &target[prefix_length..];
 
-    let mut suffix_reader = SliceReader::new(&suffix_bytes);
-    let mut suffix_lengths_reader = SliceReader::new(&suffix_length_bytes);
+    let mut suffix_reader = IndexInput::new("suffixes", &suffix_bytes);
+    let mut suffix_lengths_reader = IndexInput::new("suffix_lengths", &suffix_length_bytes);
 
     let mut term_ord = 0usize;
 
@@ -804,8 +802,8 @@ fn scan_block(
             (len, is_sub)
         };
 
-        let suffix_start = suffix_reader.pos();
-        suffix_reader.skip(suffix_len);
+        let suffix_start = suffix_reader.position();
+        suffix_reader.skip_bytes(suffix_len)?;
 
         if is_sub_block {
             continue;
@@ -838,8 +836,8 @@ fn decode_term_state(
     target_ord: usize,
     index_options: IndexOptions,
 ) -> io::Result<IntBlockTermState> {
-    let mut stats_reader = SliceReader::new(stats_bytes);
-    let mut meta_reader = SliceReader::new(meta_bytes);
+    let mut stats_reader = IndexInput::new("stats", stats_bytes);
+    let mut meta_reader = IndexInput::new("meta", meta_bytes);
     let has_freqs = index_options.has_freqs();
 
     let mut state = IntBlockTermState::new();
@@ -881,7 +879,7 @@ fn decode_term_state(
 
 /// Decode one term's postings metadata from the metadata bytes.
 fn decode_term_meta(
-    reader: &mut SliceReader,
+    reader: &mut IndexInput<'_>,
     state: &mut IntBlockTermState,
     last_state: &IntBlockTermState,
     index_options: IndexOptions,

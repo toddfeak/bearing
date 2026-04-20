@@ -11,7 +11,6 @@
 
 pub(crate) mod byte_slice_input;
 pub mod checksum;
-pub(crate) mod checksum_input;
 pub mod data_input;
 pub mod data_output;
 pub mod fs;
@@ -19,7 +18,6 @@ pub mod index_input;
 pub mod index_output;
 pub mod memory;
 pub mod mmap;
-pub(crate) mod slice_reader;
 
 pub use checksum::CRC32;
 pub use data_input::DataInput;

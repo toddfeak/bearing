@@ -371,7 +371,6 @@ mod tests {
 
     use super::*;
     use crate::codecs::lucene90::term_vectors::{CompressingTermVectorsWriter, TermVectorsWriter};
-    use crate::encoding::read_encoding::ReadEncoding;
     use crate::store::MemoryDirectory;
     use crate::util::byte_block_pool::ByteBlockPool;
     use assertables::*;

@@ -14,11 +14,8 @@ use crate::codecs::lucene103::postings_format::IntBlockTermState;
 use crate::codecs::lucene103::segment_terms_enum::read_compressed;
 use crate::codecs::lucene103::trie_reader::Node;
 use crate::document::IndexOptions;
-use crate::encoding::read_encoding::ReadEncoding;
 use crate::encoding::{pfor, zigzag};
 use crate::index::terms::SeekStatus;
-use crate::store::DataInput;
-use crate::store::slice_reader::SliceReader;
 use crate::store2::IndexInput;
 
 /// File pointers tracking where a block lives in the `.tim` file.
@@ -120,11 +117,11 @@ impl FloorState {
         index_in.read_bytes(&mut self.data)?;
 
         // Parse initial fields
-        let mut reader = SliceReader::new(&self.data);
+        let mut reader = IndexInput::new("floor", &self.data);
         self.rewind_pos = 0;
         self.num_follow_blocks = reader.read_vint()?;
         self.next_label = reader.read_byte()? as i32 & 0xff;
-        self.data_pos = reader.pos();
+        self.data_pos = reader.position();
         Ok(())
     }
 
@@ -132,22 +129,22 @@ impl FloorState {
     #[cfg(test)]
     pub fn set(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.data = bytes.to_vec();
-        let mut reader = SliceReader::new(&self.data);
+        let mut reader = IndexInput::new("floor", &self.data);
         self.rewind_pos = 0;
         self.num_follow_blocks = reader.read_vint()?;
         self.next_label = reader.read_byte()? as i32 & 0xff;
-        self.data_pos = reader.pos();
+        self.data_pos = reader.position();
         Ok(())
     }
 
     /// Rewinds floor state to its initial position.
     pub fn rewind(&mut self) -> io::Result<()> {
-        let mut reader = SliceReader::new(&self.data);
-        reader.skip(self.rewind_pos);
+        let mut reader = IndexInput::new("floor", &self.data);
+        reader.skip_bytes(self.rewind_pos)?;
         self.num_follow_blocks = reader.read_vint()?;
         debug_assert!(self.num_follow_blocks > 0);
         self.next_label = reader.read_byte()? as i32 & 0xff;
-        self.data_pos = reader.pos();
+        self.data_pos = reader.position();
         Ok(())
     }
 }
@@ -341,10 +338,12 @@ impl SegmentTermsEnumFrame {
         debug_assert!(self.next_ent != -1 && self.next_ent < self.ent_count as i32);
         self.next_ent += 1;
 
-        let mut suffix_lengths_reader =
-            SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+        let mut suffix_lengths_reader = IndexInput::new(
+            "suffix_lengths",
+            &self.data.suffix_length_bytes[self.data.suffix_length_pos..],
+        );
         self.suffix_length = suffix_lengths_reader.read_vint()? as usize;
-        self.data.suffix_length_pos += suffix_lengths_reader.pos();
+        self.data.suffix_length_pos += suffix_lengths_reader.position();
 
         self.start_byte_pos = self.data.suffix_pos;
         term.resize(self.prefix_length + self.suffix_length, 0);
@@ -390,8 +389,10 @@ impl SegmentTermsEnumFrame {
             debug_assert!(self.next_ent != -1 && self.next_ent < self.ent_count as i32);
             self.next_ent += 1;
 
-            let mut suffix_lengths_reader =
-                SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+            let mut suffix_lengths_reader = IndexInput::new(
+                "suffix_lengths",
+                &self.data.suffix_length_bytes[self.data.suffix_length_pos..],
+            );
             let code = suffix_lengths_reader.read_vint()?;
             self.suffix_length = (code as u32 >> 1) as usize;
 
@@ -408,14 +409,14 @@ impl SegmentTermsEnumFrame {
                 *term_exists = true;
                 self.sub_code = 0;
                 self.state.term_block_ord += 1;
-                self.data.suffix_length_pos += suffix_lengths_reader.pos();
+                self.data.suffix_length_pos += suffix_lengths_reader.position();
                 return Ok(false);
             } else {
                 // A sub-block; make sub-FP absolute
                 *term_exists = false;
                 self.sub_code = suffix_lengths_reader.read_vlong()?;
                 self.last_sub_fp = self.pos.fp - self.sub_code;
-                self.data.suffix_length_pos += suffix_lengths_reader.pos();
+                self.data.suffix_length_pos += suffix_lengths_reader.position();
                 return Ok(true);
             }
         }
@@ -440,7 +441,7 @@ impl SegmentTermsEnumFrame {
         debug_assert!(self.floor.num_follow_blocks != 0);
 
         let mut new_fp;
-        let mut reader = SliceReader::new(&self.floor.data[self.floor.data_pos..]);
+        let mut reader = IndexInput::new("floor_nav", &self.floor.data[self.floor.data_pos..]);
         loop {
             let code = reader.read_vlong().unwrap();
             new_fp = self.pos.fp_orig + (code >> 1);
@@ -459,7 +460,7 @@ impl SegmentTermsEnumFrame {
                 }
             }
         }
-        self.floor.data_pos += reader.pos();
+        self.floor.data_pos += reader.position();
         if new_fp != self.pos.fp {
             self.next_ent = -1;
             self.pos.fp = new_fp;
@@ -478,8 +479,10 @@ impl SegmentTermsEnumFrame {
         debug_assert!(sub_fp < self.pos.fp);
         let target_sub_code = self.pos.fp - sub_fp;
 
-        let mut suffix_lengths_reader =
-            SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+        let mut suffix_lengths_reader = IndexInput::new(
+            "suffix_lengths",
+            &self.data.suffix_length_bytes[self.data.suffix_length_pos..],
+        );
         let mut suffix_skip = 0usize;
 
         loop {
@@ -491,7 +494,7 @@ impl SegmentTermsEnumFrame {
                 let sub_code = suffix_lengths_reader.read_vlong().unwrap();
                 if target_sub_code == sub_code {
                     self.last_sub_fp = sub_fp;
-                    self.data.suffix_length_pos += suffix_lengths_reader.pos();
+                    self.data.suffix_length_pos += suffix_lengths_reader.position();
                     self.data.suffix_pos += suffix_skip;
                     return;
                 }
@@ -512,8 +515,9 @@ impl SegmentTermsEnumFrame {
         let mut absolute = self.meta_data_upto == 0;
         debug_assert!(limit > 0);
 
-        let mut stats_reader = SliceReader::new(&self.data.stat_bytes[self.data.stats_pos..]);
-        let mut meta_reader = SliceReader::new(&self.data.meta_bytes[self.data.meta_pos..]);
+        let mut stats_reader =
+            IndexInput::new("stats", &self.data.stat_bytes[self.data.stats_pos..]);
+        let mut meta_reader = IndexInput::new("meta", &self.data.meta_bytes[self.data.meta_pos..]);
 
         while self.meta_data_upto < limit {
             // Stats decoding (with singleton RLE)
@@ -548,8 +552,8 @@ impl SegmentTermsEnumFrame {
             absolute = false;
         }
 
-        self.data.stats_pos += stats_reader.pos();
-        self.data.meta_pos += meta_reader.pos();
+        self.data.stats_pos += stats_reader.position();
+        self.data.meta_pos += meta_reader.position();
         self.state.term_block_ord = self.meta_data_upto;
 
         Ok(())
@@ -561,7 +565,7 @@ impl SegmentTermsEnumFrame {
     /// (state fields are zeroed first). When false, values are delta-encoded
     /// relative to the current state.
     fn decode_term_meta(
-        reader: &mut SliceReader,
+        reader: &mut IndexInput<'_>,
         state: &mut IntBlockTermState,
         absolute: bool,
         index_options: IndexOptions,
@@ -658,10 +662,12 @@ impl SegmentTermsEnumFrame {
         loop {
             self.next_ent += 1;
 
-            let mut suffix_lengths_reader =
-                SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+            let mut suffix_lengths_reader = IndexInput::new(
+                "suffix_lengths",
+                &self.data.suffix_length_bytes[self.data.suffix_length_pos..],
+            );
             self.suffix_length = suffix_lengths_reader.read_vint()? as usize;
-            self.data.suffix_length_pos += suffix_lengths_reader.pos();
+            self.data.suffix_length_pos += suffix_lengths_reader.position();
 
             self.start_byte_pos = self.data.suffix_pos;
             self.data.suffix_pos += self.suffix_length;
@@ -712,8 +718,10 @@ impl SegmentTermsEnumFrame {
             return Ok(SeekStatus::End);
         }
 
-        let mut suffix_lengths_reader =
-            SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+        let mut suffix_lengths_reader = IndexInput::new(
+            "suffix_lengths",
+            &self.data.suffix_length_bytes[self.data.suffix_length_pos..],
+        );
         self.suffix_length = suffix_lengths_reader.read_vint()? as usize;
 
         let mut start = self.next_ent;
@@ -787,8 +795,10 @@ impl SegmentTermsEnumFrame {
         while self.next_ent < self.ent_count as i32 {
             self.next_ent += 1;
 
-            let mut suffix_lengths_reader =
-                SliceReader::new(&self.data.suffix_length_bytes[self.data.suffix_length_pos..]);
+            let mut suffix_lengths_reader = IndexInput::new(
+                "suffix_lengths",
+                &self.data.suffix_length_bytes[self.data.suffix_length_pos..],
+            );
             let code = suffix_lengths_reader.read_vint()?;
             self.suffix_length = (code as u32 >> 1) as usize;
 
@@ -802,7 +812,7 @@ impl SegmentTermsEnumFrame {
                 self.sub_code = suffix_lengths_reader.read_vlong()?;
                 self.last_sub_fp = self.pos.fp - self.sub_code;
             }
-            self.data.suffix_length_pos += suffix_lengths_reader.pos();
+            self.data.suffix_length_pos += suffix_lengths_reader.position();
 
             let cmp = self.data.suffix_bytes
                 [self.start_byte_pos..self.start_byte_pos + self.suffix_length]
