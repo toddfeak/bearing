@@ -29,8 +29,6 @@ pub(super) mod index_input;
 pub mod index_output;
 pub mod memory;
 pub mod mmap;
-pub(super) mod string;
-pub(super) mod varint;
 
 pub use checksum::CRC32;
 pub use data_output::{DataOutput, VecOutput};

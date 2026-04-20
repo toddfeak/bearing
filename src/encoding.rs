@@ -6,8 +6,11 @@
 //! writers, and index readers. Algorithms include variable-length integers,
 //! zigzag encoding, packed integers, and compression.
 //!
-//! All encoding functions operate on [`std::io::Write`] / [`std::io::Read`],
-//! keeping them independent of any project-specific I/O traits.
+//! Writers take `&mut dyn Write`. Readers take `&mut Cursor<&[u8]>` directly,
+//! operating on the cursor's underlying slice for speed on the read path.
+//! The one exception is [`varint::read_vint`], which retains a `&mut dyn Read`
+//! form for `ByteSliceReader` on the indexing path and for internal callers
+//! in other encoding modules.
 
 pub mod geo;
 pub mod group_vint;

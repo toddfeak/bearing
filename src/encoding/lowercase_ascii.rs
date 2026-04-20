@@ -12,6 +12,8 @@
 //! short (<8 bytes) or has too many exceptions (>len/32).
 
 use std::io;
+use std::io::BufRead;
+use std::io::Cursor;
 use std::io::Read;
 
 use crate::encoding::varint;
@@ -103,17 +105,18 @@ pub fn compress(input: &[u8], len: usize) -> Option<Vec<u8>> {
     if out.len() < len { Some(out) } else { None }
 }
 
-/// Decompress lowercase ASCII data from a streaming reader.
+/// Decompress lowercase ASCII data from a cursor.
 ///
 /// `len` is the original uncompressed length. Reads compressed bytes from the
-/// reader and restores the original byte values.
-pub fn decompress_from_reader(reader: &mut dyn Read, len: usize) -> io::Result<Vec<u8>> {
+/// cursor and restores the original byte values. Cursor state is undefined on
+/// error; the caller is expected to abort the surrounding read.
+pub fn decompress_from_cursor(cursor: &mut Cursor<&[u8]>, len: usize) -> io::Result<Vec<u8>> {
     let saved = len >> 2;
     let compressed_len = len - saved;
 
     // 1. Read the packed bytes
     let mut out = vec![0u8; len];
-    reader.read_exact(&mut out[..compressed_len])?;
+    cursor.read_exact(&mut out[..compressed_len])?;
 
     // 2. Restore the leading 2 bits of each packed byte
     for i in 0..saved {
@@ -128,15 +131,20 @@ pub fn decompress_from_reader(reader: &mut dyn Read, len: usize) -> io::Result<V
     }
 
     // 4. Restore exceptions
-    let num_exceptions = varint::read_vint(reader)?;
-    let mut byte = [0u8; 1];
-    let mut i = 0usize;
-    for _ in 0..num_exceptions {
-        reader.read_exact(&mut byte)?;
-        i += byte[0] as usize;
-        reader.read_exact(&mut byte)?;
-        out[i] = byte[0];
+    let num_exceptions = varint::read_vint_cursor(cursor)? as usize;
+    let exception_bytes = 2 * num_exceptions;
+    {
+        let buf = cursor.fill_buf()?;
+        if buf.len() < exception_bytes {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        let mut i = 0usize;
+        for k in 0..num_exceptions {
+            i += buf[k * 2] as usize;
+            out[i] = buf[k * 2 + 1];
+        }
     }
+    cursor.consume(exception_bytes);
 
     Ok(out)
 }

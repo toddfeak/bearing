@@ -14,9 +14,8 @@ use std::io;
 use std::io::BufRead;
 use std::io::Cursor;
 
-use crate::encoding::group_vint;
-use crate::encoding::pfor;
-use crate::store::{string, varint};
+use crate::encoding::string;
+use crate::encoding::varint;
 
 /// Sentinel name used by [`IndexInput::unnamed`] when the caller has no
 /// meaningful label to attach (e.g. tests, transient parsing buffers). Only
@@ -113,8 +112,9 @@ impl<'a> IndexInput<'a> {
     }
 
     /// Returns a mutable reference to the underlying cursor. Intended for
-    /// codec-level adapters that delegate to `std::io::Read`-based encoding
-    /// helpers without introducing per-helper wrappers on [`IndexInput`].
+    /// codec-level callers that invoke `crate::encoding::*` decoders (which
+    /// take `&mut Cursor<&[u8]>` directly) without introducing per-helper
+    /// wrappers on [`IndexInput`].
     #[inline]
     pub(crate) fn cursor_mut(&mut self) -> &mut Cursor<&'a [u8]> {
         &mut self.cursor
@@ -124,7 +124,7 @@ impl<'a> IndexInput<'a> {
 
     #[inline]
     pub(crate) fn read_vint(&mut self) -> io::Result<i32> {
-        varint::read_vint(&mut self.cursor)
+        varint::read_vint_cursor(&mut self.cursor)
     }
 
     #[inline]
@@ -152,29 +152,6 @@ impl<'a> IndexInput<'a> {
     #[inline]
     pub(crate) fn read_map_of_strings(&mut self) -> io::Result<HashMap<String, String>> {
         string::read_map_of_strings(&mut self.cursor)
-    }
-
-    /// Reads `limit` group-varint-encoded integers into `values`.
-    #[inline]
-    pub(crate) fn read_group_vints(&mut self, values: &mut [i32], limit: usize) -> io::Result<()> {
-        group_vint::read_group_vints(&mut self.cursor, values, limit)
-    }
-
-    /// Decodes a block of PFOR-encoded values.
-    #[inline]
-    pub(crate) fn pfor_decode(&mut self, longs: &mut [i64; pfor::BLOCK_SIZE]) -> io::Result<()> {
-        pfor::pfor_decode(&mut self.cursor, longs)
-    }
-
-    /// Decodes a block of FOR-delta-encoded doc ID deltas with prefix-sum.
-    #[inline]
-    pub(crate) fn for_delta_decode(
-        &mut self,
-        bpv: u32,
-        base: i32,
-        ints: &mut [i32; pfor::BLOCK_SIZE],
-    ) -> io::Result<()> {
-        pfor::for_delta_decode(bpv, &mut self.cursor, base, ints)
     }
 
     // ---------- bulk reads ----------

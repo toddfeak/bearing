@@ -4,9 +4,14 @@
 //!
 //! Strings are encoded as a VInt byte length followed by the UTF-8 bytes.
 //! Collections (sets, maps) are encoded as a VInt count followed by each element.
+//!
+//! Writers take `&mut dyn Write`. Readers take `&mut Cursor<&[u8]>`.
+//! Cursor state is undefined on error; the caller is expected to abort the
+//! surrounding read.
 
 use std::collections::HashMap;
 use std::io;
+use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
 
@@ -21,13 +26,13 @@ pub fn write_string(out: &mut dyn Write, s: &str) -> io::Result<()> {
     out.write_all(bytes)
 }
 
-/// Reads a string: VInt-encoded byte length followed by UTF-8 bytes.
-pub fn read_string(reader: &mut dyn Read) -> io::Result<String> {
-    let len = varint::read_vint(reader)?;
+/// Reads a VInt-prefixed UTF-8 string from a cursor.
+pub fn read_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
+    let len = varint::read_vint_cursor(cursor)?;
     let len = usize::try_from(len).map_err(|_| io::Error::other("negative string length"))?;
     let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf)?;
-    String::from_utf8(buf).map_err(|e| io::Error::other(e.to_string()))
+    cursor.read_exact(&mut buf)?;
+    String::from_utf8(buf).map_err(|e| io::Error::other(format!("invalid UTF-8: {e}")))
 }
 
 /// Writes a set of strings: VInt count followed by each string.
@@ -41,15 +46,14 @@ pub fn write_set_of_strings(out: &mut dyn Write, set: &[String]) -> io::Result<(
     Ok(())
 }
 
-/// Reads a set of strings: VInt count followed by each string.
-pub fn read_set_of_strings(reader: &mut dyn Read) -> io::Result<Vec<String>> {
-    let count = varint::read_vint(reader)?;
-    let count = usize::try_from(count).map_err(|_| io::Error::other("negative set count"))?;
-    let mut result = Vec::with_capacity(count);
+/// Reads a VInt count followed by that many UTF-8 strings.
+pub fn read_set_of_strings(cursor: &mut Cursor<&[u8]>) -> io::Result<Vec<String>> {
+    let count = read_count(cursor, "set")?;
+    let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        result.push(read_string(reader)?);
+        out.push(read_string(cursor)?);
     }
-    Ok(result)
+    Ok(out)
 }
 
 /// Writes a map of strings: VInt count followed by key-value pairs.
@@ -64,22 +68,38 @@ pub fn write_map_of_strings(out: &mut dyn Write, map: &HashMap<String, String>) 
     Ok(())
 }
 
-/// Reads a map of strings: VInt count followed by key-value pairs.
-pub fn read_map_of_strings(reader: &mut dyn Read) -> io::Result<HashMap<String, String>> {
-    let count = varint::read_vint(reader)?;
-    let count = usize::try_from(count).map_err(|_| io::Error::other("negative map count"))?;
-    let mut result = HashMap::with_capacity(count);
+/// Reads a VInt count followed by that many key/value UTF-8 string pairs.
+pub fn read_map_of_strings(cursor: &mut Cursor<&[u8]>) -> io::Result<HashMap<String, String>> {
+    let count = read_count(cursor, "map")?;
+    let mut out = HashMap::with_capacity(count);
     for _ in 0..count {
-        let key = read_string(reader)?;
-        let value = read_string(reader)?;
-        result.insert(key, value);
+        let key = read_string(cursor)?;
+        let value = read_string(cursor)?;
+        out.insert(key, value);
     }
-    Ok(result)
+    Ok(out)
+}
+
+fn read_count(cursor: &mut Cursor<&[u8]>, label: &str) -> io::Result<usize> {
+    let count = varint::read_vint_cursor(cursor)?;
+    usize::try_from(count).map_err(|_| io::Error::other(format!("negative {label} count")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::varint::write_vint;
+
+    fn encode<F>(f: F) -> Vec<u8>
+    where
+        F: FnOnce(&mut Vec<u8>) -> io::Result<()>,
+    {
+        let mut buf = Vec::new();
+        f(&mut buf).unwrap();
+        buf
+    }
+
+    // ---------- write_string ----------
 
     #[test]
     fn test_write_string() {
@@ -90,22 +110,10 @@ mod tests {
     }
 
     #[test]
-    fn test_read_string_roundtrip() {
-        for s in &["", "hello", "a", "hello world", "\u{00e9}\u{00e8}"] {
-            let mut buf = Vec::new();
-            write_string(&mut buf, s).unwrap();
-            let mut cursor = &buf[..];
-            let decoded = read_string(&mut cursor).unwrap();
-            assert_eq!(&decoded, s);
-            assert_is_empty!(cursor);
-        }
-    }
-
-    #[test]
     fn test_write_set_of_strings_empty() {
         let mut buf = Vec::new();
         write_set_of_strings(&mut buf, &[]).unwrap();
-        assert_eq!(buf, [0x00]); // vint(0)
+        assert_eq!(buf, [0x00]);
     }
 
     #[test]
@@ -113,31 +121,10 @@ mod tests {
         let mut buf = Vec::new();
         let set = vec!["hello".to_string(), "world".to_string()];
         write_set_of_strings(&mut buf, &set).unwrap();
-        // vint(2) + string("hello") + string("world")
-        let mut expected = vec![0x02]; // count = 2
-        expected.extend_from_slice(&[0x05, b'h', b'e', b'l', b'l', b'o']); // "hello"
-        expected.extend_from_slice(&[0x05, b'w', b'o', b'r', b'l', b'd']); // "world"
+        let mut expected = vec![0x02];
+        expected.extend_from_slice(&[0x05, b'h', b'e', b'l', b'l', b'o']);
+        expected.extend_from_slice(&[0x05, b'w', b'o', b'r', b'l', b'd']);
         assert_eq!(buf, expected);
-    }
-
-    #[test]
-    fn test_read_set_of_strings_roundtrip() {
-        let set = vec!["hello".to_string(), "world".to_string()];
-        let mut buf = Vec::new();
-        write_set_of_strings(&mut buf, &set).unwrap();
-        let mut cursor = &buf[..];
-        let decoded = read_set_of_strings(&mut cursor).unwrap();
-        assert_eq!(decoded, set);
-        assert_is_empty!(cursor);
-    }
-
-    #[test]
-    fn test_read_set_of_strings_empty() {
-        let mut buf = Vec::new();
-        write_set_of_strings(&mut buf, &[]).unwrap();
-        let mut cursor = &buf[..];
-        let decoded = read_set_of_strings(&mut cursor).unwrap();
-        assert_is_empty!(&decoded);
     }
 
     #[test]
@@ -145,7 +132,7 @@ mod tests {
         let mut buf = Vec::new();
         let map = HashMap::new();
         write_map_of_strings(&mut buf, &map).unwrap();
-        assert_eq!(buf, [0x00]); // vint(0)
+        assert_eq!(buf, [0x00]);
     }
 
     #[test]
@@ -154,30 +141,175 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("key".to_string(), "val".to_string());
         write_map_of_strings(&mut buf, &map).unwrap();
-        // vint(1) + string("key") + string("val")
-        assert_eq!(buf[0], 0x01); // count = 1
+        assert_eq!(buf[0], 0x01);
         assert_eq!(&buf[1..], &[0x03, b'k', b'e', b'y', 0x03, b'v', b'a', b'l']);
     }
 
+    // ---------- read_string ----------
+
     #[test]
-    fn test_read_map_of_strings_roundtrip() {
-        let mut map = HashMap::new();
-        map.insert("key1".to_string(), "val1".to_string());
-        map.insert("key2".to_string(), "val2".to_string());
-        let mut buf = Vec::new();
-        write_map_of_strings(&mut buf, &map).unwrap();
-        let mut cursor = &buf[..];
-        let decoded = read_map_of_strings(&mut cursor).unwrap();
-        assert_eq!(decoded, map);
-        assert_is_empty!(cursor);
+    fn string_roundtrip_values() {
+        for s in &["", "a", "hello", "hello world", "\u{00e9}\u{00e8}"] {
+            let buf = encode(|b| write_string(b, s));
+            let mut cursor = Cursor::new(&buf[..]);
+            assert_eq!(read_string(&mut cursor).unwrap(), *s, "value = {s:?}");
+            assert_eq!(
+                cursor.position() as usize,
+                buf.len(),
+                "cursor fully consumed for {s:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_read_map_of_strings_empty() {
+    fn string_empty_input_errors() {
+        let mut cursor = Cursor::new(&[][..]);
+        assert_err!(read_string(&mut cursor));
+    }
+
+    #[test]
+    fn string_negative_length_errors() {
+        let buf = encode(|b| write_vint(b, -1));
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_err!(read_string(&mut cursor));
+    }
+
+    #[test]
+    fn string_truncated_body_errors() {
+        let buf = [0x05u8, b'a', b'b', b'c'];
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_err!(read_string(&mut cursor));
+    }
+
+    #[test]
+    fn string_invalid_utf8_errors() {
+        let buf = [0x02u8, 0xFF, 0xFE];
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_err!(read_string(&mut cursor));
+    }
+
+    #[test]
+    fn string_consecutive_reads_advance_cursor() {
         let mut buf = Vec::new();
-        write_map_of_strings(&mut buf, &HashMap::new()).unwrap();
-        let mut cursor = &buf[..];
+        write_string(&mut buf, "alpha").unwrap();
+        write_string(&mut buf, "beta").unwrap();
+        write_string(&mut buf, "gamma").unwrap();
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_eq!(read_string(&mut cursor).unwrap(), "alpha");
+        assert_eq!(read_string(&mut cursor).unwrap(), "beta");
+        assert_eq!(read_string(&mut cursor).unwrap(), "gamma");
+        assert_eq!(cursor.position() as usize, buf.len());
+    }
+
+    // ---------- read_set_of_strings ----------
+
+    #[test]
+    fn set_roundtrip_empty() {
+        let buf = encode(|b| write_set_of_strings(b, &[]));
+        let mut cursor = Cursor::new(&buf[..]);
+        let decoded = read_set_of_strings(&mut cursor).unwrap();
+        assert_is_empty!(&decoded);
+        assert_eq!(cursor.position() as usize, buf.len());
+    }
+
+    #[test]
+    fn set_roundtrip_single() {
+        let set = vec!["only".to_string()];
+        let buf = encode(|b| write_set_of_strings(b, &set));
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_eq!(read_set_of_strings(&mut cursor).unwrap(), set);
+        assert_eq!(cursor.position() as usize, buf.len());
+    }
+
+    #[test]
+    fn set_roundtrip_multiple() {
+        let set = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        let buf = encode(|b| write_set_of_strings(b, &set));
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_eq!(read_set_of_strings(&mut cursor).unwrap(), set);
+        assert_eq!(cursor.position() as usize, buf.len());
+    }
+
+    #[test]
+    fn set_empty_input_errors() {
+        let mut cursor = Cursor::new(&[][..]);
+        assert_err!(read_set_of_strings(&mut cursor));
+    }
+
+    #[test]
+    fn set_negative_count_errors() {
+        let buf = encode(|b| write_vint(b, -1));
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_err!(read_set_of_strings(&mut cursor));
+    }
+
+    #[test]
+    fn set_truncated_mid_element_errors() {
+        let mut buf = Vec::new();
+        write_vint(&mut buf, 3).unwrap();
+        write_string(&mut buf, "one").unwrap();
+        buf.push(0x05);
+        buf.extend_from_slice(b"ab");
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_err!(read_set_of_strings(&mut cursor));
+    }
+
+    // ---------- read_map_of_strings ----------
+
+    #[test]
+    fn map_roundtrip_empty() {
+        let buf = encode(|b| write_map_of_strings(b, &HashMap::new()));
+        let mut cursor = Cursor::new(&buf[..]);
         let decoded = read_map_of_strings(&mut cursor).unwrap();
         assert_is_empty!(&decoded);
+        assert_eq!(cursor.position() as usize, buf.len());
+    }
+
+    #[test]
+    fn map_roundtrip_single() {
+        let mut map = HashMap::new();
+        map.insert("key".to_string(), "val".to_string());
+        let buf = encode(|b| write_map_of_strings(b, &map));
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_eq!(read_map_of_strings(&mut cursor).unwrap(), map);
+        assert_eq!(cursor.position() as usize, buf.len());
+    }
+
+    #[test]
+    fn map_roundtrip_multiple() {
+        let mut map = HashMap::new();
+        map.insert("k1".to_string(), "v1".to_string());
+        map.insert("k2".to_string(), "v2".to_string());
+        map.insert("k3".to_string(), "v3".to_string());
+        let buf = encode(|b| write_map_of_strings(b, &map));
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_eq!(read_map_of_strings(&mut cursor).unwrap(), map);
+        assert_eq!(cursor.position() as usize, buf.len());
+    }
+
+    #[test]
+    fn map_empty_input_errors() {
+        let mut cursor = Cursor::new(&[][..]);
+        assert_err!(read_map_of_strings(&mut cursor));
+    }
+
+    #[test]
+    fn map_negative_count_errors() {
+        let buf = encode(|b| write_vint(b, -1));
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_err!(read_map_of_strings(&mut cursor));
+    }
+
+    #[test]
+    fn map_truncated_mid_value_errors() {
+        let mut buf = Vec::new();
+        write_vint(&mut buf, 2).unwrap();
+        write_string(&mut buf, "k1").unwrap();
+        write_string(&mut buf, "v1").unwrap();
+        write_string(&mut buf, "k2").unwrap();
+        buf.push(0x04);
+        buf.push(b'x');
+        let mut cursor = Cursor::new(&buf[..]);
+        assert_err!(read_map_of_strings(&mut cursor));
     }
 }

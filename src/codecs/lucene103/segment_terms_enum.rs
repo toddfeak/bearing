@@ -931,7 +931,7 @@ pub(crate) fn read_compressed(
             input.cursor_mut(),
             uncompressed_len,
         )?),
-        COMPRESSION_LOWERCASE_ASCII => Ok(lowercase_ascii::decompress_from_reader(
+        COMPRESSION_LOWERCASE_ASCII => Ok(lowercase_ascii::decompress_from_cursor(
             input.cursor_mut(),
             uncompressed_len,
         )?),

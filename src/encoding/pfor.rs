@@ -2,27 +2,17 @@
 //! Frame-of-reference (FOR) and patched FOR (PFOR) integer encoding utilities.
 
 use std::io;
-use std::io::{Read, Write};
+use std::io::BufRead;
+use std::io::Cursor;
+use std::io::Write;
 
 use super::packed::bits_required;
 use super::varint;
 
 pub const BLOCK_SIZE: usize = 128;
 
-fn read_le_int(r: &mut dyn Read) -> io::Result<i32> {
-    let mut buf = [0u8; 4];
-    r.read_exact(&mut buf)?;
-    Ok(i32::from_le_bytes(buf))
-}
-
 fn write_le_int(w: &mut dyn Write, val: i32) -> io::Result<()> {
     w.write_all(&val.to_le_bytes())
-}
-
-fn read_byte(r: &mut dyn Read) -> io::Result<u8> {
-    let mut buf = [0u8; 1];
-    r.read_exact(&mut buf)?;
-    Ok(buf[0])
 }
 
 // --- ForUtil ---
@@ -212,19 +202,31 @@ fn encode_ints(
 
 /// Decode 128 FOR-encoded values with the given bits per value.
 /// Reverse of [`encode`]: reads packed LE ints, unpacks bits, then expands.
-pub fn decode(bpv: u32, input: &mut dyn Read, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
+pub fn decode(
+    bpv: u32,
+    cursor: &mut Cursor<&[u8]>,
+    longs: &mut [i64; BLOCK_SIZE],
+) -> io::Result<()> {
     if bpv == 0 {
         longs.fill(0);
         return Ok(());
     }
 
     let num_ints_per_shift = (bpv * 4) as usize;
+    let bytes_needed = num_ints_per_shift * 4;
     let mut ints = [0i32; BLOCK_SIZE];
 
-    // Read packed data as LE ints
-    for val in &mut ints[..num_ints_per_shift] {
-        *val = read_le_int(input)?;
+    {
+        let buf = cursor.fill_buf()?;
+        if buf.len() < bytes_needed {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        for (i, slot) in ints[..num_ints_per_shift].iter_mut().enumerate() {
+            let off = i * 4;
+            *slot = i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        }
     }
+    cursor.consume(bytes_needed);
 
     let primitive_size = if bpv <= 8 {
         8
@@ -435,21 +437,38 @@ pub fn pfor_encode(longs: &mut [i64; BLOCK_SIZE], out: &mut dyn Write) -> io::Re
 
 /// Decode 128 PFOR-encoded values.
 /// Reverse of [`pfor_encode`]: reads token byte, decodes base values, applies exception patches.
-pub fn pfor_decode(input: &mut dyn Read, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
-    let token = read_byte(input)? as u32;
+pub fn pfor_decode(cursor: &mut Cursor<&[u8]>, longs: &mut [i64; BLOCK_SIZE]) -> io::Result<()> {
+    let token = {
+        let buf = cursor.fill_buf()?;
+        if buf.is_empty() {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        buf[0] as u32
+    };
+    cursor.consume(1);
+
     let bpv = token & 0x1F;
     if bpv == 0 {
-        let value = varint::read_vint(input)? as i64;
+        let value = varint::read_vint_cursor(cursor)? as i64;
         longs.fill(value);
     } else {
-        decode(bpv, input, longs)?;
+        decode(bpv, cursor, longs)?;
     }
-    let num_exceptions = token >> 5;
-    for _ in 0..num_exceptions {
-        let position = read_byte(input)? as usize;
-        let patch = read_byte(input)? as i64;
-        longs[position] |= patch << bpv;
+
+    let num_exceptions = (token >> 5) as usize;
+    let exception_bytes = num_exceptions * 2;
+    {
+        let buf = cursor.fill_buf()?;
+        if buf.len() < exception_bytes {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        for i in 0..num_exceptions {
+            let position = buf[i * 2] as usize;
+            let patch = buf[i * 2 + 1] as i64;
+            longs[position] |= patch << bpv;
+        }
     }
+    cursor.consume(exception_bytes);
     Ok(())
 }
 
@@ -495,7 +514,7 @@ pub fn for_delta_encode(
 /// running sum starting from `base` (last doc ID from the previous block).
 pub fn for_delta_decode(
     bpv: u32,
-    input: &mut dyn Read,
+    cursor: &mut Cursor<&[u8]>,
     base: i32,
     ints: &mut [i32; BLOCK_SIZE],
 ) -> io::Result<()> {
@@ -506,12 +525,20 @@ pub fn for_delta_decode(
     }
 
     let num_ints_per_shift = (bpv * 4) as usize;
+    let bytes_needed = num_ints_per_shift * 4;
     ints.fill(0);
 
-    // Read packed data as LE ints
-    for val in &mut ints[..num_ints_per_shift] {
-        *val = read_le_int(input)?;
+    {
+        let buf = cursor.fill_buf()?;
+        if buf.len() < bytes_needed {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        for (i, slot) in ints[..num_ints_per_shift].iter_mut().enumerate() {
+            let off = i * 4;
+            *slot = i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+        }
     }
+    cursor.consume(bytes_needed);
 
     // ForDelta uses different collapse thresholds from ForUtil
     let primitive_size: u32 = if bpv <= 3 {
@@ -1041,7 +1068,7 @@ mod tests {
         encode(&longs, 1, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         decode(1, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1056,7 +1083,7 @@ mod tests {
         encode(&longs, 8, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         decode(8, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1071,7 +1098,7 @@ mod tests {
         encode(&longs, 16, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         decode(16, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1086,7 +1113,7 @@ mod tests {
         encode(&longs, 20, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         decode(20, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1095,8 +1122,7 @@ mod tests {
     fn test_for_decode_roundtrip_bpv0() {
         let longs = [0i64; BLOCK_SIZE];
         let mut decoded = [99i64; BLOCK_SIZE];
-        let empty: &[u8] = &[];
-        let mut input = Cursor::new(empty);
+        let mut input = Cursor::new(&[][..]);
         decode(0, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1111,7 +1137,7 @@ mod tests {
         encode(&longs, 3, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         decode(3, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1126,7 +1152,7 @@ mod tests {
         encode(&longs, 10, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         decode(10, &mut input, &mut decoded).unwrap();
         assert_eq!(longs, decoded);
     }
@@ -1140,7 +1166,7 @@ mod tests {
         pfor_encode(&mut longs, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         pfor_decode(&mut input, &mut decoded).unwrap();
         assert_eq!([42i64; BLOCK_SIZE], decoded);
     }
@@ -1156,7 +1182,7 @@ mod tests {
         pfor_encode(&mut longs, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         pfor_decode(&mut input, &mut decoded).unwrap();
         assert_eq!(original, decoded);
     }
@@ -1176,7 +1202,7 @@ mod tests {
         pfor_encode(&mut longs, &mut out).unwrap();
 
         let mut decoded = [0i64; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         pfor_decode(&mut input, &mut decoded).unwrap();
         assert_eq!(original, decoded);
     }
@@ -1194,7 +1220,7 @@ mod tests {
 
         let base = 100;
         let mut decoded = [0i32; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
 
         // Verify: prefix-sum of deltas starting from base
@@ -1218,7 +1244,7 @@ mod tests {
 
         let base = 0;
         let mut decoded = [0i32; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
 
         let mut expected = [0i32; BLOCK_SIZE];
@@ -1241,7 +1267,7 @@ mod tests {
 
         let base = 50;
         let mut decoded = [0i32; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
 
         let mut expected = [0i32; BLOCK_SIZE];
@@ -1263,7 +1289,7 @@ mod tests {
 
         let base = 0;
         let mut decoded = [0i32; BLOCK_SIZE];
-        let mut input = Cursor::new(out.clone());
+        let mut input = Cursor::new(out.as_slice());
         for_delta_decode(bpv, &mut input, base, &mut decoded).unwrap();
 
         // Sequential doc IDs: 1, 2, 3, ..., 128

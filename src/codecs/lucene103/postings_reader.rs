@@ -15,6 +15,8 @@ use crate::codecs::codec_file_handle::{CodecFileHandle, IndexFile};
 use crate::codecs::codec_headers;
 use crate::codecs::competitive_impact::Impact;
 use crate::codecs::lucene103::postings_format::{self, LEVEL1_NUM_DOCS};
+use crate::encoding::group_vint;
+use crate::encoding::pfor;
 use crate::encoding::pfor::BLOCK_SIZE;
 use crate::index::FieldInfos;
 use crate::search::doc_id_set_iterator::{DocIdSetIterator, NO_MORE_DOCS};
@@ -419,7 +421,7 @@ impl<'a> BlockPostingsEnum<'a> {
         if self.freq_fp != -1 {
             self.doc_in.seek(self.freq_fp as usize)?;
             let mut longs = [0i64; BLOCK_SIZE];
-            self.doc_in.pfor_decode(&mut longs)?;
+            pfor::pfor_decode(self.doc_in.cursor_mut(), &mut longs)?;
             for (i, &val) in longs.iter().enumerate() {
                 self.freq_buffer[i] = val as i32;
             }
@@ -434,7 +436,12 @@ impl<'a> BlockPostingsEnum<'a> {
         if bits_per_value > 0 {
             // Block is encoded as 128 packed integers (FOR delta)
             let mut arr = [0i32; BLOCK_SIZE];
-            input.for_delta_decode(bits_per_value as u32, self.prev_doc_id, &mut arr)?;
+            pfor::for_delta_decode(
+                bits_per_value as u32,
+                input.cursor_mut(),
+                self.prev_doc_id,
+                &mut arr,
+            )?;
             self.doc_buffer[..BLOCK_SIZE].copy_from_slice(&arr);
             self.encoding = DeltaEncoding::Packed;
         } else {
@@ -1018,7 +1025,7 @@ fn read_vint_block(
     index_has_freq: bool,
     decode_freq: bool,
 ) -> io::Result<()> {
-    input.read_group_vints(doc_buffer, num)?;
+    group_vint::read_group_vints(input.cursor_mut(), doc_buffer, num)?;
     if index_has_freq && decode_freq {
         for i in 0..num {
             freq_buffer[i] = doc_buffer[i] & 0x01;

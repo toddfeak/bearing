@@ -5,9 +5,14 @@
 //! Groups of 4 integers are encoded with a flag byte (2 bits per int = byte
 //! width - 1) followed by the ints in LE with variable byte widths. Remaining
 //! values (< 4) are written as regular VInts.
+//!
+//! The decoder takes `&mut Cursor<&[u8]>` and reads directly from the cursor's
+//! slice. Cursor state is undefined on error; the caller is expected to abort
+//! the surrounding read.
 
 use std::io;
-use std::io::Read;
+use std::io::BufRead;
+use std::io::Cursor;
 use std::io::Write;
 
 use crate::encoding::varint;
@@ -49,32 +54,48 @@ pub fn write_group_vints(out: &mut dyn Write, values: &[i32], limit: usize) -> i
 }
 
 /// Reads integers using group-varint encoding.
-pub fn read_group_vints(reader: &mut dyn Read, values: &mut [i32], limit: usize) -> io::Result<()> {
+pub fn read_group_vints(
+    cursor: &mut Cursor<&[u8]>,
+    values: &mut [i32],
+    limit: usize,
+) -> io::Result<()> {
     let mut read_pos = 0;
 
     while limit - read_pos >= 4 {
-        let mut flag_buf = [0u8; 1];
-        reader.read_exact(&mut flag_buf)?;
-        let flag = flag_buf[0] as u32;
+        let consumed;
+        {
+            let buf = cursor.fill_buf()?;
+            if buf.is_empty() {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
+            let flag = buf[0] as u32;
+            let sizes = [
+                (((flag >> 6) & 0x03) + 1) as usize,
+                (((flag >> 4) & 0x03) + 1) as usize,
+                (((flag >> 2) & 0x03) + 1) as usize,
+                ((flag & 0x03) + 1) as usize,
+            ];
+            let total: usize = sizes.iter().sum();
+            if buf.len() < 1 + total {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
 
-        let sizes = [
-            ((flag >> 6) & 0x03) + 1,
-            ((flag >> 4) & 0x03) + 1,
-            ((flag >> 2) & 0x03) + 1,
-            (flag & 0x03) + 1,
-        ];
-
-        for &size in &sizes {
-            let mut buf = [0u8; 4];
-            reader.read_exact(&mut buf[..size as usize])?;
-            values[read_pos] = i32::from_le_bytes(buf);
-            read_pos += 1;
+            let mut pos = 1;
+            for &size in &sizes {
+                let mut tmp = [0u8; 4];
+                tmp[..size].copy_from_slice(&buf[pos..pos + size]);
+                values[read_pos] = i32::from_le_bytes(tmp);
+                read_pos += 1;
+                pos += size;
+            }
+            consumed = 1 + total;
         }
+        cursor.consume(consumed);
     }
 
     // Tail values as regular VInts
     while read_pos < limit {
-        values[read_pos] = varint::read_vint(reader)?;
+        values[read_pos] = varint::read_vint_cursor(cursor)?;
         read_pos += 1;
     }
 
@@ -134,11 +155,11 @@ mod tests {
         let values = [1, 2, 3, 4];
         let mut buf = Vec::new();
         write_group_vints(&mut buf, &values, 4).unwrap();
-        let mut cursor = &buf[..];
+        let mut cursor = Cursor::new(&buf[..]);
         let mut decoded = [0i32; 4];
         read_group_vints(&mut cursor, &mut decoded, 4).unwrap();
         assert_eq!(decoded, values);
-        assert_is_empty!(cursor);
+        assert_eq!(cursor.position() as usize, buf.len());
     }
 
     #[test]
@@ -146,7 +167,7 @@ mod tests {
         let values = [1, 256, 1, 1];
         let mut buf = Vec::new();
         write_group_vints(&mut buf, &values, 4).unwrap();
-        let mut cursor = &buf[..];
+        let mut cursor = Cursor::new(&buf[..]);
         let mut decoded = [0i32; 4];
         read_group_vints(&mut cursor, &mut decoded, 4).unwrap();
         assert_eq!(decoded, values);
@@ -157,11 +178,11 @@ mod tests {
         let values = [1, 2, 3, 4, 5, 6];
         let mut buf = Vec::new();
         write_group_vints(&mut buf, &values, 6).unwrap();
-        let mut cursor = &buf[..];
+        let mut cursor = Cursor::new(&buf[..]);
         let mut decoded = [0i32; 6];
         read_group_vints(&mut cursor, &mut decoded, 6).unwrap();
         assert_eq!(decoded, values);
-        assert_is_empty!(cursor);
+        assert_eq!(cursor.position() as usize, buf.len());
     }
 
     #[test]
@@ -169,7 +190,7 @@ mod tests {
         let values = [0x01000000, 0x00010000, 0x00000100, 0x00000001];
         let mut buf = Vec::new();
         write_group_vints(&mut buf, &values, 4).unwrap();
-        let mut cursor = &buf[..];
+        let mut cursor = Cursor::new(&buf[..]);
         let mut decoded = [0i32; 4];
         read_group_vints(&mut cursor, &mut decoded, 4).unwrap();
         assert_eq!(decoded, values);
