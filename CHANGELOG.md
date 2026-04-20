@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.1.0-alpha.5]
+
+### Added
+
+- Added a listterms command line tool for iterating through all terms in an index or individual segment. Mostly PoC.
 - Term iteration implementation. Supports CLIs and future query path.
 - Indexing offset data.
 - Level 1 skip data support in indexing.
@@ -17,7 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- I/O and encoding layer refactored to `Read`/`Write` supertraits with blanket encoding traits
+- Reworked mechanism for opening index files and checking headers/footers to be less error prone, better encapsulated, and easy to expand/adjust.
+- Reworked index Read/Query path to leverage idiomatic Rust byte slices and Cursors to avoid many memory copies. Decoding layer switched to Cursors instead of Read. Approx 10% query performance improvement.
+- Indexing and encoding layer refactored to `Write` supertraits with blanket encoding traits
 - Memory optimizations for indexing
 - Improved `StandardAnalyzer` memory and throughput with streaming tokenization
 
