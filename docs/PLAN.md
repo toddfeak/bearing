@@ -11,13 +11,22 @@
 - All five doc values types: `NumericDocValuesField`, `BinaryDocValuesField`, `SortedDocValuesField`, `SortedSetDocValuesField`, `SortedNumericDocValuesField`
 - Sparse doc values and norms (fields not present in every document)
 - Multi-valued fields (`SORTED_SET`, `SORTED_NUMERIC`)
+- Postings with positions and offsets (`.doc`/`.pos`/`.pay`)
 - Term vectors with positions and offsets (`.tvd`/`.tvx`/`.tvm`)
 - Streaming term vector writes (per-chunk lifecycle, not segment-level buffering)
 - Memory-optimized postings: struct-of-arrays `PostingsArray`, ByteBlockPool-based position/byte streams
 
-### Next Phase: Read Path & Querying
+### Read & Search (done)
 
-The write path is functional for the target field types but not feature complete — some indexing features are deferred (low priority or high complexity) and others require the read path (merging, deletes, updates). The next major phase is building the read/query path, which unblocks both querying and those remaining write-side features.
+- `DirectoryReader` / `SegmentReader` open a `segments_N` commit point and wire up all codec readers (compound/non-compound transparent)
+- `MmapDirectory` for zero-copy reads
+- `TermQuery` with BM25 scoring and competitive skipping via impacts
+- `BooleanQuery` — all clause shapes including 3+ clauses and `minShouldMatch` (WANDScorer)
+- Cross-validated against Java Lucene (`VerifyIndex`, `compare_query_perf.sh`)
+
+### Next Phase
+
+Remaining roadmap phases (detailed below): index lifecycle (merging, deletes, updates), richer query vocabulary (phrase, wildcard, fuzzy, range), and analyzer/text-processing expansion.
 
 ---
 
@@ -41,7 +50,7 @@ Format-specific readers for each codec version. Each reader has its own read-sid
 - Doc values metadata reader (lucene90) — reads `.dvm` metadata for all 5 doc values types (NUMERIC, BINARY, SORTED, SORTED_SET, SORTED_NUMERIC). Provides per-field document counts; value reads deferred.
 - Term vectors metadata reader (lucene90) — reads `.tvm`/`.tvx`/`.tvd` files. Eager metadata, lazy chunk data. Exposes chunk count for golden summary validation.
 - Points/BKD metadata reader (lucene90) — reads `.kdm`/`.kdi`/`.kdd` files. Per-field BKD stats (pointCount, docCount, numLeaves). Tree/leaf data deferred.
-- Postings metadata reader (lucene103) — reads `.psm`/`.doc`/`.pos` files. Impact stats from metadata; posting list data deferred.
+- Postings metadata reader (lucene103) — reads `.psm`/`.doc`/`.pos` files. Metadata-only; posting list iteration is handled by `BlockPostingsEnum` (step 4).
 
 All codec metadata readers are complete. Golden summary validates per-field stats bidirectionally (Java write→Rust read, Rust write→Rust read) for: termCount, sumTotalTermFreq, sumDocFreq, termsDocCount, dvDocCount, normsDocCount, pointDocCount, pointCount, tvChunks.
 
@@ -59,13 +68,10 @@ First query path: given a field name and term, find all matching doc IDs.
 - **RandomAccessInput** — absolute-position read trait for trie navigation. Implemented for `ByteSliceIndexInput` and `FSIndexInput`.
 - **TrieReader** — navigates the `.tip` FST-like trie index. Handles all 3 node types (leaf, single-child, multi-children) and all 3 child save strategies (BITS, ARRAY, REVERSE_ARRAY). Returns block file pointer + floor data for term block lookup.
 - **SegmentTermsEnum** — parses `.tim` term blocks. Loads 5-section blocks (header, suffixes, suffix lengths, stats, metadata), scans suffixes for exact match, decodes `IntBlockTermState` with singleton RLE and delta encoding. Handles LZ4 and lowercase ASCII suffix compression. Floor block scanning for multi-block fields.
-- **BlockDocIterator** — sequential doc ID iteration from `.doc` file. Handles singleton (pulsed), VInt tail (group-varint), and full 128-doc blocks (FOR-delta, bitset, consecutive). Skips impact/freq data.
+- **BlockPostingsEnum** — doc ID, frequency, and impact iteration from `.doc` file with `advance()`/`advance_shallow()` skip-based seeking. Handles singleton (pulsed), VInt tail (group-varint), full 128-doc blocks (FOR-delta, bitset, consecutive), and level0/level1 skip data.
 - **SegmentReader::postings()** — end-to-end convenience: field lookup → trie seek → block scan → metadata decode → doc ID iteration. Works for both compound and non-compound segments.
 
-**Deferred from this step** (see `docs/backlog/block_doc_iterator_gaps.md`):
-- Frequency decoding — needed for scoring (BM25)
-- `advance(target)` / skip-based seeking — needed for conjunctive (AND) queries
-- Level1 skip handling — needed for terms with > 4096 docs (writer also limited)
+Position, offset, and payload decoding remain deferred — see `docs/backlog/block_doc_iterator_gaps.md`.
 
 ## Phase 2 — Search
 
@@ -129,8 +135,7 @@ Higher-level search functionality.
 
 These write-path features are not prioritized but remain in the backlog:
 
-- **Payloads** — `.pay` file support (niche feature)
-- **Posting offsets** — character offsets in postings for highlighter support
+- **Payloads** — `.pay` file payload support (niche feature)
 - **Index-time sorting** — pre-sorted segments for early query termination
 - **Flush control improvements** — accurate per-thread memory measurement, smarter flush policy (see `docs/backlog/`)
 - **Compact in-memory encoding** — encode stored fields, doc values, norms compactly at insertion time (see `docs/backlog/`)

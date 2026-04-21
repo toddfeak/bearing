@@ -1,25 +1,20 @@
-# BlockDocIterator gaps
+# BlockPostingsEnum gaps
 
-Deferred features from the initial BlockDocIterator implementation.
+Deferred features in the read-side posting list iterator
+(`src/codecs/lucene103/postings_reader.rs::BlockPostingsEnum`).
 
-## Must fix before scoring queries
+## Positions not decoded at query time
 
-- **Freq values discarded**: `read_vint_block` strips the freq LSB but doesn't
-  store frequencies. `refill_full_block` skips PFOR freq data entirely.
-  Need to decode and buffer freqs for TF/IDF scoring.
+- **No `next_position()` / position iteration**: `BlockPostingsEnum` opens
+  `.pos` only to validate its header at construction, then drops the handle.
+  `refill_full_block`, `skip_level0_to`, `skip_level1_to`, and
+  `do_move_to_next_level0_block` all skip past pos metadata ("positions not
+  supported yet" comments). The `PostingsEnumProducer` trait defines
+  `next_position`, but the only implementor is the write-path
+  `BufferedPostingsEnum`. Needed for phrase queries, span queries, and
+  hit highlighting.
 
-- **No `advance(target)` / skip-based seeking**: Only sequential `next_doc()`
-  is supported. Conjunctive queries (AND) need `advance()` to skip ahead
-  efficiently. Requires parsing level0 skip headers instead of skipping them.
-
-## Must fix for large terms (> 4096 docs)
-
-- **No level1 skip handling**: Assumes all blocks fit in one level1 group
-  (< 4096 docs per term). Matches the writer's current `assert!` limitation.
-  When the writer adds level1 support, the reader must handle the level1
-  skip wrapper that groups 32 level0 blocks.
-
-## Offset decoding not implemented
+## Offsets not decoded at query time
 
 - **No offset values returned at query time**: `BlockPostingsEnum` does not
   open the `.pay` file, decode PFOR offset blocks, or return offset values.
@@ -27,3 +22,10 @@ Deferred features from the initial BlockDocIterator implementation.
   skip data (no errors), but callers requesting offsets get nothing. Needed
   for highlighter support. The write path is complete — PFOR offset blocks
   in `.pay` and VInt offset tail in `.pos` are written correctly.
+
+## Payloads not decoded at query time
+
+- **No payload values returned at query time**: Same root cause as offsets —
+  `.pay` is never opened at read time. Less urgent than positions/offsets
+  because the write path does not support payloads either (see
+  `known_issues.md` item 3); both sides must be completed together.

@@ -276,7 +276,7 @@ pub struct ImpactsDISI<I: DocIdSetIterator> {
 
 // NOTE: ImpactsDISI requires ownership of the inner iterator AND a MaxScoreCache that
 // borrows from an ImpactsSource. The lifetime relationships here are complex. In a full
-// implementation, TermScorer will own both the BlockDocIterator (which is both the
+// implementation, TermScorer will own both the BlockPostingsEnum (which is both the
 // DocIdSetIterator AND the ImpactsSource) and build the MaxScoreCache from it.
 //
 // For now, we provide the struct definition and the algorithm. The actual wiring will be

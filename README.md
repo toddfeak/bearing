@@ -12,8 +12,8 @@ A Rust port of Apache Lucene - the full-text search library.
 
 Bearing is in **alpha**. The API will change.
 
-- **Indexing**: Multi-threaded `IndexWriter` with fourteen field types, five doc values types, term vectors, and sparse fields
-- **Querying**: TermQuery and BooleanQuery (MUST, SHOULD, MUST_NOT, and mixed) with BM25 scoring
+- **Indexing**: Multi-threaded `IndexWriter` with fourteen field types, five doc values types, term vectors, sparse fields, and postings with positions and offsets
+- **Querying**: TermQuery and BooleanQuery with BM25 scoring — arbitrary numbers of MUST, SHOULD, and MUST_NOT clauses, including `minShouldMatch`
 - **Codec**: Lucene103 — indexes are readable by Java Lucene and vice versa
 - **Correctness**: Query results are cross-validated against Java Lucene across multiple corpus sizes
 
