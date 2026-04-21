@@ -53,7 +53,11 @@ pub trait DocIdSetIterator {
     ///
     /// **Note:** It is illegal to call this method when the iterator is exhausted or not
     /// positioned.
-    fn doc_id_run_end(&self) -> io::Result<i32> {
+    ///
+    /// Takes `&mut self` (deviation from Java's implicitly read-only signature) so that
+    /// composite iterators can delegate to sub-iterators without requiring a separate
+    /// shared accessor on the `Scorer` trait.
+    fn doc_id_run_end(&mut self) -> io::Result<i32> {
         Ok(self.doc_id() + 1)
     }
 
@@ -176,7 +180,7 @@ impl DocIdSetIterator for RangeDocIdSetIterator {
         (self.max_doc - self.min_doc) as i64
     }
 
-    fn doc_id_run_end(&self) -> io::Result<i32> {
+    fn doc_id_run_end(&mut self) -> io::Result<i32> {
         Ok(self.max_doc)
     }
 

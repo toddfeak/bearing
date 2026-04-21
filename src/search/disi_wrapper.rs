@@ -12,8 +12,12 @@ pub struct DisiWrapper<'a> {
     pub scorer: Box<dyn Scorer + 'a>,
     /// Cost of the underlying iterator, cached at construction.
     pub cost: i64,
+    /// The match cost for two-phase iterators, 0 otherwise.
+    pub match_cost: f32,
     /// Current document ID. Updated during iteration.
     pub doc: i32,
+    /// Scaled maximum score used by WANDScorer.
+    pub scaled_max_score: i64,
 }
 
 impl<'a> DisiWrapper<'a> {
@@ -23,7 +27,9 @@ impl<'a> DisiWrapper<'a> {
         Self {
             scorer,
             cost,
+            match_cost: 0.0,
             doc: -1,
+            scaled_max_score: 0,
         }
     }
 }
@@ -32,7 +38,9 @@ impl fmt::Debug for DisiWrapper<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DisiWrapper")
             .field("cost", &self.cost)
+            .field("match_cost", &self.match_cost)
             .field("doc", &self.doc)
+            .field("scaled_max_score", &self.scaled_max_score)
             .finish()
     }
 }

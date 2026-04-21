@@ -868,24 +868,22 @@ mod tests {
     // HeadPQ tests
     // -----------------------------------------------------------------------
 
+    fn test_wrapper(cost: i64, doc: i32) -> DisiWrapper<'static> {
+        DisiWrapper {
+            scorer: Box::new(MockScorer::new(vec![], 0.0)),
+            cost,
+            match_cost: 0.0,
+            doc,
+            scaled_max_score: 0,
+        }
+    }
+
     #[test]
     fn test_head_pq_basic() {
         let wrappers = vec![
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 10,
-                doc: 5,
-            },
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 20,
-                doc: 3,
-            },
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 30,
-                doc: 8,
-            },
+            test_wrapper(10, 5),
+            test_wrapper(20, 3),
+            test_wrapper(30, 8),
         ];
 
         let mut pq = HeadPQ::new(3);
@@ -906,21 +904,9 @@ mod tests {
     #[test]
     fn test_head_pq_update_top() {
         let mut wrappers = vec![
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 10,
-                doc: 3,
-            },
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 20,
-                doc: 5,
-            },
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 30,
-                doc: 8,
-            },
+            test_wrapper(10, 3),
+            test_wrapper(20, 5),
+            test_wrapper(30, 8),
         ];
 
         let mut pq = HeadPQ::new(3);
@@ -941,21 +927,9 @@ mod tests {
     #[test]
     fn test_tail_pq_basic() {
         let wrappers = vec![
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 30,
-                doc: 0,
-            },
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 10,
-                doc: 0,
-            },
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 20,
-                doc: 0,
-            },
+            test_wrapper(30, 0),
+            test_wrapper(10, 0),
+            test_wrapper(20, 0),
         ];
 
         let mut pq = TailPQ::new(3);
@@ -970,21 +944,9 @@ mod tests {
     #[test]
     fn test_tail_pq_get() {
         let wrappers = vec![
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 30,
-                doc: 0,
-            },
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 10,
-                doc: 0,
-            },
-            DisiWrapper {
-                scorer: Box::new(MockScorer::new(vec![], 0.0)),
-                cost: 20,
-                doc: 0,
-            },
+            test_wrapper(30, 0),
+            test_wrapper(10, 0),
+            test_wrapper(20, 0),
         ];
 
         let mut pq = TailPQ::new(3);
