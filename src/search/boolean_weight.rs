@@ -20,6 +20,7 @@ use super::req_excl_scorer::ReqExclScorer;
 use super::req_opt_sum_scorer::ReqOptSumScorer;
 use super::scorer::Scorer;
 use super::scorer_util;
+use super::wand_scorer::WANDScorer;
 use crate::index::directory_reader::LeafReaderContext;
 
 // ---------------------------------------------------------------------------
@@ -282,14 +283,35 @@ impl<'a> BooleanScorerSupplier<'a> {
         }
 
         // conjunction-disjunction mix
-        if self.min_should_match > 0 {
-            todo!("conjunction-disjunction mix with minShouldMatch > 0 not yet implemented")
-        }
-
         let filter_suppliers = self.subs.remove(&Occur::Filter).unwrap_or_default();
         let must_suppliers = self.subs.remove(&Occur::Must).unwrap_or_default();
         let must_not_suppliers = self.subs.remove(&Occur::MustNot).unwrap_or_default();
         let should_suppliers = self.subs.remove(&Occur::Should).unwrap_or_default();
+
+        if self.min_should_match > 0 {
+            let req_scorer = Self::excl(
+                Self::req(
+                    filter_suppliers,
+                    must_suppliers,
+                    lead_cost,
+                    false,
+                    self.score_mode,
+                )?,
+                must_not_suppliers,
+                lead_cost,
+            )?;
+            let opt_scorer = Self::opt(
+                should_suppliers,
+                self.min_should_match,
+                self.score_mode,
+                lead_cost,
+                false,
+            )?;
+            return Ok(Box::new(ConjunctionScorer::new(
+                Vec::new(),
+                vec![req_scorer, opt_scorer],
+            )));
+        }
 
         let req_scorer = Self::excl(
             Self::req(
@@ -372,7 +394,15 @@ impl<'a> BooleanScorerSupplier<'a> {
                 prohibited_scorer,
             ))))
         } else {
-            todo!("multiple MUST_NOT not yet implemented")
+            let prohibited_scorer: Box<dyn Scorer + 'a> = Box::new(DisjunctionSumScorer::new(
+                prohibited,
+                ScoreMode::CompleteNoScores,
+                positive_scorer_cost,
+            )?);
+            Ok(Some(Box::new(ReqExclBulkScorer::new(
+                positive_scorer,
+                prohibited_scorer,
+            ))))
         }
     }
 
@@ -565,7 +595,12 @@ impl<'a> BooleanScorerSupplier<'a> {
 
         if (score_mode == ScoreMode::TopScores && top_level_scoring_clause) || min_should_match > 1
         {
-            todo!("WANDScorer not yet ported — see Phase 7")
+            return Ok(Box::new(WANDScorer::new(
+                optional_scorers,
+                min_should_match,
+                score_mode,
+                lead_cost,
+            )?));
         }
         Ok(Box::new(DisjunctionSumScorer::new(
             optional_scorers,
@@ -920,8 +955,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "WANDScorer not yet ported")]
-    fn test_get_msm_above_one_panics_until_wand() {
+    fn test_get_pure_disjunction_msm_two_uses_wand() {
+        // Phase 7: msm > 1 routes to WANDScorer.
+        // hello (0,1), world (0,2), peace (2). msm=2 → docs matching ≥ 2 clauses:
+        // doc 0 → hello+world (2) ✓; doc 2 → world+peace (2) ✓.
         let (_dir, reader) = build_test_index();
         let searcher = IndexSearcher::new(&reader);
         let clauses = vec![
@@ -931,7 +968,62 @@ mod tests {
         ];
         let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 2, 1.0).unwrap();
         let mut supplier = supplier_for(&weight, &reader).unwrap();
-        let _ = supplier.get(i64::MAX);
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(docs, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_get_mixed_must_should_msm_one_uses_disjunction_in_opt() {
+        // Mixed MUST + 2 SHOULDs with msm=1: opt() returns DisjunctionSumScorer (msm <=1),
+        // and get_internal wraps as ConjunctionScorer([req, opt]).
+        // hello (0,1) MUST + (world(0,2), peace(2)) msm=1.
+        // Required: hello → {0, 1}.
+        // Optional must contribute ≥ 1 → docs in (world ∪ peace) = {0, 2}.
+        // Intersection: {0}.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 1, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(docs, vec![0]);
+    }
+
+    #[test]
+    fn test_get_mixed_must_should_msm_two_uses_wand_in_opt() {
+        // Mixed MUST + 3 SHOULDs with msm=2: opt() routes to WANDScorer.
+        // MUST hello (0, 1).
+        // SHOULDs: world (0, 2), peace (2), there (1). msm=2 → ≥2 of these.
+        // doc 0: world only → 1. doc 1: there only → 1. doc 2: world+peace → 2 ✓.
+        // Required is hello (0,1). Required ∩ msm>=2 of optional: {0,1} ∩ {2} = {}
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+            BooleanClause::new(tq(b"there"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 2, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert!(docs.is_empty());
     }
 
     // ----------------------------------------------------------------
@@ -1007,6 +1099,25 @@ mod tests {
             .map(|(d, _)| d)
             .collect();
         assert!(docs.is_empty());
+    }
+
+    #[test]
+    fn test_bulk_scorer_must_with_multi_must_not() {
+        // Phase 6: bulk path now wraps prohibited.len() > 1 in DisjunctionSumScorer
+        // and uses ReqExclBulkScorer. Verify via searcher.search end-to-end.
+        // hello matches (0, 1); world matches (0, 2); peace matches (2).
+        // hello & !world & !peace → {0, 1} \ {0, 2} = {1}.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let mut b = BooleanQuery::builder();
+        b.add_query(tq(b"hello"), Occur::Must);
+        b.add_query(tq(b"world"), Occur::MustNot);
+        b.add_query(tq(b"peace"), Occur::MustNot);
+        let query = b.build();
+
+        let top = searcher.search(&query, 10).unwrap();
+        let docs: Vec<i32> = top.score_docs.iter().map(|sd| sd.doc).collect();
+        assert_eq!(docs, vec![1]);
     }
 
     #[test]

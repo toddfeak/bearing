@@ -12,6 +12,10 @@ set -euo pipefail
 #   5. Report timing comparison
 #
 # Usage: compare_query_perf.sh -docs DIR [--threads N]
+#
+# The generated queries file is JSON Lines: each line is `{"q": "<query>", "msm": <int>}`.
+# msm > 0 is mixed in for some multi-SHOULD generators so a single run covers the WAND
+# path alongside default disjunction without re-indexing or re-generating.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -93,10 +97,12 @@ echo ""
 # --- Generate queries ---
 echo "Generating queries from corpus..."
 python3 -c "
-import os, random, sys
+import json, os, random, sys
 
 docs_dir = '$DOCS_DIR'
-n = int('$DOC_COUNT')
+# Query count is 5 × doc_count, with a guarantee that each generator is sampled at least
+# once so very small corpora still get full coverage of every query shape.
+target_n = int('$DOC_COUNT') * 5
 
 # Collect vocabulary from corpus.
 # ASCII-only: Bearing's StandardTokenizer doesn't yet match Java's Unicode text
@@ -118,52 +124,91 @@ for f in sample:
     except:
         pass
 words = sorted(words)
-if len(words) < 2:
-    print(f'Error: need at least 2 unique words, found {len(words)}', file=sys.stderr)
+# Largest generator samples 4 words at once.
+if len(words) < 4:
+    print(f'Error: need at least 4 unique words, found {len(words)}', file=sys.stderr)
     sys.exit(1)
-if len(words) < n:
-    print(f'Warning: only {len(words)} unique words found, need {n}', file=sys.stderr)
-    n = len(words)
 
 rng = random.Random(42)
 
 # --- Query generators (add new types here) ---
+# Each generator returns (query_string, msm). msm=0 means no min-should-match.
 def gen_term_query(words, rng):
-    \"\"\"Single term query: word\"\"\"
-    return rng.choice(words)
+    return (rng.choice(words), 0)
 
 def gen_boolean_must_query(words, rng):
-    \"\"\"Double MUST boolean query: +word1 +word2\"\"\"
     w1, w2 = rng.sample(words, 2)
-    return f'+{w1} +{w2}'
+    return (f'+{w1} +{w2}', 0)
 
 def gen_boolean_should_query(words, rng):
-    \"\"\"Double SHOULD boolean query: word1 word2\"\"\"
     w1, w2 = rng.sample(words, 2)
-    return f'{w1} {w2}'
+    return (f'{w1} {w2}', 0)
 
 def gen_boolean_must_not_query(words, rng):
-    \"\"\"MUST with single MUST_NOT: +word1 -word2\"\"\"
     w1, w2 = rng.sample(words, 2)
-    return f'+{w1} -{w2}'
+    return (f'+{w1} -{w2}', 0)
 
 def gen_boolean_should_must_not_query(words, rng):
-    \"\"\"SHOULD with single MUST_NOT: word1 -word2\"\"\"
     w1, w2 = rng.sample(words, 2)
-    return f'{w1} -{w2}'
+    return (f'{w1} -{w2}', 0)
 
 def gen_boolean_mixed_query(words, rng):
-    \"\"\"Mixed MUST + SHOULD: +word1 word2\"\"\"
     w1, w2 = rng.sample(words, 2)
-    return f'+{w1} {w2}'
+    return (f'+{w1} {w2}', 0)
+
+def gen_boolean_should_3(words, rng):
+    w1, w2, w3 = rng.sample(words, 3)
+    return (f'{w1} {w2} {w3}', 0)
+
+def gen_boolean_must_3(words, rng):
+    w1, w2, w3 = rng.sample(words, 3)
+    return (f'+{w1} +{w2} +{w3}', 0)
+
+def gen_boolean_must_not_multi(words, rng):
+    w1, w2, w3 = rng.sample(words, 3)
+    return (f'+{w1} -{w2} -{w3}', 0)
+
+def gen_boolean_mixed_multi_should(words, rng):
+    w1, w2, w3 = rng.sample(words, 3)
+    return (f'+{w1} {w2} {w3}', 0)
+
+def gen_boolean_four_should(words, rng):
+    w1, w2, w3, w4 = rng.sample(words, 4)
+    return (f'{w1} {w2} {w3} {w4}', 0)
+
+# msm-bearing variants — exercise WANDScorer end-to-end on both engines.
+def gen_boolean_three_should_msm_2(words, rng):
+    w1, w2, w3 = rng.sample(words, 3)
+    return (f'{w1} {w2} {w3}', 2)
+
+def gen_boolean_four_should_msm_2(words, rng):
+    w1, w2, w3, w4 = rng.sample(words, 4)
+    return (f'{w1} {w2} {w3} {w4}', 2)
+
+def gen_boolean_four_should_msm_3(words, rng):
+    w1, w2, w3, w4 = rng.sample(words, 4)
+    return (f'{w1} {w2} {w3} {w4}', 3)
+
+def gen_boolean_mixed_must_two_should_msm_2(words, rng):
+    w1, w2, w3 = rng.sample(words, 3)
+    return (f'+{w1} {w2} {w3}', 2)
 
 generators = [
-    (gen_term_query,                    0.30),
-    (gen_boolean_must_query,            0.15),
-    (gen_boolean_should_query,          0.15),
-    (gen_boolean_must_not_query,        0.10),
-    (gen_boolean_should_must_not_query, 0.15),
-    (gen_boolean_mixed_query,           0.15),
+    (gen_term_query,                          0.10),
+    (gen_boolean_must_query,                  0.07),
+    (gen_boolean_should_query,                0.07),
+    (gen_boolean_must_not_query,              0.08),
+    (gen_boolean_should_must_not_query,       0.08),
+    (gen_boolean_mixed_query,                 0.08),
+    (gen_boolean_should_3,                    0.10),
+    (gen_boolean_must_3,                      0.07),
+    (gen_boolean_must_not_multi,              0.07),
+    (gen_boolean_mixed_multi_should,          0.06),
+    (gen_boolean_four_should,                 0.05),
+    (gen_boolean_three_should_msm_2,          0.06),
+    (gen_boolean_four_should_msm_2,           0.06),
+    (gen_boolean_four_should_msm_3,           0.03),
+    (gen_boolean_mixed_must_two_should_msm_2, 0.02),
 ]
 
 # Build cumulative weights for weighted selection
@@ -174,7 +219,12 @@ for _, weight in generators:
     cum_weights.append(total)
 
 queries = []
-for _ in range(n):
+# First, one query per generator so even tiny corpora exercise every shape.
+for fn, _ in generators:
+    queries.append(fn(words, rng))
+# Fill the remainder up to target_n via weighted random sampling. If target_n is below
+# the per-generator floor the loop is a no-op and we end with exactly len(generators).
+for _ in range(max(0, target_n - len(generators))):
     r = rng.random() * total
     for i, cw in enumerate(cum_weights):
         if r <= cw:
@@ -182,15 +232,21 @@ for _ in range(n):
             break
 
 with open('$QUERIES_FILE', 'w') as f:
-    for q in queries:
-        f.write(q + '\n')
+    for q, msm in queries:
+        obj = {'q': q}
+        if msm > 0:
+            obj['msm'] = msm
+        f.write(json.dumps(obj) + '\n')
 
-term_count = sum(1 for q in queries if ' ' not in q)
-must_count = sum(1 for q in queries if q.startswith('+') and '-' not in q and all(t.startswith('+') for t in q.split()))
-should_count = sum(1 for q in queries if ' ' in q and not q.startswith('+') and '-' not in q)
-excl_count = sum(1 for q in queries if '-' in q)
-mixed_count = sum(1 for q in queries if q.startswith('+') and '-' not in q and any(not t.startswith('+') for t in q.split()))
-print(f'  {len(queries)} queries generated ({term_count} term, {must_count} MUST, {should_count} SHOULD, {excl_count} MUST_NOT, {mixed_count} mixed)')
+def token_count(q):
+    return len(q.split())
+
+term_count = sum(1 for q, _ in queries if ' ' not in q)
+two_term = sum(1 for q, _ in queries if token_count(q) == 2)
+three_term = sum(1 for q, _ in queries if token_count(q) == 3)
+four_plus_term = sum(1 for q, _ in queries if token_count(q) >= 4)
+msm_count = sum(1 for _, m in queries if m > 0)
+print(f'  {len(queries)} queries ({term_count} term, {two_term} 2-term, {three_term} 3-term, {four_plus_term} 4+-term; {msm_count} with msm>0)')
 "
 echo ""
 

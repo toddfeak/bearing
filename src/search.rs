@@ -28,6 +28,7 @@ pub mod term_query;
 pub mod term_states;
 pub mod top_docs;
 pub mod top_score_doc_collector;
+pub mod wand_scorer;
 
 pub use boolean_query::{BooleanClause, BooleanQuery, Occur};
 pub use collector::{

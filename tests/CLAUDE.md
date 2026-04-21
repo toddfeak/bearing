@@ -48,7 +48,7 @@ python3 testdata/gen_golden_docs.py
 | `VerifyImpacts` | Checks competitive impact data in `.doc` skip blocks for proper norms |
 | `IndexAllFields` | Indexes documents with all field types (baseline for cross-validation) |
 | `GenerateIndexSummary` | Reads an index and emits a JSON summary of structure and aggregate statistics |
-| `QueryIndex` | Queries an index with a queries file (Lucene syntax), reports timing, optionally writes results to file |
+| `QueryIndex` | Runs queries from a JSON Lines file against an index and reports timing |
 
 ### Running Java utilities
 
@@ -61,7 +61,7 @@ GRADLE="./tests/java/gradlew -p tests/java"
 $GRADLE -q verifyIndex -PindexDir=/tmp/idx -PdocCount=100
 
 # Generic task (works for ANY class with a main method, no gradle changes needed):
-$GRADLE -q runJava -PmainClass=QueryIndex -Pargs="/tmp/idx /tmp/words.txt"
+$GRADLE -q runJava -PmainClass=QueryIndex -Pargs="/tmp/idx /tmp/queries.jsonl"
 $GRADLE -q runJava -PmainClass=MyNewTool -Pargs="arg1 arg2 arg3"
 ```
 
@@ -93,13 +93,12 @@ Compare indexing speed, memory usage, and correctness between Java Lucene and Ru
 Compare query speed between Java Lucene and Rust on the same index:
 
 ```bash
-./tests/compare_query_perf.sh -docs /tmp/gutenberg-small-500   # 500 docs, 500 queries
-./tests/compare_query_perf.sh -docs /tmp/gutenberg-small-2000  # 2000 docs, 2000 queries
+./tests/compare_query_perf.sh -docs /tmp/gutenberg-small-2000
 ```
 
-Builds a Java index, generates a mix of term and boolean queries, queries with both Java
-and Rust, verifies results match exactly (including totalHits and scores), and reports
-average query time.
+Generates `5 × doc_count` queries (every generator shape fires at least once) as JSON
+Lines `{"q":"<lucene syntax>","msm":<int, optional>}`, runs them on both engines, and
+diffs results.
 
 | Flag | Default | Description |
 |---|---|---|

@@ -1,23 +1,5 @@
 # Bearing — Roadmap
 
-## Performance Summary
-
-**Indexing** (2000 docs, 149 MB corpus, release build):
-
-| Metric | Bearing | Lucene 10.3.2 | Ratio |
-|---|---|---|---|
-| 1 thread | 1.36s | 2.72s | **2.0x faster** |
-| 12 threads | 0.61s | 2.72s | **4.4x faster** |
-
-**Querying** (2000 docs, 60M corpus, 2000 queries — all boolean query types with 2 terms or less):
-
-| Metric | Bearing | Lucene 10.3.2 | Ratio |
-|---|---|---|---|
-| Avg query time | 39 µs | 126 µs | **3.2x faster** |
-| Peak RSS | 10 MB | 101 MB | **10x less memory** |
-
----
-
 ## Current State
 
 ### Indexing (functional, not feature complete)
@@ -94,27 +76,8 @@ Query/Weight/Scorer/BulkScorer abstractions, BM25 similarity, collectors, MmapDi
 #### TermQuery (done)
 Single-term BM25 scoring with competitive skipping via impacts. Byte-identical results to Java Lucene.
 
-#### BooleanQuery — All 1-2 term combinations (done)
-All valid boolean query structures with up to 2 terms: pure MUST, pure SHOULD, MUST+MUST_NOT, SHOULD+MUST_NOT, and mixed MUST+SHOULD. Includes dynamic pruning for conjunction, window-based bulk scoring for disjunction, exclusion filtering, and TOP_SCORES competitive skipping for mixed queries. Cross-validated against Java Lucene across multiple corpus sizes.
-
-**Query performance (2000 docs, 60M corpus, 2000 queries — all query types):**
-
-| Metric | Bearing | Lucene | Ratio |
-|---|---|---|---|
-| Avg query time | 39 µs | 126 µs | **3.2x faster** |
-| Peak RSS | 10 MB | 101 MB | **10x less memory** |
-
-**Query performance (5000 docs, 192M corpus, 5000 queries — all query types):**
-
-| Metric | Bearing | Lucene | Ratio |
-|---|---|---|---|
-| Avg query time | 47 µs | 92 µs | **1.9x faster** |
-| Peak RSS | 23 MB | 103 MB | **4.5x less memory** |
-
-#### BooleanQuery — 3+ term queries
-- Multiple SHOULD in mixed queries (`+required word1 word2`)
-- Multiple MUST_NOT (`+word1 -word2 -word3`)
-- minShouldMatch > 0 with conjunction
+#### BooleanQuery (done)
+All boolean query structures: pure MUST, pure SHOULD, MUST+MUST_NOT (single and multi), SHOULD+MUST_NOT, mixed MUST+SHOULD, and `minShouldMatch > 0` (including `> 1` via WANDScorer). Dynamic pruning for conjunctions, window-based bulk scoring for disjunctions, exclusion filtering, and TOP_SCORES competitive skipping. Cross-validated against Java Lucene across multiple corpus sizes; the `tests/compare_query_perf.sh` mix includes 3+ clause and msm-driven WAND queries.
 
 #### Beyond Boolean
 Phrase, range, wildcard, etc.

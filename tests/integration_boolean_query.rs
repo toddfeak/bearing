@@ -889,3 +889,105 @@ fn test_boolean_should_5_terms() {
         assert_in_delta!(actual[i].1, *score, 1e-5);
     }
 }
+
+// -------------------------------------------------------------------------
+// Phase 6: multi-MUST_NOT bulk path + mixed msm=0 multi-SHOULD via search()
+//
+// Cross-validated against Java Lucene 10.3.2 via QueryIndex on /tmp/golden-3term
+// (Java IndexAllFields uses unsorted Files.walkFileTree; assertions resolve by
+// stored "filename" field).
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_must_with_two_must_not() {
+    // +algorithms -systems -networks → 1 hit: testing_008 score=0.6006123
+    let (dir, reader) = build_golden_docs_index();
+    let filenames = load_filenames_by_doc(&dir);
+    let searcher = IndexSearcher::new(&reader);
+    let mut b = BooleanQuery::builder();
+    b.add_query(
+        Box::new(TermQuery::new("contents", b"algorithms")),
+        Occur::Must,
+    );
+    b.add_query(
+        Box::new(TermQuery::new("contents", b"systems")),
+        Occur::MustNot,
+    );
+    b.add_query(
+        Box::new(TermQuery::new("contents", b"networks")),
+        Occur::MustNot,
+    );
+    let query = b.build();
+
+    let top = searcher.search(&query, 10).unwrap();
+    assert_eq!(top.total_hits.value, 1);
+
+    let actual = results_by_filename(&top, &filenames);
+    assert_eq!(actual[0].0, "testing_008");
+    assert_in_delta!(actual[0].1, 0.6006123_f32, 1e-5);
+}
+
+#[test]
+fn test_boolean_two_must_with_two_must_not() {
+    // +algorithms +data -systems -networks → 1 hit: testing_008 score=0.8000477
+    let (dir, reader) = build_golden_docs_index();
+    let filenames = load_filenames_by_doc(&dir);
+    let searcher = IndexSearcher::new(&reader);
+    let mut b = BooleanQuery::builder();
+    b.add_query(
+        Box::new(TermQuery::new("contents", b"algorithms")),
+        Occur::Must,
+    );
+    b.add_query(Box::new(TermQuery::new("contents", b"data")), Occur::Must);
+    b.add_query(
+        Box::new(TermQuery::new("contents", b"systems")),
+        Occur::MustNot,
+    );
+    b.add_query(
+        Box::new(TermQuery::new("contents", b"networks")),
+        Occur::MustNot,
+    );
+    let query = b.build();
+
+    let top = searcher.search(&query, 10).unwrap();
+    assert_eq!(top.total_hits.value, 1);
+
+    let actual = results_by_filename(&top, &filenames);
+    assert_eq!(actual[0].0, "testing_008");
+    assert_in_delta!(actual[0].1, 0.8000477_f32, 1e-5);
+}
+
+#[test]
+fn test_boolean_mixed_must_with_multi_should_msm_zero() {
+    // +algorithms data systems (1 MUST, 2 SHOULD, msm=0) → 4 hits.
+    // Same scores as pure 3-SHOULD on the docs that have "algorithms".
+    let (dir, reader) = build_golden_docs_index();
+    let filenames = load_filenames_by_doc(&dir);
+    let searcher = IndexSearcher::new(&reader);
+    let mut b = BooleanQuery::builder();
+    b.add_query(
+        Box::new(TermQuery::new("contents", b"algorithms")),
+        Occur::Must,
+    );
+    b.add_query(Box::new(TermQuery::new("contents", b"data")), Occur::Should);
+    b.add_query(
+        Box::new(TermQuery::new("contents", b"systems")),
+        Occur::Should,
+    );
+    let query = b.build();
+
+    let top = searcher.search(&query, 10).unwrap();
+    assert_eq!(top.total_hits.value, 4);
+
+    let actual = results_by_filename(&top, &filenames);
+    let expected = [
+        ("security_004", 1.068_702_f32),
+        ("algorithms_001", 0.9087003_f32),
+        ("climate_015", 0.8113856_f32),
+        ("testing_008", 0.8000477_f32),
+    ];
+    for (i, (name, score)) in expected.iter().enumerate() {
+        assert_eq!(actual[i].0, *name, "rank {i} filename mismatch");
+        assert_in_delta!(actual[i].1, *score, 1e-5);
+    }
+}

@@ -1,13 +1,20 @@
 // Query a Bearing-readable index with a list of query strings and report per-query timing.
 //
-// Each line in the queries file is a query in Lucene standard syntax:
-//   - bare word:         algorithms         (TermQuery)
-//   - boolean MUST:      +algorithms +data  (BooleanQuery with MUST clauses)
-//   - boolean SHOULD:    algorithms data    (BooleanQuery with SHOULD clauses)
-//   - boolean MUST_NOT:  +algorithms -data  (BooleanQuery with MUST and MUST_NOT clauses)
+// Each line of the queries file is a single JSON object:
+//
+//   {"q": "<query string in Lucene syntax>", "msm": <int, optional, default 0>}
+//
+// Supported query strings:
+//   - bare word:           algorithms         (TermQuery)
+//   - boolean MUST:        +algorithms +data  (BooleanQuery with MUST clauses)
+//   - boolean SHOULD:      algorithms data    (BooleanQuery with SHOULD clauses)
+//   - boolean MUST_NOT:    +algorithms -data  (BooleanQuery with MUST and MUST_NOT clauses)
+//
+// `msm` (if > 0 and the parsed query has at least msm SHOULD clauses) sets
+// `set_minimum_number_should_match(msm)` on the BooleanQuery builder.
 //
 // Usage:
-//   cargo run --release --bin queryindex -- -index <DIR> -queries <FILE> [-output <FILE>]
+//   cargo run --release --bin queryindex -- -index <DIR> -queries <FILE.jsonl> [-output <FILE>]
 
 use std::env;
 use std::fmt::Write as _;
@@ -25,16 +32,17 @@ use bearing::search::term_query::TermQuery;
 use bearing::search::top_score_doc_collector::TopScoreDocCollectorManager;
 use bearing::search::{BooleanQuery, Occur};
 use bearing::store::FSDirectory;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct QueryEntry {
+    q: String,
+    #[serde(default)]
+    msm: i32,
+}
 
 /// Parses a query string in Lucene standard syntax into a Query.
-///
-/// Supported formats:
-///   - `word`              → TermQuery on the given field
-///   - `+word1 +word2`     → BooleanQuery with MUST clauses
-///   - `+word1 -word2`     → BooleanQuery with MUST and MUST_NOT clauses
-///   - `word1 word2`       → BooleanQuery with SHOULD clauses
-///   - `word1 word2 -word3` → BooleanQuery with SHOULD and MUST_NOT clauses
-fn parse_query(query_str: &str, field: &str) -> Box<dyn Query> {
+fn parse_query(query_str: &str, field: &str, msm: i32) -> Box<dyn Query> {
     let tokens: Vec<&str> = query_str.split_whitespace().collect();
 
     let has_plus = tokens.iter().any(|t| t.starts_with('+'));
@@ -42,6 +50,7 @@ fn parse_query(query_str: &str, field: &str) -> Box<dyn Query> {
 
     if has_plus || has_minus {
         let mut builder = BooleanQuery::builder();
+        let mut should_count = 0;
         for token in &tokens {
             if let Some(term) = token.strip_prefix('+') {
                 builder.add_query(
@@ -54,12 +63,15 @@ fn parse_query(query_str: &str, field: &str) -> Box<dyn Query> {
                     Occur::MustNot,
                 );
             } else {
-                // Bare word in a mixed query → SHOULD (matches QueryParser behavior)
                 builder.add_query(
                     Box::new(TermQuery::new(field, token.as_bytes())),
                     Occur::Should,
                 );
+                should_count += 1;
             }
+        }
+        if msm > 0 && should_count >= msm {
+            builder.set_minimum_number_should_match(msm);
         }
         Box::new(builder.build())
     } else if tokens.len() > 1 {
@@ -69,6 +81,9 @@ fn parse_query(query_str: &str, field: &str) -> Box<dyn Query> {
                 Box::new(TermQuery::new(field, token.as_bytes())),
                 Occur::Should,
             );
+        }
+        if msm > 0 && tokens.len() as i32 >= msm {
+            builder.set_minimum_number_should_match(msm);
         }
         Box::new(builder.build())
     } else {
@@ -108,30 +123,34 @@ fn main() {
 
     if index_path.is_empty() || queries_path.is_empty() {
         eprintln!(
-            "Usage: queryindex -index <INDEX_DIR> -queries <QUERIES_FILE> [-output <RESULTS_FILE>]"
+            "Usage: queryindex -index <INDEX_DIR> -queries <QUERIES_FILE.jsonl> [-output <RESULTS_FILE>]"
         );
         process::exit(1);
     }
 
     let queries_content = fs::read_to_string(&queries_path).expect("Failed to read queries file");
-    let queries: Vec<&str> = queries_content
+    let entries: Vec<(String, QueryEntry)> = queries_content
         .lines()
-        .map(|l| l.trim())
+        .map(str::trim)
         .filter(|l| !l.is_empty())
+        .map(|line| {
+            let entry: QueryEntry = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("Invalid JSON line {line:?}: {e}"));
+            (line.to_string(), entry)
+        })
         .collect();
 
     let dir = FSDirectory::open(Path::new(&index_path)).expect("Failed to open index directory");
     let reader = DirectoryReader::open(&dir).expect("Failed to open DirectoryReader");
     let searcher = IndexSearcher::new(&reader);
 
-    // Collect results in memory — no I/O during timed section
-    let mut results: Vec<String> = Vec::with_capacity(queries.len());
+    let mut results: Vec<String> = Vec::with_capacity(entries.len());
     let mut errors = 0;
 
     let start = Instant::now();
 
-    for query_str in &queries {
-        let query = parse_query(query_str, "contents");
+    for (raw, entry) in &entries {
+        let query = parse_query(&entry.q, "contents", entry.msm);
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let manager = TopScoreDocCollectorManager::new(10, None, i32::MAX);
             searcher.search_with_collector_manager(query.as_ref(), &manager)
@@ -139,23 +158,18 @@ fn main() {
         match result {
             Ok(Ok(top_docs)) => {
                 let mut line = String::new();
-                write!(
-                    line,
-                    "{:<30} hits={:<6}",
-                    query_str, top_docs.total_hits.value
-                )
-                .unwrap();
+                write!(line, "{:<40} hits={:<6}", raw, top_docs.total_hits.value).unwrap();
                 for sd in &top_docs.score_docs {
-                    write!(line, "  doc={:<5} score={:.4}", sd.doc, sd.score).unwrap();
+                    write!(line, "  doc={:<5} score={:.5}", sd.doc, sd.score).unwrap();
                 }
                 results.push(line);
             }
             Ok(Err(e)) => {
-                results.push(format!("{:<30} ERROR: {}", query_str, e));
+                results.push(format!("{raw:<40} ERROR: {e}"));
                 errors += 1;
             }
             Err(_) => {
-                results.push(format!("{:<30} PANIC", query_str));
+                results.push(format!("{raw:<40} PANIC"));
                 errors += 1;
             }
         }
@@ -163,7 +177,6 @@ fn main() {
 
     let elapsed = start.elapsed();
 
-    // Write results to file or stdout
     if !output_path.is_empty() {
         let mut f = fs::File::create(&output_path).expect("Failed to create output file");
         for line in &results {
@@ -175,13 +188,12 @@ fn main() {
         }
     }
 
-    // Timing always goes to stdout
     println!(
         "Queried {} queries in {elapsed:.2?} ({errors} errors)",
-        queries.len()
+        entries.len()
     );
     println!(
         "Average: {:.2} µs/query",
-        elapsed.as_micros() as f64 / queries.len() as f64
+        elapsed.as_micros() as f64 / entries.len() as f64
     );
 }

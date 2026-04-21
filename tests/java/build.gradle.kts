@@ -10,6 +10,7 @@ repositories {
 dependencies {
     implementation("org.apache.lucene:lucene-core:10.3.2")
     implementation("org.apache.lucene:lucene-queryparser:10.3.2")
+    implementation("com.google.code.gson:gson:2.11.0")
 }
 
 java {
