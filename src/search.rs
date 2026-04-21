@@ -18,6 +18,7 @@ pub mod index_searcher;
 pub mod long_heap;
 pub mod query;
 pub mod req_excl_bulk_scorer;
+pub mod req_excl_scorer;
 pub mod req_opt_sum_scorer;
 pub mod scorable;
 pub mod scorer;

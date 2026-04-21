@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use assertables::*;
 use bearing::document::DocumentBuilder;
+use bearing::document::StoredValue;
 use bearing::index::config::IndexWriterConfig;
 use bearing::index::directory_reader::DirectoryReader;
-use bearing::index::field::text;
+use bearing::index::field::{keyword, text};
 use bearing::index::writer::IndexWriter;
 use bearing::search::*;
 use bearing::store::{MemoryDirectory, SharedDirectory};
@@ -41,8 +42,10 @@ fn build_golden_docs_index() -> (SharedDirectory, DirectoryReader) {
 
     for path in &paths {
         let contents = fs::read_to_string(path).unwrap();
+        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
         let doc = DocumentBuilder::new()
             .add_field(text("contents").value(contents.as_str()))
+            .add_field(keyword("filename").stored().value(stem))
             .build();
         writer.add_document(doc).unwrap();
     }
@@ -51,6 +54,50 @@ fn build_golden_docs_index() -> (SharedDirectory, DirectoryReader) {
 
     let reader = DirectoryReader::open(&*directory).unwrap();
     (directory, reader)
+}
+
+/// Loads the stored "filename" field for every doc into a Vec indexed by doc_id.
+/// Used by tests that derived expected results from Java QueryIndex output:
+/// Java assigns doc IDs in `Files.walkFileTree` (filesystem) order while the
+/// Rust test indexes in sorted order, so doc IDs differ. Filenames are stable.
+fn load_filenames_by_doc(directory: &SharedDirectory) -> Vec<String> {
+    use bearing::index::segment_infos;
+    use bearing::index::segment_reader::SegmentReader;
+
+    let files = directory.list_all().unwrap();
+    let segments_file = segment_infos::get_last_commit_segments_file_name(&files).unwrap();
+    let infos = segment_infos::read(&**directory, &segments_file).unwrap();
+    assert_eq!(
+        infos.segments.len(),
+        1,
+        "load_filenames_by_doc assumes a single segment"
+    );
+    let seg = &infos.segments[0];
+    let mut sr = SegmentReader::open(&**directory, &seg.name, &seg.id).unwrap();
+    let max_doc = sr.max_doc() as u32;
+    let field_no = sr
+        .field_infos()
+        .field_info_by_name("filename")
+        .expect("filename field missing")
+        .number();
+    let sfr = sr
+        .get_fields_reader()
+        .expect("stored fields reader missing");
+
+    let mut out = Vec::with_capacity(max_doc as usize);
+    for doc in 0..max_doc {
+        let fields = sfr.document(doc).unwrap();
+        let value = fields
+            .iter()
+            .find(|f| f.field_number == field_no)
+            .map(|f| match &f.value {
+                StoredValue::String(s) => s.clone(),
+                other => panic!("filename has non-string value: {other:?}"),
+            })
+            .expect("filename not stored on doc");
+        out.push(value);
+    }
+    out
 }
 
 /// Helper to build a two-MUST boolean query.
@@ -670,4 +717,175 @@ fn test_boolean_conjunction_pruning_matches_term_query() {
         doc_count as i64,
         "BooleanQuery conjunction should prune non-competitive docs like TermQuery does"
     );
+}
+
+// -------------------------------------------------------------------------
+// 3+ SHOULD term queries — pure disjunction
+//
+// Cross-validated against Java Lucene 10.3.2: indexed golden-docs with Java
+// IndexAllFields (which uses Files.walkFileTree, NOT sorted), then ran the
+// queries via QueryIndex with QueryParser default operator (OR).
+//
+// Java assigns doc IDs in walk order while the Rust integration test indexes
+// in sorted order — so doc IDs differ between the two systems. Filenames
+// are stable, so we assert against the stored "filename" field instead.
+// -------------------------------------------------------------------------
+
+/// Build a pure-SHOULD BooleanQuery from N terms.
+fn should_n_query(field: &str, terms: &[&[u8]]) -> BooleanQuery {
+    let mut builder = BooleanQuery::builder();
+    for &term in terms {
+        builder.add_query(Box::new(TermQuery::new(field, term)), Occur::Should);
+    }
+    builder.build()
+}
+
+/// Map top_docs results to (filename, score) pairs.
+fn results_by_filename(top_docs: &TopDocs, filenames: &[String]) -> Vec<(String, f32)> {
+    top_docs
+        .score_docs
+        .iter()
+        .map(|sd| (filenames[sd.doc as usize].clone(), sd.score))
+        .collect()
+}
+
+// -------------------------------------------------------------------------
+// SHOULD Query: algorithms data systems → 15 hits
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_3_terms_algorithms_data_systems() {
+    let (dir, reader) = build_golden_docs_index();
+    let filenames = load_filenames_by_doc(&dir);
+    let searcher = IndexSearcher::new(&reader);
+    let query = should_n_query("contents", &[b"algorithms", b"data", b"systems"]);
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+    assert_eq!(top_docs.total_hits.value, 15);
+    assert_eq!(top_docs.score_docs.len(), 15);
+
+    let actual = results_by_filename(&top_docs, &filenames);
+
+    let expected: [(&str, f32); 10] = [
+        ("security_004", 1.068_702),
+        ("algorithms_001", 0.9087003),
+        ("climate_015", 0.8113856),
+        ("testing_008", 0.8000477),
+        ("storage_009", 0.3473575),
+        ("robotics_011", 0.3365355),
+        ("graphics_006", 0.3131124),
+        ("quantum_013", 0.2922577),
+        ("databases_002", 0.2621497),
+        ("analysis_010", 0.250_627),
+    ];
+    for (i, (name, score)) in expected.iter().enumerate() {
+        assert_eq!(actual[i].0, *name, "rank {i} filename mismatch");
+        assert_in_delta!(actual[i].1, *score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// SHOULD Query: distributed systems networks → 12 hits
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_3_terms_distributed_systems_networks() {
+    let (dir, reader) = build_golden_docs_index();
+    let filenames = load_filenames_by_doc(&dir);
+    let searcher = IndexSearcher::new(&reader);
+    let query = should_n_query("contents", &[b"distributed", b"systems", b"networks"]);
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+    assert_eq!(top_docs.total_hits.value, 12);
+    assert_eq!(top_docs.score_docs.len(), 12);
+
+    let actual = results_by_filename(&top_docs, &filenames);
+
+    let expected: [(&str, f32); 10] = [
+        ("networks_003", 1.6444092),
+        ("systems_007", 0.6466637),
+        ("biology_014", 0.5788049),
+        ("language_012", 0.5369343),
+        ("graphics_006", 0.5074845),
+        ("algorithms_001", 0.4957356),
+        ("storage_009", 0.1548606),
+        ("climate_015", 0.1403393),
+        ("compilers_005", 0.1385187),
+        ("quantum_013", 0.1345176),
+    ];
+    for (i, (name, score)) in expected.iter().enumerate() {
+        assert_eq!(actual[i].0, *name, "rank {i} filename mismatch");
+        assert_in_delta!(actual[i].1, *score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// SHOULD Query: quantum biology security → 2 hits
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_3_terms_quantum_biology_security() {
+    let (dir, reader) = build_golden_docs_index();
+    let filenames = load_filenames_by_doc(&dir);
+    let searcher = IndexSearcher::new(&reader);
+    let query = should_n_query("contents", &[b"quantum", b"biology", b"security"]);
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+    assert_eq!(top_docs.total_hits.value, 2);
+    assert_eq!(top_docs.score_docs.len(), 2);
+
+    let actual = results_by_filename(&top_docs, &filenames);
+
+    let expected = [
+        ("biology_014", 1.1074749_f32),
+        ("quantum_013", 0.8864633_f32),
+    ];
+    for (i, (name, score)) in expected.iter().enumerate() {
+        assert_eq!(actual[i].0, *name, "rank {i} filename mismatch");
+        assert_in_delta!(actual[i].1, *score, 1e-5);
+    }
+}
+
+// -------------------------------------------------------------------------
+// SHOULD Query: algorithms data systems networks compilers (5 terms) → 15 hits
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_boolean_should_5_terms() {
+    let (dir, reader) = build_golden_docs_index();
+    let filenames = load_filenames_by_doc(&dir);
+    let searcher = IndexSearcher::new(&reader);
+    let query = should_n_query(
+        "contents",
+        &[
+            b"algorithms",
+            b"data",
+            b"systems",
+            b"networks",
+            b"compilers",
+        ],
+    );
+
+    let top_docs = searcher.search(&query, 15).unwrap();
+    assert_eq!(top_docs.total_hits.value, 15);
+    assert_eq!(top_docs.score_docs.len(), 15);
+
+    let actual = results_by_filename(&top_docs, &filenames);
+
+    let expected: [(&str, f32); 10] = [
+        ("compilers_005", 1.4667643),
+        ("networks_003", 1.2229701),
+        ("security_004", 1.068_702),
+        ("algorithms_001", 0.9087003),
+        ("climate_015", 0.8113856),
+        ("testing_008", 0.8000477),
+        ("storage_009", 0.3473575),
+        ("robotics_011", 0.3365355),
+        ("graphics_006", 0.3131124),
+        ("quantum_013", 0.2922577),
+    ];
+    for (i, (name, score)) in expected.iter().enumerate() {
+        assert_eq!(actual[i].0, *name, "rank {i} filename mismatch");
+        assert_in_delta!(actual[i].1, *score, 1e-5);
+    }
 }

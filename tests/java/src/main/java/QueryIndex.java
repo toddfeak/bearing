@@ -62,7 +62,7 @@ public class QueryIndex {
                 StringBuilder sb = new StringBuilder();
                 sb.append(String.format("%-30s hits=%-6d", queryStr, topDocs.totalHits.value()));
                 for (ScoreDoc sd : topDocs.scoreDocs) {
-                    sb.append(String.format("  doc=%-5d score=%.4f", sd.doc, sd.score));
+                    sb.append(String.format("  doc=%-5d score=%.7f", sd.doc, sd.score));
                 }
                 results[i] = sb.toString();
             }

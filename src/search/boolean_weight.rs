@@ -12,9 +12,11 @@ use super::boolean_query::{BooleanClause, Occur};
 use super::boolean_scorer::BooleanScorer;
 use super::collector::ScoreMode;
 use super::conjunction::ConjunctionScorer;
+use super::disjunction_sum_scorer::DisjunctionSumScorer;
 use super::index_searcher::IndexSearcher;
 use super::query::{BulkScorer, DefaultBulkScorer, ScorerSupplier, Weight};
 use super::req_excl_bulk_scorer::ReqExclBulkScorer;
+use super::req_excl_scorer::ReqExclScorer;
 use super::req_opt_sum_scorer::ReqOptSumScorer;
 use super::scorer::Scorer;
 use super::scorer_util;
@@ -269,7 +271,13 @@ impl<'a> BooleanScorerSupplier<'a> {
         if self.subs[&Occur::Filter].is_empty() && self.subs[&Occur::Must].is_empty() {
             let should_suppliers = self.subs.remove(&Occur::Should).unwrap_or_default();
             let must_not_suppliers = self.subs.remove(&Occur::MustNot).unwrap_or_default();
-            let opt_scorer = Self::opt(should_suppliers, self.min_should_match, lead_cost)?;
+            let opt_scorer = Self::opt(
+                should_suppliers,
+                self.min_should_match,
+                self.score_mode,
+                lead_cost,
+                top_level_scoring_clause,
+            )?;
             return Self::excl(opt_scorer, must_not_suppliers, lead_cost);
         }
 
@@ -294,7 +302,13 @@ impl<'a> BooleanScorerSupplier<'a> {
             must_not_suppliers,
             lead_cost,
         )?;
-        let opt_scorer = Self::opt(should_suppliers, self.min_should_match, lead_cost)?;
+        let opt_scorer = Self::opt(
+            should_suppliers,
+            self.min_should_match,
+            self.score_mode,
+            lead_cost,
+            false,
+        )?;
         Ok(Box::new(ReqOptSumScorer::new(
             req_scorer,
             opt_scorer,
@@ -521,33 +535,43 @@ impl<'a> BooleanScorerSupplier<'a> {
 
     fn excl(
         main: Box<dyn Scorer + 'a>,
-        mut prohibited: Vec<Box<dyn ScorerSupplier<'a> + 'a>>,
+        prohibited: Vec<Box<dyn ScorerSupplier<'a> + 'a>>,
         lead_cost: i64,
     ) -> io::Result<Box<dyn Scorer + 'a>> {
         if prohibited.is_empty() {
             Ok(main)
         } else {
-            let _ = lead_cost;
-            let _ = prohibited.drain(..);
-            todo!("MUST_NOT exclusion not yet implemented")
+            let inner = Self::opt(prohibited, 1, ScoreMode::CompleteNoScores, lead_cost, false)?;
+            Ok(Box::new(ReqExclScorer::new(main, inner)))
         }
     }
 
     /// Creates a Scorer for the optional (SHOULD) clauses.
-    ///
-    /// For a single clause, returns the scorer directly. For multiple clauses,
-    /// requires DisjunctionSumScorer (not yet implemented).
     fn opt(
         mut optional: Vec<Box<dyn ScorerSupplier<'a> + 'a>>,
         min_should_match: i32,
+        score_mode: ScoreMode,
         lead_cost: i64,
+        top_level_scoring_clause: bool,
     ) -> io::Result<Box<dyn Scorer + 'a>> {
         if optional.len() == 1 {
-            optional.remove(0).get(lead_cost)
-        } else {
-            let _ = min_should_match;
-            todo!("DisjunctionSumScorer for multiple SHOULD clauses not yet implemented")
+            return optional.remove(0).get(lead_cost);
         }
+
+        let mut optional_scorers: Vec<Box<dyn Scorer + 'a>> = Vec::with_capacity(optional.len());
+        for mut sup in optional {
+            optional_scorers.push(sup.get(lead_cost)?);
+        }
+
+        if (score_mode == ScoreMode::TopScores && top_level_scoring_clause) || min_should_match > 1
+        {
+            todo!("WANDScorer not yet ported — see Phase 7")
+        }
+        Ok(Box::new(DisjunctionSumScorer::new(
+            optional_scorers,
+            score_mode,
+            lead_cost,
+        )?))
     }
 }
 
@@ -602,42 +626,522 @@ mod tests {
     use crate::index::directory_reader::DirectoryReader;
     use crate::index::field::text;
     use crate::index::writer::IndexWriter;
+    use crate::search::BooleanQuery;
+    use crate::search::doc_id_set_iterator::NO_MORE_DOCS;
+    use crate::search::query::Query;
     use crate::search::term_query::TermQuery;
     use crate::store::{MemoryDirectory, SharedDirectory};
 
     fn build_test_index() -> (SharedDirectory, DirectoryReader) {
+        index_docs(&["hello world", "hello there", "world peace"])
+    }
+
+    /// Indexes the given strings as docs into a fresh in-memory index under field "content".
+    fn index_docs(docs: &[&str]) -> (SharedDirectory, DirectoryReader) {
         let config = IndexWriterConfig::default().num_threads(1);
         let directory: SharedDirectory = MemoryDirectory::create();
         let writer = IndexWriter::new(config, Arc::clone(&directory));
-
-        writer
-            .add_document(
-                DocumentBuilder::new()
-                    .add_field(text("content").value("hello world"))
-                    .build(),
-            )
-            .unwrap();
-
-        writer
-            .add_document(
-                DocumentBuilder::new()
-                    .add_field(text("content").value("hello there"))
-                    .build(),
-            )
-            .unwrap();
-
-        writer
-            .add_document(
-                DocumentBuilder::new()
-                    .add_field(text("content").value("world peace"))
-                    .build(),
-            )
-            .unwrap();
-
+        for content in docs {
+            writer
+                .add_document(
+                    DocumentBuilder::new()
+                        .add_field(text("content").value(*content))
+                        .build(),
+                )
+                .unwrap();
+        }
         writer.commit().unwrap();
         let reader = DirectoryReader::open(&*directory).unwrap();
         (directory, reader)
     }
+
+    fn tq(term: &'static [u8]) -> Box<dyn Query> {
+        Box::new(TermQuery::new("content", term))
+    }
+
+    /// Returns the scorer supplier for the (single) leaf, or None.
+    fn supplier_for<'a>(
+        weight: &'a BooleanWeight,
+        reader: &'a DirectoryReader,
+    ) -> Option<Box<dyn ScorerSupplier<'a> + 'a>> {
+        let leaf = &reader.leaves()[0];
+        weight.scorer_supplier(leaf).unwrap()
+    }
+
+    /// Drains a Scorer's iterator into a sorted Vec<(doc, score)>.
+    fn collect_scorer(scorer: &mut dyn Scorer) -> Vec<(i32, f32)> {
+        let mut out = Vec::new();
+        loop {
+            let doc = scorer.iterator().next_doc().unwrap();
+            if doc == NO_MORE_DOCS {
+                break;
+            }
+            let s = scorer.score().unwrap();
+            out.push((doc, s));
+        }
+        out
+    }
+
+    // ----------------------------------------------------------------
+    // Group A: Weight::scorer_supplier — clause partition + simplifications
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_scorer_supplier_only_must_not_returns_none() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![BooleanClause::new(tq(b"hello"), Occur::MustNot)];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        assert!(supplier_for(&weight, &reader).is_none());
+    }
+
+    #[test]
+    fn test_scorer_supplier_filter_no_postings_returns_none() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![BooleanClause::new(tq(b"missing"), Occur::Filter)];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        assert!(supplier_for(&weight, &reader).is_none());
+    }
+
+    #[test]
+    fn test_scorer_supplier_should_no_postings_does_not_block() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        // 1 SHOULD with no postings + 1 SHOULD with postings → still produces a supplier.
+        let clauses = vec![
+            BooleanClause::new(tq(b"missing"), Occur::Should),
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        assert!(supplier_for(&weight, &reader).is_some());
+    }
+
+    #[test]
+    fn test_scorer_supplier_msm_exceeds_should_count_returns_none() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        // 2 SHOULDs with msm=3 → impossible to match → None.
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 3, 1.0).unwrap();
+        assert!(supplier_for(&weight, &reader).is_none());
+    }
+
+    #[test]
+    fn test_scorer_supplier_shoulds_equal_msm_promotes_to_must() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        // 2 SHOULDs with msm=2 → simplification promotes them to MUSTs.
+        // hello+world both match only doc 0 ("hello world").
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 2, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs = collect_scorer(&mut *scorer);
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].0, 0);
+    }
+
+    #[test]
+    fn test_scorer_supplier_no_scores_with_mixed_clears_optional() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        // CompleteNoScores + msm=0 + (must + should) → simplification clears shoulds,
+        // and the remaining MUST drives matching alone.
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+        ];
+        let weight =
+            BooleanWeight::new(&clauses, &searcher, ScoreMode::CompleteNoScores, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs = collect_scorer(&mut *scorer);
+        // hello matches docs 0 and 1; peace would have added doc 2, but it's cleared.
+        let just_docs: Vec<i32> = docs.iter().map(|(d, _)| *d).collect();
+        assert_eq!(just_docs, vec![0, 1]);
+    }
+
+    // ----------------------------------------------------------------
+    // Group B: Construction invariants
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_negative_msm_returns_error() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, -1, 1.0).unwrap();
+        // The error surfaces during scorer_supplier (BooleanScorerSupplier::new).
+        let leaf = &reader.leaves()[0];
+        let err = weight.scorer_supplier(leaf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(err.to_string().contains("minShouldMatch"));
+    }
+
+    // ----------------------------------------------------------------
+    // Group C: Cost computation
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_cost_pure_conjunction_uses_min_required() {
+        // hello matches 2 docs; world matches 2 docs.
+        // Pure conjunction with msm=0 → min(2, 2) = 2.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::Must),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let supplier = supplier_for(&weight, &reader).unwrap();
+        assert_eq!(supplier.cost(), 2);
+    }
+
+    #[test]
+    fn test_cost_pure_disjunction_uses_should_cost() {
+        // hello (cost 2) + peace (cost 1). msm=0 → should cost = sum of (n-msm+1) least-costly = (1+2) = 3.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let supplier = supplier_for(&weight, &reader).unwrap();
+        // Cost includes both (msm=0 → all clauses contribute).
+        assert_eq!(supplier.cost(), 3);
+    }
+
+    #[test]
+    fn test_cost_mixed_with_msm_zero_uses_required_min() {
+        // MUST hello (cost 2) + SHOULD peace (cost 1), msm=0 → required min = 2.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let supplier = supplier_for(&weight, &reader).unwrap();
+        assert_eq!(supplier.cost(), 2);
+    }
+
+    // ----------------------------------------------------------------
+    // Group D: get_internal Scorer-level dispatch
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_get_pure_conjunction_returns_intersection() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::Must),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(docs, vec![0]);
+    }
+
+    #[test]
+    fn test_get_pure_disjunction_three_should_returns_union() {
+        // 3 SHOULDs: hello (0,1) + peace (2) + there (1) → union {0,1,2}
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+            BooleanClause::new(tq(b"there"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(docs, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_get_mixed_must_should_msm_zero_intersects_with_optional_score_bonus() {
+        // MUST hello (0, 1) + SHOULD world (0, 2). Intersection-required = {0,1}.
+        // doc 0 should score higher than doc 1 (world matches doc 0, not doc 1).
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let pairs = collect_scorer(&mut *scorer);
+        let docs: Vec<i32> = pairs.iter().map(|(d, _)| *d).collect();
+        assert_eq!(docs, vec![0, 1]);
+        // Doc 0 has world matching → higher score than doc 1.
+        assert!(pairs[0].1 > pairs[1].1);
+    }
+
+    #[test]
+    fn test_get_pure_disjunction_msm_one_explicit() {
+        // 3 SHOULDs with msm=1 → at least one clause must match. With our corpus,
+        // every doc matches at least one of {hello, world, peace}, so all 3 docs.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 1, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(docs, vec![0, 1, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "WANDScorer not yet ported")]
+    fn test_get_msm_above_one_panics_until_wand() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 2, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let _ = supplier.get(i64::MAX);
+    }
+
+    // ----------------------------------------------------------------
+    // Group E: bulk_scorer dispatch (BulkScorer level)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_bulk_scorer_pure_must_returns_some() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::Must),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let _ = supplier.bulk_scorer().unwrap();
+    }
+
+    #[test]
+    fn test_bulk_scorer_pure_should_msm_one() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+            BooleanClause::new(tq(b"peace"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 1, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let _ = supplier.bulk_scorer().unwrap();
+    }
+
+    #[test]
+    fn test_get_must_with_single_must_not_via_scorer_path() {
+        // Phase 5: excl() is now wired. Test via Scorer-level get(), which
+        // exercises the excl() → ReqExclScorer path directly.
+        // hello matches (0, 1); world matches (0, 2). hello & !world → doc 1.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::MustNot),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(docs, vec![1]);
+    }
+
+    #[test]
+    fn test_get_must_with_multi_must_not_via_scorer_path() {
+        // Phase 5: excl() now handles >1 prohibited via DisjunctionSumScorer + ReqExclScorer.
+        // Corpus: doc 0 "hello world", doc 1 "hello there", doc 2 "world peace".
+        // MUST hello (0, 1); MUST_NOT world (0, 2); MUST_NOT there (1).
+        // Result: hello \ {world ∪ there} = {0, 1} \ {0, 2, 1} = {}.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::MustNot),
+            BooleanClause::new(tq(b"there"), Occur::MustNot),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert!(docs.is_empty());
+    }
+
+    #[test]
+    fn test_get_must_with_multi_must_not_partial_exclusion() {
+        // MUST hello (0, 1); MUST_NOT world (0, 2); MUST_NOT peace (2).
+        // hello \ {world ∪ peace} = {0, 1} \ {0, 2} = {1}.
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::MustNot),
+            BooleanClause::new(tq(b"peace"), Occur::MustNot),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(docs, vec![1]);
+    }
+
+    #[test]
+    fn test_bulk_scorer_must_with_single_must_not() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        // MUST hello + MUST_NOT world → docs containing hello but not world = doc 1
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::MustNot),
+        ];
+        let query = {
+            let mut b = BooleanQuery::builder();
+            b.add_query(tq(b"hello"), Occur::Must);
+            b.add_query(tq(b"world"), Occur::MustNot);
+            b.build()
+        };
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let _ = weight; // verify construct
+        let top = searcher.search(&query, 10).unwrap();
+        let docs: Vec<i32> = top.score_docs.iter().map(|sd| sd.doc).collect();
+        assert_eq!(docs, vec![1]);
+    }
+
+    // ----------------------------------------------------------------
+    // Group F: required_bulk_scorer
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_required_bulk_scorer_top_scores_multi_must_works() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::Must),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::TopScores, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let _ = supplier.bulk_scorer().unwrap();
+    }
+
+    #[test]
+    fn test_required_bulk_scorer_single_must_delegates() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![BooleanClause::new(tq(b"hello"), Occur::Must)];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let _ = supplier.bulk_scorer().unwrap();
+    }
+
+    // ----------------------------------------------------------------
+    // Group G: optional_bulk_scorer
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_optional_bulk_scorer_single_should_delegates() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![BooleanClause::new(tq(b"hello"), Occur::Should)];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let _ = supplier.bulk_scorer().unwrap();
+    }
+
+    #[test]
+    fn test_optional_bulk_scorer_multi_should_uses_boolean_scorer() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Should),
+            BooleanClause::new(tq(b"world"), Occur::Should),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::Complete, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        let _ = supplier.bulk_scorer().unwrap();
+    }
+
+    // ----------------------------------------------------------------
+    // Group H: set_top_level_scoring_clause
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_set_top_level_scoring_clause_does_not_panic() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![BooleanClause::new(tq(b"hello"), Occur::Should)];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::TopScores, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        supplier.set_top_level_scoring_clause().unwrap();
+    }
+
+    #[test]
+    fn test_set_top_level_scoring_clause_results_unchanged_with_multi() {
+        let (_dir, reader) = build_test_index();
+        let searcher = IndexSearcher::new(&reader);
+        let clauses = vec![
+            BooleanClause::new(tq(b"hello"), Occur::Must),
+            BooleanClause::new(tq(b"world"), Occur::Must),
+        ];
+        let weight = BooleanWeight::new(&clauses, &searcher, ScoreMode::TopScores, 0, 1.0).unwrap();
+        let mut supplier = supplier_for(&weight, &reader).unwrap();
+        supplier.set_top_level_scoring_clause().unwrap();
+        let mut scorer = supplier.get(i64::MAX).unwrap();
+        let docs: Vec<i32> = collect_scorer(&mut *scorer)
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect();
+        assert_eq!(docs, vec![0]);
+    }
+
+    // ----------------------------------------------------------------
+    // Existing tests (kept for regression coverage)
+    // ----------------------------------------------------------------
 
     #[test]
     fn test_boolean_weight_required_clause_no_match() {
