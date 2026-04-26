@@ -41,7 +41,7 @@ unicode-segmentation = "1.13"
 utf8-zero = "0.8.1"
 
 [dev-dependencies]
-assertables = "9.8.6"
+assertables = "9.9.0"
 tempfile = "3.27.0"
 
 [[bin]]
